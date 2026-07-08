@@ -1,0 +1,115 @@
+{
+  "name": "markdown-wysiwyg-preview",
+  "displayName": "Markdown WYSIWYG Preview",
+  "description": "Preview markdown giống VS Code Markdown Preview và cho phép chỉnh sửa trực tiếp trên preview (WYSIWYG).",
+  "version": "0.5.5",
+  "publisher": "hungvu",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "markdownWysiwyg.editor",
+        "displayName": "Markdown WYSIWYG Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "markdownWysiwyg.open",
+        "title": "Mở WYSIWYG Preview",
+        "category": "Markdown",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "markdownWysiwyg.openToSide",
+        "title": "Mở WYSIWYG Preview sang bên cạnh",
+        "category": "Markdown",
+        "icon": "$(open-preview)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "markdownWysiwyg.open",
+          "when": "editorLangId == markdown"
+        },
+        {
+          "command": "markdownWysiwyg.openToSide",
+          "when": "editorLangId == markdown"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "markdownWysiwyg.openToSide",
+          "when": "editorLangId == markdown && !notebookEditorFocused",
+          "group": "navigation@100"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "markdownWysiwyg.open",
+          "when": "resourceExtname =~ /\\.(md|markdown)$/",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "markdownWysiwyg.openToSide",
+        "key": "ctrl+shift+alt+v",
+        "mac": "cmd+shift+alt+v",
+        "when": "editorLangId == markdown"
+      }
+    ],
+    "configuration": {
+      "title": "Markdown WYSIWYG Preview",
+      "properties": {
+        "markdownWysiwyg.claudeAutoInsert": {
+          "type": "boolean",
+          "default": false,
+          "description": "Nút copy @file: tự chèn thẳng @file vào ô chat Claude Code thay vì chỉ copy — cần mở tạm một text editor của file rồi tự đóng ngay (cơ chế bắt buộc của Claude Code, sẽ thấy nháy nhẹ). Mặc định tắt: điều hướng tới tab chat, focus ô nhập và copy @file vào clipboard để dán bằng ⌘V."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test:roundtrip": "node esbuild.js --test && node dist/test/roundtrip.js",
+    "vscode:prepublish": "node esbuild.js",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^20.14.0",
+    "@types/turndown": "^5.0.5",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@vscode/markdown-it-katex": "^1.1.1",
+    "highlight.js": "^11.10.0",
+    "katex": "^0.16.11",
+    "markdown-it": "^14.1.0",
+    "markdown-it-front-matter": "^0.2.4",
+    "markdown-it-task-lists": "^2.1.1",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  }
+}
