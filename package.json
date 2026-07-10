@@ -114,7 +114,7 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
     "test:roundtrip": "node esbuild.js --test && node dist/test/roundtrip.js",
-    "vscode:prepublish": "node esbuild.js",
+    "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {

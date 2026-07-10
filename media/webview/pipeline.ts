@@ -17,6 +17,10 @@ import katexPlugin from '@vscode/markdown-it-katex';
 import TurndownService from 'turndown';
 import { tables, taskListItems } from 'turndown-plugin-gfm';
 import hljs from 'highlight.js/lib/common';
+// escapeHtml/escapeAttr là hàm thuần chuỗi (không đụng global DOM ở top-level
+// của dom-utils.ts) nên import được ở đây mà vẫn giữ pipeline.ts chạy trên Node
+// cho round-trip test. Gộp về một nguồn, tránh trùng bản private (finding C-new).
+import { escapeHtml, escapeAttr } from './dom-utils';
 
 export interface PipelineConfig {
   breaks: boolean;
@@ -266,14 +270,6 @@ function renderFrontMatterBlock(raw: string, line: number): string {
     `<pre>${escapeHtml(raw)}</pre>` +
     `</div>\n`
   );
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s).replace(/"/g, '&quot;');
 }
 
 // ---------------------------------------------------------------------------

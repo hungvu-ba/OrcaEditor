@@ -199,12 +199,15 @@ function scheduleSync(): void {
 
 function syncNow(): void {
   syncTimer = undefined;
+  // Vẫn phải turndown để có markdown mà so sánh, nhưng chỉ khi nội dung THỰC SỰ
+  // đổi mới parse lại gutter (markdown-it lần 2) + gửi edit — bỏ hẳn hai bước
+  // này ở nhịp debounce mà nội dung không đổi (finding P-03).
   const markdown = serialize();
-  if (lineNumbersEnabled) {
-    lineGutter.refreshFromMarkdown(markdown);
-  }
   if (markdown === currentText) {
     return;
+  }
+  if (lineNumbersEnabled) {
+    lineGutter.refreshFromMarkdown(markdown);
   }
   currentText = markdown;
   vscode.postMessage({ type: 'edit', text: markdown });
@@ -235,8 +238,27 @@ function serialize(): string {
 // Sự kiện chỉnh sửa
 // ---------------------------------------------------------------------------
 
-content.addEventListener('input', () => {
-  fixOrphanNestedListItems();
+/**
+ * Chỉ những inputType này (xoá/cắt/undo/redo/dán) mới có thể sinh ra lỗi
+ * "orphan nested list" của Chromium (xem fixOrphanNestedListItems). Gõ chữ
+ * bình thường (insertText...) không bao giờ tạo cấu trúc này nên bỏ qua để
+ * không quét querySelectorAll('li') toàn tài liệu mỗi keystroke (finding P-04).
+ */
+const ORPHAN_LIST_INPUT_TYPES = new Set([
+  'deleteContentBackward',
+  'deleteContentForward',
+  'deleteByCut',
+  'historyUndo',
+  'historyRedo',
+  'insertFromPaste',
+]);
+
+content.addEventListener('input', (e) => {
+  // inputType rỗng (một số trình duyệt/thao tác không đặt) → quét cho chắc.
+  const inputType = (e as InputEvent).inputType;
+  if (!inputType || ORPHAN_LIST_INPUT_TYPES.has(inputType)) {
+    fixOrphanNestedListItems();
+  }
   scheduleSync();
   search.refresh();
   toc.refresh();

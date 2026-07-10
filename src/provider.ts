@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
@@ -28,6 +30,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
+  /** Kênh log dùng chung — tạo một lần, dùng cho các lỗi bị nuốt ở catch rộng. */
+  private static outputChannel: vscode.OutputChannel | undefined;
+  private static log(message: string, err?: unknown): void {
+    if (!MarkdownWysiwygProvider.outputChannel) {
+      MarkdownWysiwygProvider.outputChannel = vscode.window.createOutputChannel('Markdown WYSIWYG');
+    }
+    const detail = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : err !== undefined ? String(err) : '';
+    MarkdownWysiwygProvider.outputChannel.appendLine(
+      `[${new Date().toISOString()}] ${message}${detail ? ` — ${detail}` : ''}`
+    );
+  }
+
   public async resolveCustomTextEditor(
     document: vscode.TextDocument,
     webviewPanel: vscode.WebviewPanel,
@@ -36,17 +50,28 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const webview = webviewPanel.webview;
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
 
+    // S6: thu hẹp phạm vi tài nguyên cục bộ — chỉ cho phép dist của extension,
+    // thư mục chứa document, và (nếu có) workspace folder chứa chính document.
+    // Không trải toàn bộ workspaceFolders để không lộ các folder dự án khác.
     const localResourceRoots = [
       vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
       documentDir,
-      ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
+    const documentFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (documentFolder) {
+      localResourceRoots.push(documentFolder.uri);
+    }
 
     webview.options = { enableScripts: true, localResourceRoots };
     webview.html = this.getHtml(webview, documentDir);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+
+    // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
+    // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
+    const UPDATE_DEBOUNCE_MS = 120;
+    let updateTimer: ReturnType<typeof setTimeout> | undefined;
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) {
@@ -61,7 +86,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       lastTextFromWebview = undefined;
-      void webview.postMessage({ type: 'update', text });
+      if (updateTimer !== undefined) {
+        clearTimeout(updateTimer);
+      }
+      updateTimer = setTimeout(() => {
+        updateTimer = undefined;
+        void webview.postMessage({ type: 'update', text: document.getText() });
+      }, UPDATE_DEBOUNCE_MS);
     });
 
     const messageSubscription = webview.onDidReceiveMessage(async (msg: { type: string; [k: string]: unknown }) => {
@@ -119,6 +150,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
 
     webviewPanel.onDidDispose(() => {
+      if (updateTimer !== undefined) {
+        clearTimeout(updateTimer);
+        updateTimer = undefined;
+      }
       changeSubscription.dispose();
       messageSubscription.dispose();
     });
@@ -169,8 +204,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       try {
         await vscode.env.openExternal(vscode.Uri.parse(href, true));
-      } catch {
-        /* href không hợp lệ — bỏ qua */
+      } catch (err) {
+        MarkdownWysiwygProvider.log(`openExternal failed for href: ${href}`, err);
       }
       return;
     }
@@ -181,13 +216,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
     const target = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(pathPart));
-    if (!this.isInsideAllowedRoots(document, target)) {
+    if (!(await this.isInsideAllowedRoots(document, target))) {
       void vscode.window.showWarningMessage(`Đã chặn liên kết trỏ ra ngoài workspace: ${href}`);
       return;
     }
     try {
       await vscode.commands.executeCommand('vscode.open', target);
-    } catch {
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`vscode.open failed for target: ${target.toString()}`, err);
       void vscode.window.showWarningMessage(`Không mở được liên kết: ${href}`);
     }
   }
@@ -295,8 +331,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       vscode.window.setStatusBarMessage(`Đã copy "${mention}" — nhấn ⌘V trong ô chat để chèn`, 6000);
       return;
-    } catch {
-      /* rơi xuống fallback clipboard */
+    } catch (err) {
+      // C8: log lỗi trước khi rơi xuống fallback clipboard để không nuốt lỗi.
+      MarkdownWysiwygProvider.log('addToClaudeContext failed, falling back to clipboard', err);
     }
     await vscode.env.clipboard.writeText(mention);
     void vscode.window.showInformationMessage(
@@ -365,6 +402,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private static readonly FILE_SEARCH_MAX_SCAN = 5000;
   private static readonly FILE_SEARCH_MAX_RESULTS = 20;
 
+  // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
+  // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
+  private static readonly FILE_SEARCH_CACHE_TTL_MS = 4000;
+  private fileListCache: { uris: readonly vscode.Uri[]; expires: number } | undefined;
+
+  private async getWorkspaceFileList(): Promise<readonly vscode.Uri[]> {
+    const now = Date.now();
+    if (this.fileListCache && this.fileListCache.expires > now) {
+      return this.fileListCache.uris;
+    }
+    const uris = await vscode.workspace.findFiles(
+      '**/*',
+      MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
+      MarkdownWysiwygProvider.FILE_SEARCH_MAX_SCAN
+    );
+    this.fileListCache = { uris, expires: now + MarkdownWysiwygProvider.FILE_SEARCH_CACHE_TTL_MS };
+    return uris;
+  }
+
   /**
    * Tìm file trong workspace có tên liên quan đến query (text được select khi
    * chèn link). So khớp không phân biệt hoa thường và không phân biệt dấu
@@ -384,11 +440,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return [];
     }
     const phrase = tokens.join('-');
-    const uris = await vscode.workspace.findFiles(
-      '**/*',
-      MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
-      MarkdownWysiwygProvider.FILE_SEARCH_MAX_SCAN
-    );
+    const uris = await this.getWorkspaceFileList();
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..').path;
     const scored: Array<{ score: number; nameLength: number; uri: vscode.Uri; name: string }> = [];
@@ -426,16 +478,40 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
   }
 
-  private isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): boolean {
+  /**
+   * S4: chống thoát khỏi allowed roots qua symlink. Trước khi so path, phân
+   * giải symlink bằng fs.promises.realpath cho cả target và root. File không
+   * tồn tại (broken link) → realpath ném lỗi → fallback về path đã chuẩn hóa
+   * (vẫn chặn được traversal qua ../..).
+   */
+  private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
     const roots = [
       vscode.Uri.joinPath(document.uri, '..'),
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
-    const targetPath = target.path.replace(/\/+$/, '') + '/';
-    return roots.some((root) => {
-      const rootPath = root.path.replace(/\/+$/, '') + '/';
-      return targetPath.startsWith(rootPath);
-    });
+
+    // Chỉ phân giải symlink cho scheme file; scheme khác giữ path chuẩn hóa.
+    const canonical = async (uri: vscode.Uri): Promise<string> => {
+      const normalized = uri.path.replace(/\/+$/, '');
+      if (uri.scheme !== 'file') {
+        return normalized;
+      }
+      try {
+        return await fs.promises.realpath(uri.fsPath);
+      } catch {
+        // File chưa tồn tại — dùng path gốc đã chuẩn hóa làm fallback.
+        return uri.fsPath.replace(/[/\\]+$/, '');
+      }
+    };
+
+    const targetPath = (await canonical(target)) + '/';
+    for (const root of roots) {
+      const rootPath = (await canonical(root)) + '/';
+      if (targetPath.startsWith(rootPath)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private getHtml(webview: vscode.Webview, documentDir: vscode.Uri): string {
@@ -447,12 +523,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     const csp = [
       "default-src 'none'",
-      `img-src ${webview.cspSource} https: data:`,
+      // S2: bỏ `https:` khỏi img-src — ảnh chỉ được nạp từ webview resource
+      // roots (đã thu hẹp ở S6) và data: URI, không cho fetch ảnh từ web tùy ý.
+      `img-src ${webview.cspSource} data:`,
+      // S3: giữ 'unsafe-inline' cho style vì render markdown (KaTeX, style tô
+      // màu, v.v.) cần inline style. Residual risk: nội dung .md độc hại có thể
+      // tiêm CSS (vd đổi giao diện, ẩn nội dung) — không thoát ra ngoài webview
+      // và không chạy script được vì script-src chỉ nhận nonce.
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource} data:`,
       `script-src 'nonce-${nonce}'`,
       // chặn <base> tiêm từ nội dung markdown đổi gốc phân giải tài nguyên
       `base-uri ${webview.cspSource}`,
+      // S1: chặn submit form (không có backend hợp lệ nào để gửi tới)
+      "form-action 'none'",
+      // S1: chặn nhúng iframe/frame từ nội dung markdown
+      "frame-src 'none'",
     ].join('; ');
 
     return /* html */ `<!DOCTYPE html>
@@ -504,10 +590,6 @@ function relativePath(fromDir: string, toFile: string): string {
 }
 
 function getNonce(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let text = '';
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
+  // S7: dùng CSPRNG thay cho Math.random để nonce không đoán được.
+  return crypto.randomBytes(16).toString('base64');
 }

@@ -36,6 +36,7 @@ interface Segment {
 }
 
 const REFRESH_DEBOUNCE_MS = 200;
+const INPUT_DEBOUNCE_MS = 120;
 
 function svg(inner: string): string {
   return (
@@ -95,12 +96,25 @@ export function initSearch(content: HTMLElement): SearchController {
   let current = -1;
   let query = '';
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let inputTimer: ReturnType<typeof setTimeout> | undefined;
 
   // -------------------------------------------------------------------------
   // Thu thập text + tìm match
   // -------------------------------------------------------------------------
 
+  // Cache kết quả TreeWalker giữa các lần gõ TỪ KHÓA (haystack không đổi khi
+  // chỉ query đổi). Chỉ invalidate khi nội dung tài liệu đổi — qua hook
+  // refresh() bên dưới (được gọi mỗi khi content thay đổi).
+  let haystackCache: { haystack: string; segs: Segment[] } | undefined;
+
+  function invalidateHaystack(): void {
+    haystackCache = undefined;
+  }
+
   function collect(): { haystack: string; segs: Segment[] } {
+    if (haystackCache) {
+      return haystackCache;
+    }
     const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
       acceptNode(node): number {
         const el = node.parentElement;
@@ -132,7 +146,8 @@ export function initSearch(content: HTMLElement): SearchController {
       prevBlock = block;
       first = false;
     }
-    return { haystack, segs };
+    haystackCache = { haystack, segs };
+    return haystackCache;
   }
 
   function rangeAt(segs: Segment[], gStart: number, gEnd: number): Range | null {
@@ -232,17 +247,21 @@ export function initSearch(content: HTMLElement): SearchController {
       document.body.scrollHeight,
       1
     );
-    matches.forEach((r, i) => {
-      const rect = r.getBoundingClientRect();
-      const top = rect.top + window.scrollY;
+    // Pha ĐỌC: gom mọi getBoundingClientRect() trước, không xen ghi DOM để
+    // tránh forced reflow mỗi match.
+    const tops = matches.map((r) => r.getBoundingClientRect().top + window.scrollY);
+    // Pha GHI: tạo tick vào DocumentFragment rồi chèn một lần.
+    const frag = document.createDocumentFragment();
+    tops.forEach((top, i) => {
       const tick = document.createElement('div');
       tick.className = 'search-tick' + (i === current ? ' current' : '');
       tick.style.top = `${(top / docHeight) * 100}%`;
       tick.title = `Kết quả ${i + 1}`;
       tick.addEventListener('mousedown', (e) => e.preventDefault());
       tick.addEventListener('click', () => setCurrent(i, true));
-      overview.appendChild(tick);
+      frag.appendChild(tick);
     });
+    overview.appendChild(frag);
   }
 
   function markActiveTick(): void {
@@ -350,6 +369,10 @@ export function initSearch(content: HTMLElement): SearchController {
   }
 
   function close(): void {
+    if (inputTimer !== undefined) {
+      clearTimeout(inputTimer);
+      inputTimer = undefined;
+    }
     box.hidden = true;
     overview.hidden = true;
     overview.textContent = '';
@@ -365,7 +388,17 @@ export function initSearch(content: HTMLElement): SearchController {
   // Sự kiện
   // -------------------------------------------------------------------------
 
-  input.addEventListener('input', () => run(input.value, false));
+  // Debounce sự kiện gõ vào ô tìm để không chạy lại toàn bộ tìm kiếm mỗi
+  // ký tự (haystack đã được cache nên chỉ tốn indexOf + dựng lại overview).
+  input.addEventListener('input', () => {
+    if (inputTimer !== undefined) {
+      clearTimeout(inputTimer);
+    }
+    inputTimer = setTimeout(() => {
+      inputTimer = undefined;
+      run(input.value, false);
+    }, INPUT_DEBOUNCE_MS);
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -420,6 +453,9 @@ export function initSearch(content: HTMLElement): SearchController {
 
   return {
     refresh(): void {
+      // Nội dung tài liệu đã đổi → haystack cache cũ không còn đúng, bỏ đi
+      // (kể cả khi hộp tìm đang ẩn, để lần mở sau collect() dựng lại mới).
+      invalidateHaystack();
       if (box.hidden || !query) {
         return;
       }

@@ -54,7 +54,14 @@ function copyAssets() {
   if (fs.existsSync(katexDist)) {
     fs.mkdirSync('dist/webview/katex/fonts', { recursive: true });
     fs.copyFileSync(path.join(katexDist, 'katex.min.css'), 'dist/webview/katex/katex.min.css');
-    fs.cpSync(path.join(katexDist, 'fonts'), 'dist/webview/katex/fonts', { recursive: true });
+    // Webview chạy trên Chromium — chỉ cần .woff2 (đứng đầu @font-face src),
+    // bỏ .ttf/.woff để giảm kích thước bundle. Giữ nguyên katex.min.css.
+    const fontsSrc = path.join(katexDist, 'fonts');
+    for (const font of fs.readdirSync(fontsSrc)) {
+      if (font.endsWith('.woff2')) {
+        fs.copyFileSync(path.join(fontsSrc, font), path.join('dist/webview/katex/fonts', font));
+      }
+    }
   }
 }
 

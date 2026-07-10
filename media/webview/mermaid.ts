@@ -24,6 +24,24 @@ export interface MermaidController {
 
 let idCounter = 0;
 
+// Cache SVG theo hash nội dung source: nếu một biểu đồ có source không đổi thì
+// tái dùng SVG đã dựng, khỏi render lại (mermaid.render khá nặng).
+const svgCache = new Map<string, string>();
+
+// Token tăng dần cho mỗi đợt render. Kết quả render async chỉ được ghi vào DOM
+// nếu token của nó vẫn là mới nhất — tránh việc một kết quả cũ (đến muộn) ghi
+// đè lên đợt render mới hơn.
+let renderSeq = 0;
+
+/** Hash chuỗi đơn giản (djb2) — không cần dependency ngoài. */
+function hashSource(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  }
+  return h.toString(36);
+}
+
 export function initMermaid(content: HTMLElement): MermaidController {
   mermaid.initialize({
     startOnLoad: false,
@@ -57,9 +75,10 @@ export function initMermaid(content: HTMLElement): MermaidController {
 
   return {
     renderAll(): void {
+      const seq = ++renderSeq; // đánh dấu đợt render mới; kết quả cũ sẽ bị coi là stale
       const wrappers = Array.from(content.querySelectorAll<HTMLElement>(`.${MERMAID_CLASS}`));
       for (const wrapper of wrappers) {
-        void renderDiagram(wrapper, { fallbackToCodeOnError: true });
+        void renderDiagram(wrapper, { fallbackToCodeOnError: true, seq });
       }
     },
   };
@@ -70,24 +89,41 @@ function isDarkTheme(): boolean {
   return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
 }
 
-async function renderDiagram(wrapper: HTMLElement, opts: { fallbackToCodeOnError?: boolean } = {}): Promise<void> {
+async function renderDiagram(
+  wrapper: HTMLElement,
+  opts: { fallbackToCodeOnError?: boolean; seq?: number } = {},
+): Promise<void> {
   const chart = wrapper.querySelector(`.${MERMAID_CHART_CLASS}`) as HTMLElement | null;
   const code = wrapper.querySelector(`.${MERMAID_SOURCE_CLASS} code`) as HTMLElement | null;
   const source = code?.textContent ?? '';
   if (!chart || !source.trim()) {
     return;
   }
+  // Toggle thủ công (đổi view sang chart) không đi qua renderAll — cấp token mới
+  // để nó trở thành đợt mới nhất và các kết quả cũ đang chờ bị coi là stale.
+  const seq = opts.seq ?? ++renderSeq;
+
+  // Cache hit: source không đổi → tái dùng SVG cũ, khỏi gọi mermaid.render (đồng bộ).
+  const key = hashSource(source);
+  const cached = svgCache.get(key);
+  if (cached !== undefined) {
+    chart.innerHTML = cached;
+    chart.classList.remove(ERROR_CLASS);
+    return;
+  }
+
   const id = `md-mermaid-svg-${++idCounter}`;
   try {
     const { svg } = await mermaid.render(id, source);
-    if (!wrapper.isConnected) {
-      return; // tài liệu đã render lại trong lúc chờ — bỏ kết quả cũ, tránh ghi đè DOM mới
+    svgCache.set(key, svg); // lưu cache bất kể còn dùng được cho DOM hiện tại hay không
+    if (!wrapper.isConnected || seq !== renderSeq) {
+      return; // tài liệu đã render lại / có đợt render mới hơn — bỏ kết quả cũ, tránh ghi đè
     }
     chart.innerHTML = svg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {
     document.getElementById(id)?.remove(); // dọn sandbox mermaid tự chèn khi parse lỗi
-    if (!wrapper.isConnected) {
+    if (!wrapper.isConnected || seq !== renderSeq) {
       return;
     }
     chart.classList.add(ERROR_CLASS);

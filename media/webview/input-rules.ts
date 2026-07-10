@@ -108,6 +108,46 @@ function placeCaretAtEnd(el: Element): void {
 }
 
 /**
+ * Chèn một <li> bằng execCommand('insertHTML') (thao tác gốc → Ctrl/Cmd+Z hoàn
+ * tác gọn một bước, xem ghi chú ở convertBlockToListItem) rồi trả về <li> vừa
+ * chèn. Người gọi tự lo phần thiết lập selection/range trước khi gọi và phần
+ * dọn dẹp riêng sau khi gọi.
+ *   - mode 'merge': gộp vào list sẵn có — đặt caret cuối `lastLi` rồi chèn
+ *     `<li>…</li>`; nếu không dò được <li> mới qua vị trí caret thì lùi về
+ *     phần tử con cuối cùng của list (khớp fallback cũ ở cả hai hàm gọi).
+ *   - mode 'new': người gọi phải CHỌN sẵn range nội dung cần thay; chèn cả
+ *     `<listTag><li>…</li></listTag>`; không dò được thì ném lỗi.
+ */
+function insertListItemViaExec(
+  innerHtml: string,
+  listTag: string,
+  mode: 'merge' | 'new',
+  lastLi?: HTMLElement
+): HTMLLIElement {
+  if (mode === 'merge') {
+    placeCaretAtEnd(lastLi as HTMLElement);
+    document.execCommand('insertHTML', false, `<li>${innerHtml}</li>`);
+    const li =
+      findCurrentListItem() ?? ((lastLi as HTMLElement).parentElement!.lastElementChild as HTMLLIElement);
+    ctx.dom.placeCaretIn(li);
+    return li;
+  }
+
+  const tag = listTag.toLowerCase();
+  document.execCommand('insertHTML', false, `<${tag}><li>${innerHtml}</li></${tag}>`);
+  // Dò <li> mới qua vị trí caret SAU insertHTML (execCommand luôn để caret
+  // trong nội dung vừa chèn) thay vì suy ra qua previousSibling/nextSibling
+  // của block cũ — nội dung markdown-it render xen text node "\n" giữa các
+  // block nên suy luận qua vị trí anh em ruột không đáng tin cậy.
+  const li = findCurrentListItem();
+  if (!li) {
+    throw new Error('insertListItemViaExec: không tìm thấy <li> vừa chèn');
+  }
+  ctx.dom.placeCaretIn(li);
+  return li;
+}
+
+/**
  * Chuyển một đoạn văn (đã bị stripMarkerBeforeCaret làm rỗng) thành mục list
  * — dùng execCommand('insertHTML') thay vì thao tác DOM trần (createElement/
  * appendChild/replaceWith) như trước đây. Lý do đổi: thao tác DOM trần không
@@ -132,11 +172,7 @@ function convertBlockToListItem(block: HTMLElement, ordered: boolean): HTMLLIEle
   if (prev && prev.nodeName === listTag) {
     const lastLi = prev.lastElementChild as HTMLLIElement;
     block.remove();
-    placeCaretAtEnd(lastLi);
-    document.execCommand('insertHTML', false, `<li>${innerHtml}</li>`);
-    const li = findCurrentListItem() ?? (prev.lastElementChild as HTMLLIElement);
-    ctx.dom.placeCaretIn(li);
-    return li;
+    return insertListItemViaExec(innerHtml, listTag, 'merge', lastLi);
   }
 
   // Phải CHỌN (không chỉ collapse caret vào) toàn bộ nội dung còn lại của
@@ -149,21 +185,8 @@ function convertBlockToListItem(block: HTMLElement, ordered: boolean): HTMLLIEle
   const sel = window.getSelection();
   sel?.removeAllRanges();
   sel?.addRange(replaceRange);
-  document.execCommand(
-    'insertHTML',
-    false,
-    `<${listTag.toLowerCase()}><li>${innerHtml}</li></${listTag.toLowerCase()}>`
-  );
-  // Dò <li> mới qua vị trí caret SAU insertHTML (execCommand luôn để caret
-  // trong nội dung vừa chèn) thay vì suy ra qua previousSibling/nextSibling
-  // của block cũ — nội dung markdown-it render xen text node "\n" giữa các
-  // block nên suy luận qua vị trí anh em ruột không đáng tin cậy.
-  const li = findCurrentListItem();
-  if (!li) {
-    throw new Error('convertBlockToListItem: không tìm thấy <li> vừa chèn');
-  }
+  const li = insertListItemViaExec(innerHtml, listTag, 'new');
   removeStrayEmptyParagraphAfter(li.closest(listTag.toLowerCase()) as Element);
-  ctx.dom.placeCaretIn(li);
   return li;
 }
 
@@ -397,28 +420,12 @@ function convertCellLineToListItem(cell: HTMLElement, lineStart: number, ordered
   if (merge) {
     lineRange.deleteContents();
     merge.separatorBr?.remove();
-    placeCaretAtEnd(merge.list.lastElementChild as HTMLLIElement);
-    document.execCommand('insertHTML', false, `<li>${innerHtml}</li>`);
-    const li = findCurrentListItem() ?? (merge.list.lastElementChild as HTMLLIElement);
-    ctx.dom.placeCaretIn(li);
-    return li;
+    return insertListItemViaExec(innerHtml, listTag, 'merge', merge.list.lastElementChild as HTMLLIElement);
   }
 
   sel?.removeAllRanges();
   sel?.addRange(lineRange);
-  document.execCommand(
-    'insertHTML',
-    false,
-    `<${listTag.toLowerCase()}><li>${innerHtml}</li></${listTag.toLowerCase()}>`
-  );
-  // Dò <li> mới qua vị trí caret SAU insertHTML thay vì suy ra qua
-  // previousSibling/nextSibling — xem ghi chú tương tự ở convertBlockToListItem.
-  const li = findCurrentListItem();
-  if (!li) {
-    throw new Error('convertCellLineToListItem: không tìm thấy <li> vừa chèn');
-  }
-  ctx.dom.placeCaretIn(li);
-  return li;
+  return insertListItemViaExec(innerHtml, listTag, 'new');
 }
 
 /** Xử lý các input rule kích hoạt bằng Enter. Trả về true nếu đã chuyển đổi. */

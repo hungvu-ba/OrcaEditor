@@ -142,7 +142,19 @@ export function initLineGutter(
     rebuildDom(children, infos);
   }
 
-  const resizeObserver = new ResizeObserver(() => refreshFromDom());
+  // Gom nhiều callback ResizeObserver trong cùng một frame lại thành một lần
+  // refreshFromDom() qua requestAnimationFrame (nếu đã có rAF pending thì bỏ
+  // qua) — tránh reflow/dựng lại gutter lặp lại nhiều lần trong 1 frame.
+  let rafPending: number | undefined;
+  const resizeObserver = new ResizeObserver(() => {
+    if (rafPending !== undefined) {
+      return;
+    }
+    rafPending = requestAnimationFrame(() => {
+      rafPending = undefined;
+      refreshFromDom();
+    });
+  });
   resizeObserver.observe(content);
 
   return { refreshFromDom, refreshFromMarkdown, reposition: refreshFromDom };
