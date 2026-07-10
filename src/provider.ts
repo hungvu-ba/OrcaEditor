@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import type { HostToWebview, WebviewToHost } from './shared/messages';
 
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
@@ -50,6 +51,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const webview = webviewPanel.webview;
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
 
+    /** Gửi message tới webview theo đúng hợp đồng HostToWebview (C3). */
+    const postToWebview = (msg: HostToWebview): Thenable<boolean> => webview.postMessage(msg);
+
     // S6: thu hẹp phạm vi tài nguyên cục bộ — chỉ cho phép dist của extension,
     // thư mục chứa document, và (nếu có) workspace folder chứa chính document.
     // Không trải toàn bộ workspaceFolders để không lộ các folder dự án khác.
@@ -91,17 +95,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       updateTimer = setTimeout(() => {
         updateTimer = undefined;
-        void webview.postMessage({ type: 'update', text: document.getText() });
+        void postToWebview({ type: 'update', text: document.getText() });
       }, UPDATE_DEBOUNCE_MS);
     });
 
-    const messageSubscription = webview.onDidReceiveMessage(async (msg: { type: string; [k: string]: unknown }) => {
+    const messageSubscription = webview.onDidReceiveMessage(async (msg: WebviewToHost) => {
       switch (msg.type) {
         case 'ready': {
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
           const wysiwygCfg = vscode.workspace.getConfiguration('markdownWysiwyg', document.uri);
-          void webview.postMessage({
+          void postToWebview({
             type: 'init',
             text: document.getText(),
             config: {
@@ -121,7 +125,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'edit': {
-          const text = String(msg.text ?? '');
+          const text = msg.text;
           lastTextFromWebview = text;
           const ok = await this.applyMinimalEdit(document, text);
           if (!ok) {
@@ -130,12 +134,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'openLink': {
-          void this.openLink(document, String(msg.href ?? ''));
+          void this.openLink(document, msg.href);
           break;
         }
         case 'searchFiles': {
-          const files = await this.searchWorkspaceFiles(document, String(msg.query ?? ''));
-          void webview.postMessage({ type: 'fileSearchResult', requestId: msg.requestId, files });
+          const files = await this.searchWorkspaceFiles(document, msg.query);
+          void postToWebview({ type: 'fileSearchResult', requestId: msg.requestId, files });
           break;
         }
         case 'addToClaudeContext': {

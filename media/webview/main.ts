@@ -18,7 +18,6 @@ import {
   postProcessMathDom,
   postProcessMermaidDom,
   prepareDomForSerialize,
-  type PipelineConfig,
 } from './pipeline';
 import { initSearch } from './search';
 import { initToc } from './toc';
@@ -30,10 +29,16 @@ import { initToolbar, syncTocButton, toggleInlineCode } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList } from './table';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import type { VsCodeApi } from './vscode-api';
+import type { HostToWebview, InitConfig, WebviewToHost } from '../../src/shared/messages';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
 const vscode = acquireVsCodeApi();
+
+/** Gửi message tới host theo đúng hợp đồng WebviewToHost (C3). */
+function postToHost(msg: WebviewToHost): void {
+  vscode.postMessage(msg);
+}
 const content = document.getElementById('content') as HTMLDivElement;
 const toolbarEl = document.getElementById('toolbar') as HTMLDivElement;
 const gutterEl = document.getElementById('line-gutter') as HTMLDivElement | null;
@@ -68,24 +73,11 @@ const SYNC_DEBOUNCE_MS = 250;
 
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
-/** Kết quả tìm file cho popup chèn link — do prompt.ts đăng ký khi đang mở. */
-interface FileSuggestion {
-  path: string;
-  name: string;
-  dir: string;
-}
-
 window.addEventListener('message', (event) => {
-  const msg = event.data as {
-    type: string;
-    text?: string;
-    config?: PipelineConfig & Record<string, unknown>;
-    requestId?: number;
-    files?: FileSuggestion[];
-  };
+  const msg = event.data as HostToWebview;
   switch (msg.type) {
     case 'init': {
-      const cfg = msg.config ?? { breaks: false, linkify: true };
+      const cfg: Partial<InitConfig> = msg.config ?? { breaks: false, linkify: true };
       renderer = new MarkdownRenderer({ breaks: !!cfg.breaks, linkify: !!cfg.linkify });
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
@@ -112,9 +104,9 @@ window.addEventListener('message', (event) => {
   }
 });
 
-vscode.postMessage({ type: 'ready' });
+postToHost({ type: 'ready' });
 
-function applyPreviewFontSettings(cfg: Record<string, unknown>): void {
+function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
   const root = document.documentElement;
   if (cfg.wordWrap) {
     document.body.classList.add('wordWrap');
@@ -210,7 +202,7 @@ function syncNow(): void {
     lineGutter.refreshFromMarkdown(markdown);
   }
   currentText = markdown;
-  vscode.postMessage({ type: 'edit', text: markdown });
+  postToHost({ type: 'edit', text: markdown });
 }
 
 function serialize(): string {
@@ -474,7 +466,7 @@ function openLink(href: string): void {
     scrollToAnchor(href.slice(1));
     return;
   }
-  vscode.postMessage({ type: 'openLink', href });
+  postToHost({ type: 'openLink', href });
 }
 
 function scrollToAnchor(fragment: string): void {
