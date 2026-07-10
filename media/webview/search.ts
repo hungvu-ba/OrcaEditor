@@ -11,6 +11,8 @@
  *    Esc / nút ✕ đóng.
  */
 
+import { INPUT_DEBOUNCE_MS, REFRESH_DEBOUNCE_MS } from './constants';
+
 export interface SearchController {
   /** Chạy lại tìm kiếm (khi nội dung đổi) nếu hộp tìm đang mở. Có debounce. */
   refresh(): void;
@@ -34,9 +36,6 @@ interface Segment {
   start: number;
   len: number;
 }
-
-const REFRESH_DEBOUNCE_MS = 200;
-const INPUT_DEBOUNCE_MS = 120;
 
 function svg(inner: string): string {
   return (

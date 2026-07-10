@@ -44,6 +44,17 @@ const testConfig = {
   // turndown dùng domino trên Node — bundle được, không cần external.
 };
 
+/** @type {import('esbuild').BuildOptions} */
+const unitTestConfig = {
+  entryPoints: ['test/unit.ts'],
+  bundle: true,
+  outfile: 'dist/test/unit.js',
+  format: 'cjs',
+  platform: 'node',
+  target: 'node18',
+  sourcemap: true,
+};
+
 function copyAssets() {
   fs.mkdirSync('dist/webview', { recursive: true });
   for (const f of ['markdown.css', 'editor.css']) {
@@ -68,7 +79,7 @@ function copyAssets() {
 async function main() {
   copyAssets();
   const configs = [extensionConfig, webviewConfig];
-  if (buildTest) configs.push(testConfig);
+  if (buildTest) configs.push(testConfig, unitTestConfig);
   if (watch) {
     const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
     await Promise.all(contexts.map((c) => c.watch()));

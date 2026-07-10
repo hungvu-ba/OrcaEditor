@@ -9,6 +9,7 @@
  */
 import { encodeLinkPath, saveSelection, type DomHelpers } from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
+import { FILE_SEARCH_DEBOUNCE_MS } from './constants';
 
 export interface FileSuggestion {
   path: string;
@@ -114,7 +115,7 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
         if (searchTimer !== undefined) {
           clearTimeout(searchTimer);
         }
-        searchTimer = setTimeout(() => requestSearch(input.value), 200);
+        searchTimer = setTimeout(() => requestSearch(input.value), FILE_SEARCH_DEBOUNCE_MS);
       });
     }
 

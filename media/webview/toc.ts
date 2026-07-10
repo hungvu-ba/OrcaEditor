@@ -10,6 +10,8 @@
  *  - Rebuild (debounce) khi nội dung đổi để bám theo heading vừa sửa.
  */
 
+import { REBUILD_DEBOUNCE_MS } from './constants';
+
 export interface TocController {
   /** Dựng lại danh sách mục lục (khi nội dung đổi) nếu panel đang mở. Có debounce. */
   refresh(): void;
@@ -25,7 +27,6 @@ interface TocEntry {
 }
 
 const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
-const REBUILD_DEBOUNCE_MS = 250;
 
 export function initToc(content: HTMLElement): TocController {
   // --- Panel bên phải ---

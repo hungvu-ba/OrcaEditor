@@ -30,6 +30,7 @@ import { initTable, navigateCells, warnIfComplexTableList } from './table';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, WebviewToHost } from '../../src/shared/messages';
+import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -65,7 +66,6 @@ initInputRules(content, { scheduleSync, dom });
 /** Markdown hiện tại mà webview đã biết (đã render hoặc đã gửi lên). */
 let currentText = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
-const SYNC_DEBOUNCE_MS = 250;
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -569,7 +569,7 @@ function saveScrollSoon(): void {
   }
   scrollSaveTimer = setTimeout(() => {
     vscode.setState({ scrollTop: window.scrollY });
-  }, 200);
+  }, SCROLL_SAVE_DEBOUNCE_MS);
 }
 
 function restoreScroll(): void {

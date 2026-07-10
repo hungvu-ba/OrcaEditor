@@ -126,7 +126,7 @@ export class MarkdownRenderer {
     let html = this.md.render(markdown);
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
-      const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
+      const [start0] = this.capturedFrontMatterRange ?? [0, 0];
       html = renderFrontMatterBlock(frontMatter, start0 + 1) + html;
     }
     return { html, frontMatter };

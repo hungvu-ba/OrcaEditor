@@ -2,6 +2,7 @@
  * Tiện ích DOM dùng chung giữa toolbar, table, input-rules, prompt: thao tác
  * caret/selection, escape chuỗi, icon SVG, toast nhỏ.
  */
+import { TOAST_DURATION_MS } from './constants';
 
 export function closestElement(node: Node): HTMLElement | null {
   return node instanceof HTMLElement ? node : node.parentElement;
@@ -60,7 +61,7 @@ export function showToast(message: string): void {
   if (toastTimer !== undefined) {
     clearTimeout(toastTimer);
   }
-  toastTimer = setTimeout(() => toast?.classList.remove('show'), 6000);
+  toastTimer = setTimeout(() => toast?.classList.remove('show'), TOAST_DURATION_MS);
 }
 
 export interface DomHelpers {

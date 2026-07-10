@@ -2,6 +2,26 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { HostToWebview, WebviewToHost } from './shared/messages';
+import { classifyLink, computeMinimalEdit, normalizeForSearch, relativePath } from './text-utils';
+
+/**
+ * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
+ * manh: không có tín hiệu "đã sẵn sàng" nào để chờ, nên phải đợi cứng cho
+ * webview/panel của Claude khởi tạo hoặc reveal xong trước bước kế. Máy chậm
+ * hoặc Claude Code đổi thời gian khởi tạo có thể làm các mốc này không còn đủ
+ * — chỉnh khi thấy chèn @mention thỉnh thoảng trượt. (finding C9)
+ *
+ * Không dùng media/webview/constants.ts: file này thuộc bundle Node của
+ * extension, tách biệt với bundle webview.
+ */
+/** Chờ tab chat Claude có sẵn thành visible sau khi reveal. */
+const CLAUDE_REVEAL_DELAY_MS = 300;
+/** Chờ webview chat Claude vừa mở khởi tạo xong. */
+const CLAUDE_OPEN_DELAY_MS = 700;
+/** Chờ text editor tạm mở xong trước khi chạy insertAtMention. */
+const CLAUDE_TEMP_EDITOR_DELAY_MS = 150;
+/** Chờ chat panel reveal xong trước khi đóng text editor tạm. */
+const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
 
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
@@ -165,45 +185,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /** Áp dụng newText bằng một edit nhỏ nhất (common prefix/suffix diff). */
   private async applyMinimalEdit(document: vscode.TextDocument, newText: string): Promise<boolean> {
-    const oldText = document.getText();
-    if (oldText === newText) {
+    const diff = computeMinimalEdit(document.getText(), newText);
+    if (!diff) {
       return true;
-    }
-
-    let start = 0;
-    const minLen = Math.min(oldText.length, newText.length);
-    while (start < minLen && oldText.charCodeAt(start) === newText.charCodeAt(start)) {
-      start++;
-    }
-    let oldEnd = oldText.length;
-    let newEnd = newText.length;
-    while (oldEnd > start && newEnd > start && oldText.charCodeAt(oldEnd - 1) === newText.charCodeAt(newEnd - 1)) {
-      oldEnd--;
-      newEnd--;
     }
 
     const edit = new vscode.WorkspaceEdit();
     edit.replace(
       document.uri,
-      new vscode.Range(document.positionAt(start), document.positionAt(oldEnd)),
-      newText.slice(start, newEnd)
+      new vscode.Range(document.positionAt(diff.start), document.positionAt(diff.oldEnd)),
+      diff.newText
     );
     return vscode.workspace.applyEdit(edit);
   }
 
-  /** Chỉ các scheme này được mở ra ngoài — chặn ms-msdt:, vscode:, command:... */
-  private static readonly SAFE_SCHEMES = new Set(['http', 'https', 'mailto']);
-
   private async openLink(document: vscode.TextDocument, href: string): Promise<void> {
-    if (!href) {
+    const link = classifyLink(href);
+    if (link.kind === 'empty') {
       return;
     }
-    const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
-    if (schemeMatch) {
+    if (link.kind === 'absolute') {
       // URL tuyệt đối: chỉ cho phép allowlist (markdown-it validateLink không
       // áp dụng cho raw HTML anchor nên phải tự chặn ở đây).
-      if (!MarkdownWysiwygProvider.SAFE_SCHEMES.has(schemeMatch[1].toLowerCase())) {
-        void vscode.window.showWarningMessage(`Đã chặn liên kết có scheme không an toàn: ${schemeMatch[1]}:`);
+      if (!link.safe) {
+        void vscode.window.showWarningMessage(`Đã chặn liên kết có scheme không an toàn: ${link.scheme}:`);
         return;
       }
       try {
@@ -298,15 +303,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
       // 1) Đảm bảo tab chat Claude đang hiển thị: reveal tab có sẵn (giữ nguyên
       //    hội thoại), chỉ mở mới khi chưa có chat nào.
-      let tabs = this.findClaudeChatTabs();
+      const tabs = this.findClaudeChatTabs();
       let visibleChat = tabs.find((t) => t.isActive);
       if (!visibleChat && tabs.length > 0) {
         await this.revealTab(tabs[0]);
-        await delay(300); // chờ webview thành visible
+        await delay(CLAUDE_REVEAL_DELAY_MS);
         visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
       } else if (tabs.length === 0 && available.includes('claude-vscode.editor.openLast')) {
         await vscode.commands.executeCommand('claude-vscode.editor.openLast');
-        await delay(700); // chờ webview chat khởi tạo xong
+        await delay(CLAUDE_OPEN_DELAY_MS);
         visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
       }
 
@@ -378,11 +383,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       preview: true,
       preserveFocus: false,
     });
-    await delay(150);
+    await delay(CLAUDE_TEMP_EDITOR_DELAY_MS);
     await vscode.commands.executeCommand(insertCmd);
 
     if (!openedByUser) {
-      await delay(250); // chờ chat panel reveal xong
+      await delay(CLAUDE_PANEL_REVEAL_DELAY_MS);
       const tempTab = findTextTab();
       if (tempTab) {
         await vscode.window.tabGroups.close(tempTab);
@@ -501,6 +506,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return normalized;
       }
       try {
+        // Cố ý: chính hàm canonical() cần phân giải symlink của đường dẫn để
+        // so khớp allowlist openLink; fsPath đến từ vscode.Uri (không phải input
+        // thô của người dùng), không có chèn shell/lệnh nào ở đây.
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
         return await fs.promises.realpath(uri.fsPath);
       } catch {
         // File chưa tồn tại — dùng path gốc đã chuẩn hóa làm fallback.
@@ -565,32 +574,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 </body>
 </html>`;
   }
-}
-
-/**
- * Chuẩn hóa chuỗi để so khớp tên file: thường hóa, bỏ dấu tiếng Việt
- * (kể cả đ→d vì NFD không tách được), mọi ký tự khác chữ/số thành '-'.
- */
-function normalizeForSearch(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-/** Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file). */
-function relativePath(fromDir: string, toFile: string): string {
-  const from = fromDir.split('/').filter(Boolean);
-  const to = toFile.split('/').filter(Boolean);
-  let common = 0;
-  while (common < from.length && common < to.length && from[common] === to[common]) {
-    common++;
-  }
-  const up: string[] = new Array(from.length - common).fill('..');
-  return [...up, ...to.slice(common)].join('/');
 }
 
 function getNonce(): string {

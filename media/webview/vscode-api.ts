@@ -4,4 +4,3 @@ export interface VsCodeApi {
   getState(): { scrollTop?: number } | undefined;
   setState(state: unknown): void;
 }
-declare function acquireVsCodeApi(): VsCodeApi;

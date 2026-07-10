@@ -113,7 +113,10 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "test:roundtrip": "node esbuild.js --test && node dist/test/roundtrip.js",
+    "test:unit": "node esbuild.js --test && node dist/test/unit.js",
+    "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies"
   },
@@ -124,7 +127,10 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.25.0",
-    "typescript": "^5.6.0"
+    "eslint": "^9.36.0",
+    "eslint-plugin-security": "^3.0.1",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.44.0"
   },
   "dependencies": {
     "@vscode/markdown-it-katex": "^1.1.1",

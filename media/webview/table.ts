@@ -5,6 +5,7 @@
  */
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, showToast, svgIcon, type DomHelpers } from './dom-utils';
+import { TABLE_TOOLBAR_HIDE_MS } from './constants';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -85,8 +86,7 @@ const tableActions: TableAction[] = [
   { icon: TABLE_ICONS.trash, title: 'Xóa cả bảng', action: deleteTable, separatorBefore: true },
 ];
 
-/** Toolbar bảng tự ẩn sau 3s; chỉ hiện lại khi CLICK chuột vào bảng (gõ phím không tính). */
-const TABLE_TOOLBAR_HIDE_MS = 3_000;
+/** Toolbar bảng tự ẩn sau TABLE_TOOLBAR_HIDE_MS; chỉ hiện lại khi CLICK chuột vào bảng (gõ phím không tính). */
 let tableToolbarHideTimer: ReturnType<typeof setTimeout> | undefined;
 let lastInteractionWasPointer = false;
 
