@@ -457,6 +457,23 @@ export function warnIfComplexTableList(): void {
 
 /** Chèn bảng 3×3 mới tại vị trí caret (nút toolbar chính "⊞"). */
 export function insertTable(): void {
+  // Nếu caret đang ở trong ô của một bảng khác, chèn thẳng vào đó sẽ tạo
+  // bảng lồng bảng — không thể biểu diễn bằng pipe Markdown thuần (bị vỡ
+  // thành chuỗi "|" thoát dấu khi serialize). Đưa caret ra ngay sau bảng
+  // đang chứa nó trước khi chèn.
+  const selBefore = window.getSelection();
+  const anchorBefore = selBefore?.anchorNode ? closestElement(selBefore.anchorNode) : null;
+  const enclosingCell = anchorBefore?.closest('td, th');
+  if (enclosingCell && content.contains(enclosingCell)) {
+    const outerTable = enclosingCell.closest('table');
+    if (outerTable) {
+      const p = document.createElement('p');
+      p.appendChild(document.createElement('br'));
+      outerTable.after(p);
+      ctx.dom.placeCaretIn(p);
+    }
+  }
+
   const rows: string[] = [];
   rows.push('<table><thead><tr><th>Cột 1</th><th>Cột 2</th><th>Cột 3</th></tr></thead><tbody>');
   for (let r = 0; r < 2; r++) {

@@ -130,6 +130,12 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     };
     ok.addEventListener('click', () => close(input.value.trim() || undefined));
     cancel.addEventListener('click', () => close(undefined));
+    // Bấm ra ngoài box (lên nền overlay) → coi như Hủy.
+    overlay.addEventListener('mousedown', (e) => {
+      if (e.target === overlay) {
+        close(undefined);
+      }
+    });
     input.addEventListener('keydown', (e) => {
       if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && suggestions.length > 0) {
         e.preventDefault();

@@ -31,7 +31,22 @@ export interface RenderResult {
 
 const FRONT_MATTER_CLASS = 'md-front-matter';
 const MATH_INLINE_CLASS = 'md-math-inline';
-const MATH_BLOCK_CLASS = 'md-math-block';
+export const MATH_BLOCK_CLASS = 'md-math-block';
+export const MERMAID_CLASS = 'md-mermaid';
+export const MERMAID_TOOLBAR_CLASS = 'md-mermaid-toolbar';
+export const MERMAID_TOGGLE_CLASS = 'md-mermaid-toggle';
+export const MERMAID_CHART_CLASS = 'md-mermaid-chart';
+export const MERMAID_SOURCE_CLASS = 'md-mermaid-source';
+/** Attribute gắn lên mỗi block cấp cao nhất, giá trị = số dòng bắt đầu (1-based) trong Markdown gốc. */
+export const LINE_NUMBER_ATTR = 'data-line';
+/** Attribute gắn kèm data-line, giá trị = số dòng kết thúc (1-based, bao gồm) của block trong Markdown gốc. */
+export const LINE_NUMBER_END_ATTR = 'data-line-end';
+
+/** [dòng bắt đầu, dòng kết thúc] (1-based, bao gồm) của một block trong Markdown gốc. */
+export interface LineRange {
+  start: number;
+  end: number;
+}
 
 // ---------------------------------------------------------------------------
 // Render: Markdown → HTML
@@ -40,6 +55,15 @@ const MATH_BLOCK_CLASS = 'md-math-block';
 export class MarkdownRenderer {
   private readonly md: MarkdownIt;
   private capturedFrontMatter: string | undefined;
+  private capturedFrontMatterRange: [number, number] | undefined;
+  /**
+   * math_block có renderer riêng (@vscode/markdown-it-katex) không dùng
+   * renderToken/renderAttrs nên attrSet không lộ ra HTML (giống fence trước
+   * khi phát hiện fence lại đặt attr lên <code> — math_block thì KHÔNG đặt gì
+   * cả). Ghi lại range theo đúng thứ tự token để hàm gọi render() gắn tay
+   * data-line/data-line-end lên wrapper .md-math-block trong postProcessMathDom.
+   */
+  private capturedMathBlockRanges: Array<[number, number]> = [];
 
   constructor(config: PipelineConfig) {
     this.md = new MarkdownIt({
@@ -73,17 +97,71 @@ export class MarkdownRenderer {
 
     addAlignAttrToTables(this.md);
     fixRenderInlineAsText(this.md);
+
+    // Gắn data-line/data-line-end lên mỗi token block cấp cao nhất — renderToken
+    // mặc định của markdown-it xuất mọi attr của token ra thẻ mở nên hầu hết
+    // block (heading/paragraph/list/table/hr/blockquote...) không cần override
+    // rule render riêng. Ngoại lệ: fence đặt attr lên <code> bên trong <pre>
+    // (renderer riêng của markdown-it) — gutter.ts tự dò thêm cấp con để bù;
+    // math_block dùng renderer riêng bỏ hẳn attr — bù bằng capturedMathBlockRanges.
+    this.md.core.ruler.push('attach_line_numbers', (state) => {
+      for (const token of state.tokens as unknown as BlockToken[]) {
+        if (token.type === 'front_matter' && token.map) {
+          this.capturedFrontMatterRange = token.map;
+          continue;
+        }
+        if (token.type === 'math_block' && token.map) {
+          this.capturedMathBlockRanges.push(token.map);
+        }
+        if (token.level === 0 && token.nesting !== -1 && token.map && !token.hidden) {
+          token.attrSet(LINE_NUMBER_ATTR, String(token.map[0] + 1));
+          token.attrSet(LINE_NUMBER_END_ATTR, String(token.map[1]));
+        }
+      }
+    });
   }
 
   /** Render markdown → HTML (kèm block front-matter nếu có). */
   public render(markdown: string): RenderResult {
     this.capturedFrontMatter = undefined;
+    this.capturedFrontMatterRange = undefined;
+    this.capturedMathBlockRanges = [];
     let html = this.md.render(markdown);
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
-      html = renderFrontMatterBlock(frontMatter) + html;
+      const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
+      html = renderFrontMatterBlock(frontMatter, start0 + 1) + html;
     }
     return { html, frontMatter };
+  }
+
+  /** Range (1-based, bao gồm) của từng khối ```math``` trong lần render() gần nhất, theo đúng thứ tự xuất hiện. */
+  public getLastMathBlockRanges(): LineRange[] {
+    return this.capturedMathBlockRanges.map(([start0, end0]) => ({ start: start0 + 1, end: end0 }));
+  }
+
+  /**
+   * Chỉ lấy range dòng nguồn (1-based, bao gồm) của từng block cấp cao nhất,
+   * theo đúng thứ tự render — KHÔNG sinh lại HTML. Dùng để cập nhật gutter số
+   * dòng sau mỗi lần gõ (debounce) mà không phải re-render toàn bộ #content
+   * (tránh mất caret/undo). Front-matter (nếu có) luôn là block đầu tiên.
+   */
+  public computeTopLevelLineRanges(markdown: string): LineRange[] {
+    this.capturedFrontMatter = undefined;
+    this.capturedFrontMatterRange = undefined;
+    this.capturedMathBlockRanges = [];
+    const tokens = this.md.parse(markdown, {});
+    const ranges: LineRange[] = [];
+    if (this.capturedFrontMatter !== undefined) {
+      const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
+      ranges.push({ start: start0 + 1, end: end0 });
+    }
+    for (const token of tokens as unknown as BlockToken[]) {
+      if (token.level === 0 && token.nesting !== -1 && token.map && !token.hidden) {
+        ranges.push({ start: token.map[0] + 1, end: token.map[1] });
+      }
+    }
+    return ranges;
   }
 }
 
@@ -168,9 +246,22 @@ function fixRenderInlineAsText(md: MarkdownIt): void {
   };
 }
 
-function renderFrontMatterBlock(raw: string): string {
+/**
+ * Token cấp block, đủ thông tin để gắn số dòng nguồn (xem rule 'attach_line_numbers'
+ * trong constructor của MarkdownRenderer — cần truy cập `this` để ghi lại range
+ * của front-matter/math_block nên không tách thành hàm đứng riêng được).
+ */
+interface BlockToken extends TokenLike {
+  type: string;
+  level: number;
+  map: [number, number] | null;
+  nesting: number;
+  hidden: boolean;
+}
+
+function renderFrontMatterBlock(raw: string, line: number): string {
   return (
-    `<div class="${FRONT_MATTER_CLASS}" contenteditable="false" data-raw="${escapeAttr(raw)}">` +
+    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${escapeAttr(raw)}">` +
     `<div class="md-front-matter-label">front matter</div>` +
     `<pre>${escapeHtml(raw)}</pre>` +
     `</div>\n`
@@ -190,15 +281,34 @@ function escapeAttr(s: string): string {
 // bọc công thức KaTeX thành atom không chỉnh sửa được, lưu nguồn TeX.
 // ---------------------------------------------------------------------------
 
-export function postProcessMathDom(root: ParentNode & Node, doc: Document): void {
+/**
+ * @param mathBlockRanges range dòng nguồn (1-based, bao gồm) của từng khối
+ * ```math``` trong tài liệu, ĐÚNG THEO THỨ TỰ xuất hiện (xem
+ * MarkdownRenderer.getLastMathBlockRanges — renderer riêng của katex-plugin
+ * cho math_block bỏ qua attrSet nên không tự lộ ra HTML như các block khác).
+ * Khớp theo thứ tự với `.katex-display` tìm được trong DOM; nếu số lượng lệch
+ * nhau (hiếm — ví dụ có math lồng trong khối HTML thô) thì bỏ qua, không gắn
+ * số dòng cho khối nào cả thay vì gắn sai.
+ */
+export function postProcessMathDom(
+  root: ParentNode & Node,
+  doc: Document,
+  mathBlockRanges: LineRange[] = []
+): void {
   // @vscode/markdown-it-katex: inline → <span class="katex">, block → <span class="katex-display"> (trong <p>)
   const displays = Array.from(root.querySelectorAll('.katex-display'));
-  for (const el of displays) {
+  const ranges = mathBlockRanges.length === displays.length ? mathBlockRanges : [];
+  displays.forEach((el, i) => {
     const tex = extractTex(el);
     const wrapper = doc.createElement('div');
     wrapper.className = MATH_BLOCK_CLASS;
     wrapper.setAttribute('contenteditable', 'false');
     wrapper.setAttribute('data-tex', tex);
+    const range = ranges[i];
+    if (range) {
+      wrapper.setAttribute(LINE_NUMBER_ATTR, String(range.start));
+      wrapper.setAttribute(LINE_NUMBER_END_ATTR, String(range.end));
+    }
     const parent = el.parentElement;
     // Nếu span.katex-display là con duy nhất của <p>, thay cả <p> để tránh <p> rỗng.
     if (parent && parent.tagName === 'P' && parent.childNodes.length === 1 && parent.parentNode) {
@@ -207,7 +317,7 @@ export function postProcessMathDom(root: ParentNode & Node, doc: Document): void
       parent.replaceChild(wrapper, el);
     }
     wrapper.appendChild(el);
-  }
+  });
   const inlines = Array.from(root.querySelectorAll('.katex')).filter(
     (el) =>
       !hasAncestor(el, (a) => a.classList?.contains(MATH_BLOCK_CLASS) ?? false) &&
@@ -230,6 +340,47 @@ export function postProcessMathDom(root: ParentNode & Node, doc: Document): void
 function extractTex(katexEl: Element): string {
   const annotation = katexEl.querySelector('annotation[encoding="application/x-tex"]');
   return annotation?.textContent ?? '';
+}
+
+/**
+ * Bọc mỗi khối ```mermaid``` (```<pre><code class="language-mermaid">```, do
+ * markdown-it render như một code block bình thường) thành khung có nút
+ * chuyển đổi "biểu đồ ⇄ mã nguồn". Chỉ tạo cấu trúc DOM (chạy được cả trên
+ * Node/domino cho round-trip test) — việc gọi thư viện mermaid để dựng SVG
+ * thực sự nằm ở media/webview/mermaid.ts (chỉ chạy trong webview, cần DOM
+ * trình duyệt thật).
+ */
+export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): void {
+  const blocks = Array.from(root.querySelectorAll('pre > code.language-mermaid'));
+  for (const code of blocks) {
+    const pre = code.parentElement;
+    if (!pre?.parentElement) {
+      continue;
+    }
+    const wrapper = doc.createElement('div');
+    wrapper.className = MERMAID_CLASS;
+    wrapper.setAttribute('data-mermaid-view', 'chart');
+
+    const toolbar = doc.createElement('div');
+    toolbar.className = MERMAID_TOOLBAR_CLASS;
+    toolbar.setAttribute('contenteditable', 'false');
+    const toggle = doc.createElement('button');
+    toggle.setAttribute('type', 'button');
+    toggle.className = MERMAID_TOGGLE_CLASS;
+    toggle.setAttribute('title', 'Chuyển đổi giữa biểu đồ và mã Mermaid');
+    toolbar.appendChild(toggle);
+
+    const chart = doc.createElement('div');
+    chart.className = MERMAID_CHART_CLASS;
+    chart.setAttribute('contenteditable', 'false');
+    chart.textContent = 'Đang dựng biểu đồ Mermaid…';
+
+    pre.classList.add(MERMAID_SOURCE_CLASS);
+    pre.parentElement.replaceChild(wrapper, pre);
+    wrapper.appendChild(toolbar);
+    wrapper.appendChild(chart);
+    wrapper.appendChild(pre);
+  }
 }
 
 /**
@@ -713,6 +864,21 @@ export function createTurndown(): TurndownService {
     replacement: (_content, node) => {
       const tex = (node as HTMLElement).getAttribute('data-tex') ?? '';
       return `$${tex}$`;
+    },
+  });
+
+  // --- mermaid: bỏ qua toolbar + biểu đồ SVG đã dựng, chỉ serialize mã nguồn
+  //     trong .md-mermaid-source (giữ nguyên logic fence với fencedCodeWithLang) ---
+  td.addRule('mermaidDiagram', {
+    filter: (node) => (node as HTMLElement).classList?.contains(MERMAID_CLASS) ?? false,
+    replacement: (_content, node) => {
+      const code = (node as HTMLElement).querySelector(`.${MERMAID_SOURCE_CLASS} code`);
+      const text = (code?.textContent ?? '').replace(/\n$/, '');
+      let fence = '```';
+      while (text.includes(fence)) {
+        fence += '`';
+      }
+      return `\n\n${fence}mermaid\n${text}\n${fence}\n\n`;
     },
   });
 

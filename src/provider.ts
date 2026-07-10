@@ -69,6 +69,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         case 'ready': {
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
+          const wysiwygCfg = vscode.workspace.getConfiguration('markdownWysiwyg', document.uri);
           void webview.postMessage({
             type: 'init',
             text: document.getText(),
@@ -82,6 +83,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 'fontFamily',
                 '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif'
               ),
+              autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
+              showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
             },
           });
           break;
@@ -106,6 +109,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         }
         case 'addToClaudeContext': {
           void this.addToClaudeContext(document, webviewPanel.viewColumn);
+          break;
+        }
+        case 'viewSource': {
+          void this.viewSource(document);
           break;
         }
       }
@@ -342,6 +349,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
+  /** Mở chính file đang xem ở text editor thường (mã nguồn .md thô) cạnh bên. */
+  private async viewSource(document: vscode.TextDocument): Promise<void> {
+    await vscode.window.showTextDocument(document, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: false,
+      preserveFocus: false,
+    });
+  }
+
   /** Thư mục không bao giờ chứa file đáng để link tới từ tài liệu markdown. */
   private static readonly FILE_SEARCH_EXCLUDE =
     '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}';
@@ -453,6 +469,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 </head>
 <body>
   <div id="toolbar" aria-label="Thanh công cụ định dạng"></div>
+  <div id="line-gutter" aria-hidden="true"></div>
   <div id="content" contenteditable="true" spellcheck="false"></div>
   <script nonce="${nonce}" src="${distUri('webview', 'main.js')}"></script>
 </body>

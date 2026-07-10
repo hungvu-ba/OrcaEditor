@@ -16,14 +16,17 @@ import {
   findOrphanNestedListPair,
   normalizeMarkdown,
   postProcessMathDom,
+  postProcessMermaidDom,
   prepareDomForSerialize,
   type PipelineConfig,
 } from './pipeline';
 import { initSearch } from './search';
 import { initToc } from './toc';
+import { initMermaid } from './mermaid';
+import { initLineGutter } from './gutter';
 import { closestElement, createDomHelpers } from './dom-utils';
 import { initPrompt } from './prompt';
-import { initToolbar, toggleInlineCode } from './toolbar';
+import { initToolbar, syncTocButton, toggleInlineCode } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList } from './table';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import type { VsCodeApi } from './vscode-api';
@@ -33,11 +36,15 @@ declare function acquireVsCodeApi(): VsCodeApi;
 const vscode = acquireVsCodeApi();
 const content = document.getElementById('content') as HTMLDivElement;
 const toolbarEl = document.getElementById('toolbar') as HTMLDivElement;
+const gutterEl = document.getElementById('line-gutter') as HTMLDivElement | null;
 
 let renderer: MarkdownRenderer | undefined;
 const turndown = createTurndown();
 const search = initSearch(content);
 const toc = initToc(content);
+const mermaidView = initMermaid(content);
+const lineGutter = initLineGutter(content, gutterEl, () => renderer);
+let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
 const prompt = initPrompt(vscode, dom);
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
@@ -81,8 +88,14 @@ window.addEventListener('message', (event) => {
       const cfg = msg.config ?? { breaks: false, linkify: true };
       renderer = new MarkdownRenderer({ breaks: !!cfg.breaks, linkify: !!cfg.linkify });
       applyPreviewFontSettings(cfg);
+      lineNumbersEnabled = cfg.showLineNumbers !== false;
+      document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       renderDocument(msg.text ?? '');
       restoreScroll();
+      if (cfg.autoOpenToc !== false && !toc.isOpen()) {
+        toc.toggle();
+        syncTocButton();
+      }
       break;
     }
     case 'update': {
@@ -129,9 +142,14 @@ function renderDocument(markdown: string): void {
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
   content.innerHTML = html;
-  postProcessMathDom(content, document);
-  ensureEditablePlaceholder();
+  postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
+  postProcessMermaidDom(content, document);
+  ensureTrailingParagraph();
+  mermaidView.renderAll();
   table.hideTableToolbar();
+  if (lineNumbersEnabled) {
+    lineGutter.refreshFromDom();
+  }
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
@@ -140,10 +158,31 @@ function renderDocument(markdown: string): void {
   toc.refresh();
 }
 
-/** contentEditable cần ít nhất một block để đặt caret. */
-function ensureEditablePlaceholder(): void {
-  if (!content.firstElementChild) {
+/**
+ * contentEditable cần ít nhất một block để đặt caret. Ngoài ra, nếu phần tử
+ * CUỐI là khối "atom"/"bẫy caret" — Mermaid, công thức, front matter, code
+ * block, bảng, <hr> — thì không có chỗ đặt con trỏ ngay phía sau nó nên không
+ * thể thêm nội dung mới xuống dưới (Mermaid ở chế độ biểu đồ là nặng nhất:
+ * toàn bộ vùng nhìn thấy đều contenteditable=false). Đảm bảo luôn có một <p>
+ * rỗng ở cuối để làm "chỗ thoát".
+ *
+ * An toàn với serialize: rule 'emptyParagraph' của turndown bỏ mọi <p> rỗng
+ * khi lưu (xem pipeline.ts) nên <p> thêm vào KHÔNG làm đổi Markdown, không gây
+ * sync/diff giả.
+ */
+const TRAILING_TRAP_SELECTOR =
+  '.md-mermaid, .md-math-block, .md-front-matter, pre, table, hr, [contenteditable="false"]';
+
+function ensureTrailingParagraph(): void {
+  const last = content.lastElementChild;
+  if (!last) {
     content.innerHTML = '<p><br></p>';
+    return;
+  }
+  if (last.matches(TRAILING_TRAP_SELECTOR)) {
+    const p = document.createElement('p');
+    p.appendChild(document.createElement('br'));
+    content.appendChild(p);
   }
 }
 
@@ -161,6 +200,9 @@ function scheduleSync(): void {
 function syncNow(): void {
   syncTimer = undefined;
   const markdown = serialize();
+  if (lineNumbersEnabled) {
+    lineGutter.refreshFromMarkdown(markdown);
+  }
   if (markdown === currentText) {
     return;
   }
@@ -252,12 +294,49 @@ window.addEventListener('visibilitychange', () => {
 window.addEventListener('blur', flushPendingSync);
 window.addEventListener('pagehide', flushPendingSync);
 
-// Paste: chèn plain text (tránh dán HTML bừa từ ngoài vào làm hỏng cấu trúc).
+// Copy/cut: mặc định trình duyệt lấy text/plain của vùng chọn theo cách riêng
+// (bảng → cột cách nhau bằng tab, không phải cú pháp pipe "| a | b |"); dán
+// lại (qua handler 'paste' bên dưới, chỉ đọc text/plain rồi render bằng
+// markdown-it) sẽ mất hẳn cấu trúc bảng/list. Ghi đè text/plain bằng chính
+// Markdown (cùng turndown dùng để lưu file) của đúng vùng đang chọn — copy
+// rồi paste (kể cả dán ra ngoài editor) luôn giữ đúng định dạng.
+function copySelectionAsMarkdown(e: ClipboardEvent): boolean {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    return false;
+  }
+  const wrapper = document.createElement('div');
+  wrapper.appendChild(sel.getRangeAt(0).cloneContents());
+  prepareDomForSerialize(wrapper, document);
+  const md = normalizeMarkdown(turndown.turndown(wrapper));
+  if (!md.trim()) {
+    return false;
+  }
+  e.preventDefault();
+  e.clipboardData?.setData('text/plain', md);
+  return true;
+}
+
+content.addEventListener('copy', copySelectionAsMarkdown);
+
+content.addEventListener('cut', (e) => {
+  if (copySelectionAsMarkdown(e)) {
+    document.execCommand('delete');
+    scheduleSync();
+  }
+});
+
+// Paste: chỉ lấy text/plain (tránh dán HTML bừa từ ngoài vào làm hỏng cấu
+// trúc), rồi render lại bằng chính markdown-it của app. Nếu chèn thẳng làm
+// text thô, cú pháp Markdown copy từ file .md khác (**bold**, # heading,
+// `code`, [link](...)...) sẽ nằm lại như text thường; khi serialize ngược về
+// Markdown, turndown sẽ escape các ký tự đó (\*\*bold\*\*...) để giữ nguyên ý
+// "đây là text thường" — kết quả là toàn bộ format bị chèn thêm dấu \ và vỡ.
 content.addEventListener('paste', (e) => {
   e.preventDefault();
   const text = e.clipboardData?.getData('text/plain') ?? '';
   if (text) {
-    document.execCommand('insertText', false, text);
+    insertPastedMarkdown(text);
   }
 });
 
@@ -273,12 +352,59 @@ function pasteFromClipboardApi(): void {
     .readText()
     .then((text) => {
       if (text) {
-        document.execCommand('insertText', false, text);
+        insertPastedMarkdown(text);
       }
     })
     .catch(() => {
       /* Không có quyền clipboard-read — bỏ qua, đã có handler 'paste' ở trên lo trường hợp còn lại. */
     });
+}
+
+/**
+ * Chèn text vừa dán vào vị trí caret. Render qua markdown-it trước (cùng
+ * renderer dùng cho toàn bộ tài liệu) để cú pháp Markdown được hiểu đúng
+ * thành nội dung có định dạng, thay vì nằm lại như text thô rồi bị turndown
+ * escape ngược khi serialize. Text thường (không có cú pháp Markdown) vẫn ra
+ * y hệt như insertText cũ nhờ bước "bóc <p> đơn" bên dưới.
+ */
+function insertPastedMarkdown(text: string): void {
+  const html = renderPasteHtml(text);
+  if (!html) {
+    document.execCommand('insertText', false, text);
+    return;
+  }
+  document.execCommand('insertHTML', false, html);
+  // Có thể vừa chèn một khối ```mermaid``` mới — dựng SVG cho nó (renderAll
+  // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
+  // thêm chút công tính lại chứ không phá cấu trúc).
+  mermaidView.renderAll();
+}
+
+/**
+ * Render text vừa dán thành HTML để chèn. Nếu kết quả chỉ là một <p> duy nhất
+ * (dán một dòng giữa câu, không có cú pháp block nào) thì bóc thẻ <p> ra —
+ * tránh tạo ngắt đoạn ngoài ý muốn khi dán chữ thường vào giữa văn bản.
+ *
+ * postProcessMathDom/postProcessMermaidDom phải chạy trên `tmp` (fragment
+ * rời, tách biệt) chứ KHÔNG được chạy trên `content` (DOM sống): hai hàm này
+ * bọc thêm wrapper quanh mỗi <span class="katex">/<code class="language-
+ * mermaid"> tìm thấy mà không kiểm tra đã bọc hay chưa — chạy lại trên toàn
+ * bộ content sẽ bọc chồng (double-wrap) luôn cả những khối math/mermaid đã có
+ * sẵn từ trước trong tài liệu, không chỉ đoạn vừa dán.
+ */
+function renderPasteHtml(text: string): string {
+  if (!renderer) {
+    return '';
+  }
+  const { html } = renderer.render(text);
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
+  postProcessMermaidDom(tmp, document);
+  if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
+    return tmp.firstElementChild.innerHTML;
+  }
+  return tmp.innerHTML;
 }
 
 // Checkbox task list: toggle bằng chuột.
@@ -383,6 +509,14 @@ content.addEventListener('keydown', (e) => {
     document.execCommand('strikeThrough');
     scheduleSync();
     return;
+  }
+  // Lưới an toàn giữa phiên: nếu block cuối là khối "bẫy caret" (Mermaid/code/
+  // bảng/công thức...) mà <p> thoát đã bị xóa hoặc chưa có, ArrowDown sẽ không
+  // đi đâu được. Tạo lại <p> cuối rồi để trình duyệt tự đưa caret vào (KHÔNG
+  // preventDefault). Nếu đã có <p> cuối thì đây là no-op. renderDocument lo ca
+  // lúc mở file; đây lo ca DOM đổi trong lúc gõ (không re-render).
+  if (e.key === 'ArrowDown' && !mod && !e.shiftKey && !e.altKey) {
+    ensureTrailingParagraph();
   }
   // Tab trong list → thụt/bỏ thụt lề (tạo phân cấp). Trong ô bảng, chỉ thụt lề
   // khi caret ở ĐẦU mục (quy ước Notion/Docs) để không mất chức năng nhảy ô;

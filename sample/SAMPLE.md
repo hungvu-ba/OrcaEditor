@@ -50,3 +50,5 @@ Chi tiết xem thêm tại [tài liệu nghiệp vụ](https://example.com/docs)
 -   sdfdsf
 -   fdsfds
 -   d
+
+<pre><font face="Menlo, Monaco, Courier New, monospace">sequenceDiagram<br><br></font></pre>

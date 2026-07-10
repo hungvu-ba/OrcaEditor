@@ -38,6 +38,13 @@ const CLAUDE_COPY_ICON =
   '<text x="8" y="11.75" text-anchor="middle" font-size="8" font-weight="bold" fill="currentColor">@</text>' +
   '</svg>';
 
+/** Icon trang tài liệu góc gấp + dấu </> — mở file .md dạng text thô cạnh bên. */
+const RAW_SOURCE_ICON = svgIcon(
+  `<path d="M4.25 2.75h5.5l3 3v7a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z" ${FMT_STROKE}/>` +
+    `<path d="M9.75 2.75v3h3" ${FMT_STROKE}/>` +
+    `<path d="M6.4 9.2L5 10.6l1.4 1.4M9.6 9.2L11 10.6l-1.4 1.4" ${FMT_STROKE}/>`
+);
+
 /**
  * Icon SVG đơn sắc cho các nút cấu trúc / chèn (đồng bộ nét với table toolbar).
  * Các nút chữ (B, I, S, </>, H1–H3, ¶) giữ nguyên vì đã là quy ước quen thuộc.
@@ -122,6 +129,11 @@ function updateTocButton(): void {
   document.getElementById('toc-toggle')?.classList.toggle('active', ctx.toc.isOpen());
 }
 
+/** Gọi từ ngoài (main.ts) sau khi tự mở mục lục theo cấu hình lúc khởi tạo. */
+export function syncTocButton(): void {
+  updateTocButton();
+}
+
 const toolbarItems: ToolbarItem[] = [
   { label: 'B', title: 'Đậm (⌘B)', action: () => document.execCommand('bold') },
   { label: 'I', title: 'Nghiêng (⌘I)', action: () => document.execCommand('italic') },
@@ -178,6 +190,12 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Copy "@file" vào clipboard cho chat Claude Code — tự mở/focus ô chat, bạn chỉ cần dán (⌘V)',
     action: () => ctx.vscode.postMessage({ type: 'addToClaudeContext' }),
     alignRight: true,
+  },
+  {
+    label: '⟨/⟩',
+    icon: RAW_SOURCE_ICON,
+    title: 'Xem mã nguồn Markdown thô (mở text editor cạnh bên)',
+    action: () => ctx.vscode.postMessage({ type: 'viewSource' }),
   },
   {
     label: '☰',

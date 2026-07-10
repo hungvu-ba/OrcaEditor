@@ -1,8 +1,8 @@
 {
   "name": "markdown-wysiwyg-preview",
-  "displayName": "Markdown WYSIWYG Preview",
+  "displayName": "Orca MD Preview",
   "description": "Preview markdown giống VS Code Markdown Preview và cho phép chỉnh sửa trực tiếp trên preview (WYSIWYG).",
-  "version": "0.5.5",
+  "version": "0.5.14",
   "publisher": "hungvu",
   "private": true,
   "license": "MIT",
@@ -17,7 +17,7 @@
     "customEditors": [
       {
         "viewType": "markdownWysiwyg.editor",
-        "displayName": "Markdown WYSIWYG Preview",
+        "displayName": "Orca MD Preview",
         "selector": [
           {
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
@@ -29,13 +29,13 @@
     "commands": [
       {
         "command": "markdownWysiwyg.open",
-        "title": "Mở WYSIWYG Preview",
+        "title": "Mở Orca Preview",
         "category": "Markdown",
         "icon": "$(open-preview)"
       },
       {
         "command": "markdownWysiwyg.openToSide",
-        "title": "Mở WYSIWYG Preview sang bên cạnh",
+        "title": "Mở Orca Preview sang bên cạnh",
         "category": "Markdown",
         "icon": "$(open-preview)"
       }
@@ -55,6 +55,20 @@
         {
           "command": "markdownWysiwyg.openToSide",
           "when": "editorLangId == markdown && !notebookEditorFocused",
+          "group": "navigation@100"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "markdownWysiwyg.open",
+          "when": "resourceExtname =~ /\\.(md|markdown)$/ && activeCustomEditorId != 'markdownWysiwyg.editor'",
+          "group": "navigation@100"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "markdownWysiwyg.open",
+          "when": "resourceExtname =~ /\\.(md|markdown|mdown|mkd|mdwn|mdtxt|mdtext)$/",
           "group": "navigation@100"
         }
       ],
@@ -81,6 +95,16 @@
           "type": "boolean",
           "default": false,
           "description": "Nút copy @file: tự chèn thẳng @file vào ô chat Claude Code thay vì chỉ copy — cần mở tạm một text editor của file rồi tự đóng ngay (cơ chế bắt buộc của Claude Code, sẽ thấy nháy nhẹ). Mặc định tắt: điều hướng tới tab chat, focus ô nhập và copy @file vào clipboard để dán bằng ⌘V."
+        },
+        "markdownWysiwyg.autoOpenToc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tự động mở panel mục lục (Table of Contents) mỗi khi mở file Markdown trong WYSIWYG Preview."
+        },
+        "markdownWysiwyg.showLineNumbers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hiển thị số dòng (theo file Markdown gốc) ở cột bên trái mỗi khối nội dung (đoạn văn, heading, list, bảng, code, mermaid...), giống gutter số dòng của chế độ raw text."
         }
       }
     }
@@ -109,6 +133,7 @@
     "markdown-it": "^14.1.0",
     "markdown-it-front-matter": "^0.2.4",
     "markdown-it-task-lists": "^2.1.1",
+    "mermaid": "^11.16.0",
     "turndown": "^7.2.0",
     "turndown-plugin-gfm": "^1.0.2"
   }

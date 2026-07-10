@@ -13,6 +13,50 @@
   outline: none;
 }
 
+/* --- Gutter số dòng (giống raw text editor) ---
+ * body cần position:relative để offsetTop của các block trong #content (và
+ * của #line-gutter, đặt absolute) cùng chung một hệ toạ độ (offsetParent).
+ * Chỉ dành chỗ (padding-left) khi tính năng bật, tránh lệch layout khi tắt. */
+body.md-line-numbers {
+  position: relative;
+  padding-left: 66px;
+}
+
+body.md-line-numbers #toolbar {
+  margin-left: -66px;
+  padding-left: 66px;
+}
+
+#line-gutter {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 56px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.md-line-number {
+  position: absolute;
+  right: 10px;
+  min-width: 1px;
+  font-family: var(--vscode-editor-font-family, 'SF Mono', Consolas, 'Courier New', monospace);
+  font-size: 11px;
+  line-height: var(--markdown-line-height, 22px);
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
+  white-space: nowrap;
+}
+
+/* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
+ * (biểu đồ Mermaid, công thức KaTeX): số ở mép trên là dòng bắt đầu, số này ở
+ * mép dưới là dòng kết thúc. Dịch nhẹ lên trên để số không tràn ra ngoài block,
+ * và làm mờ hơn một chút để không lẫn với các số "bắt đầu" khác. */
+.md-line-number-end {
+  transform: translateY(-100%);
+  opacity: 0.75;
+}
+
 /* --- Toolbar --- */
 #toolbar {
   position: sticky;
@@ -261,6 +305,83 @@
   outline: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.5));
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/* --- Mermaid: khối ```mermaid``` hiển thị biểu đồ, có nút chuyển sang xem mã
+ * nguồn. Khung ngoài đóng vai trò "card" (giống front-matter). --- */
+.md-mermaid {
+  margin: 16px 0;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.md-mermaid-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+.md-mermaid-toggle {
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.md-mermaid-toggle:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.md-mermaid-toggle::after {
+  content: 'Xem mã nguồn';
+}
+
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after {
+  content: 'Xem biểu đồ';
+}
+
+.md-mermaid-chart {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  overflow: auto;
+  cursor: default;
+}
+
+.md-mermaid-chart svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-mermaid-chart.md-mermaid-error {
+  justify-content: flex-start;
+  color: var(--vscode-errorForeground, #f14c4c);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.md-mermaid[data-mermaid-view='chart'] .md-mermaid-source {
+  display: none;
+}
+
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-chart {
+  display: none;
+}
+
+.md-mermaid-source {
+  margin: 0;
+  border: none;
+  border-radius: 0;
 }
 
 /* --- Con trỏ trong ô bảng trống dễ nhìn hơn --- */

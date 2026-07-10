@@ -17,6 +17,7 @@ import {
   fillSequenceColumn,
   normalizeMarkdown,
   postProcessMathDom,
+  postProcessMermaidDom,
   prepareDomForSerialize,
 } from '../media/webview/pipeline';
 
@@ -31,6 +32,7 @@ function serializeHtml(html: string): string {
     throw new Error('không parse được HTML');
   }
   postProcessMathDom(root, doc);
+  postProcessMermaidDom(root, doc);
   prepareDomForSerialize(root, doc);
   return normalizeMarkdown(turndown.turndown(root as HTMLElement));
 }
@@ -91,7 +93,11 @@ function serializeNode(node: Node, out: string[], inPre: boolean): void {
       out.push(`<!--${(child as Comment).data}-->`);
     } else if (child.nodeType === 1) {
       const el = child as Element;
+      // data-line/data-line-end (số dòng nguồn) tự nhiên khác nhau giữa md gốc
+      // và md sau round-trip (turndown định dạng lại loose list, setext→atx...)
+      // dù nội dung hiển thị tương đương — không phải khác biệt cấu trúc cần bắt lỗi.
       const attrs = Array.from(el.attributes ?? [])
+        .filter((a) => a.name !== 'data-line' && a.name !== 'data-line-end')
         .map((a) => `${a.name}="${a.value}"`)
         .sort()
         .join(' ');

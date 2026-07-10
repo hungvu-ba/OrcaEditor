@@ -385,6 +385,17 @@ export function initSearch(content: HTMLElement): SearchController {
   });
   closeBtn.addEventListener('click', close);
 
+  // Bấm ra ngoài hộp tìm (và ngoài thanh overview) → đóng, giống các popup khác.
+  document.addEventListener('mousedown', (e) => {
+    if (box.hidden) {
+      return;
+    }
+    const target = e.target as Node;
+    if (!box.contains(target) && !overview.contains(target)) {
+      close();
+    }
+  });
+
   // Ctrl/Cmd+F mở hộp tìm. Dùng capture để đứng trước các handler khác; webview
   // không có 'editorFocus' nên VS Code không nuốt phím này.
   document.addEventListener(
