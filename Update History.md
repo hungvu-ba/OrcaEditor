@@ -33,3 +33,18 @@
 | 0.6.6 | 2026-07-11 | Fix: đồng nhất version trong package.json/package-lock.json với CHANGELOG.md và Update History.md (0.6.0 → 0.6.6). |
 | 0.6.6 | 2026-07-11 | Chore: thêm THIRD-PARTY-NOTICES.md liệt kê license của toàn bộ dependency được bundle (mermaid, dompurify, katex...). |
 | 0.6.6 | 2026-07-11 | Feature: thêm icon extension (cá heo xanh) tại images/icon.png, khai báo trong package.json. |
+| 0.6.6 | 2026-07-11 | Fix: nút ¶/H1-H3 đổi tag qua execCommand thay vì thao tác DOM thô — undo hoàn tác đúng từng bước, không còn reset toàn bộ định dạng. |
+| 0.6.6 | 2026-07-11 | Fix: nút code block khi chọn text giữa câu — tách đúng phần trước/sau vùng chọn thành đoạn riêng thay vì để trình duyệt tự tách lộn xộn. |
+| 0.6.6 | 2026-07-11 | Fix: tooltip toolbar không hiện ở một số icon — thay title attribute gốc bằng tooltip tự vẽ qua mouseenter/focus, hiển thị nhất quán mọi nút. |
+| 0.6.6 | 2026-07-11 | Fix: toolbar bị xô xuống dòng 2 khi cửa sổ hẹp — chuyển sang menu tràn "..." gom các nút định dạng không đủ chỗ. |
+| 0.6.6 | 2026-07-11 | Fix: dịch nốt 2 chuỗi tiếng Việt còn sót (tooltip tick tìm kiếm, thông báo lỗi Mermaid) sang tiếng Anh. |
+| 0.6.6 | 2026-07-11 | Fix: nút checkbox toolbar chỉ đổi item chứa caret khi chọn nhiều dòng bullet — nay convert toàn bộ dòng đang chọn, undo hoạt động đúng. |
+| 0.6.6 | 2026-07-11 | Feature: tự ẩn panel mục lục khi tab hẹp hơn nửa màn hình (split editor); user vẫn tự bật lại được qua nút toolbar. |
+| 0.6.6 | 2026-07-11 | Fix: chuyển đổi giữa bullet/numbered/task list không convert được (bấm nút bullet trên task list chỉ tắt cả list) — bỏ checkbox trước khi đổi kiểu list. |
+| 0.6.6 | 2026-07-11 | Fix: đổi kiểu list nhiều dòng chỉ áp lên dòng cuối, tách rời khỏi list gốc kèm dòng trống dư — re-select đúng phạm vi trước execCommand, dọn `<p>` rỗng còn sót. |
+| 0.6.6 | 2026-07-11 | Fix: bấm checkbox ép đổi luôn danh sách số (1.) sang dạng gạch đầu dòng (-) — bỏ checkbox nay giữ nguyên kiểu list, sửa CSS để số thứ tự vẫn hiện đúng. |
+| 0.6.6 | 2026-07-11 | Fix (triệt để): chọn nhiều dòng text thường bấm task list chỉ dòng đầu có checkbox — dò lại từ selection sau execCommand thay vì reference DOM cũ, gộp mọi case về một đường xử lý chung. |
+| 0.6.6 | 2026-07-11 | Fix: khoảng trắng thừa đầu dòng sau khi bỏ checkbox (chuyển task list về bullet/số) — cắt dấu cách mà markdown-it-task-lists để sót lại trong text khi gỡ checkbox. |
+| 0.6.6 | 2026-07-11 | Feature: thêm sample song ngữ EN/JP (SAMPLE_EN_JP.md) đủ mọi format để test preview với tiếng Nhật. |
+| 0.6.6 | 2026-07-11 | Feature: thêm subcommand `release` vào build.sh — kiểm tra git sạch, đăng nhập vsce, bump version, test, đóng gói, publish Marketplace và tag git; kèm `--dry-run`. |
+| 0.6.7 | 2026-07-11 | Release: nâng version lên 0.6.7, gom toàn bộ fix/feature sau bản 0.6.6 vào một mục [0.6.7] trong CHANGELOG.md. |

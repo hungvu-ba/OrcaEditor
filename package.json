@@ -2,7 +2,7 @@
   "name": "orca-editor",
   "displayName": "Orca Editor",
   "description": "Markdown preview like VS Code's built-in Markdown Preview, with direct WYSIWYG editing on the preview.",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -123,7 +123,8 @@
     "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
-    "publish": "vsce publish --no-dependencies"
+    "publish": "vsce publish --no-dependencies",
+    "release": "./build.sh release"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",

@@ -255,7 +255,7 @@ export function initSearch(content: HTMLElement): SearchController {
       const tick = document.createElement('div');
       tick.className = 'search-tick' + (i === current ? ' current' : '');
       tick.style.top = `${(top / docHeight) * 100}%`;
-      tick.title = `Kết quả ${i + 1}`;
+      tick.title = `Result ${i + 1}`;
       tick.addEventListener('mousedown', (e) => e.preventDefault());
       tick.addEventListener('click', () => setCurrent(i, true));
       frag.appendChild(tick);

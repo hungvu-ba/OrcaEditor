@@ -4,6 +4,29 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.6.7\] - 2026-07-11
+
+### Added
+
+-   Extension icon (blue dolphin) at `images/icon.png`, declared in `package.json`.
+-   `THIRD-PARTY-NOTICES.md` listing the licenses of all bundled dependencies (mermaid, dompurify, katex, …).
+-   `release` subcommand in `build.sh` — checks for a clean git tree and `vsce` login, bumps the version, runs tests, packages, publishes to the Marketplace, and tags git; supports `--dry-run`.
+-   Bilingual EN/JP sample (`sample/SAMPLE_EN_JP.md`) covering every supported format, for testing the preview with Japanese text.
+-   The table-of-contents panel now auto-hides when the tab is narrower than half the screen (split editor); it can still be reopened from the toolbar.
+
+### Changed
+
+-   Renamed the command IDs and `viewType` from `markdownWysiwyg.*` to `orcaEditor.*`, consistent with the setting names.
+-   Translated all remaining user-facing Vietnamese strings (toolbar, table of contents, search, tables, notifications, Mermaid errors) to English.
+
+### Fixed
+
+-   Overhauled toolbar list/checkbox conversions: switching between bullet/numbered/task lists now converts every selected line (not just the caret or last line), keeps numbered lists numbered when removing checkboxes, cleans up leftover empty paragraphs and stray leading spaces, and undoes correctly.
+-   The ¶/H1–H3 buttons now change tags via `execCommand` instead of raw DOM manipulation, so undo reverts one step at a time instead of resetting all formatting.
+-   The code-block button with a mid-sentence selection now splits the text before/after the selection into separate paragraphs cleanly, instead of letting the browser split it unpredictably.
+-   Toolbar tooltips didn't appear on some icons — replaced native `title` attributes with a custom tooltip (shown on hover/focus) that displays consistently on every button.
+-   The toolbar no longer wraps onto a second row in narrow windows — formatting buttons that don't fit move into an overflow "..." menu.
+
 ## \[0.6.6\] - 2026-07-11
 
 ### Added

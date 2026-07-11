@@ -104,6 +104,13 @@ const FMT_ICONS = {
   ),
 };
 
+/** Icon "..." cho nút mở menu tràn (các nút không đủ chỗ khi toolbar hẹp). */
+const MORE_ICON = svgIcon(
+  '<circle cx="4" cy="8" r="1.3" fill="currentColor"/>' +
+    '<circle cx="8" cy="8" r="1.3" fill="currentColor"/>' +
+    '<circle cx="12" cy="8" r="1.3" fill="currentColor"/>'
+);
+
 interface ToolbarItem {
   label: string;
   /** SVG markup — nếu có thì dùng thay label text. */
@@ -147,10 +154,10 @@ const toolbarItems: ToolbarItem[] = [
     label: '•',
     icon: FMT_ICONS.ul,
     title: 'Bulleted list',
-    action: () => document.execCommand('insertUnorderedList'),
+    action: setBulletList,
     separatorBefore: true,
   },
-  { label: '1.', icon: FMT_ICONS.ol, title: 'Numbered list', action: () => document.execCommand('insertOrderedList') },
+  { label: '1.', icon: FMT_ICONS.ol, title: 'Numbered list', action: setNumberedList },
   { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem },
   {
     label: '❝',
@@ -209,13 +216,79 @@ const toolbarItems: ToolbarItem[] = [
   },
 ];
 
+let tooltipEl: HTMLDivElement | undefined;
+
+/**
+ * Tooltip tự vẽ bằng JS thay vì dựa vào title attribute gốc của trình duyệt —
+ * title attribute im lặng không hiện được ở một số nút toolbar tuỳ vị trí
+ * (nghi do tương tác giữa layout flex-wrap của #toolbar với việc trình duyệt
+ * xác định "phần tử đang hover" cho riêng cơ chế tooltip, khác với hit-test
+ * click bình thường), nên không thể tin cậy hoàn toàn vào title. Tự quản lý
+ * show/hide qua mouseenter/focus và mouseleave/blur đảm bảo hiện thị nhất
+ * quán bất kể vị trí nút.
+ */
+function showTooltip(target: HTMLElement, text: string): void {
+  if (!tooltipEl) {
+    tooltipEl = document.createElement('div');
+    tooltipEl.id = 'toolbar-tooltip';
+    document.body.appendChild(tooltipEl);
+  }
+  tooltipEl.textContent = text;
+  tooltipEl.style.display = 'block';
+  const rect = target.getBoundingClientRect();
+  const tipRect = tooltipEl.getBoundingClientRect();
+  const left = Math.max(4, Math.min(rect.left + rect.width / 2 - tipRect.width / 2, window.innerWidth - tipRect.width - 4));
+  tooltipEl.style.left = `${left}px`;
+  tooltipEl.style.top = `${rect.bottom + 6}px`;
+}
+
+function hideTooltip(): void {
+  if (tooltipEl) {
+    tooltipEl.style.display = 'none';
+  }
+}
+
+/** Một nút định dạng có thể bị ẩn vào menu tràn (".toolbar-more") khi hẹp chỗ. */
+interface CollapsibleEntry {
+  item: ToolbarItem;
+  btn: HTMLButtonElement;
+  /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
+  sep: HTMLSpanElement | null;
+}
+
+let toolbarElRef: HTMLElement | undefined;
+let moreBtn: HTMLButtonElement | undefined;
+let overflowMenu: HTMLDivElement | undefined;
+let collapsibleEntries: CollapsibleEntry[] = [];
+let overflowResizeObserver: ResizeObserver | undefined;
+
 export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, context: ToolbarContext): void {
   content = contentEl;
   ctx = context;
+  toolbarElRef = toolbarEl;
+  collapsibleEntries = [];
+  let moreBtnInserted = false;
+  // alignRight chỉ đánh dấu nút ĐẦU nhóm tiện ích ("và mọi nút sau nó" — xem
+  // định nghĩa ToolbarItem.alignRight) — mọi item kể từ đó trở đi (raw source,
+  // mục lục...) cũng thuộc nhóm luôn-hiện dù không tự có cờ này.
+  let inPinnedGroup = false;
 
   for (const item of toolbarItems) {
+    if (item.alignRight) {
+      inPinnedGroup = true;
+    }
+    // Chèn nút "..." ngay trước nhóm tiện ích đẩy phải (@ / raw source / mục
+    // lục) — nhóm này luôn hiện, chỉ các nút định dạng phía trước mới rút vào
+    // menu tràn khi hẹp chỗ.
+    if (!moreBtnInserted && inPinnedGroup) {
+      moreBtn = createMoreButton();
+      toolbarEl.appendChild(moreBtn);
+      moreBtnInserted = true;
+    }
+
+    let sep: HTMLSpanElement | null = null;
     if (item.separatorBefore) {
-      const sep = document.createElement('span');
+      sep = document.createElement('span');
       sep.className = 'toolbar-sep';
       toolbarEl.appendChild(sep);
     }
@@ -232,10 +305,15 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     } else {
       btn.textContent = item.label;
     }
-    btn.title = item.title;
+    btn.setAttribute('aria-label', item.title);
+    btn.addEventListener('mouseenter', () => showTooltip(btn, item.title));
+    btn.addEventListener('mouseleave', hideTooltip);
+    btn.addEventListener('focus', () => showTooltip(btn, item.title));
+    btn.addEventListener('blur', hideTooltip);
     // mousedown + preventDefault để không mất selection trong #content
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => {
+      hideTooltip();
       item.action();
       // Action mở popup bất đồng bộ (chèn liên kết/ảnh) tự lo focus + restore
       // selection khi đóng — focus lại content ngay ở đây sẽ cướp focus khỏi
@@ -246,6 +324,175 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
       ctx.scheduleSync();
     });
     toolbarEl.appendChild(btn);
+
+    if (!inPinnedGroup) {
+      collapsibleEntries.push({ item, btn, sep });
+    }
+  }
+
+  if (!moreBtnInserted) {
+    moreBtn = createMoreButton();
+    toolbarEl.appendChild(moreBtn);
+  }
+
+  setupOverflowMenu();
+}
+
+/** Nút "..." — mở menu chứa các nút định dạng đang không đủ chỗ hiển thị. */
+function createMoreButton(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'toolbar-more';
+  btn.innerHTML = MORE_ICON;
+  btn.style.display = 'none';
+  btn.setAttribute('aria-label', 'More tools');
+  btn.addEventListener('mouseenter', () => showTooltip(btn, 'More tools'));
+  btn.addEventListener('mouseleave', hideTooltip);
+  btn.addEventListener('focus', () => showTooltip(btn, 'More tools'));
+  btn.addEventListener('blur', hideTooltip);
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', () => {
+    hideTooltip();
+    toggleOverflowMenu();
+  });
+  return btn;
+}
+
+/**
+ * Dựng menu tràn (dropdown) + theo dõi bề rộng toolbar bằng ResizeObserver.
+ * Toolbar chuyển sang flex-wrap: nowrap (xem editor.css) — khi không đủ chỗ,
+ * các nút định dạng cuối dãy được ẩn dần và liệt kê lại trong menu này thay vì
+ * bị đẩy lệch xuống dòng 2.
+ */
+function setupOverflowMenu(): void {
+  if (!overflowMenu) {
+    overflowMenu = document.createElement('div');
+    overflowMenu.className = 'toolbar-overflow-menu';
+    overflowMenu.style.display = 'none';
+    document.body.appendChild(overflowMenu);
+
+    document.addEventListener('mousedown', (e) => {
+      if (!overflowMenu || overflowMenu.style.display === 'none') {
+        return;
+      }
+      const target = e.target as Node;
+      if (overflowMenu.contains(target) || target === moreBtn) {
+        return;
+      }
+      closeOverflowMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeOverflowMenu();
+      }
+    });
+  }
+
+  overflowResizeObserver?.disconnect();
+  overflowResizeObserver = new ResizeObserver(() => recalcOverflow());
+  if (toolbarElRef) {
+    overflowResizeObserver.observe(toolbarElRef);
+  }
+  recalcOverflow();
+}
+
+function toggleOverflowMenu(): void {
+  if (!overflowMenu) {
+    return;
+  }
+  if (overflowMenu.style.display === 'none') {
+    openOverflowMenu();
+  } else {
+    closeOverflowMenu();
+  }
+}
+
+function openOverflowMenu(): void {
+  if (!overflowMenu || !moreBtn) {
+    return;
+  }
+  overflowMenu.style.display = 'flex';
+  const rect = moreBtn.getBoundingClientRect();
+  const menuRect = overflowMenu.getBoundingClientRect();
+  const left = Math.max(4, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 4));
+  overflowMenu.style.left = `${left}px`;
+  overflowMenu.style.top = `${rect.bottom + 4}px`;
+}
+
+function closeOverflowMenu(): void {
+  if (overflowMenu) {
+    overflowMenu.style.display = 'none';
+  }
+}
+
+/**
+ * Đo lại bề rộng: hiện tất cả nút định dạng trước, nếu tràn thì ẩn dần từ nút
+ * cuối dãy (giữ nguyên nhóm tiện ích đẩy phải luôn hiện) cho tới khi vừa,
+ * rồi dựng lại menu tràn từ danh sách vừa ẩn.
+ */
+function recalcOverflow(): void {
+  if (!toolbarElRef || !moreBtn) {
+    return;
+  }
+  const toolbarEl = toolbarElRef;
+
+  for (const entry of collapsibleEntries) {
+    entry.btn.style.display = '';
+    if (entry.sep) {
+      entry.sep.style.display = '';
+    }
+  }
+  moreBtn.style.display = 'none';
+  closeOverflowMenu();
+
+  if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
+    rebuildOverflowMenu([]);
+    return;
+  }
+
+  moreBtn.style.display = '';
+  const hidden: CollapsibleEntry[] = [];
+  for (let i = collapsibleEntries.length - 1; i >= 0; i--) {
+    if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
+      break;
+    }
+    const entry = collapsibleEntries[i];
+    entry.btn.style.display = 'none';
+    if (entry.sep) {
+      entry.sep.style.display = 'none';
+    }
+    hidden.unshift(entry);
+  }
+  rebuildOverflowMenu(hidden);
+}
+
+function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
+  if (!overflowMenu) {
+    return;
+  }
+  overflowMenu.innerHTML = '';
+  for (const entry of hidden) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'toolbar-overflow-item';
+    if (entry.item.icon) {
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'toolbar-overflow-icon';
+      iconSpan.innerHTML = entry.item.icon;
+      row.appendChild(iconSpan);
+    }
+    const label = document.createElement('span');
+    label.className = 'toolbar-overflow-label';
+    label.textContent = entry.item.title;
+    row.appendChild(label);
+    row.addEventListener('mousedown', (e) => e.preventDefault());
+    row.addEventListener('click', () => {
+      // Nút gốc đang display:none nhưng .click() vẫn kích hoạt handler bình
+      // thường (action + focus + scheduleSync) — không cần lặp lại logic.
+      closeOverflowMenu();
+      entry.btn.click();
+    });
+    overflowMenu.appendChild(row);
   }
 }
 
@@ -314,42 +561,308 @@ function toggleBlockquote(): void {
   ctx.scheduleSync();
 }
 
-function toggleTaskItem(): void {
+/**
+ * Lấy mọi <li> đang giao với vùng chọn hiện tại cùng <ul>/<ol> cha — null nếu
+ * selection chưa nằm trong list nào (dùng chung cho toggleTaskItem/
+ * setBulletList/setNumberedList để convert đúng TOÀN BỘ dòng đang chọn, không
+ * chỉ dòng chứa anchor).
+ */
+function getListSelection(): { list: HTMLElement; items: HTMLLIElement[] } | null {
   const sel = window.getSelection();
-  const li = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('li') : null;
-  if (!li) {
-    // Chưa ở trong list → tạo list trước rồi thêm checkbox
-    document.execCommand('insertUnorderedList');
-    const sel2 = window.getSelection();
-    const li2 = sel2?.anchorNode ? closestElement(sel2.anchorNode)?.closest('li') : null;
-    if (li2) {
-      addCheckbox(li2);
+  const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  if (!range) {
+    return null;
+  }
+  const startEl = closestElement(range.startContainer);
+  let li = startEl?.closest('li') ?? null;
+  if (!li && startEl && (startEl.tagName === 'UL' || startEl.tagName === 'OL')) {
+    // Chrome có thể normalize mép range về CHÍNH <ul>/<ol> (container là
+    // list, offset là chỉ số phần tử con) thay vì text bên trong <li> —
+    // nhất là ngay sau một execCommand vừa mutate DOM.
+    const child = startEl.children.item(range.startOffset);
+    if (child?.tagName === 'LI') {
+      li = child as HTMLLIElement;
     }
+  }
+  if (!li) {
+    return null;
+  }
+  const list = li.parentElement as HTMLElement;
+  const items = Array.from(list.children).filter((c): c is HTMLLIElement => c.tagName === 'LI');
+  const targets = items.filter((item) => range.intersectsNode(item));
+  return { list, items: targets.length ? targets : [li] };
+}
+
+/** Dò các <li> nằm giữa 2 mép ngoài `before`/`after` (chốt lại TRƯỚC khi
+ * mutate) — insertHTML tạo node MỚI nên không thể dò lại qua reference <li>
+ * cũ, chỉ có thể dò qua vị trí tương đối với 2 sibling ngoài vùng bị thay. */
+function findListItemsBetween(parent: Element, before: Element | null, after: Element | null): HTMLLIElement[] {
+  const result: HTMLLIElement[] = [];
+  for (
+    let node: Element | null = before ? before.nextElementSibling : parent.firstElementChild;
+    node && node !== after;
+    node = node.nextElementSibling
+  ) {
+    if (node.tagName === 'LI') {
+      result.push(node as HTMLLIElement);
+    }
+  }
+  return result;
+}
+
+/** Đặt lại selection = Range bao trọn từ items[0] đến items cuối — đảm bảo
+ * execCommand gọi NGAY SAU đó (vd. đổi <ol>↔<ul>) áp lên đúng toàn bộ các
+ * <li> vừa xử lý, không bị thu hẹp về caret đơn lẻ mà insertHTML để lại. */
+function reselectItems(items: HTMLLIElement[]): void {
+  if (items.length === 0) {
     return;
   }
-  const existing = li.querySelector(':scope > input[type="checkbox"]');
-  if (existing) {
-    existing.remove();
-    li.classList.remove('task-list-item');
-    const ul = li.parentElement;
-    ul?.classList.remove('contains-task-list');
-    if (ul?.tagName === 'UL' && ul.children.length === 1) {
-      // <ul> chỉ tạo riêng cho item này (do nhánh !li ở trên) → bỏ checkbox
-      // lần 2 phải về lại đoạn văn thường, không được để trơ lại thành bullet.
-      document.execCommand('insertUnorderedList');
+  const range = document.createRange();
+  range.setStartBefore(items[0]);
+  range.setEndAfter(items[items.length - 1]);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+/** Dọn <p></p> rỗng trơ lại sát cạnh `list` — Chrome đôi khi để lại mảnh này
+ * khi execCommand tách/đổi kiểu list giữa chừng (list-split). An toàn vì
+ * phần tử này không có nội dung nên không mất gì khi undo sau đó (cùng cách
+ * removeStrayEmptyParagraphAfter xử lý ở input-rules.ts). */
+function removeStrayEmptyParagraphNear(list: Element | null): void {
+  if (!list) {
+    return;
+  }
+  for (const sibling of [list.previousElementSibling, list.nextElementSibling]) {
+    if (
+      sibling &&
+      sibling.tagName === 'P' &&
+      (sibling.textContent ?? '').trim() === '' &&
+      !sibling.querySelector('img, input, video, audio, iframe, picture')
+    ) {
+      sibling.remove();
     }
-  } else {
-    addCheckbox(li);
   }
 }
 
+/**
+ * Thay thế các <li> đã chọn bằng bản clone đã áp `mutate`, dùng
+ * execCommand('insertHTML') thay vì thao tác DOM trần (createElement/remove
+ * trực tiếp) — thao tác DOM trần không được trình duyệt ghi vào lịch sử
+ * undo/redo gốc, cùng lý do đã sửa ở replaceBlockTag (dom-utils.ts) và
+ * convertBlockToListItem (input-rules.ts). Trả về các <li> MỚI vừa chèn (xem
+ * findListItemsBetween) để caller re-select đúng phạm vi nếu cần thao tác
+ * execCommand tiếp theo — insertHTML để lại selection collapse về 1 điểm,
+ * không đủ để execCommand sau đó áp lên toàn bộ targets.
+ */
+function replaceListItems(items: HTMLLIElement[], mutate: (clone: HTMLLIElement) => void): HTMLLIElement[] {
+  const parent = items[0].parentElement;
+  const before = items[0].previousElementSibling;
+  const after = items[items.length - 1].nextElementSibling;
+
+  const html = items
+    .map((item) => {
+      const clone = item.cloneNode(true) as HTMLLIElement;
+      mutate(clone);
+      return clone.outerHTML;
+    })
+    .join('');
+  const replaceRange = document.createRange();
+  replaceRange.setStartBefore(items[0]);
+  replaceRange.setEndAfter(items[items.length - 1]);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(replaceRange);
+  document.execCommand('insertHTML', false, html);
+
+  return parent ? findListItemsBetween(parent, before, after) : [];
+}
+
+function stripCheckboxFrom(li: HTMLLIElement): void {
+  li.querySelector(':scope > input[type="checkbox"]')?.remove();
+  li.classList.remove('task-list-item');
+  // markdown-it-task-lists chỉ cắt "[ ]" (3 ký tự) khỏi text khi render, GIỮ
+  // LẠI dấu cách đứng sau — text node trong <li> task luôn bắt đầu bằng " ".
+  // Đứng sau checkbox thì vô hình, nhưng bỏ checkbox rồi thì lộ ra thành
+  // khoảng trắng thừa đầu dòng → cắt luôn khi gỡ checkbox.
+  const first = li.firstChild;
+  if (first?.nodeType === Node.TEXT_NODE && first.textContent) {
+    first.textContent = first.textContent.replace(/^\s+/, '');
+    if (first.textContent === '') {
+      first.remove();
+    }
+  }
+}
+
+function syncTaskListClass(list: HTMLElement): void {
+  const hasCheckbox = Array.from(list.children).some(
+    (c) => c.tagName === 'LI' && c.querySelector(':scope > input[type="checkbox"]')
+  );
+  list.classList.toggle('contains-task-list', hasCheckbox);
+}
+
+/**
+ * Nút bullet (•): nếu vùng chọn đang ở task list, bỏ checkbox trước khi đổi
+ * kiểu — execCommand không phân biệt được <ul> thường với <ul> task-list
+ * (cùng thẻ), nên gọi thẳng insertUnorderedList trên task list sẽ TOGGLE OFF
+ * (unwrap về đoạn văn) thay vì chuyển thành bullet thường.
+ */
+function setBulletList(): void {
+  const current = getListSelection();
+  if (!current) {
+    document.execCommand('insertUnorderedList');
+    return;
+  }
+  const { list, items } = current;
+  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  if (hasCheckbox) {
+    const inserted = replaceListItems(items, stripCheckboxFrom);
+    syncTaskListClass(list);
+    if (list.tagName === 'UL') {
+      return; // đã là bullet thường sau khi bỏ checkbox, không cần execCommand
+    }
+    reselectItems(inserted);
+  }
+  document.execCommand('insertUnorderedList');
+  removeStrayEmptyParagraphNear(list);
+}
+
+/**
+ * Nút numbered (1.): tương tự setBulletList — bỏ checkbox trước nếu có, để
+ * execCommand('insertOrderedList') chuyển đúng <ul>→<ol> thay vì phó mặc cho
+ * trình duyệt xử lý <li> còn lẫn checkbox trong danh sách số.
+ */
+function setNumberedList(): void {
+  const current = getListSelection();
+  if (current) {
+    const hasCheckbox = current.items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+    if (hasCheckbox) {
+      const inserted = replaceListItems(current.items, stripCheckboxFrom);
+      syncTaskListClass(current.list);
+      reselectItems(inserted);
+    }
+  }
+  document.execCommand('insertOrderedList');
+  if (current) {
+    removeStrayEmptyParagraphNear(current.list);
+  }
+}
+
+function toggleTaskItem(): void {
+  let current = getListSelection();
+
+  if (!current) {
+    // Chưa ở trong list → tạo list cho cả vùng chọn trước. execCommand GIỮ
+    // NGUYÊN vùng chọn qua mutation (spec editing của Chromium), nên sau lệnh
+    // chỉ cần dò lại từ selection hiện hành là có đủ mọi <li> vừa tạo — tuyệt
+    // đối KHÔNG dò qua reference block cũ: các <p> đã bị gỡ khỏi DOM
+    // (parentElement = null) nên mọi suy luận sibling từ chúng đều gãy.
+    // Sau đó rơi xuống đường xử lý chung phía dưới: <li> mới chắc chắn chưa
+    // có checkbox → shouldAdd = true → thêm checkbox cho TOÀN BỘ.
+    document.execCommand('insertUnorderedList');
+    current = getListSelection();
+    if (!current) {
+      return;
+    }
+  }
+
+  const { list, items: targets } = current;
+
+  if (targets.length === 1) {
+    const existing = targets[0].querySelector(':scope > input[type="checkbox"]');
+    if (existing) {
+      stripCheckboxFrom(targets[0]);
+      list.classList.remove('contains-task-list');
+      if (list.tagName === 'UL' && list.children.length === 1) {
+        // <ul> chỉ tạo riêng cho item này (do nhánh !current ở trên) → bỏ
+        // checkbox lần 2 phải về lại đoạn văn thường, không được để trơ lại
+        // thành bullet.
+        document.execCommand('insertUnorderedList');
+        removeStrayEmptyParagraphNear(list);
+      }
+    } else {
+      // Checkbox độc lập với kiểu list (bullet/numbered) — markdown-it-task-
+      // lists và turndown đều không phân biệt <ol>/<ul>, nên KHÔNG ép đổi
+      // sang <ul>: giữ nguyên số thứ tự nếu list đang là <ol> (xem CSS riêng
+      // cho ol.contains-task-list/ul.contains-task-list ở markdown.css).
+      addCheckbox(targets[0]);
+    }
+    return;
+  }
+
+  // Nhiều <li> đang được chọn → convert TOÀN BỘ sang cùng chiều (thêm hoặc bỏ
+  // checkbox), không chỉ mỗi item chứa anchor.
+  const shouldAdd = !targets.every((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  replaceListItems(targets, (clone) => {
+    const existing = clone.querySelector(':scope > input[type="checkbox"]');
+    if (shouldAdd) {
+      if (!existing) {
+        addCheckbox(clone);
+      }
+    } else if (existing) {
+      stripCheckboxFrom(clone);
+    }
+  });
+  syncTaskListClass(list);
+}
+
+/** Lấy HTML (giữ định dạng inline) trong một Range dưới dạng chuỗi. */
+function rangeToHtml(range: Range): string {
+  const div = document.createElement('div');
+  div.appendChild(range.cloneContents());
+  return div.innerHTML;
+}
+
+/**
+ * Chèn code block. Nếu đang chọn một đoạn text ở giữa câu (trong cùng một
+ * đoạn văn/heading), tách phần trước/sau vùng chọn ra thành block riêng rồi
+ * mới chèn <pre> xen giữa — nếu không tách trước, insertHTML một block-level
+ * element (<pre>) giữa nội dung inline sẽ phó mặc cho trình duyệt tự tách
+ * đoạn, thứ tự trước/sau không được đảm bảo.
+ */
 function insertCodeBlock(): void {
-  const selectedText = window.getSelection()?.toString() ?? '';
-  const content = selectedText ? escapeHtml(selectedText) : 'code';
+  const sel = window.getSelection();
+  const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  const selectedText = sel?.toString() ?? '';
+  const codeContent = escapeHtml(selectedText || 'code');
+
+  const anchor = range ? closestElement(range.startContainer) : null;
+  const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+
+  if (!range || !selectedText || !block || !content.contains(block) || block === content) {
+    // Không có vùng chọn hợp lệ trong một đoạn văn/heading (vd. caret rỗng,
+    // hoặc đang ở trong list/bảng) — giữ hành vi cũ: chèn code block mẫu
+    // ngay tại vị trí caret, không cần tách trước/sau.
+    document.execCommand(
+      'insertHTML',
+      false,
+      `<pre><code class="language-plaintext">${codeContent}</code></pre><p><br></p>`
+    );
+    return;
+  }
+
+  const beforeRange = document.createRange();
+  beforeRange.setStart(block, 0);
+  beforeRange.setEnd(range.startContainer, range.startOffset);
+  const beforeHtml = rangeToHtml(beforeRange);
+
+  const afterRange = document.createRange();
+  afterRange.setStart(range.endContainer, range.endOffset);
+  afterRange.setEnd(block, block.childNodes.length);
+  const afterHtml = rangeToHtml(afterRange);
+
+  const tag = block.tagName.toLowerCase();
+  const beforeBlock = beforeHtml.trim() ? `<${tag}>${beforeHtml}</${tag}>` : '';
+  const afterBlock = `<${tag}>${afterHtml.trim() ? afterHtml : '<br>'}</${tag}>`;
+
+  const blockRange = document.createRange();
+  blockRange.selectNode(block);
+  sel?.removeAllRanges();
+  sel?.addRange(blockRange);
   document.execCommand(
     'insertHTML',
     false,
-    `<pre><code class="language-plaintext">${content}</code></pre><p><br></p>`
+    `${beforeBlock}<pre><code class="language-plaintext">${codeContent}</code></pre>${afterBlock}`
   );
 }
 

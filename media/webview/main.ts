@@ -73,6 +73,17 @@ let syncTimer: ReturnType<typeof setTimeout> | undefined;
 
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
+/**
+ * Tab (webview) hẹp hơn nửa màn hình vật lý → không đủ chỗ cho panel mục lục
+ * cố định bên phải mà không đè lên nội dung. So window.innerWidth (bề rộng
+ * tab) với screen.width (màn hình) chứ không phải bề rộng #content, vì mục
+ * đích là phát hiện tab đang bị chia đôi/thu nhỏ, không phải nội dung dài hay
+ * ngắn.
+ */
+function isNarrowViewport(): boolean {
+  return window.innerWidth < window.screen.width / 2;
+}
+
 window.addEventListener('message', (event) => {
   const msg = event.data as HostToWebview;
   switch (msg.type) {
@@ -84,7 +95,7 @@ window.addEventListener('message', (event) => {
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       renderDocument(msg.text ?? '');
       restoreScroll();
-      if (cfg.autoOpenToc !== false && !toc.isOpen()) {
+      if (cfg.autoOpenToc !== false && !toc.isOpen() && !isNarrowViewport()) {
         toc.toggle();
         syncTocButton();
       }
@@ -107,7 +118,7 @@ window.addEventListener('message', (event) => {
       if (lineNumbersEnabled) {
         lineGutter.refreshFromDom();
       }
-      if (msg.autoOpenToc !== false && !toc.isOpen()) {
+      if (msg.autoOpenToc !== false && !toc.isOpen() && !isNarrowViewport()) {
         toc.toggle();
         syncTocButton();
       }
@@ -117,6 +128,20 @@ window.addEventListener('message', (event) => {
 });
 
 postToHost({ type: 'ready' });
+
+// Tab bị thu hẹp xuống dưới nửa màn hình (vd. chia đôi split editor) → tự ẩn
+// mục lục để không choán chỗ nội dung. Chỉ tự ẩn đúng lúc CHUYỂN từ rộng sang
+// hẹp — nếu user tự bật lại panel trong lúc tab vẫn đang hẹp, không tự đóng
+// lại lần nữa (tôn trọng lựa chọn thủ công của họ) cho tới lần hẹp tiếp theo.
+let wasNarrowViewport = isNarrowViewport();
+window.addEventListener('resize', () => {
+  const narrow = isNarrowViewport();
+  if (narrow && !wasNarrowViewport && toc.isOpen()) {
+    toc.toggle();
+    syncTocButton();
+  }
+  wasNarrowViewport = narrow;
+});
 
 function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
   const root = document.documentElement;

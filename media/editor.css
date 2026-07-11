@@ -57,13 +57,17 @@ body.md-line-numbers #toolbar {
   opacity: 0.75;
 }
 
-/* --- Toolbar --- */
+/* --- Toolbar ---
+ * flex-wrap: nowrap + overflow: hidden — thay vì để tràn xuống dòng 2 khi
+ * cửa sổ hẹp (gây xô lệch layout), các nút cuối dãy được toolbar.ts ẩn dần
+ * và gom vào menu "..." (.toolbar-more / .toolbar-overflow-menu). */
 #toolbar {
   position: sticky;
   top: 0;
   z-index: 100;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
   align-items: center;
   gap: 2px;
   padding: 4px 0;
@@ -76,6 +80,7 @@ body.md-line-numbers #toolbar {
 
 #toolbar button {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   font-family: inherit;
@@ -107,15 +112,85 @@ body.md-line-numbers #toolbar {
 }
 
 #toolbar .toolbar-sep {
+  flex-shrink: 0;
   width: 1px;
   height: 16px;
   margin: 0 4px;
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
+/* Tooltip tự vẽ cho nút toolbar — xem showTooltip() trong toolbar.ts. */
+#toolbar-tooltip {
+  position: fixed;
+  display: none;
+  z-index: 300;
+  padding: 4px 8px;
+  max-width: 260px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorHoverWidget-background, #2d2d2d);
+  border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
 /* Nút mở đầu nhóm tiện ích (Claude, mục lục) — đẩy cả nhóm sang mép phải. */
 #toolbar .toolbar-push-right {
   margin-left: auto;
+}
+
+/* --- Menu tràn ("...") — xem setupOverflowMenu() trong toolbar.ts --- */
+#toolbar .toolbar-more {
+  flex-shrink: 0;
+}
+
+.toolbar-overflow-menu {
+  position: fixed;
+  z-index: 300;
+  display: none;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.toolbar-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.toolbar-overflow-item:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.toolbar-overflow-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.toolbar-overflow-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- Toolbar nổi cho bảng --- */

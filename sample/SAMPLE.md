@@ -6,9 +6,12 @@
 
 Nhân viên có thể tạo và gửi yêu cầu nghỉ phép đến Quản lý dự án (Project Manager) để xác nhận. Hệ thống tự động:
 
--   Tạo mã yêu cầu nghỉ phép với định dạng `LR-[5 chữ số]`.
--   Ghi nhật ký theo dõi (audit log) khi thực hiện các thao tác liên quan.
--   Cập nhật trạng thái yêu cầu nghỉ phép.
+1.  [ ] Tạo mã yêu cầu nghỉ phép với định dạng `LR-[5 chữ số]`.
+2.  [ ] Ghi nhật ký theo dõi (audit log) khi thực hiện các thao tác liên quan.
+3.  [ ] Cập nhật trạng thái yêu cầu nghỉ phép.
+4.  [ ] fdsfds
+5.  [ ] d fsdfsd
+6.  [ ] sdf dsfs
 
 ### 1.2. Các bước
 

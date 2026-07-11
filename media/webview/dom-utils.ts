@@ -101,33 +101,30 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     content.focus();
   }
 
-  /** Thay tag của block, giữ nguyên children + căn lề + vị trí caret. */
+  /**
+   * Thay tag của block, giữ nguyên children + căn lề. Dùng execCommand
+   * ('insertHTML') thay vì thao tác DOM trần (createElement/appendChild/
+   * replaceWith) như trước đây — thao tác DOM trần không được trình duyệt
+   * ghi vào lịch sử undo/redo gốc, nên Ctrl/Cmd+Z sau khi đổi heading/đoạn
+   * văn không hoàn tác đúng từng bước (cùng lý do đã sửa ở
+   * input-rules.ts, xem convertBlockToListItem). Vì nội dung được tạo lại
+   * từ chuỗi HTML nên không thể khôi phục đúng offset caret cũ (node cũ bị
+   * gỡ khỏi DOM) — đặt caret vào block mới thay vì cố giữ vị trí cũ.
+   */
   function replaceBlockTag(block: HTMLElement, tag: string): HTMLElement {
-    const sel = window.getSelection();
-    const saved = sel && sel.rangeCount > 0 ? { node: sel.anchorNode, offset: sel.anchorOffset } : null;
-    const el = document.createElement(tag);
     const align = block.getAttribute('align');
-    if (align) {
-      el.setAttribute('align', align);
-    }
-    while (block.firstChild) {
-      el.appendChild(block.firstChild);
-    }
-    block.replaceWith(el);
-    if (saved?.node && el.contains(saved.node)) {
-      const range = document.createRange();
-      try {
-        range.setStart(saved.node, saved.offset);
-      } catch {
-        range.selectNodeContents(el);
-      }
-      range.collapse(true);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-      content.focus();
-    } else {
-      placeCaretIn(el);
-    }
+    const alignAttr = align ? ` align="${escapeAttr(align)}"` : '';
+    const innerHtml = block.innerHTML;
+    const range = document.createRange();
+    range.selectNode(block);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    document.execCommand('insertHTML', false, `<${tag}${alignAttr}>${innerHtml}</${tag}>`);
+    const afterSel = window.getSelection();
+    const anchor = afterSel?.anchorNode ? closestElement(afterSel.anchorNode) : null;
+    const el = (anchor?.closest(tag) as HTMLElement | null) ?? (content.lastElementChild as HTMLElement);
+    placeCaretIn(el);
     return el;
   }
 

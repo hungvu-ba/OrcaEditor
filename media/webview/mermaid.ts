@@ -127,7 +127,7 @@ async function renderDiagram(
       return;
     }
     chart.classList.add(ERROR_CLASS);
-    chart.textContent = `Không dựng được biểu đồ Mermaid: ${err instanceof Error ? err.message : String(err)}`;
+    chart.textContent = `Failed to render Mermaid diagram: ${err instanceof Error ? err.message : String(err)}`;
     if (opts.fallbackToCodeOnError) {
       wrapper.setAttribute('data-mermaid-view', 'code');
     }

@@ -255,8 +255,13 @@ body.wordWrap pre {
   white-space: pre-wrap;
 }
 
-/* --- Task list --- */
-li.task-list-item {
+/* --- Task list ---
+ * Checkbox độc lập với kiểu list (bullet/numbered) — markdown-it-task-lists
+ * và turndown không phân biệt <ol>/<ul>, nên <ol> vẫn có thể chứa task item
+ * ("1.  [ ] foo"). Chỉ ẩn marker (bullet) và kéo checkbox lùi vào chỗ đó cho
+ * <ul>; <ol> phải GIỮ số thứ tự, checkbox canh khoảng cách bình thường ngay
+ * sau số thay vì kéo lùi như bullet ẩn. */
+ul.contains-task-list > li.task-list-item {
   list-style-type: none;
 }
 
@@ -264,9 +269,13 @@ ul.contains-task-list {
   padding-left: 1.2em;
 }
 
-.task-list-item-checkbox,
-li.task-list-item > input[type='checkbox'] {
+ul.contains-task-list li.task-list-item > input.task-list-item-checkbox {
   margin: 0 0.4em 0.25em -1.2em;
+  vertical-align: middle;
+}
+
+ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
+  margin: 0 0.4em 0.25em 0;
   vertical-align: middle;
 }
 
