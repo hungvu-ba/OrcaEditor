@@ -12,17 +12,17 @@ export function activate(context: vscode.ExtensionContext): void {
       uri = active?.document.languageId === 'markdown' ? active.document.uri : undefined;
     }
     if (!uri || !MARKDOWN_EXT.test(uri.path)) {
-      void vscode.window.showWarningMessage('Không có file markdown nào đang mở.');
+      void vscode.window.showWarningMessage('No markdown file is currently open.');
       return;
     }
     await vscode.commands.executeCommand('vscode.openWith', uri, MarkdownWysiwygProvider.viewType, viewColumn);
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('markdownWysiwyg.open', (uri?: vscode.Uri) =>
+    vscode.commands.registerCommand('orcaEditor.open', (uri?: vscode.Uri) =>
       openWith(uri, vscode.ViewColumn.Active)
     ),
-    vscode.commands.registerCommand('markdownWysiwyg.openToSide', (uri?: vscode.Uri) =>
+    vscode.commands.registerCommand('orcaEditor.openToSide', (uri?: vscode.Uri) =>
       openWith(uri, vscode.ViewColumn.Beside)
     )
   );

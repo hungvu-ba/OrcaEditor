@@ -105,13 +105,13 @@ export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): v
     const toggle = doc.createElement('button');
     toggle.setAttribute('type', 'button');
     toggle.className = MERMAID_TOGGLE_CLASS;
-    toggle.setAttribute('title', 'Chuyển đổi giữa biểu đồ và mã Mermaid');
+    toggle.setAttribute('title', 'Toggle between chart and Mermaid source');
     toolbar.appendChild(toggle);
 
     const chart = doc.createElement('div');
     chart.className = MERMAID_CHART_CLASS;
     chart.setAttribute('contenteditable', 'false');
-    chart.textContent = 'Đang dựng biểu đồ Mermaid…';
+    chart.textContent = 'Rendering Mermaid chart…';
 
     pre.classList.add(MERMAID_SOURCE_CLASS);
     pre.parentElement.replaceChild(wrapper, pre);

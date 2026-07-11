@@ -36,7 +36,7 @@ const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
  *    chặn bằng cách so sánh với văn bản cuối cùng webview gửi lên.
  */
 export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider {
-  public static readonly viewType = 'markdownWysiwyg.editor';
+  public static readonly viewType = 'orcaEditor.editor';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
@@ -119,12 +119,27 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }, UPDATE_DEBOUNCE_MS);
     });
 
+    // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
+    // cần đóng/mở lại preview (claudeAutoInsert không cần vì đã đọc live ở
+    // addToClaudeContext, tại thời điểm bấm nút).
+    const configSubscription = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration('orcaEditor', document.uri)) {
+        return;
+      }
+      const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
+      void postToWebview({
+        type: 'configUpdate',
+        autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
+        showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+      });
+    });
+
     const messageSubscription = webview.onDidReceiveMessage(async (msg: WebviewToHost) => {
       switch (msg.type) {
         case 'ready': {
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
-          const wysiwygCfg = vscode.workspace.getConfiguration('markdownWysiwyg', document.uri);
+          const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
           void postToWebview({
             type: 'init',
             text: document.getText(),
@@ -179,6 +194,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         updateTimer = undefined;
       }
       changeSubscription.dispose();
+      configSubscription.dispose();
       messageSubscription.dispose();
     });
   }
@@ -208,7 +224,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // URL tuyệt đối: chỉ cho phép allowlist (markdown-it validateLink không
       // áp dụng cho raw HTML anchor nên phải tự chặn ở đây).
       if (!link.safe) {
-        void vscode.window.showWarningMessage(`Đã chặn liên kết có scheme không an toàn: ${link.scheme}:`);
+        void vscode.window.showWarningMessage(`Blocked link with unsafe scheme: ${link.scheme}:`);
         return;
       }
       try {
@@ -226,14 +242,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     const target = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(pathPart));
     if (!(await this.isInsideAllowedRoots(document, target))) {
-      void vscode.window.showWarningMessage(`Đã chặn liên kết trỏ ra ngoài workspace: ${href}`);
+      void vscode.window.showWarningMessage(`Blocked link pointing outside the workspace: ${href}`);
       return;
     }
     try {
       await vscode.commands.executeCommand('vscode.open', target);
     } catch (err) {
       MarkdownWysiwygProvider.log(`vscode.open failed for target: ${target.toString()}`, err);
-      void vscode.window.showWarningMessage(`Không mở được liên kết: ${href}`);
+      void vscode.window.showWarningMessage(`Could not open link: ${href}`);
     }
   }
 
@@ -321,7 +337,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       //    webview của extension khác (VS Code không expose command paste cho
       //    webview; Electron xử lý ⌘V ở tầng native).
       const autoInsert = vscode.workspace
-        .getConfiguration('markdownWysiwyg')
+        .getConfiguration('orcaEditor')
         .get<boolean>('claudeAutoInsert', false);
       const insertCmd = ['claude-vscode.insertAtMention', 'claude-code.insertAtMentioned'].find((c) =>
         available.includes(c)
@@ -346,7 +362,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     await vscode.env.clipboard.writeText(mention);
     void vscode.window.showInformationMessage(
-      `Đã copy "${mention}" — dán vào ô chat Claude để thêm file vào context.`
+      `Copied "${mention}" — paste it into the Claude chat input to add the file to context.`
     );
   }
 
@@ -567,7 +583,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   <title>Markdown WYSIWYG Preview</title>
 </head>
 <body>
-  <div id="toolbar" aria-label="Thanh công cụ định dạng"></div>
+  <div id="toolbar" aria-label="Formatting toolbar"></div>
   <div id="line-gutter" aria-hidden="true"></div>
   <div id="content" contenteditable="true" spellcheck="false"></div>
   <script nonce="${nonce}" src="${distUri('webview', 'main.js')}"></script>

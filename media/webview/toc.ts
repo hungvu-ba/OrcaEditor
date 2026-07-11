@@ -38,12 +38,12 @@ export function initToc(content: HTMLElement): TocController {
   header.id = 'toc-header';
   const title = document.createElement('span');
   title.id = 'toc-title';
-  title.textContent = 'Mục lục';
+  title.textContent = 'Table of Contents';
   header.appendChild(title);
 
   const list = document.createElement('nav');
   list.id = 'toc-list';
-  list.setAttribute('aria-label', 'Mục lục');
+  list.setAttribute('aria-label', 'Table of Contents');
 
   panel.append(header, list);
   document.body.appendChild(panel);
@@ -80,7 +80,7 @@ export function initToc(content: HTMLElement): TocController {
     if (headings.length === 0) {
       const empty = document.createElement('div');
       empty.id = 'toc-empty';
-      empty.textContent = 'Chưa có tiêu đề';
+      empty.textContent = 'No headings yet';
       list.appendChild(empty);
       return;
     }
@@ -88,7 +88,7 @@ export function initToc(content: HTMLElement): TocController {
       const level = Number(heading.nodeName.charAt(1)) || 1;
       const link = document.createElement('a');
       link.className = `toc-item toc-level-${level}`;
-      const text = (heading.textContent ?? '').trim() || '(trống)';
+      const text = (heading.textContent ?? '').trim() || '(empty)';
       link.textContent = text;
       link.title = text;
       link.href = '#';

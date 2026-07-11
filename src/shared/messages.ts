@@ -43,4 +43,5 @@ export type WebviewToHost =
 export type HostToWebview =
   | { type: 'init'; text: string; config: InitConfig }
   | { type: 'update'; text: string }
-  | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] };
+  | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
+  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean };

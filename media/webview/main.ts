@@ -101,6 +101,18 @@ window.addEventListener('message', (event) => {
       prompt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
       break;
     }
+    case 'configUpdate': {
+      lineNumbersEnabled = msg.showLineNumbers !== false;
+      document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
+      if (lineNumbersEnabled) {
+        lineGutter.refreshFromDom();
+      }
+      if (msg.autoOpenToc !== false && !toc.isOpen()) {
+        toc.toggle();
+        syncTocButton();
+      }
+      break;
+    }
   }
 });
 
@@ -314,16 +326,21 @@ window.addEventListener('pagehide', flushPendingSync);
 // markdown-it) sẽ mất hẳn cấu trúc bảng/list. Ghi đè text/plain bằng chính
 // Markdown (cùng turndown dùng để lưu file) của đúng vùng đang chọn — copy
 // rồi paste (kể cả dán ra ngoài editor) luôn giữ đúng định dạng.
-function copySelectionAsMarkdown(e: ClipboardEvent): boolean {
+function selectionAsMarkdown(): string | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    return false;
+    return null;
   }
   const wrapper = document.createElement('div');
   wrapper.appendChild(sel.getRangeAt(0).cloneContents());
   prepareDomForSerialize(wrapper, document);
   const md = normalizeMarkdown(turndown.turndown(wrapper));
-  if (!md.trim()) {
+  return md.trim() ? md : null;
+}
+
+function copySelectionAsMarkdown(e: ClipboardEvent): boolean {
+  const md = selectionAsMarkdown();
+  if (md === null) {
     return false;
   }
   e.preventDefault();
@@ -339,6 +356,28 @@ content.addEventListener('cut', (e) => {
     scheduleSync();
   }
 });
+
+/**
+ * Fallback cho Cmd/Ctrl+X (giống pasteFromClipboardApi cho Cmd/Ctrl+V): iframe
+ * webview lồng nhau của VS Code custom editor không phải lúc nào cũng bắn sự
+ * kiện 'cut' kèm clipboardData khi phím tắt được gõ — khi đó handler 'cut' ở
+ * trên không chạy nên Cmd+X không cắt được gì. Dùng thẳng async Clipboard API
+ * (VS Code cấp quyền cho webview) để ghi Markdown của vùng chọn vào clipboard,
+ * rồi xoá vùng chọn. Trả về false nếu không có gì để cắt (để không preventDefault
+ * thừa). Ghi clipboard là async nhưng `md` đã chốt trước khi xoá nên không race.
+ */
+function cutSelectionViaClipboardApi(): boolean {
+  const md = selectionAsMarkdown();
+  if (md === null) {
+    return false;
+  }
+  navigator.clipboard.writeText(md).catch(() => {
+    /* Không có quyền clipboard-write — handler 'cut' event ở trên lo trường hợp còn lại. */
+  });
+  document.execCommand('delete');
+  scheduleSync();
+  return true;
+}
 
 // Paste: chỉ lấy text/plain (tránh dán HTML bừa từ ngoài vào làm hỏng cấu
 // trúc), rồi render lại bằng chính markdown-it của app. Nếu chèn thẳng làm
@@ -425,14 +464,17 @@ function renderPasteHtml(text: string): string {
 content.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
   if (target instanceof HTMLInputElement && target.type === 'checkbox') {
-    e.preventDefault();
-    const checked = !target.hasAttribute('checked');
-    if (checked) {
+    // KHÔNG preventDefault: click mặc định đã tự toggle target.checked. Nếu
+    // preventDefault (như trước đây), spec bắt buộc browser revert lại
+    // .checked về giá trị trước click sau khi dispatch xong — attribute thì
+    // đã set nhưng property bị revert nên checkbox không đổi trạng thái hiển
+    // thị/tương tác được (đúng lỗi user báo). Ở đây chỉ đồng bộ attribute
+    // theo property đã được browser toggle sẵn.
+    if (target.checked) {
       target.setAttribute('checked', 'checked');
     } else {
       target.removeAttribute('checked');
     }
-    target.checked = checked;
     scheduleSync();
     return;
   }
@@ -515,6 +557,13 @@ content.addEventListener('keydown', (e) => {
       case 'v':
         e.preventDefault();
         pasteFromClipboardApi();
+        return;
+      case 'x':
+        // Chỉ chặn mặc định khi thực sự có vùng chọn để cắt; nếu không, để trình
+        // duyệt xử lý bình thường (con trỏ rỗng — không có gì để cắt).
+        if (cutSelectionViaClipboardApi()) {
+          e.preventDefault();
+        }
         return;
     }
   }

@@ -10,3 +10,12 @@ tsconfig.json
 dist/test/**
 **/*.map
 sample/**
+CLAUDE.md
+Claude Code Monitor - Spec.md
+Fix Plan.md
+Review Plan.md
+Review Report.md
+Update History.md
+build.sh
+eslint.config.mjs
+.DS_Store

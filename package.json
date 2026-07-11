@@ -1,11 +1,15 @@
 {
-  "name": "markdown-wysiwyg-preview",
-  "displayName": "Orca MD Preview",
-  "description": "Preview markdown giống VS Code Markdown Preview và cho phép chỉnh sửa trực tiếp trên preview (WYSIWYG).",
-  "version": "0.5.14",
+  "name": "orca-editor",
+  "displayName": "Orca Editor",
+  "description": "Markdown preview like VS Code's built-in Markdown Preview, with direct WYSIWYG editing on the preview.",
+  "version": "0.6.6",
   "publisher": "hungvu",
-  "private": true,
+  "icon": "images/icon.png",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hungvu-ba/OrcaEditor.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -16,8 +20,8 @@
   "contributes": {
     "customEditors": [
       {
-        "viewType": "markdownWysiwyg.editor",
-        "displayName": "Orca MD Preview",
+        "viewType": "orcaEditor.editor",
+        "displayName": "Orca Editor",
         "selector": [
           {
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
@@ -28,14 +32,14 @@
     ],
     "commands": [
       {
-        "command": "markdownWysiwyg.open",
-        "title": "Mở Orca Preview",
+        "command": "orcaEditor.open",
+        "title": "Open Orca Editor",
         "category": "Markdown",
         "icon": "$(open-preview)"
       },
       {
-        "command": "markdownWysiwyg.openToSide",
-        "title": "Mở Orca Preview sang bên cạnh",
+        "command": "orcaEditor.openToSide",
+        "title": "Open Orca Editor to the Side",
         "category": "Markdown",
         "icon": "$(open-preview)"
       }
@@ -43,38 +47,38 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "markdownWysiwyg.open",
+          "command": "orcaEditor.open",
           "when": "editorLangId == markdown"
         },
         {
-          "command": "markdownWysiwyg.openToSide",
+          "command": "orcaEditor.openToSide",
           "when": "editorLangId == markdown"
         }
       ],
       "editor/title": [
         {
-          "command": "markdownWysiwyg.openToSide",
+          "command": "orcaEditor.openToSide",
           "when": "editorLangId == markdown && !notebookEditorFocused",
           "group": "navigation@100"
         }
       ],
       "editor/context": [
         {
-          "command": "markdownWysiwyg.open",
-          "when": "resourceExtname =~ /\\.(md|markdown)$/ && activeCustomEditorId != 'markdownWysiwyg.editor'",
+          "command": "orcaEditor.open",
+          "when": "resourceExtname =~ /\\.(md|markdown)$/ && activeCustomEditorId != 'orcaEditor.editor'",
           "group": "navigation@100"
         }
       ],
       "editor/title/context": [
         {
-          "command": "markdownWysiwyg.open",
+          "command": "orcaEditor.open",
           "when": "resourceExtname =~ /\\.(md|markdown|mdown|mkd|mdwn|mdtxt|mdtext)$/",
           "group": "navigation@100"
         }
       ],
       "explorer/context": [
         {
-          "command": "markdownWysiwyg.open",
+          "command": "orcaEditor.open",
           "when": "resourceExtname =~ /\\.(md|markdown)$/",
           "group": "navigation@100"
         }
@@ -82,29 +86,29 @@
     },
     "keybindings": [
       {
-        "command": "markdownWysiwyg.openToSide",
+        "command": "orcaEditor.openToSide",
         "key": "ctrl+shift+alt+v",
         "mac": "cmd+shift+alt+v",
         "when": "editorLangId == markdown"
       }
     ],
     "configuration": {
-      "title": "Markdown WYSIWYG Preview",
+      "title": "Orca Editor",
       "properties": {
-        "markdownWysiwyg.claudeAutoInsert": {
+        "orcaEditor.claudeAutoInsert": {
           "type": "boolean",
           "default": false,
-          "description": "Nút copy @file: tự chèn thẳng @file vào ô chat Claude Code thay vì chỉ copy — cần mở tạm một text editor của file rồi tự đóng ngay (cơ chế bắt buộc của Claude Code, sẽ thấy nháy nhẹ). Mặc định tắt: điều hướng tới tab chat, focus ô nhập và copy @file vào clipboard để dán bằng ⌘V."
+          "description": "Copy @file button: insert @file directly into the Claude Code chat input instead of just copying it — requires briefly opening a text editor for the file then closing it right away (a mechanism required by Claude Code; you'll see a brief flicker). Default off: navigates to the chat tab, focuses the input, and copies @file to the clipboard so you can paste with ⌘V."
         },
-        "markdownWysiwyg.autoOpenToc": {
+        "orcaEditor.autoOpenToc": {
           "type": "boolean",
           "default": true,
-          "description": "Tự động mở panel mục lục (Table of Contents) mỗi khi mở file Markdown trong WYSIWYG Preview."
+          "description": "Automatically open the Table of Contents panel whenever a Markdown file is opened in WYSIWYG Preview."
         },
-        "markdownWysiwyg.showLineNumbers": {
+        "orcaEditor.showLineNumbers": {
           "type": "boolean",
           "default": true,
-          "description": "Hiển thị số dòng (theo file Markdown gốc) ở cột bên trái mỗi khối nội dung (đoạn văn, heading, list, bảng, code, mermaid...), giống gutter số dòng của chế độ raw text."
+          "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
         }
       }
     }
@@ -118,7 +122,8 @@
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish --no-dependencies"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",

@@ -135,42 +135,42 @@ export function syncTocButton(): void {
 }
 
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Đậm (⌘B)', action: () => document.execCommand('bold') },
-  { label: 'I', title: 'Nghiêng (⌘I)', action: () => document.execCommand('italic') },
-  { label: 'S', title: 'Gạch ngang (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold') },
+  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic') },
+  { label: 'S', title: 'Strikethrough (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
   { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode },
-  { label: 'H1', title: 'Tiêu đề 1', action: () => formatHeading('h1'), separatorBefore: true },
-  { label: 'H2', title: 'Tiêu đề 2', action: () => formatHeading('h2') },
-  { label: 'H3', title: 'Tiêu đề 3', action: () => formatHeading('h3') },
-  { label: '¶', title: 'Đoạn văn thường', action: () => formatHeading('p') },
+  { label: 'H1', title: 'Heading 1', action: () => formatHeading('h1'), separatorBefore: true },
+  { label: 'H2', title: 'Heading 2', action: () => formatHeading('h2') },
+  { label: 'H3', title: 'Heading 3', action: () => formatHeading('h3') },
+  { label: '¶', title: 'Normal paragraph', action: () => formatHeading('p') },
   {
     label: '•',
     icon: FMT_ICONS.ul,
-    title: 'Danh sách chấm',
+    title: 'Bulleted list',
     action: () => document.execCommand('insertUnorderedList'),
     separatorBefore: true,
   },
-  { label: '1.', icon: FMT_ICONS.ol, title: 'Danh sách số', action: () => document.execCommand('insertOrderedList') },
+  { label: '1.', icon: FMT_ICONS.ol, title: 'Numbered list', action: () => document.execCommand('insertOrderedList') },
   { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
-    title: 'Trích dẫn (bấm lại để bỏ)',
+    title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
     separatorBefore: true,
   },
-  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Khối code', action: insertCodeBlock },
-  { label: '⊞', icon: FMT_ICONS.table, title: 'Chèn bảng 3×3', action: insertTable },
+  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Code block', action: insertCodeBlock },
+  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
   {
     label: '—',
     icon: FMT_ICONS.hr,
-    title: 'Đường kẻ ngang',
+    title: 'Horizontal rule',
     action: () => document.execCommand('insertHTML', false, '<hr><p><br></p>'),
   },
   {
     label: '🔗',
     icon: FMT_ICONS.link,
-    title: 'Chèn liên kết',
+    title: 'Insert link',
     action: insertLink,
     separatorBefore: true,
     opensAsyncPrompt: true,
@@ -178,29 +178,29 @@ const toolbarItems: ToolbarItem[] = [
   {
     label: '🖼',
     icon: FMT_ICONS.image,
-    title: 'Chèn ảnh (đường dẫn)',
+    title: 'Insert image (path)',
     action: insertImage,
     opensAsyncPrompt: true,
   },
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Hoàn tác (⌘Z)', action: () => document.execCommand('undo'), separatorBefore: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Làm lại (⌘⇧Z)', action: () => document.execCommand('redo') },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo'), separatorBefore: true },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
     label: '@',
     icon: CLAUDE_COPY_ICON,
-    title: 'Copy "@file" vào clipboard cho chat Claude Code — tự mở/focus ô chat, bạn chỉ cần dán (⌘V)',
+    title: 'Copy "@file" to clipboard for Claude Code chat — auto-opens/focuses the chat input, you just paste (⌘V)',
     action: () => ctx.vscode.postMessage({ type: 'addToClaudeContext' }),
     alignRight: true,
   },
   {
     label: '⟨/⟩',
     icon: RAW_SOURCE_ICON,
-    title: 'Xem mã nguồn Markdown thô (mở text editor cạnh bên)',
+    title: 'View raw Markdown source (opens a text editor to the side)',
     action: () => ctx.vscode.postMessage({ type: 'viewSource' }),
   },
   {
     label: '☰',
     icon: TOC_ICON,
-    title: 'Hiện/ẩn mục lục (Table of Contents)',
+    title: 'Show/hide Table of Contents',
     action: () => {
       ctx.toc.toggle();
       updateTocButton();
@@ -331,7 +331,13 @@ function toggleTaskItem(): void {
   if (existing) {
     existing.remove();
     li.classList.remove('task-list-item');
-    li.parentElement?.classList.remove('contains-task-list');
+    const ul = li.parentElement;
+    ul?.classList.remove('contains-task-list');
+    if (ul?.tagName === 'UL' && ul.children.length === 1) {
+      // <ul> chỉ tạo riêng cho item này (do nhánh !li ở trên) → bỏ checkbox
+      // lần 2 phải về lại đoạn văn thường, không được để trơ lại thành bullet.
+      document.execCommand('insertUnorderedList');
+    }
   } else {
     addCheckbox(li);
   }
@@ -350,8 +356,8 @@ function insertCodeBlock(): void {
 function insertLink(): void {
   const selectedText = window.getSelection()?.toString().trim() ?? '';
   ctx.promptInput(
-    'URL liên kết:',
-    'https://… hoặc gõ tên file trong dự án',
+    'Link URL:',
+    'https://… or type a file name in the project',
     (url, displayText) => {
       if (!url) {
         return;
@@ -373,7 +379,7 @@ function insertLink(): void {
 }
 
 function insertImage(): void {
-  ctx.promptInput('Đường dẫn ảnh (tương đối hoặc URL):', '', (src) => {
+  ctx.promptInput('Image path (relative or URL):', '', (src) => {
     if (!src) {
       return;
     }

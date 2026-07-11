@@ -110,7 +110,12 @@ export class MarkdownRenderer {
         if (token.type === 'math_block' && token.map) {
           this.capturedMathBlockRanges.push(token.map);
         }
-        if (token.level === 0 && token.nesting !== -1 && token.map && !token.hidden) {
+        // Gắn cho block cấp cao nhất (đoạn/heading/list/bảng...) VÀ cho từng
+        // list_item ở mọi độ sâu — để gutter đánh số riêng cho MỖI dòng bullet
+        // thay vì chỉ dòng đầu của cả danh sách (một <ul>/<ol> là MỘT block cấp
+        // cao nhất, nếu chỉ dựa vào nó thì cả list chỉ có một số ở dòng đầu).
+        const isTopLevelBlock = token.level === 0 && token.nesting !== -1 && !token.hidden;
+        if ((isTopLevelBlock || token.type === 'list_item_open') && token.map) {
           token.attrSet(LINE_NUMBER_ATTR, String(token.map[0] + 1));
           token.attrSet(LINE_NUMBER_END_ATTR, String(token.map[1]));
         }
@@ -138,10 +143,14 @@ export class MarkdownRenderer {
   }
 
   /**
-   * Chỉ lấy range dòng nguồn (1-based, bao gồm) của từng block cấp cao nhất,
-   * theo đúng thứ tự render — KHÔNG sinh lại HTML. Dùng để cập nhật gutter số
-   * dòng sau mỗi lần gõ (debounce) mà không phải re-render toàn bộ #content
-   * (tránh mất caret/undo). Front-matter (nếu có) luôn là block đầu tiên.
+   * Lấy range dòng nguồn (1-based, bao gồm) của từng phần tử ĐƯỢC ĐÁNH SỐ trong
+   * gutter, theo đúng thứ tự tài liệu — KHÔNG sinh lại HTML. Dùng để cập nhật
+   * gutter số dòng sau mỗi lần gõ (debounce) mà không phải re-render toàn bộ
+   * #content (tránh mất caret/undo). Front-matter (nếu có) luôn là phần tử đầu.
+   *
+   * Với danh sách cấp cao nhất (<ul>/<ol>), đánh số theo TỪNG list_item (mọi độ
+   * sâu) thay vì cả khối — khớp đúng với cách gutter.ts liệt kê phần tử (mỗi
+   * <li> một số), nếu không cả list chỉ hiện một số ở dòng đầu.
    */
   public computeTopLevelLineRanges(markdown: string): LineRange[] {
     this.capturedFrontMatter = undefined;
@@ -153,7 +162,24 @@ export class MarkdownRenderer {
       const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
       ranges.push({ start: start0 + 1, end: end0 });
     }
+    let insideTopLevelList = false;
     for (const token of tokens as unknown as BlockToken[]) {
+      const isListContainer = token.type === 'bullet_list_open' || token.type === 'ordered_list_open';
+      const isListContainerClose = token.type === 'bullet_list_close' || token.type === 'ordered_list_close';
+      if (token.level === 0 && isListContainer) {
+        insideTopLevelList = true;
+        continue;
+      }
+      if (token.level === 0 && isListContainerClose) {
+        insideTopLevelList = false;
+        continue;
+      }
+      if (insideTopLevelList) {
+        if (token.type === 'list_item_open' && token.map) {
+          ranges.push({ start: token.map[0] + 1, end: token.map[1] });
+        }
+        continue;
+      }
       if (token.level === 0 && token.nesting !== -1 && token.map && !token.hidden) {
         ranges.push({ start: token.map[0] + 1, end: token.map[1] });
       }

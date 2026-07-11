@@ -74,16 +74,16 @@ interface TableAction {
 }
 
 const tableActions: TableAction[] = [
-  { icon: TABLE_ICONS.rowAbove, title: 'Thêm dòng phía trên', action: (c) => insertRow(c, 'above') },
-  { icon: TABLE_ICONS.rowBelow, title: 'Thêm dòng phía dưới', action: (c) => insertRow(c, 'below') },
-  { icon: TABLE_ICONS.colLeft, title: 'Thêm cột bên trái', action: (c) => insertColumn(c, 'left'), separatorBefore: true },
-  { icon: TABLE_ICONS.colRight, title: 'Thêm cột bên phải', action: (c) => insertColumn(c, 'right') },
-  { icon: TABLE_ICONS.alignLeft, title: 'Căn trái cột (mặc định)', action: (c) => alignTableColumn(c, 'left'), separatorBefore: true },
-  { icon: TABLE_ICONS.alignCenter, title: 'Căn giữa cột', action: (c) => alignTableColumn(c, 'center') },
-  { icon: TABLE_ICONS.alignRight, title: 'Căn phải cột', action: (c) => alignTableColumn(c, 'right') },
-  { icon: TABLE_ICONS.delRow, title: 'Xóa dòng hiện tại', action: deleteRow, separatorBefore: true },
-  { icon: TABLE_ICONS.delCol, title: 'Xóa cột hiện tại', action: deleteColumn },
-  { icon: TABLE_ICONS.trash, title: 'Xóa cả bảng', action: deleteTable, separatorBefore: true },
+  { icon: TABLE_ICONS.rowAbove, title: 'Insert row above', action: (c) => insertRow(c, 'above') },
+  { icon: TABLE_ICONS.rowBelow, title: 'Insert row below', action: (c) => insertRow(c, 'below') },
+  { icon: TABLE_ICONS.colLeft, title: 'Insert column left', action: (c) => insertColumn(c, 'left'), separatorBefore: true },
+  { icon: TABLE_ICONS.colRight, title: 'Insert column right', action: (c) => insertColumn(c, 'right') },
+  { icon: TABLE_ICONS.alignLeft, title: 'Align column left (default)', action: (c) => alignTableColumn(c, 'left'), separatorBefore: true },
+  { icon: TABLE_ICONS.alignCenter, title: 'Align column center', action: (c) => alignTableColumn(c, 'center') },
+  { icon: TABLE_ICONS.alignRight, title: 'Align column right', action: (c) => alignTableColumn(c, 'right') },
+  { icon: TABLE_ICONS.delRow, title: 'Delete current row', action: deleteRow, separatorBefore: true },
+  { icon: TABLE_ICONS.delCol, title: 'Delete current column', action: deleteColumn },
+  { icon: TABLE_ICONS.trash, title: 'Delete entire table', action: deleteTable, separatorBefore: true },
 ];
 
 /** Toolbar bảng tự ẩn sau TABLE_TOOLBAR_HIDE_MS; chỉ hiện lại khi CLICK chuột vào bảng (gõ phím không tính). */
@@ -451,7 +451,7 @@ export function warnIfComplexTableList(): void {
   }
   warnedComplexCells.add(cell);
   showToast(
-    '⚠ Bảng có danh sách phân cấp sẽ được lưu dưới dạng HTML — ' + 'ô này không còn là bảng Markdown thuần.'
+    '⚠ Tables containing nested lists will be saved as HTML — ' + 'this cell is no longer a plain Markdown table.'
   );
 }
 
@@ -475,7 +475,7 @@ export function insertTable(): void {
   }
 
   const rows: string[] = [];
-  rows.push('<table><thead><tr><th>Cột 1</th><th>Cột 2</th><th>Cột 3</th></tr></thead><tbody>');
+  rows.push('<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead><tbody>');
   for (let r = 0; r < 2; r++) {
     rows.push('<tr><td><br></td><td><br></td><td><br></td></tr>');
   }

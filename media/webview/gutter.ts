@@ -114,10 +114,10 @@ export function initLineGutter(
   }
 
   function refreshFromDom(): void {
-    const children = Array.from(content.children) as HTMLElement[];
+    const els = enumerateNumberedElements();
     rebuildDom(
-      children,
-      children.map((c) => readBlockInfo(c))
+      els,
+      els.map((el) => readBlockInfo(el))
     );
   }
 
@@ -127,19 +127,45 @@ export function initLineGutter(
       return;
     }
     const ranges = renderer.computeTopLevelLineRanges(markdown);
-    const children = Array.from(content.children) as HTMLElement[];
-    if (ranges.length !== children.length) {
+    const els = enumerateNumberedElements();
+    if (ranges.length !== els.length) {
       return;
     }
-    const infos = children.map((child, i) => {
+    const infos = els.map((el, i) => {
       const range: LineRange = ranges[i];
+      const start = String(range.start);
+      const end = String(range.end);
+      // Ghi số dòng mới TRỞ LẠI DOM: các <li> gõ thêm trong lúc soạn (Enter tạo
+      // mục mới) KHÔNG có data-line — chỉ markdown-it lúc render mới gắn. Nếu
+      // không ghi lại, refreshFromDom (ResizeObserver bắn mỗi lần layout đổi khi
+      // gõ) đọc data-line rỗng của các mục mới và bỏ số của chúng, ghi đè lên kết
+      // quả parse đúng ở đây → list gõ thêm chỉ hiện số của các mục cũ.
+      el.setAttribute(LINE_NUMBER_ATTR, start);
+      el.setAttribute(LINE_NUMBER_END_ATTR, end);
       return {
-        start: String(range.start),
-        end: String(range.end),
-        dual: isDualBoundaryBlock(child),
+        start,
+        end,
+        dual: isDualBoundaryBlock(el),
       };
     });
-    rebuildDom(children, infos);
+    rebuildDom(els, infos);
+  }
+
+  // Danh sách phần tử được đánh số, theo thứ tự tài liệu. Mỗi block cấp cao
+  // nhất là MỘT phần tử, RIÊNG danh sách (<ul>/<ol>) được tách thành từng <li>
+  // (mọi độ sâu) để mỗi dòng bullet có số riêng — phải khớp đúng thứ tự với
+  // computeTopLevelLineRanges (renderer). Mỗi <li> đã được gắn data-line lúc
+  // render nên readBlockInfo đọc được số dòng của chính nó.
+  function enumerateNumberedElements(): HTMLElement[] {
+    const els: HTMLElement[] = [];
+    for (const child of Array.from(content.children) as HTMLElement[]) {
+      if (child.tagName === 'UL' || child.tagName === 'OL') {
+        child.querySelectorAll('li').forEach((li) => els.push(li as HTMLElement));
+      } else {
+        els.push(child);
+      }
+    }
+    return els;
   }
 
   // Gom nhiều callback ResizeObserver trong cùng một frame lại thành một lần

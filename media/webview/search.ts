@@ -61,9 +61,9 @@ export function initSearch(content: HTMLElement): SearchController {
   const input = document.createElement('input');
   input.id = 'search-input';
   input.type = 'text';
-  input.placeholder = 'Tìm';
+  input.placeholder = 'Find';
   input.spellcheck = false;
-  input.setAttribute('aria-label', 'Tìm trong tài liệu');
+  input.setAttribute('aria-label', 'Find in document');
 
   const count = document.createElement('span');
   count.id = 'search-count';
@@ -77,9 +77,9 @@ export function initSearch(content: HTMLElement): SearchController {
     b.addEventListener('mousedown', (e) => e.preventDefault());
     return b;
   };
-  const prevBtn = mkBtn(ICON_PREV, 'Kết quả trước (⇧Enter)');
-  const nextBtn = mkBtn(ICON_NEXT, 'Kết quả sau (Enter)');
-  const closeBtn = mkBtn(ICON_CLOSE, 'Đóng (Esc)');
+  const prevBtn = mkBtn(ICON_PREV, 'Previous match (⇧Enter)');
+  const nextBtn = mkBtn(ICON_NEXT, 'Next match (Enter)');
+  const closeBtn = mkBtn(ICON_CLOSE, 'Close (Esc)');
 
   box.append(input, count, prevBtn, nextBtn, closeBtn);
   document.body.appendChild(box);
@@ -278,7 +278,7 @@ export function initSearch(content: HTMLElement): SearchController {
     if (!query) {
       count.textContent = '';
     } else if (!matches.length) {
-      count.textContent = 'Không có';
+      count.textContent = 'No results';
     } else {
       count.textContent = `${current + 1}/${matches.length}`;
     }

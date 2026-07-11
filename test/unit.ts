@@ -170,9 +170,10 @@ const toWebview: HostToWebview[] = [
   } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
+  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true },
 ];
 check('contract: WebviewToHost phủ đủ 6 biến thể', fromWebview.length === 6);
-check('contract: HostToWebview phủ đủ 3 biến thể', toWebview.length === 3);
+check('contract: HostToWebview phủ đủ 4 biến thể', toWebview.length === 4);
 
 // ---------------------------------------------------------------------------
 

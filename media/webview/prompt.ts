@@ -51,7 +51,7 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     const ok = document.createElement('button');
     ok.textContent = 'OK';
     const cancel = document.createElement('button');
-    cancel.textContent = 'Hủy';
+    cancel.textContent = 'Cancel';
     buttons.append(cancel, ok);
     box.append(lbl, input, buttons);
     overlay.appendChild(box);
