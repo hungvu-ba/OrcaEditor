@@ -48,29 +48,30 @@
 | 0.6.6 | 2026-07-11 | Feature: thêm sample song ngữ EN/JP (SAMPLE_EN_JP.md) đủ mọi format để test preview với tiếng Nhật. |
 | 0.6.6 | 2026-07-11 | Feature: thêm subcommand `release` vào build.sh — kiểm tra git sạch, đăng nhập vsce, bump version, test, đóng gói, publish Marketplace và tag git; kèm `--dry-run`. |
 | 0.6.7 | 2026-07-11 | Release: nâng version lên 0.6.7, gom toàn bộ fix/feature sau bản 0.6.6 vào một mục [0.6.7] trong CHANGELOG.md. |
-| 0.6.7 | 2026-07-12 | Feature: highlight mọi vị trí khác trùng với text đang bôi đen trong file hiện tại, và icon tìm xuyên file trong project (bấm hoặc Ctrl/Cmd+Shift+F) với popover kết quả nhóm theo file. |
-| 0.6.7 | 2026-07-12 | Feature: Enter ở dòng task list (kể cả trong ô bảng) tự tạo dòng mới cũng có checkbox, thay vì mất định dạng task. |
-| 0.6.7 | 2026-07-12 | Fix: ordered task list ("1. [ ] ...") chỉ hiện checkbox, không hiện thêm số thứ tự "1." gây rối mắt. |
-| 0.6.7 | 2026-07-12 | Fix: bấm H1/H2/H3 làm mất vị trí con trỏ, bấm lại lần 2 không revert về đoạn văn thường — dùng execCommand('formatBlock') riêng khi đổi TỪ heading (insertHTML bị Chrome lờ đi hoặc rò rỉ style sang block liền sau), khôi phục đúng offset caret khi tạo heading mới. |
-| 0.6.7 | 2026-07-12 | Fix: highlight trong kết quả tìm xuyên file bị mất hút khi popover hẹp/dòng dài — cắt ngữ cảnh 40 ký tự mỗi bên quanh match trước khi render, thay vì phó mặc CSS ellipsis cắt mất luôn cả phần highlight. |
-| 0.6.7 | 2026-07-12 | Feature: icon tìm xuyên file tự ẩn sau 3s (pause khi hover/focus); debounce hiện icon 750ms + huỷ khi copy/cut/Backspace/Delete; icon neo bubble phía trên vùng chọn, cuộn theo tài liệu. |
-| 0.6.7 | 2026-07-12 | Fix: click kết quả tìm xuyên file trỏ tới .md không cuộn tới đúng vị trí match — forward line/character qua message init/scrollToPosition, cả khi file đã mở sẵn ở tab khác. |
-| 0.6.7 | 2026-07-12 | Feature: thước overview bên phải cho highlight khi select text (Feature A) — chỉ báo trực quan, tắt hẳn khi Ctrl+F đang mở, throttle 150ms/cap 500 tick tránh giật với file dài. |
-| 0.6.7 | 2026-07-12 | Feature: thêm option Match Case/Whole Word (mặc định Whole Word ON) cho Ctrl+F và tìm xuyên file, word-boundary Unicode-aware cho tiếng Việt, fallback tự động về substring khi 0 kết quả. |
-| 0.6.7 | 2026-07-12 | Fix: caret sai vị trí (trước checkbox thay vì sau) khi tạo task item mới hoặc Enter xuống dòng trong task list. |
-| 0.6.7 | 2026-07-12 | Fix: click kết quả tìm xuyên file chỉ scroll, không select đoạn text khớp — forward character/length qua reveal/scrollToPosition, select trong block đơn dòng. |
-| 0.6.7 | 2026-07-12 | Feature: thước overview khi select text (Feature A) thêm tick riêng cho vị trí đang chọn (màu cam) để so sánh với các match khác. |
-| 0.6.7 | 2026-07-12 | Fix: icon Whole Word dễ nhầm với toggle chữ hoa/thường — đổi sang icon "ab" có vạch biên; icon Match Case/Whole Word đổi màu accent khi bật. |
-| 0.6.7 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet "•" ở dòng đầu — Chrome tách nhiều `<ul>` độc lập, nay quét cả vùng chọn thay vì chỉ 1 list. |
-| 0.6.7 | 2026-07-12 | Fix: icon tìm xuyên file không tự ẩn sau 3s — bỏ qua mouseenter dư vị trí chuột trong 400ms đầu sau khi icon hiện, tránh pause timer vĩnh viễn. |
-| 0.6.7 | 2026-07-12 | Feature: dán ảnh từ clipboard vào editor — lưu file thật vào images/ cạnh file .md (hoặc thư mục tuỳ chỉnh qua setting), chèn `<img>` với đường dẫn tương đối. |
-| 0.6.7 | 2026-07-12 | Fix: icon tìm xuyên file giữ nguyên hình kính lúp, đổi màu sang accent vàng/cam (giống 💡) cho dễ nhận biết hơn. |
-| 0.6.7 | 2026-07-12 | Fix: dán ảnh Cmd/Ctrl+V tạo 2 file/2 link ảnh trùng nhau — chặn trùng 500ms giữa fallback Clipboard API và 'paste' event thật cùng xử lý 1 lượt dán. |
-| 0.6.7 | 2026-07-12 | Feature: thêm dải viewport band trên thước overview (Ctrl+F/select-highlight), đánh dấu vùng đang cuộn tới, cập nhật live theo scroll. |
-| 0.6.7 | 2026-07-12 | Feature: khi save, tự dọn ảnh dán mồ côi (paste nhầm rồi undo) theo prefix tên file .md, chuyển vào images/.trash thay vì xoá cứng. |
-| 0.6.7 | 2026-07-12 | Fix: icon tìm xuyên file không bao giờ tự ẩn — thiếu CSS `.cross-file-search-icon[hidden]{display:none}` nên `icon.hidden=true` bị rule `display:inline-flex` cùng độ đặc hiệu ghi đè. |
-| 0.6.7 | 2026-07-12 | Fix: follow link kết quả tìm xuyên file highlight lệch vị trí — offset thô (raw markdown) lệch với text đã render; nay dùng matchText làm mỏ neo tìm lại trong DOM. |
-| 0.6.7 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet + dòng trắng (list loose/tách nhiều `<ul>`) — tự dựng một `<ul>` tight duy nhất bằng insertHTML thay vì execCommand. |
-| 0.6.7 | 2026-07-12 | Fix: xoá dòng cuối bullet/task list làm heading kế tiếp bị gộp thành bullet — thêm handler Backspace/Delete xoá vắt ranh giới list mà giữ nguyên danh tính block hai đầu. |
-| 0.6.7 | 2026-07-12 | Fix: ảnh mồ côi bị xoá cứng ngay khi save (bỏ .trash); undo xoá ảnh tự khôi phục lại file thật, xử lý như đang paste ảnh mới. |
-| 0.6.7 | 2026-07-12 | Feature: click vào ảnh trong editor đặt caret ngay bên phải ảnh, cho phép Enter xuống dòng ngay sau ảnh. |
+| 0.6.8 | 2026-07-12 | Feature: highlight mọi vị trí khác trùng với text đang bôi đen trong file hiện tại, và icon tìm xuyên file trong project (bấm hoặc Ctrl/Cmd+Shift+F) với popover kết quả nhóm theo file. |
+| 0.6.8 | 2026-07-12 | Feature: Enter ở dòng task list (kể cả trong ô bảng) tự tạo dòng mới cũng có checkbox, thay vì mất định dạng task. |
+| 0.6.8 | 2026-07-12 | Fix: ordered task list ("1. [ ] ...") chỉ hiện checkbox, không hiện thêm số thứ tự "1." gây rối mắt. |
+| 0.6.8 | 2026-07-12 | Fix: bấm H1/H2/H3 làm mất vị trí con trỏ, bấm lại lần 2 không revert về đoạn văn thường — dùng execCommand('formatBlock') riêng khi đổi TỪ heading (insertHTML bị Chrome lờ đi hoặc rò rỉ style sang block liền sau), khôi phục đúng offset caret khi tạo heading mới. |
+| 0.6.8 | 2026-07-12 | Fix: highlight trong kết quả tìm xuyên file bị mất hút khi popover hẹp/dòng dài — cắt ngữ cảnh 40 ký tự mỗi bên quanh match trước khi render, thay vì phó mặc CSS ellipsis cắt mất luôn cả phần highlight. |
+| 0.6.8 | 2026-07-12 | Feature: icon tìm xuyên file tự ẩn sau 3s (pause khi hover/focus); debounce hiện icon 750ms + huỷ khi copy/cut/Backspace/Delete; icon neo bubble phía trên vùng chọn, cuộn theo tài liệu. |
+| 0.6.8 | 2026-07-12 | Fix: click kết quả tìm xuyên file trỏ tới .md không cuộn tới đúng vị trí match — forward line/character qua message init/scrollToPosition, cả khi file đã mở sẵn ở tab khác. |
+| 0.6.8 | 2026-07-12 | Feature: thước overview bên phải cho highlight khi select text (Feature A) — chỉ báo trực quan, tắt hẳn khi Ctrl+F đang mở, throttle 150ms/cap 500 tick tránh giật với file dài. |
+| 0.6.8 | 2026-07-12 | Feature: thêm option Match Case/Whole Word (mặc định Whole Word ON) cho Ctrl+F và tìm xuyên file, word-boundary Unicode-aware cho tiếng Việt, fallback tự động về substring khi 0 kết quả. |
+| 0.6.8 | 2026-07-12 | Fix: caret sai vị trí (trước checkbox thay vì sau) khi tạo task item mới hoặc Enter xuống dòng trong task list. |
+| 0.6.8 | 2026-07-12 | Fix: click kết quả tìm xuyên file chỉ scroll, không select đoạn text khớp — forward character/length qua reveal/scrollToPosition, select trong block đơn dòng. |
+| 0.6.8 | 2026-07-12 | Feature: thước overview khi select text (Feature A) thêm tick riêng cho vị trí đang chọn (màu cam) để so sánh với các match khác. |
+| 0.6.8 | 2026-07-12 | Fix: icon Whole Word dễ nhầm với toggle chữ hoa/thường — đổi sang icon "ab" có vạch biên; icon Match Case/Whole Word đổi màu accent khi bật. |
+| 0.6.8 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet "•" ở dòng đầu — Chrome tách nhiều `<ul>` độc lập, nay quét cả vùng chọn thay vì chỉ 1 list. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file không tự ẩn sau 3s — bỏ qua mouseenter dư vị trí chuột trong 400ms đầu sau khi icon hiện, tránh pause timer vĩnh viễn. |
+| 0.6.8 | 2026-07-12 | Feature: dán ảnh từ clipboard vào editor — lưu file thật vào images/ cạnh file .md (hoặc thư mục tuỳ chỉnh qua setting), chèn `<img>` với đường dẫn tương đối. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file giữ nguyên hình kính lúp, đổi màu sang accent vàng/cam (giống 💡) cho dễ nhận biết hơn. |
+| 0.6.8 | 2026-07-12 | Fix: dán ảnh Cmd/Ctrl+V tạo 2 file/2 link ảnh trùng nhau — chặn trùng 500ms giữa fallback Clipboard API và 'paste' event thật cùng xử lý 1 lượt dán. |
+| 0.6.8 | 2026-07-12 | Feature: thêm dải viewport band trên thước overview (Ctrl+F/select-highlight), đánh dấu vùng đang cuộn tới, cập nhật live theo scroll. |
+| 0.6.8 | 2026-07-12 | Feature: khi save, tự dọn ảnh dán mồ côi (paste nhầm rồi undo) theo prefix tên file .md, chuyển vào images/.trash thay vì xoá cứng. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file không bao giờ tự ẩn — thiếu CSS `.cross-file-search-icon[hidden]{display:none}` nên `icon.hidden=true` bị rule `display:inline-flex` cùng độ đặc hiệu ghi đè. |
+| 0.6.8 | 2026-07-12 | Fix: follow link kết quả tìm xuyên file highlight lệch vị trí — offset thô (raw markdown) lệch với text đã render; nay dùng matchText làm mỏ neo tìm lại trong DOM. |
+| 0.6.8 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet + dòng trắng (list loose/tách nhiều `<ul>`) — tự dựng một `<ul>` tight duy nhất bằng insertHTML thay vì execCommand. |
+| 0.6.8 | 2026-07-12 | Fix: xoá dòng cuối bullet/task list làm heading kế tiếp bị gộp thành bullet — thêm handler Backspace/Delete xoá vắt ranh giới list mà giữ nguyên danh tính block hai đầu. |
+| 0.6.8 | 2026-07-12 | Fix: ảnh mồ côi bị xoá cứng ngay khi save (bỏ .trash); undo xoá ảnh tự khôi phục lại file thật, xử lý như đang paste ảnh mới. |
+| 0.6.8 | 2026-07-12 | Feature: click vào ảnh trong editor đặt caret ngay bên phải ảnh, cho phép Enter xuống dòng ngay sau ảnh. |
+| 0.6.8 | 2026-07-12 | Release: nâng version lên 0.6.8, gom toàn bộ feature/fix sau bản 0.6.7 (tìm xuyên file, dán ảnh, select-highlight, task list, fix list/task/gutter) vào mục [0.6.8]; publish lên Marketplace. |

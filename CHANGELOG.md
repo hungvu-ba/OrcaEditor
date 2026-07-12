@@ -4,6 +4,26 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.6.8\] - 2026-07-12
+
+### Added
+
+-   Cross-file search with match highlighting, grouped-by-file results, and a project search icon (Ctrl/Cmd+Shift+F).
+-   Match Case / Whole Word search options, with an overview ruler showing match and viewport positions.
+-   Paste images from the clipboard directly into the editor, with automatic cleanup of orphaned images on save.
+-   Task lists now continue correctly on Enter, and clicking an image positions the caret right after it.
+-   A select-text overview ruler that marks the current selection and other matches, with a live viewport band.
+
+### Changed
+
+-   Restyled the cross-file search and Whole Word icons for clarity, and gave active Match Case / Whole Word toggles an accent color.
+
+### Fixed
+
+-   Task list numbering, task-item caret placement, and paragraph-to-list conversion (stray bullets/blank lines) fixed.
+-   Cross-file search: truncated highlights, incorrect scroll/selection on click, and the icon failing to auto-hide.
+-   Duplicate image files when pasting, and bullet/task lists merging into an adjacent heading on delete.
+
 ## \[0.6.7\] - 2026-07-11
 
 ### Added
