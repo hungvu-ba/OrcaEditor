@@ -81,6 +81,18 @@ export function normalizeForSearch(s: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Prefix gắn vào tên file ảnh dán, suy ra từ basename file .md sở hữu nó —
+ * để cleanup ảnh mồ côi (xem cleanupOrphanImages trong provider.ts) nhận ra
+ * ảnh nào "thuộc về" file nào chỉ bằng tên file, không cần quét nội dung mọi
+ * file .md khác trong thư mục. Rỗng nếu basename không còn ký tự chữ/số nào
+ * sau chuẩn hoá (vd toàn CJK) — caller tự fallback về không prefix (ảnh đó
+ * nằm ngoài phạm vi cleanup tự động).
+ */
+export function imageNamePrefix(baseName: string): string {
+  return normalizeForSearch(baseName).slice(0, 40);
+}
+
 /** Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file). */
 export function relativePath(fromDir: string, toFile: string): string {
   const from = fromDir.split('/').filter(Boolean);

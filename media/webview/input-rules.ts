@@ -32,7 +32,11 @@ export function initInputRules(contentEl: HTMLElement, context: InputRulesContex
         e.preventDefault();
       }
     } else if (e.key === 'Enter' && !e.shiftKey) {
-      if (applyEnterInputRule()) {
+      if (applyEnterInputRule() || applyTaskListEnterRule()) {
+        e.preventDefault();
+      }
+    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+      if (applyListBoundaryDeleteRule()) {
         e.preventDefault();
       }
     }
@@ -105,6 +109,29 @@ function placeCaretAtEnd(el: Element): void {
   const sel = window.getSelection();
   sel?.removeAllRanges();
   sel?.addRange(range);
+}
+
+/**
+ * Đặt caret ngay SAU checkbox vừa thêm vào một task item (gọi sau addCheckbox()).
+ * addCheckbox() luôn chèn <input> làm con đầu tiên của <li> — nếu đặt caret vào
+ * (li, 0) như placeCaretIn mặc định, offset 0 vẫn trỏ TRƯỚC checkbox (vì offset
+ * đó tính theo chỉ số con của li, không neo vào text node cụ thể nào). Dùng
+ * setStartAfter(checkbox) để offset trỏ đúng vị trí ngay sau checkbox, trước
+ * phần text theo sau (nếu có).
+ */
+function placeCaretAfterCheckbox(li: HTMLElement): void {
+  const checkbox = li.querySelector(':scope > input[type="checkbox"]');
+  const range = document.createRange();
+  if (checkbox) {
+    range.setStartAfter(checkbox);
+  } else {
+    range.selectNodeContents(li);
+  }
+  range.collapse(true);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  content.focus();
 }
 
 /**
@@ -246,6 +273,7 @@ function applySpaceInputRule(): boolean {
     if (task[1] === 'x' || task[1] === 'X') {
       li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
     }
+    placeCaretAfterCheckbox(li);
     ctx.scheduleSync();
     return true;
   }
@@ -320,6 +348,7 @@ function applyCellListInputRule(): boolean {
     if (task[1] === 'x' || task[1] === 'X') {
       li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
     }
+    placeCaretAfterCheckbox(li);
   } else if (ordered) {
     const li = convertCellLineToListItem(cell, lineStart, true);
     const start = parseInt(ordered[1], 10);
@@ -464,6 +493,183 @@ function applyEnterInputRule(): boolean {
   }
 
   return false;
+}
+
+/**
+ * Enter trong một mục task list ("- [ ] ...") → mục mới tách ra cũng phải có
+ * checkbox, khớp hành vi Notion/Typora. Mặc định trình duyệt split <li> lúc
+ * Enter chỉ nhân bản định dạng inline bao quanh caret (b/i/span...); checkbox
+ * là <input> đứng TRƯỚC caret (sibling, không phải wrapper) nên không được
+ * nhân bản — <li> mới sinh ra mất cả checkbox lẫn class task-list-item. Áp
+ * dụng cho cả task item trong ô bảng (convertCellLineToListItem tạo <li>
+ * giống hệt cấu trúc top-level nên dùng chung được, không cần phân biệt).
+ * Dùng execCommand('insertHTML') để chèn <li> mới — cùng lý do undo/redo với
+ * insertListItemViaExec (xem convertBlockToListItem).
+ */
+function applyTaskListEnterRule(): boolean {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) {
+    return false;
+  }
+  const anchor = sel.anchorNode ? closestElement(sel.anchorNode) : null;
+  const li = anchor?.closest('li') as HTMLLIElement | null;
+  if (!li || !content.contains(li) || !li.classList.contains('task-list-item')) {
+    return false;
+  }
+  // Có sub-list lồng trực tiếp trong mục này — để hành vi mặc định xử lý,
+  // tránh xáo trộn cấu trúc con khi tách <li>.
+  if (li.querySelector(':scope > ul, :scope > ol')) {
+    return false;
+  }
+
+  const range = sel.getRangeAt(0);
+  const afterRange = document.createRange();
+  afterRange.selectNodeContents(li);
+  afterRange.setStart(range.startContainer, range.startOffset);
+
+  if ((li.textContent ?? '').trim() === '') {
+    // <li> task rỗng hoàn toàn → để trình duyệt tự outdent như list thường.
+    return false;
+  }
+
+  const container = document.createElement('div');
+  container.appendChild(afterRange.cloneContents());
+  const afterHtml = container.textContent ? container.innerHTML : '<br>';
+  afterRange.deleteContents();
+
+  const listTag = li.parentElement?.nodeName === 'OL' ? 'OL' : 'UL';
+  const newLi = insertListItemViaExec(afterHtml, listTag, 'merge', li);
+  addCheckbox(newLi);
+  placeCaretAfterCheckbox(newLi);
+  ctx.scheduleSync();
+  return true;
+}
+
+/** Selector các block "cấp lá" mà một vùng chọn có thể bắt đầu/kết thúc bên trong. */
+const DELETE_BLOCK_SEL = 'li, p, h1, h2, h3, h4, h5, h6, blockquote, pre, td, th';
+
+/** Block cấp lá gần nhất chứa `node` (li/đoạn văn/heading/ô bảng...). */
+function deleteBlockAncestor(node: Node): Element | null {
+  const el = closestElement(node);
+  return el ? el.closest(DELETE_BLOCK_SEL) : null;
+}
+
+/** Block coi như "rỗng, xoá được": không còn text nhìn thấy và không nhúng media (checkbox task thì kệ). */
+function isEmptyDeletableBlock(el: Element): boolean {
+  return (el.textContent ?? '').trim() === '' && !el.querySelector('img, video, audio, iframe, picture');
+}
+
+/** Đặt caret (đã collapse) về đầu nội dung `el` — với task item thì ngay sau checkbox. */
+function placeCaretAtBlockStart(el: Element): void {
+  const range = document.createRange();
+  const checkbox =
+    el.nodeName === 'LI' ? el.querySelector(':scope > input[type="checkbox"]') : null;
+  if (checkbox) {
+    range.setStartAfter(checkbox);
+  } else {
+    range.selectNodeContents(el);
+  }
+  range.collapse(true);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  content.focus();
+}
+
+/**
+ * Xoá đúng vùng chọn `range` trải TỪ `startBlock` SANG `endBlock` mà GIỮ NGUYÊN
+ * danh tính hai block ở hai đầu (không để trình duyệt gộp chéo thẻ). Ba bước:
+ *   1. Xoá phần đuôi startBlock (từ điểm bắt đầu vùng chọn tới hết block).
+ *   2. Xoá phần đầu endBlock (từ đầu block tới điểm kết thúc vùng chọn).
+ *   3. Xoá mọi node NẰM GIỮA hai block — dùng setStartAfter/setEndBefore để hai
+ *      mép nằm NGOÀI startBlock/endBlock nên bản thân hai block không bị đụng.
+ * Sau đó dọn block rỗng ở đầu (nếu user chọn từ đầu nó) và đặt lại caret.
+ */
+function deleteAcrossBlocksKeepingIdentity(range: Range, startBlock: Element, endBlock: Element): void {
+  // Chốt 4 mép TRƯỚC khi xoá — deleteContents() mutate DOM có thể dời điểm cuối
+  // của live selection `range`, đọc lại range.endContainer sau bước 1 sẽ sai.
+  // startBlock ≠ endBlock (khác cây con) nên xoá trong startBlock không đụng
+  // endContainer/endOffset đã chốt.
+  const startContainer = range.startContainer;
+  const startOffset = range.startOffset;
+  const endContainer = range.endContainer;
+  const endOffset = range.endOffset;
+
+  const tail = document.createRange();
+  tail.setStart(startContainer, startOffset);
+  tail.setEnd(startBlock, startBlock.childNodes.length);
+  tail.deleteContents();
+
+  const head = document.createRange();
+  head.setStart(endBlock, 0);
+  head.setEnd(endContainer, endOffset);
+  head.deleteContents();
+
+  const between = document.createRange();
+  between.setStartAfter(startBlock);
+  between.setEndBefore(endBlock);
+  between.deleteContents();
+
+  const startLi = startBlock.closest('li');
+  if (startLi && isEmptyDeletableBlock(startLi)) {
+    const list = startLi.parentElement;
+    startLi.remove();
+    if (list && !list.querySelector(':scope > li')) {
+      list.remove();
+    }
+  } else if (!startLi && startBlock.parentElement === content && isEmptyDeletableBlock(startBlock)) {
+    startBlock.remove();
+  }
+
+  placeCaretAtBlockStart(endBlock);
+}
+
+/**
+ * Bug #4: xoá vắt qua ranh giới list. Khi vùng chọn trải TỪ một <li> SANG một
+ * block khác list (heading/đoạn văn đứng sau list, hoặc ngược lại) rồi user bấm
+ * Backspace/Delete, contentEditable mặc định hay GỘP block kia vào trong list —
+ * biến heading thành bullet item, mất định dạng (đúng ảnh chụp bug report #4:
+ * xoá dòng cuối list làm heading "Bug Analysis" thành bullet). Ta tự xoá đúng
+ * vùng chọn mà giữ nguyên hai block ở hai đầu.
+ *
+ * CHỈ can thiệp đúng trường hợp vắt qua ranh giới list (start-block ≠ end-block,
+ * ít nhất một đầu là <li> thuộc list KHÁC đầu kia, và không dính bảng) — mọi
+ * thao tác xoá khác giữ nguyên hành vi mặc định của trình duyệt.
+ */
+function applyListBoundaryDeleteRule(): boolean {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    return false;
+  }
+  const range = sel.getRangeAt(0);
+  const startBlock = deleteBlockAncestor(range.startContainer);
+  const endBlock = deleteBlockAncestor(range.endContainer);
+  if (
+    !startBlock ||
+    !endBlock ||
+    startBlock === endBlock ||
+    !content.contains(startBlock) ||
+    !content.contains(endBlock)
+  ) {
+    return false;
+  }
+  // Không đụng khi hai đầu ở khác "khung bảng" — tránh phá cấu trúc <table>.
+  if (startBlock.closest('table') !== endBlock.closest('table')) {
+    return false;
+  }
+  const startLi = startBlock.closest('li');
+  const endLi = endBlock.closest('li');
+  const startList = startLi?.parentElement ?? null;
+  const endList = endLi?.parentElement ?? null;
+  const crossesListBoundary =
+    (!!startLi && (!endLi || startList !== endList)) || (!!endLi && (!startLi || startList !== endList));
+  if (!crossesListBoundary) {
+    return false;
+  }
+
+  deleteAcrossBlocksKeepingIdentity(range, startBlock, endBlock);
+  ctx.scheduleSync();
+  return true;
 }
 
 /** Caret có đang ở ngay đầu nội dung của mục list (không có text đứng trước)? */

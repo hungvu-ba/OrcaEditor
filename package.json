@@ -109,6 +109,36 @@
           "type": "boolean",
           "default": true,
           "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
+        },
+        "orcaEditor.crossFileSearch.scope": {
+          "type": "string",
+          "enum": ["markdown", "allFiles"],
+          "enumDescriptions": [
+            "Only search .md/.markdown files in the workspace.",
+            "Search all text files in the workspace (respecting .gitignore and default excludes like node_modules, dist, images, binaries)."
+          ],
+          "default": "markdown",
+          "description": "Default scope for the cross-file search triggered from a text selection in the preview. Can be overridden per-search via the dropdown in the results popover."
+        },
+        "orcaEditor.pasteImage.location": {
+          "type": "string",
+          "enum": ["siblingImagesFolder", "customFolder"],
+          "enumDescriptions": [
+            "Save into an `images/` subfolder next to the Markdown file being edited.",
+            "Save into the folder specified by orcaEditor.pasteImage.customFolderPath."
+          ],
+          "default": "siblingImagesFolder",
+          "description": "Where to save images pasted from the clipboard into the editor."
+        },
+        "orcaEditor.pasteImage.customFolderPath": {
+          "type": "string",
+          "default": "",
+          "description": "Folder to save pasted images into when orcaEditor.pasteImage.location is \"customFolder\". Relative paths resolve against the workspace folder containing the Markdown file; absolute paths are used as-is."
+        },
+        "orcaEditor.pasteImage.orphanCleanup.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "On save, permanently delete pasted images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically."
         }
       }
     }

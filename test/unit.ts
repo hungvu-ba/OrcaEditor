@@ -9,11 +9,13 @@
 import {
   classifyLink,
   computeMinimalEdit,
+  imageNamePrefix,
   normalizeForSearch,
   relativePath,
   type MinimalEdit,
 } from '../src/text-utils';
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
+import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 
 let pass = 0;
 let fail = 0;
@@ -135,6 +137,15 @@ eq('rel: khác nhánh', relativePath('/w/a/b', '/w/c/d/e.md'), '../../c/d/e.md')
 eq('rel: from là gốc', relativePath('/', '/w/a.md'), 'w/a.md');
 
 // ---------------------------------------------------------------------------
+// imageNamePrefix — prefix tên ảnh dán (C4: dọn ảnh mồ côi khi save)
+// ---------------------------------------------------------------------------
+
+eq('prefix: basename thường', imageNamePrefix('Requirement Doc'), 'requirement-doc');
+eq('prefix: bỏ dấu tiếng Việt như normalizeForSearch', imageNamePrefix('Đăng ký sự kiện'), 'dang-ky-su-kien');
+eq('prefix: chỉ ký tự CJK → rỗng (fallback không prefix)', imageNamePrefix('日本語'), '');
+check('prefix: giới hạn độ dài 40 ký tự', imageNamePrefix('a'.repeat(100)).length === 40);
+
+// ---------------------------------------------------------------------------
 // classifyLink — allowlist scheme
 // ---------------------------------------------------------------------------
 
@@ -162,18 +173,128 @@ const fromWebview: WebviewToHost[] = [
   { type: 'searchFiles', query: 'q', requestId: 1 },
   { type: 'addToClaudeContext' },
   { type: 'viewSource' },
+  { type: 'crossFileSearch:request', requestId: 1, query: 'q', scope: 'markdown', matchCase: false, wholeWord: true },
+  { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
+  { type: 'crossFileSearch:openInSearchPanel', query: 'q', scope: 'allFiles' },
+  { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
 ];
 const toWebview: HostToWebview[] = [
   { type: 'init', text: 'x', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
+    crossFileSearchScope: 'markdown',
   } },
+  { type: 'init', text: 'x', config: {
+    breaks: false, linkify: true, wordWrap: false, fontSize: 14,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
+    crossFileSearchScope: 'markdown',
+  }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
   { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true },
+  { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
+  { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
+  { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
 ];
-check('contract: WebviewToHost phủ đủ 6 biến thể', fromWebview.length === 6);
-check('contract: HostToWebview phủ đủ 4 biến thể', toWebview.length === 4);
+check('contract: WebviewToHost phủ đủ 10 biến thể', fromWebview.length === 10);
+check('contract: HostToWebview phủ đủ 8 biến thể (init có/không reveal + scrollToPosition + pasteImage)', toWebview.length === 8);
+
+// ---------------------------------------------------------------------------
+// findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho
+// Ctrl+F/Feature B (webview) và host provider. Case tiếng Việt có dấu là lý do
+// cấm \b/\w (chỉ nhận [A-Za-z0-9_]).
+// ---------------------------------------------------------------------------
+
+const OPT = (matchCase: boolean, wholeWord: boolean): MatchOptions => ({ matchCase, wholeWord });
+
+// Substring, case-insensitive mặc định (matchCase:false) — query lệch hoa/thường vẫn khớp.
+eq(
+  'match: substring case-insensitive mặc định',
+  findTextMatches('Hello WORLD hello', 'hello', OPT(false, false)),
+  [{ start: 0, end: 5 }, { start: 12, end: 17 }]
+);
+
+// matchCase:true — chỉ khớp đúng hoa/thường; occurrence lệch case KHÔNG khớp.
+eq(
+  'match: matchCase phân biệt hoa/thường',
+  findTextMatches('Editor editor EDITOR', 'editor', OPT(true, false)),
+  [{ start: 7, end: 13 }]
+);
+
+// wholeWord:true — query đứng như từ trọn vẹn khớp; nằm trong từ lớn hơn thì KHÔNG.
+eq(
+  'match: wholeWord chỉ khớp từ trọn vẹn',
+  findTextMatches('MarkdownEditor and Editor', 'Editor', OPT(false, true)),
+  [{ start: 19, end: 25 }]
+);
+
+// wholeWord:false — cùng query DO khớp cả bên trong từ lớn hơn.
+eq(
+  'match: wholeWord tắt vẫn khớp bên trong từ lớn',
+  findTextMatches('MarkdownEditor and Editor', 'Editor', OPT(false, false)),
+  [{ start: 8, end: 14 }, { start: 19, end: 25 }]
+);
+
+// Ranh giới từ tiếng Việt có dấu — ĐÂY LÀ LÝ DO CẤM \b/\w. Query "ường" là
+// substring của cả "đường" (đứng trước là 'đ') lẫn "trường" (đứng trước là 'r').
+// 'đ' và 'r' đều là CHỮ CÁI ⇒ với ranh giới Unicode-aware, "ường" KHÔNG phải từ
+// trọn vẹn ở đâu cả ⇒ wholeWord trả về RỖNG. (\b/\w naive sẽ SAI: coi 'đ' là
+// ký tự non-word nên tưởng có ranh giới trước "ường" trong "đường".)
+eq(
+  'match: wholeWord — "đ" là ký tự từ nên "ường" không khớp (chống \\b sai)',
+  findTextMatches('đường trường', 'ường', OPT(false, true)),
+  []
+);
+// Đối chứng: wholeWord:false thì cả hai lần xuất hiện đều khớp.
+eq(
+  'match: substring bắt cả "ường" trong "đường" lẫn "trường"',
+  findTextMatches('đường trường', 'ường', OPT(false, false)),
+  [{ start: 1, end: 5 }, { start: 8, end: 12 }]
+);
+// "trường" như một từ trọn vẹn (giữa 2 khoảng trắng) vẫn khớp dù có dấu.
+eq(
+  'match: wholeWord khớp "trường" trọn vẹn (có dấu)',
+  findTextMatches('đi trên trường', 'trường', OPT(false, true)),
+  [{ start: 8, end: 14 }]
+);
+// "đường" đứng riêng (đầu chuỗi) khớp wholeWord — chứng minh nhánh find-được.
+eq(
+  'match: wholeWord khớp "đường" đứng riêng',
+  findTextMatches('đường trường', 'đường', OPT(false, true)),
+  [{ start: 0, end: 5 }]
+);
+
+// Ranh giới = mép chuỗi (không phải ký tự) — từ đầu và từ cuối vẫn khớp wholeWord.
+eq(
+  'match: wholeWord ở đầu chuỗi',
+  findTextMatches('cat and dog', 'cat', OPT(false, true)),
+  [{ start: 0, end: 3 }]
+);
+eq(
+  'match: wholeWord ở cuối chuỗi',
+  findTextMatches('a lazy dog', 'dog', OPT(false, true)),
+  [{ start: 7, end: 10 }]
+);
+
+// Không chồng lấn + tôn trọng cap maxMatches.
+eq(
+  'match: không chồng lấn, cap maxMatches',
+  findTextMatches('aaaa', 'aa', OPT(false, false), 5),
+  [{ start: 0, end: 2 }, { start: 2, end: 4 }]
+);
+eq(
+  'match: cap maxMatches cắt đúng số lượng',
+  findTextMatches('x x x x', 'x', OPT(false, false), 2),
+  [{ start: 0, end: 1 }, { start: 2, end: 3 }]
+);
+
+// Query rỗng ⇒ không match; wholeWord với ký tự "_" coi là ký tự từ.
+eq('match: query rỗng ⇒ rỗng', findTextMatches('abc', '', OPT(false, true)), []);
+eq(
+  'match: "_" là ký tự từ nên foo_bar không khớp wholeWord "foo"',
+  findTextMatches('foo_bar foo', 'foo', OPT(false, true)),
+  [{ start: 8, end: 11 }]
+);
 
 // ---------------------------------------------------------------------------
 

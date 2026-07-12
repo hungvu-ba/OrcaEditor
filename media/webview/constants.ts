@@ -39,3 +39,48 @@ export const TABLE_TOOLBAR_HIDE_MS = 3_000;
 
 /** Thời gian hiện toast trước khi tự ẩn (dom-utils.ts). */
 export const TOAST_DURATION_MS = 6_000;
+
+// --- Lựa chọn văn bản (selection) ---
+
+/** Ngưỡng độ dài tối thiểu (ký tự) để trigger highlight-khi-select (A) và icon tìm xuyên file (B). */
+export const MIN_SELECT_LENGTH = 3;
+
+/** Trễ trước khi hiện icon tìm xuyên file sau khi selection đứng yên (cross-file-search.ts). */
+export const CROSS_FILE_ICON_DEBOUNCE_MS = 750;
+
+/** Thời gian icon tìm xuyên file tự ẩn sau khi hiện, nếu user không hover/focus vào nó (cross-file-search.ts). */
+export const ICON_AUTO_HIDE_MS = 3_000;
+
+/**
+ * Cửa sổ "ân hạn" ngay sau khi icon tìm xuyên file vừa hiện — bỏ qua sự kiện 'mouseenter' xảy ra
+ * trong khoảng này (cross-file-search.ts). Icon luôn xuất hiện đúng ngay chỗ chuột vừa dừng lại
+ * (cuối vùng chọn vừa kéo — xem positionBubble), nên chỉ cần rung tay nhẹ là 'mouseenter' bắn ra
+ * ngay sau khi icon hiện, pause timer tự-ẩn 3s VĨNH VIỄN (chỉ resume khi mouseleave, mà chuột chưa
+ * hề rời khỏi icon) — đây là nguyên nhân bug "icon không tự ẩn sau 3s" (C4 bug report #1).
+ */
+export const ICON_HOVER_GRACE_MS = 400;
+
+/**
+ * Throttle riêng cho việc dựng lại tick DOM của thước overview bên phải khi select
+ * (select-highlight.ts, C1). CSS.highlights.set(...) (paint) rẻ nên KHÔNG bị throttle bởi hằng số
+ * này, giữ nguyên tần suất mỗi requestAnimationFrame — chỉ phần dựng tick DOM +
+ * getBoundingClientRect() mỗi match (đắt hơn) bị gộp về tối đa 1 lần mỗi khoảng này, kể cả khi
+ * 'selectionchange' bắn liên tục lúc kéo chuột.
+ */
+export const SELECT_OVERVIEW_THROTTLE_MS = 150;
+
+/** Số ký tự ngữ cảnh tối đa mỗi bên (trái/phải) quanh match trong snippet kết quả — cắt bằng "…" để match luôn nằm trong vùng nhìn thấy của popover 320px, không bị `text-overflow: ellipsis` nuốt mất khi dòng gốc quá dài (cross-file-search.ts). */
+export const SNIPPET_CONTEXT_CHARS = 40;
+
+// --- Chống trùng lặp xử lý sự kiện ---
+
+/**
+ * Cửa sổ chặn trùng (ms) khi lưu ảnh dán từ clipboard (paste-image.ts).
+ * Cmd/Ctrl+V bắn 'keydown' (→ fallback Clipboard API) nhưng trong webview lồng
+ * nhau của VS Code, 'paste' DOM event kèm đủ clipboardData ảnh vẫn có thể bắn
+ * tiếp ngay sau đó — khác với text (hay thiếu clipboardData khi gõ phím tắt),
+ * ảnh dường như luôn có mặt ở cả hai nơi, khiến cả hai đường cùng "tìm thấy
+ * ảnh" và cùng lưu, tạo 2 file/2 link trùng nhau. Đường nào gọi requestSave
+ * trước trong cửa sổ này thắng; đường còn lại coi như đã được xử lý, bỏ qua.
+ */
+export const PASTE_IMAGE_DEDUPE_MS = 500;

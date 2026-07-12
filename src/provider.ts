@@ -1,8 +1,16 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as crypto from 'crypto';
-import type { HostToWebview, WebviewToHost } from './shared/messages';
-import { classifyLink, computeMinimalEdit, normalizeForSearch, relativePath } from './text-utils';
+import type {
+  CrossFileMatch,
+  CrossFileMatchGroup,
+  CrossFileSearchScope,
+  HostToWebview,
+  WebviewToHost,
+} from './shared/messages';
+import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
+import { findTextMatches, type MatchOptions } from './shared/text-match';
 
 /**
  * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
@@ -51,6 +59,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
+  /**
+   * C6b: registry panel đang mở theo uri.toString(). `supportsMultipleEditorsPerDocument:
+   * true` (xem register() ở trên) cho phép NHIỀU panel Orca Editor cùng mở 1
+   * document cùng lúc — vì vậy giá trị là 1 Set, không phải 1 panel duy nhất.
+   * Dùng để: khi kết quả tìm xuyên file trỏ tới 1 file .md đã có panel mở sẵn,
+   * gửi thẳng 'scrollToPosition' tới panel đó thay vì mở lại (vscode.openWith).
+   */
+  private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
+
+  /**
+   * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
+   * (panel .md CHƯA tồn tại), đọc + xoá đúng 1 lần khi resolveCustomTextEditor
+   * gửi message 'init' cho document đó. Dùng một lần: nếu không xoá ngay, mở
+   * lại file này sau đó (không qua cross-file-search) sẽ vô tình áp lại vị trí
+   * cũ.
+   */
+  private pendingReveal = new Map<string, { line: number; character: number; length: number; matchText?: string }>();
+
   /** Kênh log dùng chung — tạo một lần, dùng cho các lỗi bị nuốt ở catch rộng. */
   private static outputChannel: vscode.OutputChannel | undefined;
   private static log(message: string, err?: unknown): void {
@@ -70,6 +96,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   ): Promise<void> {
     const webview = webviewPanel.webview;
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const docUriStr = document.uri.toString();
+
+    // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
+    // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
+    let panelsForUri = this.panelsByUri.get(docUriStr);
+    if (!panelsForUri) {
+      panelsForUri = new Set();
+      this.panelsByUri.set(docUriStr, panelsForUri);
+    }
+    panelsForUri.add(webviewPanel);
 
     /** Gửi message tới webview theo đúng hợp đồng HostToWebview (C3). */
     const postToWebview = (msg: HostToWebview): Thenable<boolean> => webview.postMessage(msg);
@@ -105,6 +141,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       const text = e.document.getText();
+      // C5: chạy TRƯỚC echo-check bên dưới — undo trong webview (Ctrl+Z trên
+      // contentEditable) đi qua đúng flow 'edit' bình thường (xem
+      // restoreUndoneImageDeletions), nên e.document.getText() === lastTextFromWebview
+      // và sẽ bị early-return nếu đặt sau.
+      void this.restoreUndoneImageDeletions(e.document, text);
       if (text === lastTextFromWebview) {
         // Thay đổi này do chính webview tạo ra — webview đã ở đúng trạng thái.
         return;
@@ -117,6 +158,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         updateTimer = undefined;
         void postToWebview({ type: 'update', text: document.getText() });
       }, UPDATE_DEBOUNCE_MS);
+    });
+
+    // C4: dọn ảnh dán bị mồ côi (paste nhầm rồi undo...) mỗi lần file được
+    // lưu — xem cleanupOrphanImages để biết phạm vi và giới hạn.
+    const saveSubscription = vscode.workspace.onDidSaveTextDocument((saved) => {
+      if (saved.uri.toString() !== document.uri.toString()) {
+        return;
+      }
+      void this.cleanupOrphanImages(saved);
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
@@ -140,9 +190,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
           const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
+          // C6a: vị trí chờ áp dụng (nếu panel này vừa được mở từ 1 kết quả
+          // tìm xuyên file) — dùng một lần, xoá ngay khỏi map để không áp lại
+          // cho lần mở file sau đó không qua cross-file-search.
+          const reveal = this.pendingReveal.get(docUriStr);
+          if (reveal) {
+            this.pendingReveal.delete(docUriStr);
+          }
           void postToWebview({
             type: 'init',
             text: document.getText(),
+            ...(reveal ? { reveal } : {}),
             config: {
               breaks: cfg.get<boolean>('breaks', false),
               linkify: cfg.get<boolean>('linkify', true),
@@ -155,6 +213,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+              crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
             },
           });
           break;
@@ -185,6 +244,27 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void this.viewSource(document);
           break;
         }
+        case 'crossFileSearch:request': {
+          const { groups, truncated, usedFallback } = await this.crossFileSearch(document, msg.query, msg.scope, {
+            matchCase: msg.matchCase,
+            wholeWord: msg.wholeWord,
+          });
+          void postToWebview({ type: 'crossFileSearch:result', requestId: msg.requestId, groups, truncated, usedFallback });
+          break;
+        }
+        case 'crossFileSearch:openResult': {
+          void this.openCrossFileSearchResult(msg.uri, msg.line, msg.character, msg.length, msg.matchText);
+          break;
+        }
+        case 'crossFileSearch:openInSearchPanel': {
+          void this.openInSearchPanel(msg.query, msg.scope);
+          break;
+        }
+        case 'pasteImage': {
+          const result = await this.savePastedImage(document, msg.mime, msg.dataBase64);
+          void postToWebview({ type: 'pasteImageResult', requestId: msg.requestId, ...result });
+          break;
+        }
       }
     });
 
@@ -194,8 +274,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         updateTimer = undefined;
       }
       changeSubscription.dispose();
+      saveSubscription.dispose();
       configSubscription.dispose();
       messageSubscription.dispose();
+
+      // C6b: gỡ panel khỏi registry để tránh rò rỉ / nhắm 'scrollToPosition'
+      // vào 1 panel đã đóng.
+      const panels = this.panelsByUri.get(docUriStr);
+      if (panels) {
+        panels.delete(webviewPanel);
+        if (panels.size === 0) {
+          this.panelsByUri.delete(docUriStr);
+        }
+      }
     });
   }
 
@@ -250,6 +341,82 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     } catch (err) {
       MarkdownWysiwygProvider.log(`vscode.open failed for target: ${target.toString()}`, err);
       void vscode.window.showWarningMessage(`Could not open link: ${href}`);
+    }
+  }
+
+  /**
+   * Mở kết quả tìm xuyên file tại đúng vị trí match: file .md mở bằng chính
+   * Orca Editor (vscode.openWith + viewType), file khác mở bằng text editor
+   * thường (vscode.open) — theo yêu cầu B. "mở file đó (Orca Editor nếu là
+   * .md, editor thường nếu không)". Cùng kiểu try/catch + log + cảnh báo như
+   * openLink() ở trên để nhất quán trong file.
+   *
+   * C6: `selection` trong TextDocumentShowOptions chỉ được VS Code tự áp dụng
+   * cho text editor chuẩn — với custom editor webview (.md) nó bị bỏ qua âm
+   * thầm, nên phải tự forward vị trí qua 2 kênh tuỳ trạng thái panel:
+   *  - Panel .md đã mở sẵn (registry `panelsByUri`, có thể do
+   *    supportsMultipleEditorsPerDocument) → reveal panel đó rồi gửi thẳng
+   *    'scrollToPosition', KHÔNG gọi lại vscode.openWith (sẽ dư thừa/có thể
+   *    tạo thêm editor group).
+   *  - Chưa có panel nào → set `pendingReveal` rồi mới openWith; panel mới sẽ
+   *    đọc lại giá trị này khi gửi message 'init' (xem case 'ready' ở trên).
+   */
+  private async openCrossFileSearchResult(
+    uriStr: string,
+    line: number,
+    character: number,
+    length: number,
+    matchText?: string
+  ): Promise<void> {
+    try {
+      const uri = vscode.Uri.parse(uriStr);
+      const range = new vscode.Range(
+        new vscode.Position(line, character),
+        new vscode.Position(line, character + length)
+      );
+      const isMarkdown = /\.(md|markdown)$/i.test(uri.path);
+      if (isMarkdown) {
+        const existingPanels = this.panelsByUri.get(uri.toString());
+        if (existingPanels && existingPanels.size > 0) {
+          // Ưu tiên panel đang active (focus) nếu có, không thì lấy đại 1 cái.
+          let target: vscode.WebviewPanel | undefined;
+          for (const panel of existingPanels) {
+            if (panel.active) {
+              target = panel;
+              break;
+            }
+          }
+          if (!target) {
+            target = existingPanels.values().next().value;
+          }
+          target?.reveal(target.viewColumn);
+          const msg: HostToWebview = { type: 'scrollToPosition', line, character, length, matchText };
+          void target?.webview.postMessage(msg);
+        } else {
+          this.pendingReveal.set(uri.toString(), { line, character, length, matchText });
+          await vscode.commands.executeCommand('vscode.openWith', uri, MarkdownWysiwygProvider.viewType, {
+            selection: range,
+          });
+        }
+      } else {
+        await vscode.commands.executeCommand('vscode.open', uri, { selection: range });
+      }
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`crossFileSearch:openResult failed for uri: ${uriStr}`, err);
+      void vscode.window.showWarningMessage(`Could not open file: ${uriStr}`);
+    }
+  }
+
+  /** "Xem thêm trong Search panel" — đẩy query sang panel Search chuẩn của VS Code khi popover không đủ chỗ hiển thị hết. */
+  private async openInSearchPanel(query: string, scope: CrossFileSearchScope): Promise<void> {
+    try {
+      await vscode.commands.executeCommand('workbench.action.findInFiles', {
+        query,
+        filesToInclude: scope === 'markdown' ? '*.md,*.markdown' : '',
+        isCaseSensitive: false,
+      });
+    } catch (err) {
+      MarkdownWysiwygProvider.log('crossFileSearch:openInSearchPanel failed', err);
     }
   }
 
@@ -427,6 +594,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private static readonly FILE_SEARCH_MAX_SCAN = 5000;
   private static readonly FILE_SEARCH_MAX_RESULTS = 20;
 
+  // --- Tìm xuyên file (crossFileSearch) — cùng tinh thần với FILE_SEARCH_* ở
+  // trên nhưng là tính năng riêng: tìm NỘI DUNG (không phải tên file) trên
+  // nhiều file cùng lúc, theo scope 'markdown' | 'allFiles'.
+  /** Số file tối đa quét nội dung — glob rộng (đặc biệt allFiles) có thể rất lớn. */
+  private static readonly CROSS_FILE_SEARCH_MAX_FILES = 500;
+  /** Tổng số match tối đa trả về, gộp mọi file. */
+  private static readonly CROSS_FILE_SEARCH_MAX_RESULTS = 20;
+  /** Số file (nhóm) tối đa có mặt trong kết quả. */
+  private static readonly CROSS_FILE_SEARCH_MAX_GROUPS = 5;
+  /** scope 'allFiles': loại thêm ảnh/binary phổ biến ngoài các thư mục build/deps. */
+  private static readonly CROSS_FILE_SEARCH_EXCLUDE_ALL =
+    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,' +
+    '**/*.png,**/*.jpg,**/*.jpeg,**/*.gif,**/*.svg,**/*.ico,**/*.webp,**/*.bmp,' +
+    '**/*.pdf,**/*.zip,**/*.gz,**/*.tar,**/*.7z,**/*.rar,' +
+    '**/*.woff,**/*.woff2,**/*.ttf,**/*.eot,**/*.otf,' +
+    '**/*.mp4,**/*.mp3,**/*.mov,**/*.avi,**/*.wav,' +
+    '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar}';
+
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
   private static readonly FILE_SEARCH_CACHE_TTL_MS = 4000;
@@ -501,6 +686,382 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         dir: rel.slice(0, Math.max(0, rel.length - item.name.length - 1)) || '.',
       };
     });
+  }
+
+  /**
+   * Tìm literal `query` (không phân biệt hoa/thường, không phải regex) trong
+   * nội dung nhiều file của workspace — mục B "Tìm xuyên file trong project".
+   *
+   * - File đang mở trong editor (kể cả đang sửa dở, chưa lưu) được đọc từ
+   *   buffer `vscode.workspace.textDocuments` để bắt cả nội dung chưa save;
+   *   file khác đọc từ đĩa qua workspace.fs.
+   * - File đang mở trong CHÍNH editor này (document) bị loại trừ hoàn toàn.
+   * - Giới hạn kết quả: tối đa CROSS_FILE_SEARCH_MAX_RESULTS match, gộp trong
+   *   tối đa CROSS_FILE_SEARCH_MAX_GROUPS file đầu tiên có match — quét file
+   *   theo thứ tự findFiles trả về, dừng thu thập file MỚI khi đã đủ nhóm,
+   *   nhưng vẫn cho file đang được thu thập dở dùng nốt phần ngân sách 20 kết
+   *   quả còn lại. `truncated` = true nếu còn file/kết quả chưa quét (kể cả
+   *   khi chính findFiles đã bị cắt ở CROSS_FILE_SEARCH_MAX_FILES).
+   */
+  private async crossFileSearch(
+    document: vscode.TextDocument,
+    query: string,
+    scope: CrossFileSearchScope,
+    options: MatchOptions
+  ): Promise<{ groups: CrossFileMatchGroup[]; truncated: boolean; usedFallback: boolean }> {
+    if (!query) {
+      return { groups: [], truncated: false, usedFallback: false };
+    }
+
+    const include = scope === 'markdown' ? '**/*.{md,markdown}' : '**/*';
+    const exclude =
+      scope === 'markdown'
+        ? MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE
+        : MarkdownWysiwygProvider.CROSS_FILE_SEARCH_EXCLUDE_ALL;
+    const uris = await vscode.workspace.findFiles(
+      include,
+      exclude,
+      MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES
+    );
+
+    // Một lượt quét theo `opts` — giữ NGUYÊN mọi cap/exclusion/đọc buffer/loại
+    // trừ file hiện tại; chỉ thay primitive so khớp (indexOf phẳng → lõi chung
+    // findTextMatches, để logic ranh giới từ Unicode-aware khớp hệt webview).
+    const scan = async (
+      opts: MatchOptions
+    ): Promise<{ groups: CrossFileMatchGroup[]; truncated: boolean; total: number }> => {
+      const groups: CrossFileMatchGroup[] = [];
+      let totalMatches = 0;
+      // findFiles tự nó đã có thể bị cắt bớt ở cap quét file — nếu số file trả
+      // về đúng bằng cap, coi như "có thể còn file chưa quét".
+      let truncated = uris.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES;
+
+      for (const uri of uris) {
+        if (uri.toString() === document.uri.toString()) {
+          continue; // loại trừ hoàn toàn file đang mở, không tính vào cap
+        }
+        if (
+          totalMatches >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS ||
+          groups.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_GROUPS
+        ) {
+          truncated = true;
+          break;
+        }
+
+        let text: string;
+        try {
+          const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+          if (openDoc) {
+            text = openDoc.getText();
+          } else {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            text = new TextDecoder().decode(bytes);
+          }
+        } catch (err) {
+          // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
+          // làm hỏng cả lượt tìm — bỏ qua file đó, log lại rồi tiếp tục.
+          MarkdownWysiwygProvider.log(`crossFileSearch: could not read ${uri.toString()}`, err);
+          continue;
+        }
+
+        const lines = text.split(/\r\n|\r|\n/);
+        const fileMatches: CrossFileMatch[] = [];
+        let hitCap = false;
+        for (let lineNo = 0; lineNo < lines.length && !hitCap; lineNo++) {
+          // Trim TRƯỚC rồi so khớp trên chuỗi đã trim, để character luôn khớp
+          // đúng vị trí trong lineText trả về (bất biến bắt buộc: webview chỉ
+          // slice(character, character+length) từ lineText, không tự tìm lại).
+          const trimmedLine = lines[lineNo].trim();
+          // Cap còn lại cho toàn lượt — chỉ cần tối đa từng ấy match trên 1 dòng.
+          const remaining = MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS - (totalMatches + fileMatches.length);
+          if (remaining <= 0) {
+            hitCap = true;
+            truncated = true;
+            break;
+          }
+          const offsets = findTextMatches(trimmedLine, query, opts, remaining);
+          for (const { start, end } of offsets) {
+            fileMatches.push({
+              line: lineNo,
+              character: start,
+              length: end - start,
+              contextBefore: lineNo > 0 ? lines[lineNo - 1].trim() : '',
+              lineText: trimmedLine,
+              contextAfter: lineNo < lines.length - 1 ? lines[lineNo + 1].trim() : '',
+            });
+            if (totalMatches + fileMatches.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS) {
+              hitCap = true;
+              truncated = true;
+              break;
+            }
+          }
+        }
+
+        if (fileMatches.length === 0) {
+          continue; // file không có match không tính vào cap 5 nhóm
+        }
+        const segments = uri.path.split('/');
+        groups.push({
+          uri: uri.toString(),
+          fileName: segments[segments.length - 1],
+          relativePath: vscode.workspace.asRelativePath(uri, false),
+          matches: fileMatches,
+        });
+        totalMatches += fileMatches.length;
+      }
+
+      return { groups, truncated, total: totalMatches };
+    };
+
+    let result = await scan(options);
+    let usedFallback = false;
+    // Fallback server-side (C4, chốt #4): Whole Word bật mà 0 kết quả trên toàn
+    // bộ file ⇒ quét lại toàn bộ theo substring (vẫn tôn trọng matchCase) trong
+    // CÙNG round-trip, trả usedFallback=true để webview báo + đồng bộ toggle.
+    // Chỉ 0-total mới kích hoạt; tìm được dù chỉ 1 match thì KHÔNG fallback.
+    if (options.wholeWord && result.total === 0) {
+      result = await scan({ matchCase: options.matchCase, wholeWord: false });
+      usedFallback = true;
+    }
+
+    return { groups: result.groups, truncated: result.truncated, usedFallback };
+  }
+
+  /** Đuôi file tương ứng mỗi MIME ảnh clipboard hỗ trợ — SVG cố ý bỏ qua (kịch bản khai thác XSS/script trong SVG dán từ clipboard không đáng để đánh đổi). */
+  private static readonly PASTE_IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+  };
+
+  /** Đoạn giữa cố định của tên file ảnh dán — dùng để nhận diện file "của cleanup" khi liệt kê thư mục. */
+  private static readonly PASTE_IMAGE_MARKER = 'pasted-image-';
+
+  /**
+   * Thư mục lưu ảnh dán, theo setting `orcaEditor.pasteImage.location`:
+   *  - siblingImagesFolder (mặc định): thư mục con `images/` cạnh file .md.
+   *  - customFolder: thư mục ở `customFolderPath` (tuyệt đối, hoặc tương đối
+   *    so với workspace folder chứa document).
+   * Dùng chung bởi savePastedImage (ghi file) và cleanupOrphanImages (quét).
+   */
+  private resolveImagesDir(document: vscode.TextDocument): vscode.Uri {
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage', document.uri);
+    const location = cfg.get<'siblingImagesFolder' | 'customFolder'>('location', 'siblingImagesFolder');
+    const customFolderPath = cfg.get<string>('customFolderPath', '').trim();
+
+    if (location === 'customFolder' && customFolderPath) {
+      const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+      const base = workspaceFolder?.uri ?? documentDir;
+      return path.isAbsolute(customFolderPath)
+        ? vscode.Uri.file(customFolderPath)
+        : vscode.Uri.joinPath(base, customFolderPath);
+    }
+    return vscode.Uri.joinPath(documentDir, 'images');
+  }
+
+  /**
+   * Prefix tên file ảnh suy ra từ basename document — gắn "quyền sở hữu" ảnh
+   * vào 1 file .md mà không cần lưu index riêng (xem imageNamePrefix). Rỗng
+   * khi basename không chuẩn hoá được (vd toàn CJK) — cleanupOrphanImages bỏ
+   * qua document đó (không đủ cơ sở xác định ảnh nào thuộc về nó).
+   */
+  private imagePrefixFor(document: vscode.TextDocument): string {
+    return imageNamePrefix(path.basename(document.fileName, path.extname(document.fileName)));
+  }
+
+  /**
+   * Lưu ảnh dán từ clipboard (case 'pasteImage') thành file thật.
+   * Tái dùng isInsideAllowedRoots (như openLink) để customFolderPath cấu hình
+   * sai/trỏ ra ngoài workspace không thể ghi file ra ngoài phạm vi cho phép.
+   * Tên file có prefix theo basename document (C4: xem cleanupOrphanImages) để
+   * dọn ảnh mồ côi khi save không cần quét nội dung mọi file .md khác.
+   * Trả về đường dẫn tương đối (chưa mã hoá URL — webview tự encodeLinkPath
+   * trước khi chèn, giống quy ước searchWorkspaceFiles) để webview chèn
+   * <img src="...">; trả `error` (không có relativePath) khi thất bại.
+   */
+  private async savePastedImage(
+    document: vscode.TextDocument,
+    mime: string,
+    dataBase64: string
+  ): Promise<{ relativePath?: string; error?: string }> {
+    const ext = MarkdownWysiwygProvider.PASTE_IMAGE_EXTENSIONS[mime];
+    if (!ext) {
+      return { error: `Unsupported clipboard image type: ${mime}` };
+    }
+
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const targetDir = this.resolveImagesDir(document);
+
+    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+      return { error: 'Configured paste-image folder is outside the allowed workspace.' };
+    }
+
+    const prefix = this.imagePrefixFor(document);
+    const fileName = `${prefix ? prefix + '-' : ''}${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    const targetUri = vscode.Uri.joinPath(targetDir, fileName);
+
+    try {
+      await vscode.workspace.fs.createDirectory(targetDir);
+      await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`Failed to save pasted image to ${targetUri.toString()}`, err);
+      return { error: 'Failed to save pasted image.' };
+    }
+
+    return { relativePath: relativePath(documentDir.path, targetUri.path) };
+  }
+
+  /**
+   * Bytes của ảnh vừa bị cleanupOrphanImages xoá cứng, giữ tạm trong bộ nhớ để
+   * restoreUndoneImageDeletions có thể ghi lại file thật ngay khi tên file đó
+   * xuất hiện lại trong document (undo xoá ảnh, hoặc paste lại đúng ảnh cũ) —
+   * xử lý y như đang paste ảnh mới, không cần trash trên đĩa (C5). Cap kích
+   * thước để không phình bộ nhớ nếu người dùng xoá nhiều ảnh trong 1 phiên mà
+   * không bao giờ undo; key là tên file (đã unique nhờ hash ngẫu nhiên trong
+   * savePastedImage nên không cần phân biệt theo document).
+   */
+  private static readonly MAX_RECENTLY_DELETED_IMAGES = 20;
+  private readonly recentlyDeletedImages = new Map<string, Uint8Array>();
+
+  private rememberDeletedImage(fileName: string, bytes: Uint8Array): void {
+    this.recentlyDeletedImages.set(fileName, bytes);
+    while (this.recentlyDeletedImages.size > MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_IMAGES) {
+      const oldest = this.recentlyDeletedImages.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.recentlyDeletedImages.delete(oldest);
+    }
+  }
+
+  /**
+   * Dọn ảnh mồ côi khi save (đăng ký ở onDidSaveTextDocument, xem
+   * resolveCustomTextEditor): ảnh do document này "sở hữu" (tên file có
+   * prefix từ imagePrefixFor, xem savePastedImage) nhưng không còn xuất hiện
+   * trong nội dung vừa lưu → ứng viên mồ côi (vd paste nhầm rồi undo ngay).
+   *
+   * Trước khi dọn 1 ứng viên, kiểm tra các file .md khác CÙNG THƯ MỤC — nếu
+   * bất kỳ file nào còn nhắc tới tên file ảnh đó (dừng ngay khi thấy 1 file,
+   * không cần đọc hết), coi là còn dùng và bỏ qua: không xoá, không đổi tên.
+   * Sửa nội dung 1 file khác ngoài ý muốn người dùng (để cập nhật lại link)
+   * rủi ro hơn hẳn giá trị của việc giữ đúng naming convention.
+   *
+   * Ứng viên thật sự mồ côi bị xoá cứng ngay (không tạo thư mục trash trên
+   * đĩa) — an toàn undo được xử lý riêng bằng cache trong bộ nhớ, xem
+   * rememberDeletedImage/restoreUndoneImageDeletions.
+   *
+   * Giới hạn phạm vi (đánh đổi lấy hiệu năng — không quét toàn bộ thư mục):
+   * ảnh dán trước khi tính năng này tồn tại (không có prefix) không được quản
+   * lý tự động; tham chiếu chéo từ file .md ngoài thư mục hiện tại cũng không
+   * được phát hiện. Mọi lỗi ở đây chỉ log, không làm fail thao tác save.
+   */
+  private async cleanupOrphanImages(document: vscode.TextDocument): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage.orphanCleanup', document.uri);
+    if (!cfg.get<boolean>('enabled', true)) {
+      return;
+    }
+
+    const imagesDir = this.resolveImagesDir(document);
+    if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
+      return;
+    }
+
+    const prefix = this.imagePrefixFor(document);
+    if (!prefix) {
+      return;
+    }
+
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(imagesDir);
+    } catch {
+      return; // Chưa có thư mục ảnh nào — không có gì để dọn.
+    }
+
+    const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
+    const text = document.getText();
+    const candidates = entries
+      .filter(([name, type]) => type === vscode.FileType.File && name.startsWith(ownedMarker))
+      .map(([name]) => name)
+      .filter((name) => !text.includes(name));
+
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
+
+    for (const name of candidates) {
+      if (await this.isReferencedInSiblingFiles(name, siblingMdUris, document.uri)) {
+        continue;
+      }
+      await this.deleteOrphanImage(imagesDir, name);
+    }
+  }
+
+  /** true nếu tìm thấy 1 file .md khác (không phải chính document) còn nhắc tới fileName — dừng ngay, không đọc hết danh sách. */
+  private async isReferencedInSiblingFiles(
+    fileName: string,
+    siblingUris: readonly vscode.Uri[],
+    ownDocumentUri: vscode.Uri
+  ): Promise<boolean> {
+    for (const uri of siblingUris) {
+      if (uri.toString() === ownDocumentUri.toString()) {
+        continue;
+      }
+      try {
+        const opened = await vscode.workspace.openTextDocument(uri);
+        if (opened.getText().includes(fileName)) {
+          return true;
+        }
+      } catch (err) {
+        MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
+      }
+    }
+    return false;
+  }
+
+  /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
+  private async deleteOrphanImage(imagesDir: vscode.Uri, fileName: string): Promise<void> {
+    const fileUri = vscode.Uri.joinPath(imagesDir, fileName);
+    try {
+      const bytes = await vscode.workspace.fs.readFile(fileUri);
+      this.rememberDeletedImage(fileName, bytes);
+      await vscode.workspace.fs.delete(fileUri, { useTrash: false });
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`cleanupOrphanImages: failed to delete ${fileName}`, err);
+    }
+  }
+
+  /**
+   * Ghi lại file thật cho ảnh vừa bị cleanupOrphanImages xoá, ngay khi tên
+   * file đó xuất hiện lại trong nội dung document — dù do undo (DOM-level
+   * trong webview lẫn undo ở cấp TextDocument đều đi qua onDidChangeTextDocument)
+   * hay do người dùng dán/gõ lại đúng path cũ. Coi như đang xử lý một lượt
+   * paste ảnh mới (C5): không có bước này thì sau khi undo, ảnh hiện lại
+   * trong editor nhưng file thật đã mất — save, đóng, mở lại sẽ vỡ ảnh.
+   */
+  private async restoreUndoneImageDeletions(document: vscode.TextDocument, text: string): Promise<void> {
+    if (this.recentlyDeletedImages.size === 0) {
+      return;
+    }
+    const imagesDir = this.resolveImagesDir(document);
+    for (const [fileName, bytes] of this.recentlyDeletedImages) {
+      if (!text.includes(fileName)) {
+        continue;
+      }
+      this.recentlyDeletedImages.delete(fileName);
+      try {
+        await vscode.workspace.fs.createDirectory(imagesDir);
+        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+      } catch (err) {
+        MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: failed to restore ${fileName}`, err);
+      }
+    }
   }
 
   /**

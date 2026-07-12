@@ -20,11 +20,14 @@ import {
   prepareDomForSerialize,
 } from './pipeline';
 import { initSearch } from './search';
+import { initSelectHighlight } from './select-highlight';
+import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
 import { initMermaid } from './mermaid';
 import { initLineGutter } from './gutter';
 import { closestElement, createDomHelpers } from './dom-utils';
 import { initPrompt } from './prompt';
+import { initPasteImage } from './paste-image';
 import { initToolbar, syncTocButton, toggleInlineCode } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList } from './table';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
@@ -47,12 +50,17 @@ const gutterEl = document.getElementById('line-gutter') as HTMLDivElement | null
 let renderer: MarkdownRenderer | undefined;
 const turndown = createTurndown();
 const search = initSearch(content);
+// C1: Feature A tự tắt hẳn (không paint, không build overview strip) khi Ctrl+F đang mở —
+// truyền accessor isOpen() của search thay vì cả controller để giữ phụ thuộc tối thiểu.
+const selectHighlight = initSelectHighlight(content, () => search.isOpen());
+const crossFileSearch = initCrossFileSearch(content, vscode);
 const toc = initToc(content);
 const mermaidView = initMermaid(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
 const prompt = initPrompt(vscode, dom);
+const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 initToolbar(content, toolbarEl, {
   vscode,
@@ -93,8 +101,16 @@ window.addEventListener('message', (event) => {
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
+      crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
       renderDocument(msg.text ?? '');
-      restoreScroll();
+      // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
+      // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
+      // lưu — chỉ fallback về restoreScroll() cho luồng mở file bình thường.
+      if (msg.reveal) {
+        lineGutter.scrollToSourceLine(msg.reveal.line + 1, msg.reveal.character, msg.reveal.length, msg.reveal.matchText);
+      } else {
+        restoreScroll();
+      }
       if (cfg.autoOpenToc !== false && !toc.isOpen() && !isNarrowViewport()) {
         toc.toggle();
         syncTocButton();
@@ -110,6 +126,20 @@ window.addEventListener('message', (event) => {
     }
     case 'fileSearchResult': {
       prompt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      break;
+    }
+    case 'pasteImageResult': {
+      pasteImage.notifyResult(msg.requestId, msg.relativePath, msg.error);
+      break;
+    }
+    case 'crossFileSearch:result': {
+      crossFileSearch.notifyResult(msg.requestId, msg.groups, msg.truncated, msg.usedFallback);
+      break;
+    }
+    case 'scrollToPosition': {
+      // C6b: file .md đã có panel mở sẵn — host gửi thẳng message này thay vì
+      // qua 'init' vì resolveCustomTextEditor không chạy lại trong trường hợp này.
+      lineGutter.scrollToSourceLine(msg.line + 1, msg.character, msg.length, msg.matchText);
       break;
     }
     case 'configUpdate': {
@@ -183,6 +213,10 @@ function renderDocument(markdown: string): void {
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
   search.refresh();
+  // Selection cũ (nếu có) đã mất ý nghĩa sau khi DOM đổi — dọn highlight.
+  selectHighlight.refresh();
+  // Vị trí icon/selection cũ không còn hợp lệ sau khi DOM đổi — ẩn icon/đóng popover.
+  crossFileSearch.refresh();
   // Heading có thể đã đổi — dựng lại mục lục nếu panel đang mở.
   toc.refresh();
 }
@@ -412,6 +446,9 @@ function cutSelectionViaClipboardApi(): boolean {
 // "đây là text thường" — kết quả là toàn bộ format bị chèn thêm dấu \ và vỡ.
 content.addEventListener('paste', (e) => {
   e.preventDefault();
+  if (pasteImage.handlePasteEvent(e)) {
+    return;
+  }
   const text = e.clipboardData?.getData('text/plain') ?? '';
   if (text) {
     insertPastedMarkdown(text);
@@ -426,16 +463,21 @@ content.addEventListener('paste', (e) => {
  * làm đường dự phòng độc lập với cơ chế 'paste' event của trình duyệt.
  */
 function pasteFromClipboardApi(): void {
-  navigator.clipboard
-    .readText()
-    .then((text) => {
-      if (text) {
-        insertPastedMarkdown(text);
-      }
-    })
-    .catch(() => {
-      /* Không có quyền clipboard-read — bỏ qua, đã có handler 'paste' ở trên lo trường hợp còn lại. */
-    });
+  void pasteImage.tryPasteImageFromClipboardApi().then((handledImage) => {
+    if (handledImage) {
+      return;
+    }
+    navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) {
+          insertPastedMarkdown(text);
+        }
+      })
+      .catch(() => {
+        /* Không có quyền clipboard-read — bỏ qua, đã có handler 'paste' ở trên lo trường hợp còn lại. */
+      });
+  });
 }
 
 /**
@@ -501,6 +543,16 @@ content.addEventListener('click', (e) => {
       target.removeAttribute('checked');
     }
     scheduleSync();
+    return;
+  }
+  // Click vào ảnh: trình duyệt mặc định "chọn ảnh như object" (không có vị
+  // trí caret bên trong ảnh) khiến người dùng không Enter xuống dòng được
+  // ngay sau ảnh. Đặt caret ngay bên phải ảnh thay vào đó. Bỏ qua khi giữ
+  // Cmd/Ctrl để click ảnh nằm trong link vẫn mở link như bình thường (nhánh anchor bên dưới).
+  const img = target.closest('img');
+  if (img && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    dom.placeCaretAfter(img);
     return;
   }
   // Cmd/Ctrl+Click mở liên kết. Luôn chặn cả preventDefault lẫn propagation:

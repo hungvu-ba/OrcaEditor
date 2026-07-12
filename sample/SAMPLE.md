@@ -6,12 +6,22 @@
 
 Nhân viên có thể tạo và gửi yêu cầu nghỉ phép đến Quản lý dự án (Project Manager) để xác nhận. Hệ thống tự động:
 
-1.  [ ] Tạo mã yêu cầu nghỉ phép với định dạng `LR-[5 chữ số]`.
-2.  [ ] Ghi nhật ký theo dõi (audit log) khi thực hiện các thao tác liên quan.
-3.  [ ] Cập nhật trạng thái yêu cầu nghỉ phép.
-4.  [ ] fdsfds
-5.  [ ] d fsdfsd
-6.  [ ] sdf dsfs
+1.  [ ]  Tạo mã yêu cầu nghỉ phép với định dạng `LR-[5 chữ số]`.
+    
+2.  [ ]  Ghi nhật ký theo dõi (audit log) khi thực hiện các thao tác liên quan.
+    
+3.  [ ]  Cập nhật trạng thái yêu cầu nghỉ phép.
+    
+4.  [ ]  A
+    
+5.  \[ \]
+    
+6.  [ ]  B
+    
+
+![](images/pasted-image-1783859945866-3e5076ce.png)
+
+![](images/pasted-image-1783859945867-38c14615.png)
 
 ### 1.2. Các bước
 
@@ -20,7 +30,7 @@ Nhân viên có thể tạo và gửi yêu cầu nghỉ phép đến Quản lý 
 | 1 | Chọn nghiệp vụ | Nhân viên | Chọn chức năng "Tạo yêu cầu nghỉ phép" trên màn hình danh sách nghiệp vụ. |
 | 2 | Nhập thông tin | Nhân viên | Nhập các thông tin như: loại nghỉ, nguyên nhân, thời gian bắt đầu/kết thúc. |
 | 3 | Tạo yêu cầu | Hệ thống | \- Tự động tạo mã yêu cầu định dạng LR-<5 chữ số>.<br>\- Ghi nhật ký theo dõi (log) nghiệp vụ.<br>\- Hiển thị thông báo và lưu yêu cầu vào hệ thống.<br>\- |
-| 4 | Gửi yêu cầu | Hệ thống | Tự động gửi email thông báo đến Quản lý dự án để xác nhận.<br>\- dfdfsd<br>1\. dfdsfs<br>2\. dfs<br><br>\- |
+| 4 | Gửi yêu cầu | Hệ thống | Tự động gửi email thông báo đến Quản lý dự án để xác nhận.<br>\- dfdfsd<br>1\. dfdsfs<br>2\. dfs<br>![](images/pasted-image-1783859957713-85c1fb1e.png)<br>\- |
 
 ## 2\. Business Rules
 
@@ -49,9 +59,14 @@ Công thức tính số ngày nghỉ còn lại: $R = T - U$ trong đó $T$ là 
 
 Chi tiết xem thêm tại [tài liệu nghiệp vụ](https://example.com/docs) hoặc liên hệ admin@example.com.
 
--   fdsfds
--   sdfdsf
--   fdsfds
--   d
+1.  [ ] fdsfds
+2.  [ ] sdfdsf
+3.  [ ] dsssaas
+4.  [ ] dfdsfdsf
+5.  [ ] fdsfdsfs
+6.  [ ] fdsfds
+7.  [ ] d
 
-<pre><font face="Menlo, Monaco, Courier New, monospace">sequenceDiagram<br><br></font></pre>
+<pre data-line="70" data-line-end="70"><font face="Menlo, Monaco, Courier New, monospace">sequenceDiagram<br><br></font></pre>
+
+![](images/sample-pasted-image-1783866525344-7834407b.png)

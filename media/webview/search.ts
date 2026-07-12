@@ -12,30 +12,27 @@
  */
 
 import { INPUT_DEBOUNCE_MS, REFRESH_DEBOUNCE_MS } from './constants';
+import {
+  buildOverviewTicks,
+  collectHaystack,
+  createViewportBand,
+  findMatches,
+  updateViewportBand,
+  type Haystack,
+} from './match-utils';
+import { buildMatchOptionToggles } from './match-options';
+import type { MatchOptions } from '../../src/shared/text-match';
 
 export interface SearchController {
   /** Chạy lại tìm kiếm (khi nội dung đổi) nếu hộp tìm đang mở. Có debounce. */
   refresh(): void;
+  /** true nếu hộp tìm kiếm (#search-box) đang mở — Feature A (select-highlight.ts) dùng để tự tắt hẳn khi Ctrl+F đang mở (C1). */
+  isOpen(): boolean;
 }
 
 /** Tên highlight đăng ký với CSS.highlights — khớp với ::highlight() trong CSS. */
 const MATCH_HL = 'search-match';
 const CURRENT_HL = 'search-current';
-
-/**
- * Ranh giới khối: một match không được nối ngang qua ranh giới này (tránh
- * cụm "…đoạn A" + "đoạn B…" bị coi là một match vắt qua hai khối). Trong cùng
- * một khối, các text node nội tuyến (do <strong>, <em>, <code>… tách ra) vẫn
- * được nối liền nên "Last **Con**voy" tìm "Convoy" vẫn khớp.
- */
-const BLOCK_SEL = 'p,li,td,th,h1,h2,h3,h4,h5,h6,pre,blockquote,dt,dd,figcaption,summary,hr,div';
-
-interface Segment {
-  node: Text;
-  /** Offset đầu của node trong chuỗi haystack ghép chung. */
-  start: number;
-  len: number;
-}
 
 function svg(inner: string): string {
   return (
@@ -65,8 +62,21 @@ export function initSearch(content: HTMLElement): SearchController {
   input.spellcheck = false;
   input.setAttribute('aria-label', 'Find in document');
 
+  // Option Match Case / Whole Word (C4). Mặc định Whole Word = ON, Match Case
+  // = OFF. State là object được MUTATE trực tiếp (buildMatchOptionToggles + luồng
+  // fallback cùng nhìn một object).
+  const matchOptions: MatchOptions = { matchCase: false, wholeWord: true };
+
   const count = document.createElement('span');
   count.id = 'search-count';
+
+  // Ghi chú fallback (C4, chốt #4): hiện khi whole-word 0 kết quả và đã hạ về
+  // substring — text ngắn, câu đầy đủ nằm ở title.
+  const fallbackNote = document.createElement('span');
+  fallbackNote.id = 'search-fallback-note';
+  fallbackNote.hidden = true;
+  fallbackNote.textContent = 'substring';
+  fallbackNote.title = 'No whole-word match — showing substring results';
 
   const mkBtn = (icon: string, title: string): HTMLButtonElement => {
     const b = document.createElement('button');
@@ -81,7 +91,16 @@ export function initSearch(content: HTMLElement): SearchController {
   const nextBtn = mkBtn(ICON_NEXT, 'Next match (Enter)');
   const closeBtn = mkBtn(ICON_CLOSE, 'Close (Esc)');
 
-  box.append(input, count, prevBtn, nextBtn, closeBtn);
+  // Toggle Aa/ab — bấm → lật state → re-run query hiện tại (giống gõ phím). `run`
+  // là function declaration (hoisted) nên tham chiếu trong callback hợp lệ dù nó
+  // khai báo phía dưới; callback chỉ chạy khi user bấm, lúc mọi thứ đã init.
+  const toggles = buildMatchOptionToggles(matchOptions, () => {
+    if (input.value) {
+      run(input.value, false);
+    }
+  });
+
+  box.append(input, ...toggles.elements, count, fallbackNote, prevBtn, nextBtn, closeBtn);
   document.body.appendChild(box);
 
   // --- Thanh overview bên phải ---
@@ -89,6 +108,18 @@ export function initSearch(content: HTMLElement): SearchController {
   overview.id = 'search-overview';
   overview.hidden = true;
   document.body.appendChild(overview);
+
+  // Dải mờ đánh dấu vị trí đang cuộn tới trên thước overview (khác khái niệm "current match" —
+  // cập nhật liên tục theo scroll, không chỉ khi điều hướng prev/next). Phần tử riêng, ẩn/hiện
+  // đồng bộ tay với `overview` — xem syncViewportBand().
+  const viewportBand = createViewportBand('search-viewport-band');
+
+  function syncViewportBand(): void {
+    viewportBand.hidden = overview.hidden;
+    if (!overview.hidden) {
+      updateViewportBand(viewportBand);
+    }
+  }
 
   // --- Trạng thái ---
   let matches: Range[] = [];
@@ -104,89 +135,30 @@ export function initSearch(content: HTMLElement): SearchController {
   // Cache kết quả TreeWalker giữa các lần gõ TỪ KHÓA (haystack không đổi khi
   // chỉ query đổi). Chỉ invalidate khi nội dung tài liệu đổi — qua hook
   // refresh() bên dưới (được gọi mỗi khi content thay đổi).
-  let haystackCache: { haystack: string; segs: Segment[] } | undefined;
+  let haystackCache: Haystack | undefined;
 
   function invalidateHaystack(): void {
     haystackCache = undefined;
   }
 
-  function collect(): { haystack: string; segs: Segment[] } {
-    if (haystackCache) {
-      return haystackCache;
+  function collect(): Haystack {
+    if (!haystackCache) {
+      haystackCache = collectHaystack(content);
     }
-    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
-      acceptNode(node): number {
-        const el = node.parentElement;
-        if (!el || !node.nodeValue) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        // Bỏ text ẩn/không thực (KaTeX dựng cả MathML + annotation ẩn), script, style.
-        if (el.closest('.katex, script, style')) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    const segs: Segment[] = [];
-    let haystack = '';
-    let prevBlock: Element | null = null;
-    let first = true;
-    let n: Node | null;
-    while ((n = walker.nextNode())) {
-      const node = n as Text;
-      const block = node.parentElement ? node.parentElement.closest(BLOCK_SEL) : null;
-      if (!first && block !== prevBlock) {
-        // Chèn '\n' ngăn cách hai khối. Vì ô tìm không cho nhập '\n' nên
-        // match không bao giờ vắt qua dấu ngăn này ⇒ không vắt qua khối.
-        haystack += '\n';
-      }
-      segs.push({ node, start: haystack.length, len: node.nodeValue!.length });
-      haystack += node.nodeValue;
-      prevBlock = block;
-      first = false;
-    }
-    haystackCache = { haystack, segs };
     return haystackCache;
   }
 
-  function rangeAt(segs: Segment[], gStart: number, gEnd: number): Range | null {
-    const startSeg = segs.find((s) => gStart >= s.start && gStart < s.start + s.len);
-    const endSeg = segs.find((s) => gEnd > s.start && gEnd <= s.start + s.len);
-    if (!startSeg || !endSeg) {
-      return null;
-    }
-    const r = document.createRange();
-    try {
-      r.setStart(startSeg.node, gStart - startSeg.start);
-      r.setEnd(endSeg.node, gEnd - endSeg.start);
-    } catch {
-      return null;
-    }
-    return r;
-  }
-
   function computeMatches(q: string): Range[] {
-    const found: Range[] = [];
     if (!q) {
-      return found;
+      return [];
     }
     const { haystack, segs } = collect();
-    const hay = haystack.toLowerCase();
-    const needle = q.toLowerCase();
-    let from = 0;
-    while (found.length < 5000) {
-      const idx = hay.indexOf(needle, from);
-      if (idx < 0) {
-        break;
-      }
-      const r = rangeAt(segs, idx, idx + needle.length);
-      if (r) {
-        found.push(r);
-      }
-      from = idx + needle.length; // không cho match chồng lấn
-    }
-    return found;
+    return findMatches(haystack, segs, q, matchOptions);
   }
+
+  // true khi lần tìm hiện tại đã hạ Whole Word → substring vì whole-word 0 kết
+  // quả (C4, chốt #4) — điều khiển hiển thị fallbackNote trong updateCount().
+  let usedFallback = false;
 
   // -------------------------------------------------------------------------
   // Highlight + overview
@@ -195,6 +167,7 @@ export function initSearch(content: HTMLElement): SearchController {
   function paint(): void {
     paintHighlights();
     buildOverview();
+    syncViewportBand();
   }
 
   /**
@@ -235,32 +208,17 @@ export function initSearch(content: HTMLElement): SearchController {
   }
 
   function buildOverview(): void {
-    overview.textContent = '';
-    if (!matches.length) {
-      overview.hidden = true;
-      return;
-    }
-    overview.hidden = false;
-    const docHeight = Math.max(
-      document.documentElement.scrollHeight,
-      document.body.scrollHeight,
-      1
-    );
-    // Pha ĐỌC: gom mọi getBoundingClientRect() trước, không xen ghi DOM để
-    // tránh forced reflow mỗi match.
-    const tops = matches.map((r) => r.getBoundingClientRect().top + window.scrollY);
-    // Pha GHI: tạo tick vào DocumentFragment rồi chèn một lần.
-    const frag = document.createDocumentFragment();
-    tops.forEach((top, i) => {
-      const tick = document.createElement('div');
-      tick.className = 'search-tick' + (i === current ? ' current' : '');
-      tick.style.top = `${(top / docHeight) * 100}%`;
-      tick.title = `Result ${i + 1}`;
-      tick.addEventListener('mousedown', (e) => e.preventDefault());
-      tick.addEventListener('click', () => setCurrent(i, true));
-      frag.appendChild(tick);
+    // Dùng hàm dựng tick dùng chung (match-utils.ts) — Feature A (select-highlight.ts) dùng
+    // chung hàm này cho #select-overview, với tickClass/current/maxTicks/onTickClick khác.
+    // Không truyền maxTicks ⇒ mặc định không giới hạn, giữ đúng hành vi cũ (render mọi match,
+    // đã cap sẵn ở findMatches).
+    buildOverviewTicks({
+      container: overview,
+      matches,
+      tickClass: 'search-tick',
+      current,
+      onTickClick: (i) => setCurrent(i, true),
     });
-    overview.appendChild(frag);
   }
 
   function markActiveTick(): void {
@@ -283,6 +241,9 @@ export function initSearch(content: HTMLElement): SearchController {
       count.textContent = `${current + 1}/${matches.length}`;
     }
     count.classList.toggle('no-result', !!query && matches.length === 0);
+    // Chỉ hiện ghi chú fallback khi thực sự đang xem kết quả substring (>0) sau khi
+    // whole-word không có gì — nếu substring cũng 0 thì "No results" đã đủ nghĩa.
+    fallbackNote.hidden = !(usedFallback && matches.length > 0);
     const disabled = matches.length === 0;
     prevBtn.disabled = disabled;
     nextBtn.disabled = disabled;
@@ -331,7 +292,18 @@ export function initSearch(content: HTMLElement): SearchController {
   function run(q: string, keepCurrent: boolean): void {
     query = q;
     const prevIndex = current;
+    usedFallback = false;
     matches = computeMatches(q);
+    // Fallback cục bộ (C4, chốt #4 — luồng Ctrl+F, không cần round-trip host):
+    // Whole Word đang bật mà 0 kết quả ⇒ hạ hẳn state về OFF (đồng bộ toggle),
+    // tìm lại theo substring cho lần này. Hạ state (không chỉ tạm) để lần gõ sau
+    // không lặp lại nhánh này với toggle hiện ON gây hiểu lầm.
+    if (q && matchOptions.wholeWord && matches.length === 0) {
+      matchOptions.wholeWord = false;
+      toggles.sync();
+      matches = computeMatches(q);
+      usedFallback = true;
+    }
     paint();
     if (!matches.length) {
       setCurrent(-1, false);
@@ -375,11 +347,14 @@ export function initSearch(content: HTMLElement): SearchController {
     box.hidden = true;
     overview.hidden = true;
     overview.textContent = '';
+    syncViewportBand();
     clearHighlights();
     matches = [];
     current = -1;
     query = '';
     count.textContent = '';
+    usedFallback = false;
+    fallbackNote.hidden = true;
     content.focus();
   }
 
@@ -448,7 +423,25 @@ export function initSearch(content: HTMLElement): SearchController {
       buildOverview();
       markActiveTick();
     }
+    syncViewportBand();
   });
+
+  // Cập nhật vị trí viewport band theo scroll, coalesce về 1 lần/khung hình (giống
+  // 'selectionchange' của select-highlight.ts) — rẻ vì chỉ tính lại top/height %, không đụng DOM tick.
+  let viewportRafId: number | undefined;
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (viewportBand.hidden || viewportRafId !== undefined) {
+        return;
+      }
+      viewportRafId = requestAnimationFrame(() => {
+        viewportRafId = undefined;
+        updateViewportBand(viewportBand);
+      });
+    },
+    { passive: true }
+  );
 
   return {
     refresh(): void {
@@ -467,6 +460,9 @@ export function initSearch(content: HTMLElement): SearchController {
           run(query, true);
         }
       }, REFRESH_DEBOUNCE_MS);
+    },
+    isOpen(): boolean {
+      return !box.hidden;
     },
   };
 }

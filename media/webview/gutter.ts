@@ -31,6 +31,7 @@ import {
   type LineRange,
   type MarkdownRenderer,
 } from './pipeline';
+import { collectHaystack, rangeAt } from './match-utils';
 
 export interface LineGutter {
   /** Dựng lại toàn bộ (số + vị trí) từ chính data-line có sẵn trên DOM — gọi sau renderDocument(). */
@@ -39,12 +40,23 @@ export interface LineGutter {
   refreshFromMarkdown(markdown: string): void;
   /** Dựng lại vị trí (và phân loại đơn/đôi) theo layout hiện tại — gọi khi layout đổi (resize, ảnh/SVG tải xong, toggle mermaid...). */
   reposition(): void;
+  /**
+   * Scroll #content sao cho block chứa dòng nguồn 1-based `line` vào view. Trả về true nếu tìm thấy block khớp.
+   * Nếu truyền thêm `character`/`length` (0-based, cùng quy ước CrossFileMatch) VÀ block khớp chỉ trải đúng
+   * một dòng nguồn (block đơn dòng — đa số đoạn văn/list item/heading), còn select luôn đoạn văn bản đó
+   * (C6, chốt #2: "chỉ scroll" là chưa đủ, cần select để thấy ngay kết quả tìm được). Block trải nhiều dòng
+   * nguồn (info.start !== info.end, vd đoạn văn xuống dòng mềm) bị bỏ qua phần select — không đủ dữ liệu để
+   * ánh xạ character của MỘT dòng con về offset trong text đã ghép phẳng của cả block.
+   * `matchText` (raw markdown đã khớp) là MỎ NEO ưu tiên để định vị đoạn cần select — xem selectWithinBlock.
+   */
+  scrollToSourceLine(line: number, character?: number, length?: number, matchText?: string): boolean;
 }
 
 const NOOP_GUTTER: LineGutter = {
   refreshFromDom: () => {},
   refreshFromMarkdown: () => {},
   reposition: () => {},
+  scrollToSourceLine: () => false,
 };
 
 /** Block mà chiều cao hiển thị KHÔNG tỉ lệ với số dòng nguồn — cần số ở cả hai mép. */
@@ -183,5 +195,113 @@ export function initLineGutter(
   });
   resizeObserver.observe(content);
 
-  return { refreshFromDom, refreshFromMarkdown, reposition: refreshFromDom };
+  // C6: dùng khi mở kết quả tìm xuyên file / cross-file link trỏ tới file .md
+  // này — cần scroll tới đúng block chứa dòng nguồn được yêu cầu, tái dùng
+  // đúng cơ chế ánh xạ dòng→DOM đã có (enumerateNumberedElements/readBlockInfo)
+  // thay vì viết lại từ đầu; hoạt động bất kể gutter số dòng có đang bật hiển
+  // thị hay không (data-line/data-line-end luôn có trên DOM sau render).
+  /**
+   * Select đúng đoạn đã khớp bên trong block `el` (đã render).
+   *
+   * KHÔNG dùng thẳng offset thô [character, character+length): `character` được
+   * host tính trên DÒNG MARKDOWN GỐC (còn `#`, `**`, `- `, số thứ tự...), còn
+   * haystack ở đây là text ĐÃ RENDER (cú pháp markdown đã bị strip), nên hai hệ
+   * toạ độ lệch nhau — áp offset thô sẽ highlight lệch vị trí (bug #2, vd tìm
+   * "Text" trong "## 2. Text Styles" bị nhảy thành "t St").
+   *
+   * Thay vào đó dùng `matchText` (đúng đoạn text đã khớp) làm MỎ NEO: tìm mọi
+   * lần xuất hiện của nó trong haystack rồi chọn cái GẦN offset thô nhất (raw và
+   * rendered thường chỉ lệch nhau một hằng số nhỏ = độ dài tiền tố bị strip, nên
+   * occurrence gần nhất gần như luôn đúng). Chỉ khi không có matchText / không
+   * tìm thấy (vd đoạn khớp chứa cú pháp markdown đã bị strip khi render) mới lùi
+   * về offset thô như trước.
+   */
+  function selectWithinBlock(el: HTMLElement, character: number, length: number, matchText?: string): void {
+    const { haystack, segs } = collectHaystack(el);
+    let gStart = character;
+    let gEnd = character + length;
+
+    const anchor = matchText?.trim() ? matchText : '';
+    if (anchor) {
+      const occurrences: number[] = [];
+      for (let i = haystack.indexOf(anchor); i !== -1; i = haystack.indexOf(anchor, i + 1)) {
+        occurrences.push(i);
+      }
+      if (occurrences.length > 0) {
+        // Occurrence có |index - character| nhỏ nhất — khử nhập nhằng khi đoạn
+        // text khớp xuất hiện nhiều lần trong cùng block.
+        let best = occurrences[0];
+        for (const i of occurrences) {
+          if (Math.abs(i - character) < Math.abs(best - character)) {
+            best = i;
+          }
+        }
+        gStart = best;
+        gEnd = best + anchor.length;
+      }
+    }
+
+    const range = rangeAt(segs, gStart, Math.min(gEnd, haystack.length));
+    if (!range) {
+      return;
+    }
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    content.focus();
+  }
+
+  function scrollToSourceLine(line: number, character?: number, length?: number, matchText?: string): boolean {
+    const els = enumerateNumberedElements();
+    if (els.length === 0) {
+      return false;
+    }
+    let exactMatch: HTMLElement | undefined;
+    let exactMatchInfo: BlockLineInfo | undefined;
+    let closest: HTMLElement | undefined;
+    let closestDistance = Infinity;
+    for (const el of els) {
+      const info = readBlockInfo(el);
+      if (!info.start) {
+        continue;
+      }
+      const start = Number(info.start);
+      const end = info.end ? Number(info.end) : start;
+      if (Number.isNaN(start)) {
+        continue;
+      }
+      if (line >= start && line <= end) {
+        exactMatch = el;
+        exactMatchInfo = info;
+        break;
+      }
+      const distance = Math.abs(start - line);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = el;
+      }
+    }
+    const target = exactMatch ?? closest;
+    if (!target) {
+      return false;
+    }
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Chỉ select khi block khớp CHÍNH XÁC dòng nguồn (không phải fallback "gần nhất").
+    // Có `matchText` → tìm theo mỏ neo text nên select được cả block đa dòng (start !== end);
+    // không có matchText thì vẫn giới hạn ở block đơn dòng như cũ (offset thô chỉ đáng tin khi
+    // block trải đúng MỘT dòng nguồn — xem selectWithinBlock).
+    if (
+      exactMatch &&
+      exactMatchInfo &&
+      character !== undefined &&
+      length !== undefined &&
+      length > 0 &&
+      (!!matchText?.trim() || exactMatchInfo.start === exactMatchInfo.end)
+    ) {
+      selectWithinBlock(target, character, length, matchText);
+    }
+    return true;
+  }
+
+  return { refreshFromDom, refreshFromMarkdown, reposition: refreshFromDom, scrollToSourceLine };
 }

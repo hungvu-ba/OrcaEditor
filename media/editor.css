@@ -536,6 +536,52 @@ th:empty::after {
   opacity: 1;
 }
 
+/* Ghi chú fallback whole-word→substring (C4) — nhỏ, mờ, câu đầy đủ nằm ở title. */
+#search-fallback-note {
+  padding: 0 2px;
+  font-size: 10px;
+  font-style: italic;
+  white-space: nowrap;
+  opacity: 0.7;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+#search-fallback-note[hidden] {
+  display: none;
+}
+
+/* Nút toggle option tìm kiếm Aa/ab (C4) — dùng chung Ctrl+F (#search-box) và
+ * popover tìm xuyên file. Tham chiếu Find widget VS Code: nút vuông nhỏ, trạng
+ * thái active có nền + viền nổi rõ "on" vs "off". */
+.match-option-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 4px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+
+.match-option-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.match-option-btn.active {
+  background: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
+  border-color: var(--vscode-inputOption-activeBorder, #007fd4);
+  /* Màu accent vàng/cam (giống 💡 lightBulb của VS Code) cho chính icon/chữ khi bật — trước đây chỉ
+   * đổi nền, glyph vẫn theo màu foreground mặc định nên không đủ nổi bật (C4 bug report #4). */
+  color: var(--vscode-editorLightBulb-foreground, #ffcc00);
+}
+
 #search-box button {
   display: inline-flex;
   align-items: center;
@@ -578,6 +624,14 @@ th:empty::after {
   background-color: rgba(234, 92, 0, 0.85); /* cam — match hiện tại */
 }
 
+/* Highlight vùng chọn đang được dùng để tìm kiếm chéo file (xem
+ * CSS.highlights.set('select-match', ...) ở phía webview JS). Dùng cùng tông
+ * vàng với search-match nhưng nhạt hơn hẳn để không trùng màu khi Find box
+ * đang mở song song với popover tìm kiếm chéo file. */
+::highlight(select-match) {
+  background-color: rgba(255, 197, 61, 0.18); /* vàng nhạt hơn search-match — tránh trùng màu khi Find box đang mở cùng lúc */
+}
+
 /* --- Thước tổng quan bên phải: vị trí mọi match --- */
 #search-overview {
   position: fixed;
@@ -612,6 +666,91 @@ th:empty::after {
   background: rgb(234, 92, 0); /* cam, khớp màu match hiện tại */
 }
 
+/* Thước tổng quan bên phải cho Feature A (highlight khi select — select-highlight.ts, C1).
+ * Song song #search-overview nhưng CHỈ báo trực quan — không click-to-jump (xem .select-tick bên
+ * dưới, không có cursor: pointer). Không bao giờ hiện cùng lúc với #search-overview (Feature A
+ * tắt hẳn khi Ctrl+F đang mở, xem select-highlight.ts recompute()) nên không cần phân tầng chặt
+ * với z-index 400 của nó — đặt ngay cạnh (395) cho nhất quán với "tầng thước tổng quan". */
+#select-overview {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  z-index: 395;
+  pointer-events: none;
+}
+
+#select-overview[hidden] {
+  display: none;
+}
+
+#select-overview .select-tick {
+  position: absolute;
+  right: 2px;
+  width: 8px;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  /* Cùng tông vàng với ::highlight(select-match) (rgba(255, 197, 61, 0.18)) nhưng đậm hơn nhiều
+   * để nhìn thấy trên thước mỏng 12px — vẫn nhạt hơn hẳn .search-tick (0.8) để phân biệt khi so
+   * sánh trực tiếp hai thước (dù thực tế không bao giờ cùng hiện). */
+  background: rgba(255, 197, 61, 0.5);
+  /* KHÔNG cursor: pointer / pointer-events: auto — tick này không tương tác (không
+   * click-to-jump), khác hẳn .search-tick; giữ pointer-events: none kế thừa từ container để
+   * không vô tình chặn thao tác chuột trên nội dung bên dưới. */
+}
+
+/* Tick riêng cho CHÍNH vị trí đang được chọn (C1 mở rộng, chốt #3) — cùng tông cam với
+ * .search-tick.current để giữ ý nghĩa "vị trí hiện tại" nhất quán giữa hai thước, nhưng nhạt hơn
+ * (0.85 thay vì màu cam đặc rgb(234,92,0)) để không lấn át các tick match vàng khi cả hai cùng hiện
+ * sát nhau trên thước 12px. Vẫn không tương tác — kế thừa "không cursor:pointer" từ .select-tick. */
+#select-overview .select-tick.current {
+  height: 3px;
+  right: 1px;
+  width: 10px;
+  background: rgba(234, 92, 0, 0.85);
+}
+
+/* Dải mờ đánh dấu vùng tài liệu đang nằm trong khung nhìn (viewport), cập nhật theo scroll —
+ * khác khái niệm "current match"/"current selection" (chỉ đổi khi điều hướng, không đổi khi cuộn
+ * trang mà không có match/selection nào thay đổi). Phần tử riêng (không phải tick con của
+ * #search-overview/#select-overview) vì buildOverviewTicks() xoá sạch container mỗi lần rebuild —
+ * xem createViewportBand()/updateViewportBand() trong match-utils.ts. Màu trung tính (không vàng/
+ * cam) để không bị hiểu nhầm là một match, đọc được trên cả theme sáng/tối. */
+#search-viewport-band,
+#select-viewport-band {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 12px;
+  min-height: 2px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.22);
+  pointer-events: none;
+}
+
+#search-viewport-band {
+  z-index: 399; /* ngay dưới #search-overview (400) — band nằm dưới tick */
+}
+
+#select-viewport-band {
+  z-index: 394; /* ngay dưới #select-overview (395) */
+}
+
+#search-viewport-band[hidden],
+#select-viewport-band[hidden] {
+  display: none;
+}
+
+body.toc-open #search-viewport-band {
+  right: var(--toc-width);
+}
+
+body.toc-open #select-viewport-band {
+  right: var(--toc-width);
+}
+
 /*---------------------------------------------------------------------------
  * Mục lục (Table of Contents) — panel cố định bên phải
  *--------------------------------------------------------------------------*/
@@ -632,6 +771,10 @@ body.toc-open #search-box {
 }
 
 body.toc-open #search-overview {
+  right: var(--toc-width);
+}
+
+body.toc-open #select-overview {
   right: var(--toc-width);
 }
 
@@ -737,4 +880,207 @@ body.toc-open #search-overview {
 #wysiwyg-toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+/*---------------------------------------------------------------------------
+ * Tìm kiếm chéo file (icon nổi cạnh vùng chọn + popover kết quả)
+ *--------------------------------------------------------------------------*/
+
+/* Icon kính lúp nổi gần cuối vùng chọn — vị trí (left/top) do JS tính và gán
+ * qua style trực tiếp, ở đây chỉ lo hình dáng. Cùng tầng "tạm thời/theo ngữ
+ * cảnh" như #search-box (500) nhưng thấp hơn một chút để không đá màu khi cả
+ * hai cùng hiện; luôn nổi trên #toc-panel (150) và #search-overview (400). */
+.cross-file-search-icon {
+  position: absolute;
+  z-index: 480;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 50%;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  /* Giữ nguyên hình kính lúp (ICON_SVG, cross-file-search.ts), chỉ đổi màu sang accent vàng/cam
+   * (giống 💡 lightBulb) cho dễ nhận ra hơn nền/icon toolbar xung quanh (C4 bug report #7). */
+  color: var(--vscode-editorLightBulb-foreground, #ffcc00);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+/* Ẩn icon khi JS set `icon.hidden = true` (timer tự-ẩn 3s, mất selection,
+ * Esc...). Bắt buộc phải có: selector class `.cross-file-search-icon` khai báo
+ * `display: inline-flex` cùng độ đặc hiệu (0,1,0) với rule mặc định của trình
+ * duyệt cho `[hidden]`, nên nếu thiếu rule này, icon LUÔN hiển thị bất kể
+ * thuộc tính `hidden` — timer tự-ẩn tưởng như không chạy (bug #1). Mọi phần tử
+ * ẩn/hiện khác trong file cũng có cặp rule `[hidden]` tương ứng. */
+.cross-file-search-icon[hidden] {
+  display: none;
+}
+
+.cross-file-search-icon svg {
+  display: block;
+  pointer-events: none;
+}
+
+.cross-file-search-icon:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.cross-file-search-icon:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 2px;
+}
+
+/* Popover kết quả — nổi dưới/cạnh icon, trên icon (490) nhưng dưới
+ * .prompt-overlay (1000). Cùng khuôn "card" với .prompt-box /
+ * .toolbar-overflow-menu: nền editorWidget, viền + đổ bóng. */
+.cross-file-search-popover {
+  position: fixed;
+  z-index: 490;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  max-height: 360px;
+  overflow: hidden;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  color: var(--vscode-foreground);
+  font-size: 12px;
+}
+
+.cross-file-search-popover[hidden] {
+  display: none;
+}
+
+/* Header: hàng trên (số kết quả + scope) và hàng phụ (toggle option Aa/ab, C4) */
+.cross-file-search-header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+.cross-file-search-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Hàng nút toggle option trong popover — canh phải như Find widget VS Code. */
+.cross-file-search-options {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.cross-file-search-count {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.cross-file-search-scope {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+/* Danh sách kết quả, gom nhóm theo file */
+.cross-file-search-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.cross-file-search-group + .cross-file-search-group {
+  margin-top: 6px;
+}
+
+.cross-file-search-file {
+  padding: 4px 10px 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-file-search-path {
+  padding: 0 10px 2px;
+  font-size: 11px;
+  opacity: 0.65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-file-search-match {
+  display: block;
+  width: 100%;
+  padding: 3px 10px 3px 18px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cross-file-search-match:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* Đoạn chữ khớp được tô nổi bật trong dòng snippet — DOM span thường (không
+ * phải CSS Custom Highlight API), nhưng tái dùng cùng tông vàng với
+ * search-match để nhất quán thị giác. */
+.cross-file-search-mark {
+  background: rgba(255, 197, 61, 0.35);
+  border-radius: 2px;
+}
+
+/* Trạng thái rỗng (không có kết quả) */
+.cross-file-search-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+/* Nút/liên kết "Xem thêm trong Search panel" ở cuối popover */
+.cross-file-search-more {
+  flex: none;
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  background: transparent;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cross-file-search-more:hover {
+  text-decoration: underline;
 }
