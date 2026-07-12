@@ -2,7 +2,7 @@
   "name": "orca-editor",
   "displayName": "Orca Editor",
   "description": "Markdown preview like VS Code's built-in Markdown Preview, with direct WYSIWYG editing on the preview.",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",

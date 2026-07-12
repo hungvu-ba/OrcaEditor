@@ -10,6 +10,9 @@ tsconfig.json
 dist/test/**
 **/*.map
 sample/**
+WIP/**
+Requirement/**
+Plan/**
 CLAUDE.md
 Claude Code Monitor - Spec.md
 Fix Plan.md

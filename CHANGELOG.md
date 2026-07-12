@@ -4,6 +4,12 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.6.9\] - 2026-07-12
+
+### Fixed
+
+-   Packaging: excluded the `WIP/`, `Requirement/`, and `Plan/` folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.
+
 ## \[0.6.8\] - 2026-07-12
 
 ### Added
