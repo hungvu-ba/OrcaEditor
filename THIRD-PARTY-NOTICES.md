@@ -128,7 +128,7 @@ No bundled package uses a copyleft license (GPL/LGPL/AGPL). All licenses below a
 | marked | 16.4.2 | MIT | https://github.com/markedjs/marked |
 | mdurl | 2.0.0 | MIT | https://github.com/markdown-it/mdurl |
 | mermaid | 11.16.0 | MIT | https://github.com/mermaid-js/mermaid |
-| orca-editor | 0.6.6 | MIT | https://github.com/hungvu-ba/OrcaEditor |
+| orca-md-editor | 0.6.9 | MIT | https://github.com/hungvu-ba/OrcaEditor |
 | package-manager-detector | 1.7.0 | MIT | https://github.com/antfu-collective/package-manager-detector |
 | path-data-parser | 0.1.0 | MIT | https://github.com/pshihn/path-data-parser |
 | points-on-curve | 0.2.0 | MIT | https://github.com/pshihn/bezier-points |

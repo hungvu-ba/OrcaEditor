@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## \[0.6.9\] - 2026-07-12
 
+### Changed
+
+-   Renamed the extension to **Orca MD Editor** and its Marketplace identifier to `hungvu.orca-md-editor` (`displayName`, command titles, settings category, docs). Internal command/setting IDs (`orcaEditor.*`) are unchanged, so existing settings and keybindings keep working.
+
 ### Fixed
 
 -   Packaging: excluded the `WIP/`, `Requirement/`, and `Plan/` folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.

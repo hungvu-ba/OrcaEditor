@@ -1,6 +1,6 @@
 {
-  "name": "orca-editor",
-  "displayName": "Orca Editor",
+  "name": "orca-md-editor",
+  "displayName": "Orca MD Editor",
   "description": "Markdown preview like VS Code's built-in Markdown Preview, with direct WYSIWYG editing on the preview.",
   "version": "0.6.9",
   "publisher": "hungvu",
@@ -21,7 +21,7 @@
     "customEditors": [
       {
         "viewType": "orcaEditor.editor",
-        "displayName": "Orca Editor",
+        "displayName": "Orca MD Editor",
         "selector": [
           {
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
@@ -33,13 +33,13 @@
     "commands": [
       {
         "command": "orcaEditor.open",
-        "title": "Open Orca Editor",
+        "title": "Open Orca MD Editor",
         "category": "Markdown",
         "icon": "$(open-preview)"
       },
       {
         "command": "orcaEditor.openToSide",
-        "title": "Open Orca Editor to the Side",
+        "title": "Open Orca MD Editor to the Side",
         "category": "Markdown",
         "icon": "$(open-preview)"
       }
@@ -93,7 +93,7 @@
       }
     ],
     "configuration": {
-      "title": "Orca Editor",
+      "title": "Orca MD Editor",
       "properties": {
         "orcaEditor.claudeAutoInsert": {
           "type": "boolean",

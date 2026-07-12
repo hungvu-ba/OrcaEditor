@@ -1,4 +1,4 @@
-# Orca Editor
+# Orca MD Editor
 
 A VS Code extension that lets you **preview Markdown with pixel-accurate rendering while editing directly in the preview** (WYSIWYG). Every change is synced back to the `.md` file in real time.
 
@@ -29,17 +29,17 @@ A VS Code extension that lets you **preview Markdown with pixel-accurate renderi
 
 ## How to open
 
--   Open a `.md` file, click **Open Orca Editor to the Side** in the editor title bar (or `⌘⇧⌥V`).
--   Or right-click the file in the Explorer / editor tab → **Open Orca Editor**.
--   Or **Reopen Editor With... → Orca Editor** to replace the current editor.
+-   Open a `.md` file, click **Open Orca MD Editor to the Side** in the editor title bar (or `⌘⇧⌥V`).
+-   Or right-click the file in the Explorer / editor tab → **Open Orca MD Editor**.
+-   Or **Reopen Editor With... → Orca MD Editor** to replace the current editor.
 -   Save with **⌘S** as usual (changes in the preview mark the document "dirty" just like typing in a text editor).
 
 ## Install
 
-Search **"Orca Editor"** in the VS Code Extensions view (`⌘⇧X`) and click **Install** — or run:
+Search **"Orca MD Editor"** in the VS Code Extensions view (`⌘⇧X`) and click **Install** — or run:
 
 ```bash
-code --install-extension hungvu.orca-editor
+code --install-extension hungvu.orca-md-editor
 ```
 
 ## Build from source
@@ -69,7 +69,7 @@ Manual install with npm:
 ```bash
 npm install
 npm run compile
-npm run package         # creates the orca-editor-<version>.vsix file
+npm run package         # creates the orca-md-editor-<version>.vsix file
 ```
 
 Then in VS Code: **Extensions → ⋯ → Install from VSIX...** and select the `.vsix` file you just created. Or try it without installing: open this folder in VS Code and press **F5** (Extension Development Host).
