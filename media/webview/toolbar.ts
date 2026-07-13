@@ -252,9 +252,14 @@ const MERMAID_TEMPLATE = '```mermaid\ngraph TD; A[Start] --> B{Decision} --> C[E
 // chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
 // chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold') },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic') },
-  { label: 'S', title: 'Strikethrough (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold' },
+  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
+  {
+    label: 'S',
+    title: 'Strikethrough (⌘⇧X)',
+    action: () => document.execCommand('strikeThrough'),
+    id: 'fmt-strike',
+  },
   {
     label: 'H2',
     title: 'Heading (click again on the same level to revert to paragraph)',
@@ -278,15 +283,23 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Bulleted list',
     action: setBulletList,
     separatorBefore: true,
+    id: 'fmt-bullet',
   },
-  { label: '1.', icon: FMT_ICONS.ol, title: 'Numbered list', action: setNumberedList },
-  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem },
+  {
+    label: '1.',
+    icon: FMT_ICONS.ol,
+    title: 'Numbered list',
+    action: setNumberedList,
+    id: 'fmt-numbered',
+  },
+  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task' },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
     title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
     separatorBefore: true,
+    id: 'fmt-blockquote',
   },
   { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
   {
@@ -310,7 +323,13 @@ const toolbarItems: ToolbarItem[] = [
     action: insertImage,
     opensAsyncPrompt: true,
   },
-  { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode, separatorBefore: true },
+  {
+    label: '</>',
+    title: 'Inline code (⌘E)',
+    action: toggleInlineCode,
+    separatorBefore: true,
+    id: 'fmt-inline-code',
+  },
   {
     label: '{ }',
     icon: FMT_ICONS.codeBlock,
@@ -652,6 +671,7 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
   toolbarEl.appendChild(createMoreOptionsButton());
 
   setupOverflowMenu();
+  setupActiveFormattingSync();
 }
 
 /** Nút "..." — mở menu chứa các nút định dạng đang không đủ chỗ hiển thị. */
@@ -1318,4 +1338,86 @@ export function toggleInlineCode(): void {
     range.insertNode(code);
   }
   sel.removeAllRanges();
+}
+
+// ---------------------------------------------------------------------------
+// Active-state sync theo caret (US-4.15) — Bold/Italic/Strikethrough/Inline
+// code/Blockquote/Bullet/Numbered/Task đồng bộ class `.active` (đã ship, xem
+// updateTocButton) theo vị trí caret. Heading/Code block/Math (US-4.9–4.11)
+// CỐ Ý bị loại — split-button của các nút đó luôn hiện nhãn mặc định tĩnh,
+// không live-sync theo caret (chính AC của US-4.9), đây là quyết định riêng,
+// không phải thiếu sót.
+// ---------------------------------------------------------------------------
+
+const ACTIVE_SYNC_IDS = [
+  'fmt-bold',
+  'fmt-italic',
+  'fmt-strike',
+  'fmt-inline-code',
+  'fmt-blockquote',
+  'fmt-bullet',
+  'fmt-numbered',
+  'fmt-task',
+];
+
+function setActive(id: string, active: boolean): void {
+  document.getElementById(id)?.classList.toggle('active', active);
+}
+
+/**
+ * Tính lại + gán `.active` cho 8 nút ở trên. Bullet/Numbered dựa theo
+ * `getListSelection()` (US-4.2) — CHỈ theo tag `<ul>`/`<ol>`, không loại trừ
+ * item có checkbox: ví dụ cụ thể trong AC US-4.15 xác nhận 1 item đã check
+ * nằm trong `<ol>` phải sáng ĐỒNG THỜI cả Numbered lẫn Task (giống Bold+Italic
+ * cùng sáng một lúc) — task/list-type là 2 trục độc lập, không loại trừ nhau.
+ * Task dùng riêng `<li>` chứa anchor (không phải cả `getListSelection().items`)
+ * theo đúng câu chữ AC ("active when the caret's `<li>` has a checkbox").
+ */
+function recomputeActiveFormatting(): void {
+  const sel = window.getSelection();
+  const anchor = sel?.anchorNode;
+  const focus = sel?.focusNode;
+  if (!sel || !anchor || !focus || !content.contains(anchor) || !content.contains(focus)) {
+    for (const id of ACTIVE_SYNC_IDS) {
+      setActive(id, false);
+    }
+    return;
+  }
+
+  setActive('fmt-bold', document.queryCommandState('bold'));
+  setActive('fmt-italic', document.queryCommandState('italic'));
+  setActive('fmt-strike', document.queryCommandState('strikeThrough'));
+
+  const anchorEl = closestElement(anchor);
+  const inlineCode = anchorEl?.closest('code') ?? null;
+  setActive('fmt-inline-code', !!inlineCode && !inlineCode.closest('pre'));
+
+  const bq = anchorEl?.closest('blockquote') ?? null;
+  setActive('fmt-blockquote', !!bq && content.contains(bq));
+
+  const li = anchorEl?.closest('li') ?? null;
+  setActive('fmt-task', !!li && content.contains(li) && !!li.querySelector(':scope > input[type="checkbox"]'));
+
+  const listSel = getListSelection();
+  setActive('fmt-bullet', listSel?.list.tagName === 'UL');
+  setActive('fmt-numbered', listSel?.list.tagName === 'OL');
+}
+
+let activeSyncRafId: number | undefined;
+
+/**
+ * `selectionchange` bắn rất dày (mỗi lần caret di chuyển) — coalesce về một
+ * lần tính/khung hình bằng requestAnimationFrame, cùng kỹ thuật đã dùng ở
+ * select-highlight.ts, thay vì tính lại trên từng sự kiện thô.
+ */
+function setupActiveFormattingSync(): void {
+  document.addEventListener('selectionchange', () => {
+    if (activeSyncRafId !== undefined) {
+      return;
+    }
+    activeSyncRafId = requestAnimationFrame(() => {
+      activeSyncRafId = undefined;
+      recomputeActiveFormatting();
+    });
+  });
 }
