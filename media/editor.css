@@ -263,11 +263,6 @@ body.md-line-numbers #toolbar {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
-#toolbar .split-main.active {
-  background: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.3));
-  color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground));
-}
-
 #toolbar .split-divider {
   flex-shrink: 0;
   width: 1px;

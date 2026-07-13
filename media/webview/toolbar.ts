@@ -234,8 +234,9 @@ const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
  * cần đổi renderer.
  */
 const MATH_FORMULA = 'x^2+y^2=z^2';
+const insertInlineMath = () => ctx.insertMarkdown(`$${MATH_FORMULA}$`);
 const MATH_DROPDOWN: ToolbarDropdownEntry[] = [
-  { label: 'Inline math', badge: 'Phổ biến', action: () => ctx.insertMarkdown(`$${MATH_FORMULA}$`) },
+  { label: 'Inline math', badge: 'Phổ biến', action: insertInlineMath },
   { label: 'Block math', action: () => ctx.insertMarkdown(`$$${MATH_FORMULA}$$`) },
 ];
 
@@ -341,7 +342,7 @@ const toolbarItems: ToolbarItem[] = [
   {
     label: '∑',
     title: 'Math (default: inline, KaTeX)',
-    action: () => ctx.insertMarkdown(`$${MATH_FORMULA}$`),
+    action: insertInlineMath,
     dropdown: MATH_DROPDOWN,
     dropdownTitle: 'Choose math type',
   },
@@ -405,18 +406,23 @@ function attachTooltip(el: HTMLElement, text: string): void {
 }
 
 /**
- * Chạy 1 ToolbarItem: action + (focus lại #content trừ khi tự mở prompt bất
+ * Chạy 1 action bất kỳ: action + (focus lại #content trừ khi tự mở prompt bất
  * đồng bộ) + scheduleSync — logic dùng chung cho nút đơn, mặt chính của
- * split-button, VÀ hàng trong menu tràn (US-4.7) khi đại diện split-button bị
- * ẩn (chỉ action mặc định được liệt kê, xem ToolbarItem.dropdown doc).
+ * split-button, hàng dropdown của split-button, VÀ hàng trong menu tràn
+ * (US-4.7) khi đại diện split-button bị ẩn (chỉ action mặc định được liệt kê,
+ * xem ToolbarItem.dropdown doc).
  */
-function invokeItem(item: ToolbarItem): void {
+function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
   hideTooltip();
-  item.action();
-  if (!item.opensAsyncPrompt) {
+  action();
+  if (!opensAsyncPrompt) {
     content.focus();
   }
   ctx.scheduleSync();
+}
+
+function invokeItem(item: ToolbarItem): void {
+  invokeAction(item.action, item.opensAsyncPrompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -571,10 +577,20 @@ function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
 function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   const wrap = document.createElement('span');
   wrap.className = 'split-btn';
+  if (item.alignRight) {
+    wrap.classList.add('toolbar-push-right');
+  }
 
   const main = document.createElement('button');
   main.type = 'button';
   main.className = 'split-main';
+  // id đi trên MẶT CHÍNH (không phải wrap) — khớp với contract của
+  // buildPlainButtonEl (id trên chính <button> hiển thị), để mọi lookup
+  // getElementById (vd. updateTocButton, hoặc active-state sync US-4.15 nếu
+  // sau này mở rộng sang split-button) tìm đúng phần tử thật sự đổi trạng thái.
+  if (item.id) {
+    main.id = item.id;
+  }
   if (item.icon) {
     main.innerHTML = item.icon;
   } else {
@@ -601,12 +617,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   for (const entry of item.dropdown ?? []) {
     addPopoverRow(popover, entry.icon, entry.label, entry.badge, () => {
       closePopover();
-      hideTooltip();
-      entry.action();
-      if (!item.opensAsyncPrompt) {
-        content.focus();
-      }
-      ctx.scheduleSync();
+      invokeAction(entry.action, item.opensAsyncPrompt);
     });
   }
   caret.addEventListener('click', () => {
@@ -704,14 +715,20 @@ function createMoreOptionsButton(): HTMLButtonElement {
   attachTooltip(btn, 'More options');
   btn.addEventListener('mousedown', (e) => e.preventDefault());
 
+  // invokeAction (không phải postMessage trần) để khôi phục focus về #content
+  // sau khi chọn — quan trọng nhất khi kích hoạt bằng bàn phím (Tab + Enter):
+  // lúc đó mousedown/preventDefault (chặn trình duyệt cướp focus khi bấm
+  // chuột) không hề chạy, focus đã nằm sẵn trên hàng popover từ trước khi
+  // click, nên PHẢI có content.focus() tường minh — không thì focus kẹt lại
+  // trên hàng vừa ẩn (display:none) thay vì quay về editor.
   const popover = buildPopover('toolbar-more-options-menu');
   addPopoverRow(popover, CLAUDE_COPY_ICON, 'Copy "@file" for Claude Code chat', undefined, () => {
     closePopover();
-    ctx.vscode.postMessage({ type: 'addToClaudeContext' });
+    invokeAction(() => ctx.vscode.postMessage({ type: 'addToClaudeContext' }));
   });
   addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
     closePopover();
-    ctx.vscode.postMessage({ type: 'viewSource' });
+    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }));
   });
 
   btn.addEventListener('click', () => {
@@ -747,17 +764,15 @@ function toggleOverflowMenu(): void {
   togglePopover(moreBtn, overflowMenu);
 }
 
-/** Đóng menu tràn CHỈ khi nó đang là popover đang mở — không đụng popover khác (vd. dropdown split-button). */
-function closeOverflowMenu(): void {
-  if (overflowMenu && openPopoverEl === overflowMenu) {
-    closePopover();
-  }
-}
-
 /**
  * Đo lại bề rộng: hiện tất cả nút định dạng trước, nếu tràn thì ẩn dần từ nút
  * cuối dãy (giữ nguyên nhóm tiện ích đẩy phải luôn hiện) cho tới khi vừa,
  * rồi dựng lại menu tràn từ danh sách vừa ẩn.
+ *
+ * Đóng bất kỳ popover nào đang mở (không chỉ menu tràn) trước khi tính lại —
+ * một dropdown split-button (Heading/Code block/Math) đang mở có thể chính là
+ * cái trigger sắp bị ẩn (display:none) ở vòng lặp bên dưới; nếu chỉ đóng
+ * riêng menu tràn, popover đó sẽ trôi nổi ở toạ độ cũ, mất neo với trigger.
  */
 function recalcOverflow(): void {
   if (!toolbarElRef || !moreBtn) {
@@ -772,7 +787,7 @@ function recalcOverflow(): void {
     }
   }
   moreBtn.style.display = 'none';
-  closeOverflowMenu();
+  closePopover();
 
   if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
     rebuildOverflowMenu([]);
@@ -810,7 +825,7 @@ function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
   overflowMenu.innerHTML = '';
   for (const entry of hidden) {
     addPopoverRow(overflowMenu, entry.item.icon, entry.item.title, undefined, () => {
-      closeOverflowMenu();
+      closePopover();
       invokeItem(entry.item);
     });
   }
@@ -1395,12 +1410,19 @@ function recomputeActiveFormatting(): void {
   const bq = anchorEl?.closest('blockquote') ?? null;
   setActive('fmt-blockquote', !!bq && content.contains(bq));
 
+  // Dò trực tiếp <li>/<ul>/<ol> gần nhất qua closest() thay vì gọi
+  // getListSelection() (US-4.2) — hàm đó tự dò lại toàn bộ Range + duyệt hết
+  // các <li> con của list bằng range.intersectsNode để trả về CẢ danh sách
+  // item đang chọn, tốn hơn hẳn mức cần cho việc này (chỉ cần biết li/list
+  // của một điểm caret). recomputeActiveFormatting chạy trên mọi
+  // selectionchange (mỗi lần di caret) nên tránh phần dò thừa đó.
   const li = anchorEl?.closest('li') ?? null;
-  setActive('fmt-task', !!li && content.contains(li) && !!li.querySelector(':scope > input[type="checkbox"]'));
+  const liInContent = !!li && content.contains(li);
+  setActive('fmt-task', liInContent && !!li.querySelector(':scope > input[type="checkbox"]'));
 
-  const listSel = getListSelection();
-  setActive('fmt-bullet', listSel?.list.tagName === 'UL');
-  setActive('fmt-numbered', listSel?.list.tagName === 'OL');
+  const list = liInContent ? li.parentElement : null;
+  setActive('fmt-bullet', list?.tagName === 'UL');
+  setActive('fmt-numbered', list?.tagName === 'OL');
 }
 
 let activeSyncRafId: number | undefined;
