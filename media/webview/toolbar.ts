@@ -141,15 +141,27 @@ export function syncTocButton(): void {
   updateTocButton();
 }
 
+// Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
+// Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
+// code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
+// chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
+// chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
 const toolbarItems: ToolbarItem[] = [
   { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold') },
   { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic') },
   { label: 'S', title: 'Strikethrough (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
-  { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode },
   { label: 'H1', title: 'Heading 1', action: () => formatHeading('h1'), separatorBefore: true },
   { label: 'H2', title: 'Heading 2', action: () => formatHeading('h2') },
   { label: 'H3', title: 'Heading 3', action: () => formatHeading('h3') },
   { label: '¶', title: 'Normal paragraph', action: () => formatHeading('p') },
+  {
+    label: '↶',
+    icon: FMT_ICONS.undo,
+    title: 'Undo (⌘Z)',
+    action: () => document.execCommand('undo'),
+    separatorBefore: true,
+  },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
     label: '•',
     icon: FMT_ICONS.ul,
@@ -166,7 +178,6 @@ const toolbarItems: ToolbarItem[] = [
     action: toggleBlockquote,
     separatorBefore: true,
   },
-  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Code block', action: insertCodeBlock },
   { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
   {
     label: '—',
@@ -189,8 +200,8 @@ const toolbarItems: ToolbarItem[] = [
     action: insertImage,
     opensAsyncPrompt: true,
   },
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo'), separatorBefore: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
+  { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode, separatorBefore: true },
+  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Code block', action: insertCodeBlock },
   {
     label: '@',
     icon: CLAUDE_COPY_ICON,
