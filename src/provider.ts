@@ -11,6 +11,7 @@ import type {
 } from './shared/messages';
 import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
+import { rankFileGroups } from './shared/rank-utils';
 
 /**
  * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
@@ -777,11 +778,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         const lines = text.split(/\r\n|\r|\n/);
         const fileMatches: CrossFileMatch[] = [];
         let hitFileScanCap = false;
+        // Offset xấp xỉ (US-15.7 positionBoost) của đầu dòng hiện tại trong `text`
+        // gốc — split() làm mất ký tự xuống dòng thật (\n hay \r\n) nên cộng dồn
+        // +1/dòng chỉ là gần đúng, đủ dùng cho tín hiệu xếp hạng (không dùng để
+        // định vị mở file — line/character vẫn là nguồn sự thật cho việc đó).
+        let lineStartOffset = 0;
         for (let lineNo = 0; lineNo < lines.length && !hitFileScanCap; lineNo++) {
+          const rawLine = lines[lineNo];
           // Trim TRƯỚC rồi so khớp trên chuỗi đã trim, để character luôn khớp
           // đúng vị trí trong lineText trả về (bất biến bắt buộc: webview chỉ
           // slice(character, character+length) từ lineText, không tự tìm lại).
-          const trimmedLine = lines[lineNo].trim();
+          const trimmedLine = rawLine.trim();
+          const leadingWhitespace = rawLine.length - rawLine.trimStart().length;
           // Cap an toàn kỹ thuật RIÊNG CHO FILE NÀY — không còn dùng ngân sách
           // toàn cục, để 1 file nhiều match không chặn việc quét file khác.
           const remaining =
@@ -799,12 +807,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               contextBefore: lineNo > 0 ? lines[lineNo - 1].trim() : '',
               lineText: trimmedLine,
               contextAfter: lineNo < lines.length - 1 ? lines[lineNo + 1].trim() : '',
+              charOffset: lineStartOffset + leadingWhitespace + start,
             });
             if (fileMatches.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN) {
               hitFileScanCap = true;
               break;
             }
           }
+          lineStartOffset += rawLine.length + 1;
         }
 
         if (fileMatches.length === 0) {
@@ -816,6 +826,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           fileName: segments[segments.length - 1],
           relativePath: vscode.workspace.asRelativePath(uri, false),
           totalInFile: fileMatches.length,
+          fileLength: text.length,
           matches: fileMatches.slice(0, MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_DISPLAY),
         });
         totalMatches += fileMatches.length;
@@ -835,7 +846,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       usedFallback = true;
     }
 
-    return { groups: result.groups, truncated: result.truncated, usedFallback };
+    // US-15.7: xếp hạng theo mức độ liên quan (fileScore) thay vì giữ nguyên
+    // thứ tự findFiles trả về. `uris.length` = tổng file đủ điều kiện quét nội
+    // dung, dùng làm mẫu số idf trong rankFileGroups.
+    const rankedGroups = rankFileGroups(result.groups, query, uris.length);
+
+    return { groups: rankedGroups, truncated: result.truncated, usedFallback };
   }
 
   /** Đuôi file tương ứng mỗi MIME ảnh clipboard hỗ trợ — SVG cố ý bỏ qua (kịch bản khai thác XSS/script trong SVG dán từ clipboard không đáng để đánh đổi). */

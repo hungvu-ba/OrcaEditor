@@ -32,6 +32,8 @@ export interface CrossFileMatch {
   lineText: string;
   /** Dòng liền sau, đã trim (rỗng nếu là dòng cuối file). */
   contextAfter: string;
+  /** Offset ký tự XẤP XỈ của match trong toàn bộ nội dung file gốc (0-based) — dùng cho positionBoost khi xếp hạng (US-15.7), không dùng để mở file (đã có line/character). */
+  charOffset: number;
 }
 
 /** Kết quả nhóm theo file cho tìm xuyên file. */
@@ -44,6 +46,8 @@ export interface CrossFileMatchGroup {
   relativePath: string;
   /** Tổng số match THẬT tìm được trong file (trước khi cắt còn tối đa 10 để gửi đi) — dùng cho badge + dòng "+N match khác". */
   totalInFile: number;
+  /** Độ dài nội dung file gốc (số ký tự) — mẫu số cho positionBoost khi xếp hạng (US-15.7). */
+  fileLength: number;
   matches: CrossFileMatch[];
 }
 
