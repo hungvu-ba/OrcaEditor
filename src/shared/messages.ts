@@ -74,7 +74,8 @@ export type WebviewToHost =
   | { type: 'viewSource' }
   | { type: 'crossFileSearch:request'; requestId: number; query: string; scope: CrossFileSearchScope; matchCase: boolean; wholeWord: boolean }
   | { type: 'crossFileSearch:openResult'; uri: string; line: number; character: number; length: number; matchText: string }
-  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope }
+  /** relativePath: có khi bấm "+N match khác trong file này" (GĐ4) — Search panel chỉ hiện kết quả đúng file đó thay vì toàn scope. */
+  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope; relativePath?: string }
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
   | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string };
 

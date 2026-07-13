@@ -406,7 +406,13 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     row.textContent = `+${remaining} match khác trong file này → xem trong Search panel`;
     row.addEventListener('mousedown', (e) => e.preventDefault());
     row.addEventListener('click', () => {
-      postToHost({ type: 'crossFileSearch:openInSearchPanel', query: currentQuery, scope: currentScope });
+      // GĐ4: scope Search panel về ĐÚNG file này (không phải toàn `currentScope`).
+      postToHost({
+        type: 'crossFileSearch:openInSearchPanel',
+        query: currentQuery,
+        scope: currentScope,
+        relativePath: group.relativePath,
+      });
       closePopover();
       hideIcon();
     });

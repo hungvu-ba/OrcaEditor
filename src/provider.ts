@@ -257,7 +257,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'crossFileSearch:openInSearchPanel': {
-          void this.openInSearchPanel(msg.query, msg.scope);
+          void this.openInSearchPanel(msg.query, msg.scope, msg.relativePath);
           break;
         }
         case 'pasteImage': {
@@ -407,12 +407,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /** "Xem thêm trong Search panel" — đẩy query sang panel Search chuẩn của VS Code khi popover không đủ chỗ hiển thị hết. */
-  private async openInSearchPanel(query: string, scope: CrossFileSearchScope): Promise<void> {
+  /**
+   * "Xem thêm trong Search panel" — đẩy query sang panel Search chuẩn của VS Code khi popover
+   * không đủ chỗ hiển thị hết.
+   *
+   * `relativePath` (GĐ4, US-15.6 điểm 3): có khi bấm dòng "+N match khác trong file này" của 1
+   * group cụ thể — scope Search panel về ĐÚNG file đó thay vì glob rộng `markdown`/`allFiles`.
+   */
+  private async openInSearchPanel(query: string, scope: CrossFileSearchScope, relativePath?: string): Promise<void> {
     try {
       await vscode.commands.executeCommand('workbench.action.findInFiles', {
         query,
-        filesToInclude: scope === 'markdown' ? '*.md,*.markdown' : '',
+        filesToInclude: relativePath ?? (scope === 'markdown' ? '*.md,*.markdown' : ''),
         isCaseSensitive: false,
       });
     } catch (err) {
