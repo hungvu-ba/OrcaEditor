@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
--   Packaging: excluded the `WIP/`, `Requirement/`, and `Plan/` folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.
+-   Packaging: excluded internal working folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.
 
 ## \[0.6.8\] - 2026-07-12
 
