@@ -1008,11 +1008,61 @@ body.toc-open #select-overview {
 }
 
 .cross-file-search-group + .cross-file-search-group {
-  margin-top: 6px;
+  margin-top: 2px;
+}
+
+/* Header 1 nhóm file (hàng khi collapsed) — bấm để toggle expand/collapse,
+ * KHÔNG mở file (tránh lẫn target click với .cross-file-search-match). */
+.cross-file-search-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cross-file-search-group-header:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* Chevron ▸ khi collapsed, xoay 90° thành ▾ khi expanded (đồng bộ aria-expanded do JS set). */
+.cross-file-search-chevron {
+  flex: none;
+  width: 10px;
+  height: 12px;
+  transition: transform 0.1s ease;
+}
+
+.cross-file-search-chevron::before {
+  content: '';
+  display: block;
+  width: 0;
+  height: 0;
+  margin: 2px 0 0 1px;
+  border-style: solid;
+  border-width: 4px 0 4px 5px;
+  border-color: transparent transparent transparent currentColor;
+  opacity: 0.75;
+}
+
+.cross-file-search-group-header[aria-expanded='true'] .cross-file-search-chevron {
+  transform: rotate(90deg);
+}
+
+.cross-file-search-group-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .cross-file-search-file {
-  padding: 4px 10px 0;
   font-size: 12px;
   font-weight: 600;
   overflow: hidden;
@@ -1021,12 +1071,53 @@ body.toc-open #select-overview {
 }
 
 .cross-file-search-path {
-  padding: 0 10px 2px;
   font-size: 11px;
   opacity: 0.65;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Badge số lượng match THẬT trong file (totalInFile) — pill nhỏ, dùng token
+ * --vscode-badge-* để tự đủ tương phản ở cả theme sáng/tối. */
+.cross-file-search-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.6));
+}
+
+/* Danh sách match con — chỉ hiển thị khi group đang expanded (toggle [hidden] qua JS).
+ * padding-left cộng thêm để thụt lề rõ so với header, không cần đổi lại
+ * .cross-file-search-match (giữ nguyên style đã Shipped ở C5). */
+.cross-file-search-group-matches {
+  padding-left: 10px;
+}
+
+.cross-file-search-group-matches[hidden] {
+  display: none;
+}
+
+/* Dòng "+N match khác trong file này" — style nhẹ hơn .cross-file-search-more
+ * (không có border-top, vì đây là overflow CỦA 1 GROUP, không phải toàn popover). */
+.cross-file-search-overflow {
+  display: block;
+  width: 100%;
+  padding: 4px 10px 4px 18px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cross-file-search-overflow:hover {
+  text-decoration: underline;
 }
 
 .cross-file-search-match {
