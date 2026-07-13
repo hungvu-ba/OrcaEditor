@@ -104,6 +104,12 @@ const FMT_ICONS = {
     `<path d="M10.25 6.5H6a3.5 3.5 0 1 0 0 7h3.5" ${FMT_STROKE}/>` +
       `<path d="M8.25 4.25l2.5 2.5-2.5 2.5" ${FMT_STROKE}/>`
   ),
+  /** Icon Mermaid (US-4.12): 2 khối nối bằng đường gấp khúc, gợi sơ đồ flowchart. */
+  mermaid: svgIcon(
+    `<rect x="1.5" y="2.5" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
+      `<rect x="8.5" y="10" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
+      `<path d="M4.5 6v2.5a1.5 1.5 0 0 0 1.5 1.5h5.5" ${FMT_STROKE}/>`
+  ),
 };
 
 /** Icon "..." cho nút mở menu tràn (các nút không đủ chỗ khi toolbar hẹp). */
@@ -213,6 +219,13 @@ const MATH_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Block math', action: () => ctx.insertMarkdown(`$$${MATH_FORMULA}$$`) },
 ];
 
+/**
+ * Template Mermaid (US-4.12) — 1 flowchart mẫu, chèn qua `ctx.insertMarkdown`
+ * giống Math ở trên. mermaidView.renderAll() (gọi trong insertMarkdownAtCaret,
+ * main.ts) tự dựng SVG cho khối vừa chèn — không cần đổi mermaid.ts.
+ */
+const MERMAID_TEMPLATE = '```mermaid\ngraph TD; A[Start] --> B{Decision} --> C[End]\n```';
+
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
 // code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
@@ -291,6 +304,12 @@ const toolbarItems: ToolbarItem[] = [
     action: () => ctx.insertMarkdown(`$${MATH_FORMULA}$`),
     dropdown: MATH_DROPDOWN,
     dropdownTitle: 'Choose math type',
+  },
+  {
+    label: '⎇',
+    icon: FMT_ICONS.mermaid,
+    title: 'Insert Mermaid diagram template',
+    action: () => ctx.insertMarkdown(MERMAID_TEMPLATE),
   },
   {
     label: '@',
