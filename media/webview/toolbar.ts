@@ -125,6 +125,20 @@ const MORE_ICON = svgIcon(
     '<circle cx="12" cy="8" r="1.3" fill="currentColor"/>'
 );
 
+/**
+ * Icon "⋮" (kebab DỌC, 3 chấm xếp trên-dưới) cho nút "more options" (US-4.14)
+ * — CỐ Ý khác hình với MORE_ICON ("..." NGANG, menu tràn US-4.7) để 2 trigger
+ * đọc được là 2 control khác nhau khi cùng hiện trên toolbar hẹp. Thắng 2
+ * phương án khác được so sánh trong prototype: gear (⚙, ngụ ý "cấu hình" chứ
+ * không phải "hành động") và "..." + label chữ (tốn ~40-50px đúng chỗ đang
+ * thiếu chỗ nhất).
+ */
+const MORE_OPTIONS_ICON = svgIcon(
+  '<circle cx="8" cy="3.6" r="1.3" fill="currentColor"/>' +
+    '<circle cx="8" cy="8" r="1.3" fill="currentColor"/>' +
+    '<circle cx="8" cy="12.4" r="1.3" fill="currentColor"/>'
+);
+
 /** Chevron nhỏ cho caret của split-button (Heading/Code block/Math — US-4.9–4.11). */
 const CARET_DOWN_ICON = svgIcon(`<path d="M4.5 6.25L8 9.75l3.5-3.5" ${FMT_STROKE}/>`);
 
@@ -319,19 +333,6 @@ const toolbarItems: ToolbarItem[] = [
     action: () => ctx.insertMarkdown(MERMAID_TEMPLATE),
   },
   {
-    label: '@',
-    icon: CLAUDE_COPY_ICON,
-    title: 'Copy "@file" to clipboard for Claude Code chat — auto-opens/focuses the chat input, you just paste (⌘V)',
-    action: () => ctx.vscode.postMessage({ type: 'addToClaudeContext' }),
-    alignRight: true,
-  },
-  {
-    label: '⟨/⟩',
-    icon: RAW_SOURCE_ICON,
-    title: 'View raw Markdown source (opens a text editor to the side)',
-    action: () => ctx.vscode.postMessage({ type: 'viewSource' }),
-  },
-  {
     label: '☰',
     icon: TOC_ICON,
     title: 'Show/hide Table of Contents',
@@ -340,6 +341,7 @@ const toolbarItems: ToolbarItem[] = [
       updateTocButton();
     },
     id: 'toc-toggle',
+    alignRight: true,
   },
 ];
 
@@ -642,6 +644,13 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     toolbarEl.appendChild(moreBtn);
   }
 
+  // Kebab "more options" (US-4.14) luôn ở CUỐI cùng, ngoài phạm vi
+  // collapsibleEntries/toolbarItems — điều kiện "unconditional" khác hẳn
+  // width-based overflow của US-4.7 (không bao giờ tự ẩn dù toolbar rộng hay
+  // hẹp). Đứng ngay sau nút TOC (item cuối cùng có alignRight), cùng nhóm bị
+  // đẩy phải nhờ margin-left: auto của TOC.
+  toolbarEl.appendChild(createMoreOptionsButton());
+
   setupOverflowMenu();
 }
 
@@ -658,6 +667,36 @@ function createMoreButton(): HTMLButtonElement {
   btn.addEventListener('click', () => {
     hideTooltip();
     toggleOverflowMenu();
+  });
+  return btn;
+}
+
+/**
+ * Nút "⋮" (kebab dọc) — gộp Copy "@file" cho Claude / View raw Markdown
+ * source vào 1 popover, thay cho 2 nút luôn-hiện trước đây (US-4.6/US-4.14).
+ * Cùng action/message gốc (`addToClaudeContext`/`viewSource`), chỉ đổi UI.
+ */
+function createMoreOptionsButton(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.innerHTML = MORE_OPTIONS_ICON;
+  btn.setAttribute('aria-label', 'More options');
+  attachTooltip(btn, 'More options');
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+
+  const popover = buildPopover('toolbar-more-options-menu');
+  addPopoverRow(popover, CLAUDE_COPY_ICON, 'Copy "@file" for Claude Code chat', undefined, () => {
+    closePopover();
+    ctx.vscode.postMessage({ type: 'addToClaudeContext' });
+  });
+  addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
+    closePopover();
+    ctx.vscode.postMessage({ type: 'viewSource' });
+  });
+
+  btn.addEventListener('click', () => {
+    hideTooltip();
+    togglePopover(btn, popover);
   });
   return btn;
 }
