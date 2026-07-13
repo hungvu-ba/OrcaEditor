@@ -47,6 +47,11 @@ function pluralResults(n: number): string {
   return n === 1 ? '1 result' : `${n} results`;
 }
 
+/** Badge số lượng trên header 1 nhóm file (vd "12 matches") — dùng totalInFile, không phải số match đã serialize. */
+function pluralMatches(n: number): string {
+  return n === 1 ? '1 match' : `${n} matches`;
+}
+
 /** Cắt bớt đầu chuỗi (giữ đoạn sát match) khi vượt ngân sách, thêm tiền tố "…". */
 function truncateContextLeft(text: string, maxChars: number): string {
   return text.length > maxChars ? `…${text.slice(text.length - maxChars)}` : text;
@@ -358,9 +363,59 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     return row;
   }
 
+  /** Header 1 nhóm file (dòng khi collapsed): chevron + tên file/đường dẫn + badge. Click → chỉ toggle, KHÔNG mở file (tránh lẫn với renderMatchRow). */
+  function renderGroupHeader(group: CrossFileMatchGroup, onToggle: () => void): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cross-file-search-group-header';
+    btn.setAttribute('aria-expanded', 'false');
+
+    const chevron = document.createElement('span');
+    chevron.className = 'cross-file-search-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+
+    const fileEl = document.createElement('span');
+    fileEl.className = 'cross-file-search-file';
+    fileEl.textContent = group.fileName;
+    const pathEl = document.createElement('span');
+    pathEl.className = 'cross-file-search-path';
+    pathEl.textContent = group.relativePath;
+    const info = document.createElement('span');
+    info.className = 'cross-file-search-group-info';
+    info.append(fileEl, pathEl);
+
+    const badge = document.createElement('span');
+    badge.className = 'cross-file-search-badge';
+    badge.textContent = pluralMatches(group.totalInFile);
+
+    btn.append(chevron, info, badge);
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', onToggle);
+    return btn;
+  }
+
+  /** Dòng "+N match khác trong file này" — chỉ render khi group bị cắt bớt (totalInFile > số match đã gửi). */
+  function renderOverflowRow(group: CrossFileMatchGroup): HTMLButtonElement | undefined {
+    const remaining = group.totalInFile - group.matches.length;
+    if (remaining <= 0) {
+      return undefined;
+    }
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'cross-file-search-overflow';
+    row.textContent = `+${remaining} match khác trong file này → xem trong Search panel`;
+    row.addEventListener('mousedown', (e) => e.preventDefault());
+    row.addEventListener('click', () => {
+      postToHost({ type: 'crossFileSearch:openInSearchPanel', query: currentQuery, scope: currentScope });
+      closePopover();
+      hideIcon();
+    });
+    return row;
+  }
+
   function renderResults(groups: CrossFileMatchGroup[], truncated: boolean, usedFallback: boolean): void {
     resultsEl.textContent = '';
-    const total = groups.reduce((n, g) => n + g.matches.length, 0);
+    const total = groups.reduce((n, g) => n + g.totalInFile, 0);
     // Fallback (C4, chốt #4): host đã hạ whole-word→substring vì 0 kết quả. Đồng
     // bộ toggle Whole Word về OFF + hạ state thật (khớp luồng cục bộ của Ctrl+F).
     if (usedFallback) {
@@ -394,14 +449,25 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     for (const group of groups) {
       const groupEl = document.createElement('div');
       groupEl.className = 'cross-file-search-group';
-      const fileEl = document.createElement('div');
-      fileEl.className = 'cross-file-search-file';
-      fileEl.textContent = group.fileName;
-      const pathEl = document.createElement('div');
-      pathEl.className = 'cross-file-search-path';
-      pathEl.textContent = group.relativePath;
-      groupEl.append(fileEl, pathEl);
-      group.matches.forEach((_m, i) => groupEl.appendChild(renderMatchRow(group, i)));
+
+      const matchesEl = document.createElement('div');
+      matchesEl.className = 'cross-file-search-group-matches';
+      matchesEl.hidden = true;
+      group.matches.forEach((_m, i) => matchesEl.appendChild(renderMatchRow(group, i)));
+      const overflowRow = renderOverflowRow(group);
+      if (overflowRow) {
+        matchesEl.appendChild(overflowRow);
+      }
+
+      let expanded = false;
+      const headerBtn = renderGroupHeader(group, () => {
+        expanded = !expanded;
+        matchesEl.hidden = !expanded;
+        headerBtn.setAttribute('aria-expanded', String(expanded));
+        groupEl.classList.toggle('expanded', expanded);
+      });
+
+      groupEl.append(headerBtn, matchesEl);
       frag.appendChild(groupEl);
     }
     resultsEl.appendChild(frag);
