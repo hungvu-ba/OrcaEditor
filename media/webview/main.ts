@@ -68,6 +68,7 @@ initToolbar(content, toolbarEl, {
   dom,
   toc,
   promptInput: prompt.promptInput,
+  insertMarkdown: insertMarkdownAtCaret,
 });
 initInputRules(content, { scheduleSync, dom });
 
@@ -498,6 +499,17 @@ function insertPastedMarkdown(text: string): void {
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
   mermaidView.renderAll();
+}
+
+/**
+ * Chèn markdown tại vị trí caret hiện tại — dùng cho toolbar (Math US-4.11,
+ * Mermaid US-4.12), khác "dán" chỉ ở tên gọi/ngữ cảnh gọi: text luôn là một
+ * mảnh nhỏ tự sinh (vd. `$x^2$`, fence ```mermaid```), nên tái dùng nguyên
+ * pipeline renderPasteHtml → insertHTML → mermaidView.renderAll() của
+ * insertPastedMarkdown là đủ, không cần logic riêng.
+ */
+function insertMarkdownAtCaret(text: string): void {
+  insertPastedMarkdown(text);
 }
 
 /**

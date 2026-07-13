@@ -147,12 +147,16 @@ body.md-line-numbers #toolbar {
   flex-shrink: 0;
 }
 
-.toolbar-overflow-menu {
+/* --- Popover dùng chung: menu tràn (US-4.7), dropdown split-button
+ * (Heading/Code block/Math — US-4.9–4.11), "more options" (US-4.14). Xem
+ * buildPopover()/openPopover()/closePopover() trong toolbar.ts — chỉ MỘT
+ * popover mở tại một thời điểm, đóng khi click ra ngoài/Escape. --- */
+.toolbar-popover {
   position: fixed;
   z-index: 300;
   display: none;
   flex-direction: column;
-  min-width: 200px;
+  min-width: 180px;
   max-width: 320px;
   max-height: 60vh;
   overflow-y: auto;
@@ -163,7 +167,7 @@ body.md-line-numbers #toolbar {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
-.toolbar-overflow-item {
+.toolbar-popover-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -178,19 +182,97 @@ body.md-line-numbers #toolbar {
   cursor: pointer;
 }
 
-.toolbar-overflow-item:hover {
+.toolbar-popover-item:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
 }
 
-.toolbar-overflow-icon {
+.toolbar-popover-icon {
   display: inline-flex;
   flex-shrink: 0;
 }
 
-.toolbar-overflow-label {
+.toolbar-popover-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Nhãn nhỏ "Phổ biến" cạnh lựa chọn mặc định trong dropdown split-button. */
+.toolbar-popover-badge {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+
+/* --- Split-button (mặt chính + caret): Heading/Code block/Math (US-4.9–4.11).
+ * Port cấu trúc từ prototype HTML đã duyệt — 2 nút con trong 1 khung viền
+ * chung, vạch chia ở giữa. --- */
+#toolbar .split-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+#toolbar .split-btn:hover {
+  border-color: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+#toolbar .split-main,
+#toolbar .split-caret {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+
+#toolbar .split-main {
+  min-width: 20px;
+  padding: 0 6px;
+}
+
+#toolbar .split-caret {
+  min-width: 16px;
+  padding: 0 3px;
+}
+
+#toolbar .split-main svg,
+#toolbar .split-caret svg {
+  display: block;
+  pointer-events: none;
+}
+
+#toolbar .split-main:hover,
+#toolbar .split-caret:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+#toolbar .split-main.active {
+  background: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground));
+}
+
+#toolbar .split-divider {
+  flex-shrink: 0;
+  width: 1px;
+  margin: 4px 0;
+  background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
 /* --- Toolbar nổi cho bảng --- */

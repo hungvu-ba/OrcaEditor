@@ -14,6 +14,8 @@ export interface ToolbarContext {
   dom: DomHelpers;
   toc: TocController;
   promptInput: PromptController['promptInput'];
+  /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
+  insertMarkdown: (text: string) => void;
 }
 
 let content: HTMLElement;
@@ -111,6 +113,18 @@ const MORE_ICON = svgIcon(
     '<circle cx="12" cy="8" r="1.3" fill="currentColor"/>'
 );
 
+/** Chevron nhỏ cho caret của split-button (Heading/Code block/Math — US-4.9–4.11). */
+const CARET_DOWN_ICON = svgIcon(`<path d="M4.5 6.25L8 9.75l3.5-3.5" ${FMT_STROKE}/>`);
+
+/** Một dòng trong dropdown của split-button (vd. các cấp Heading, ngôn ngữ code). */
+interface ToolbarDropdownEntry {
+  label: string;
+  icon?: string;
+  /** Nhãn nhỏ đánh dấu lựa chọn phổ biến/mặc định (vd. "Phổ biến"). */
+  badge?: string;
+  action: () => void;
+}
+
 interface ToolbarItem {
   label: string;
   /** SVG markup — nếu có thì dùng thay label text. */
@@ -129,6 +143,16 @@ interface ToolbarItem {
    * nhập trong lúc selection đang rỗng, khiến caret nhảy về đầu file.
    */
   opensAsyncPrompt?: boolean;
+  /**
+   * Có mặt → render thành split-button (mặt chính + caret) thay vì nút đơn
+   * (US-4.9/4.10/4.11). `action` vẫn là hành vi mặt chính (mặc định); caret mở
+   * popover liệt kê các lựa chọn này. Khi bị ẩn vào menu tràn (US-4.7), chỉ
+   * `action` mặc định được liệt kê — dropdown không truy cập được từ đó
+   * (accepted simplification, xem Open Questions US-4.9/4.10).
+   */
+  dropdown?: ToolbarDropdownEntry[];
+  /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
+  dropdownTitle?: string;
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -259,10 +283,139 @@ function hideTooltip(): void {
   }
 }
 
+/** Gắn tooltip tự vẽ (mouseenter/focus → hiện, mouseleave/blur → ẩn) cho 1 phần tử. */
+function attachTooltip(el: HTMLElement, text: string): void {
+  el.addEventListener('mouseenter', () => showTooltip(el, text));
+  el.addEventListener('mouseleave', hideTooltip);
+  el.addEventListener('focus', () => showTooltip(el, text));
+  el.addEventListener('blur', hideTooltip);
+}
+
+/**
+ * Chạy 1 ToolbarItem: action + (focus lại #content trừ khi tự mở prompt bất
+ * đồng bộ) + scheduleSync — logic dùng chung cho nút đơn, mặt chính của
+ * split-button, VÀ hàng trong menu tràn (US-4.7) khi đại diện split-button bị
+ * ẩn (chỉ action mặc định được liệt kê, xem ToolbarItem.dropdown doc).
+ */
+function invokeItem(item: ToolbarItem): void {
+  hideTooltip();
+  item.action();
+  if (!item.opensAsyncPrompt) {
+    content.focus();
+  }
+  ctx.scheduleSync();
+}
+
+// ---------------------------------------------------------------------------
+// Popover dùng chung (GĐ2 hạ tầng) — nền cho menu tràn (US-4.7) và mọi
+// dropdown mới (Heading/Code block/Math split-button, "more options" US-4.14).
+// Chỉ MỘT popover được mở tại một thời điểm; đóng khi click ra ngoài/Escape.
+// ---------------------------------------------------------------------------
+
+let openPopoverEl: HTMLElement | undefined;
+let openPopoverTrigger: HTMLElement | undefined;
+let popoverGlobalListenersInstalled = false;
+
+function installPopoverGlobalListeners(): void {
+  if (popoverGlobalListenersInstalled) {
+    return;
+  }
+  popoverGlobalListenersInstalled = true;
+  document.addEventListener('mousedown', (e) => {
+    if (!openPopoverEl) {
+      return;
+    }
+    const target = e.target as Node;
+    if (openPopoverEl.contains(target) || target === openPopoverTrigger) {
+      return;
+    }
+    closePopover();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closePopover();
+    }
+  });
+}
+
+/** Tạo 1 popover ẩn sẵn, gắn vào <body> — style dùng chung `.toolbar-popover`. */
+function buildPopover(extraClassName?: string): HTMLDivElement {
+  installPopoverGlobalListeners();
+  const el = document.createElement('div');
+  el.className = extraClassName ? `toolbar-popover ${extraClassName}` : 'toolbar-popover';
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  return el;
+}
+
+/** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
+function addPopoverRow(
+  popoverEl: HTMLElement,
+  icon: string | undefined,
+  label: string,
+  badge: string | undefined,
+  onClick: () => void
+): void {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'toolbar-popover-item';
+  if (icon) {
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'toolbar-popover-icon';
+    iconSpan.innerHTML = icon;
+    row.appendChild(iconSpan);
+  }
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'toolbar-popover-label';
+  labelSpan.textContent = label;
+  row.appendChild(labelSpan);
+  if (badge) {
+    const badgeSpan = document.createElement('span');
+    badgeSpan.className = 'toolbar-popover-badge';
+    badgeSpan.textContent = badge;
+    row.appendChild(badgeSpan);
+  }
+  row.addEventListener('mousedown', (e) => e.preventDefault());
+  row.addEventListener('click', onClick);
+  popoverEl.appendChild(row);
+}
+
+/** Mở popoverEl neo theo triggerBtn (căn phải mép dưới nút) — đóng popover khác đang mở trước. */
+function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
+  if (openPopoverEl && openPopoverEl !== popoverEl) {
+    closePopover();
+  }
+  popoverEl.style.display = 'flex';
+  const rect = triggerBtn.getBoundingClientRect();
+  const menuRect = popoverEl.getBoundingClientRect();
+  const left = Math.max(4, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 4));
+  popoverEl.style.left = `${left}px`;
+  popoverEl.style.top = `${rect.bottom + 4}px`;
+  openPopoverEl = popoverEl;
+  openPopoverTrigger = triggerBtn;
+}
+
+function closePopover(): void {
+  if (openPopoverEl) {
+    openPopoverEl.style.display = 'none';
+  }
+  openPopoverEl = undefined;
+  openPopoverTrigger = undefined;
+}
+
+function togglePopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
+  if (openPopoverEl === popoverEl) {
+    closePopover();
+  } else {
+    openPopover(triggerBtn, popoverEl);
+  }
+}
+
 /** Một nút định dạng có thể bị ẩn vào menu tràn (".toolbar-more") khi hẹp chỗ. */
 interface CollapsibleEntry {
   item: ToolbarItem;
-  btn: HTMLButtonElement;
+  /** Phần tử hiện/ẩn — <button> cho nút đơn, <span class="split-btn"> cho split-button. */
+  btn: HTMLElement;
   /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
   sep: HTMLSpanElement | null;
 }
@@ -272,6 +425,87 @@ let moreBtn: HTMLButtonElement | undefined;
 let overflowMenu: HTMLDivElement | undefined;
 let collapsibleEntries: CollapsibleEntry[] = [];
 let overflowResizeObserver: ResizeObserver | undefined;
+
+/** Dựng nút đơn (label/icon text, không dropdown) — trường hợp đa số các ToolbarItem. */
+function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  if (item.id) {
+    btn.id = item.id;
+  }
+  if (item.alignRight) {
+    btn.classList.add('toolbar-push-right');
+  }
+  if (item.icon) {
+    btn.innerHTML = item.icon;
+  } else {
+    btn.textContent = item.label;
+  }
+  btn.setAttribute('aria-label', item.title);
+  attachTooltip(btn, item.title);
+  // mousedown + preventDefault để không mất selection trong #content
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', () => invokeItem(item));
+  return btn;
+}
+
+/**
+ * Dựng split-button (mặt chính + vạch chia + caret nhỏ) — US-4.9/4.10/4.11.
+ * Mặt chính chạy `item.action` (hành vi mặc định); caret mở popover liệt kê
+ * `item.dropdown`. Port cấu trúc từ prototype HTML đã duyệt, chỉ đổi biến CSS
+ * `--vs-*` sang biến VS Code thật (xem `.split-*` trong editor.css).
+ */
+function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
+  const wrap = document.createElement('span');
+  wrap.className = 'split-btn';
+
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'split-main';
+  if (item.icon) {
+    main.innerHTML = item.icon;
+  } else {
+    main.textContent = item.label;
+  }
+  main.setAttribute('aria-label', item.title);
+  attachTooltip(main, item.title);
+  main.addEventListener('mousedown', (e) => e.preventDefault());
+  main.addEventListener('click', () => invokeItem(item));
+
+  const divider = document.createElement('span');
+  divider.className = 'split-divider';
+
+  const caret = document.createElement('button');
+  caret.type = 'button';
+  caret.className = 'split-caret';
+  caret.innerHTML = CARET_DOWN_ICON;
+  const dropdownTitle = item.dropdownTitle ?? `${item.title} — more options`;
+  caret.setAttribute('aria-label', dropdownTitle);
+  attachTooltip(caret, dropdownTitle);
+  caret.addEventListener('mousedown', (e) => e.preventDefault());
+
+  const popover = buildPopover('toolbar-split-popover');
+  for (const entry of item.dropdown ?? []) {
+    addPopoverRow(popover, entry.icon, entry.label, entry.badge, () => {
+      closePopover();
+      hideTooltip();
+      entry.action();
+      if (!item.opensAsyncPrompt) {
+        content.focus();
+      }
+      ctx.scheduleSync();
+    });
+  }
+  caret.addEventListener('click', () => {
+    hideTooltip();
+    togglePopover(caret, popover);
+  });
+
+  wrap.appendChild(main);
+  wrap.appendChild(divider);
+  wrap.appendChild(caret);
+  return wrap;
+}
 
 export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, context: ToolbarContext): void {
   content = contentEl;
@@ -303,41 +537,11 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
       sep.className = 'toolbar-sep';
       toolbarEl.appendChild(sep);
     }
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    if (item.id) {
-      btn.id = item.id;
-    }
-    if (item.alignRight) {
-      btn.classList.add('toolbar-push-right');
-    }
-    if (item.icon) {
-      btn.innerHTML = item.icon;
-    } else {
-      btn.textContent = item.label;
-    }
-    btn.setAttribute('aria-label', item.title);
-    btn.addEventListener('mouseenter', () => showTooltip(btn, item.title));
-    btn.addEventListener('mouseleave', hideTooltip);
-    btn.addEventListener('focus', () => showTooltip(btn, item.title));
-    btn.addEventListener('blur', hideTooltip);
-    // mousedown + preventDefault để không mất selection trong #content
-    btn.addEventListener('mousedown', (e) => e.preventDefault());
-    btn.addEventListener('click', () => {
-      hideTooltip();
-      item.action();
-      // Action mở popup bất đồng bộ (chèn liên kết/ảnh) tự lo focus + restore
-      // selection khi đóng — focus lại content ngay ở đây sẽ cướp focus khỏi
-      // ô nhập của popup và làm caret nhảy về đầu file.
-      if (!item.opensAsyncPrompt) {
-        content.focus();
-      }
-      ctx.scheduleSync();
-    });
-    toolbarEl.appendChild(btn);
+    const el = item.dropdown ? buildSplitButtonEl(item) : buildPlainButtonEl(item);
+    toolbarEl.appendChild(el);
 
     if (!inPinnedGroup) {
-      collapsibleEntries.push({ item, btn, sep });
+      collapsibleEntries.push({ item, btn: el, sep });
     }
   }
 
@@ -357,10 +561,7 @@ function createMoreButton(): HTMLButtonElement {
   btn.innerHTML = MORE_ICON;
   btn.style.display = 'none';
   btn.setAttribute('aria-label', 'More tools');
-  btn.addEventListener('mouseenter', () => showTooltip(btn, 'More tools'));
-  btn.addEventListener('mouseleave', hideTooltip);
-  btn.addEventListener('focus', () => showTooltip(btn, 'More tools'));
-  btn.addEventListener('blur', hideTooltip);
+  attachTooltip(btn, 'More tools');
   btn.addEventListener('mousedown', (e) => e.preventDefault());
   btn.addEventListener('click', () => {
     hideTooltip();
@@ -370,33 +571,14 @@ function createMoreButton(): HTMLButtonElement {
 }
 
 /**
- * Dựng menu tràn (dropdown) + theo dõi bề rộng toolbar bằng ResizeObserver.
- * Toolbar chuyển sang flex-wrap: nowrap (xem editor.css) — khi không đủ chỗ,
- * các nút định dạng cuối dãy được ẩn dần và liệt kê lại trong menu này thay vì
- * bị đẩy lệch xuống dòng 2.
+ * Dựng menu tràn (dropdown, dùng hạ tầng popover chung ở trên) + theo dõi bề
+ * rộng toolbar bằng ResizeObserver. Toolbar chuyển sang flex-wrap: nowrap (xem
+ * editor.css) — khi không đủ chỗ, các nút định dạng cuối dãy được ẩn dần và
+ * gom lại trong menu này thay vì bị đẩy lệch xuống dòng 2.
  */
 function setupOverflowMenu(): void {
   if (!overflowMenu) {
-    overflowMenu = document.createElement('div');
-    overflowMenu.className = 'toolbar-overflow-menu';
-    overflowMenu.style.display = 'none';
-    document.body.appendChild(overflowMenu);
-
-    document.addEventListener('mousedown', (e) => {
-      if (!overflowMenu || overflowMenu.style.display === 'none') {
-        return;
-      }
-      const target = e.target as Node;
-      if (overflowMenu.contains(target) || target === moreBtn) {
-        return;
-      }
-      closeOverflowMenu();
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        closeOverflowMenu();
-      }
-    });
+    overflowMenu = buildPopover('toolbar-overflow-menu');
   }
 
   overflowResizeObserver?.disconnect();
@@ -408,31 +590,16 @@ function setupOverflowMenu(): void {
 }
 
 function toggleOverflowMenu(): void {
-  if (!overflowMenu) {
-    return;
-  }
-  if (overflowMenu.style.display === 'none') {
-    openOverflowMenu();
-  } else {
-    closeOverflowMenu();
-  }
-}
-
-function openOverflowMenu(): void {
   if (!overflowMenu || !moreBtn) {
     return;
   }
-  overflowMenu.style.display = 'flex';
-  const rect = moreBtn.getBoundingClientRect();
-  const menuRect = overflowMenu.getBoundingClientRect();
-  const left = Math.max(4, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 4));
-  overflowMenu.style.left = `${left}px`;
-  overflowMenu.style.top = `${rect.bottom + 4}px`;
+  togglePopover(moreBtn, overflowMenu);
 }
 
+/** Đóng menu tràn CHỈ khi nó đang là popover đang mở — không đụng popover khác (vd. dropdown split-button). */
 function closeOverflowMenu(): void {
-  if (overflowMenu) {
-    overflowMenu.style.display = 'none';
+  if (overflowMenu && openPopoverEl === overflowMenu) {
+    closePopover();
   }
 }
 
@@ -477,33 +644,24 @@ function recalcOverflow(): void {
   rebuildOverflowMenu(hidden);
 }
 
+/**
+ * Dựng lại menu tràn từ danh sách nút đang bị ẩn. Với split-button (US-4.9/
+ * 4.10/4.11), chỉ liệt kê `item.action` mặc định — dropdown riêng của nó
+ * không truy cập được từ menu tràn (accepted simplification, xem
+ * ToolbarItem.dropdown doc) — nên dùng thẳng `invokeItem` thay vì `.click()`
+ * delegation cũ (vốn giả định `entry.btn` luôn là 1 <button> đơn, không đúng
+ * nữa với split-button là <span> bọc 2 nút con).
+ */
 function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
   if (!overflowMenu) {
     return;
   }
   overflowMenu.innerHTML = '';
   for (const entry of hidden) {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'toolbar-overflow-item';
-    if (entry.item.icon) {
-      const iconSpan = document.createElement('span');
-      iconSpan.className = 'toolbar-overflow-icon';
-      iconSpan.innerHTML = entry.item.icon;
-      row.appendChild(iconSpan);
-    }
-    const label = document.createElement('span');
-    label.className = 'toolbar-overflow-label';
-    label.textContent = entry.item.title;
-    row.appendChild(label);
-    row.addEventListener('mousedown', (e) => e.preventDefault());
-    row.addEventListener('click', () => {
-      // Nút gốc đang display:none nhưng .click() vẫn kích hoạt handler bình
-      // thường (action + focus + scheduleSync) — không cần lặp lại logic.
+    addPopoverRow(overflowMenu, entry.item.icon, entry.item.title, undefined, () => {
       closeOverflowMenu();
-      entry.btn.click();
+      invokeItem(entry.item);
     });
-    overflowMenu.appendChild(row);
   }
 }
 
