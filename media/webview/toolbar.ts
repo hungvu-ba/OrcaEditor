@@ -110,6 +110,12 @@ const FMT_ICONS = {
       `<rect x="8.5" y="10" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
       `<path d="M4.5 6v2.5a1.5 1.5 0 0 0 1.5 1.5h5.5" ${FMT_STROKE}/>`
   ),
+  /** Icon eraser (US-4.13): khối tẩy nghiêng + gạch chân "mặt bàn". */
+  eraser: svgIcon(
+    `<path d="M10.6 2.9L13.1 5.4a1.5 1.5 0 0 1 0 2.1l-5.6 5.6H4.2L2.2 11.1a1.5 1.5 0 0 1 0-2.1l6.3-6.1a1.5 1.5 0 0 1 2.1 0z" ${FMT_STROKE}/>` +
+      `<path d="M8.5 5L11 7.5" ${FMT_STROKE}/>` +
+      '<path d="M4.2 13.1h9.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>'
+  ),
 };
 
 /** Icon "..." cho nút mở menu tràn (các nút không đủ chỗ khi toolbar hẹp). */
@@ -244,12 +250,13 @@ const toolbarItems: ToolbarItem[] = [
     separatorBefore: true,
   },
   {
-    label: '↶',
-    icon: FMT_ICONS.undo,
-    title: 'Undo (⌘Z)',
-    action: () => document.execCommand('undo'),
+    label: '⌫',
+    icon: FMT_ICONS.eraser,
+    title: 'Clear formatting',
+    action: () => document.execCommand('removeFormat'),
     separatorBefore: true,
   },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo') },
   { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
     label: '•',
