@@ -42,6 +42,8 @@ export interface CrossFileMatchGroup {
   fileName: string;
   /** Đường dẫn tương đối so với workspace, hiển thị dưới tên file. */
   relativePath: string;
+  /** Tổng số match THẬT tìm được trong file (trước khi cắt còn tối đa 10 để gửi đi) — dùng cho badge + dòng "+N match khác". */
+  totalInFile: number;
   matches: CrossFileMatch[];
 }
 
