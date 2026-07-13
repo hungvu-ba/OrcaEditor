@@ -165,6 +165,22 @@ export function syncTocButton(): void {
   updateTocButton();
 }
 
+/**
+ * Dropdown của Heading split-button (US-4.9) — Paragraph, H1–H6, H2 đánh dấu
+ * "Phổ biến" (mặc định của mặt chính). Mọi lựa chọn đều gọi `formatHeading`
+ * (đã hỗ trợ sẵn h1–h6/p, xem `closest('h1, h2, h3, h4, h5, h6, p')`) nên
+ * giữ nguyên hành vi toggle-về-`<p>` của US-4.1 cho cả 7 lựa chọn.
+ */
+const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Paragraph', action: () => formatHeading('p') },
+  { label: 'Heading 1', action: () => formatHeading('h1') },
+  { label: 'Heading 2', badge: 'Phổ biến', action: () => formatHeading('h2') },
+  { label: 'Heading 3', action: () => formatHeading('h3') },
+  { label: 'Heading 4', action: () => formatHeading('h4') },
+  { label: 'Heading 5', action: () => formatHeading('h5') },
+  { label: 'Heading 6', action: () => formatHeading('h6') },
+];
+
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
 // code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
@@ -174,10 +190,14 @@ const toolbarItems: ToolbarItem[] = [
   { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold') },
   { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic') },
   { label: 'S', title: 'Strikethrough (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
-  { label: 'H1', title: 'Heading 1', action: () => formatHeading('h1'), separatorBefore: true },
-  { label: 'H2', title: 'Heading 2', action: () => formatHeading('h2') },
-  { label: 'H3', title: 'Heading 3', action: () => formatHeading('h3') },
-  { label: '¶', title: 'Normal paragraph', action: () => formatHeading('p') },
+  {
+    label: 'H2',
+    title: 'Heading (click again on the same level to revert to paragraph)',
+    action: () => formatHeading('h2'),
+    dropdown: HEADING_DROPDOWN,
+    dropdownTitle: 'Choose heading level',
+    separatorBefore: true,
+  },
   {
     label: '↶',
     icon: FMT_ICONS.undo,
