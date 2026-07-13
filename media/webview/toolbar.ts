@@ -200,6 +200,19 @@ const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Markdown', action: () => insertCodeBlock('markdown') },
 ];
 
+/**
+ * Dropdown của Math split-button (US-4.11) — Inline (mặc định của mặt chính)
+ * / Block. Cả hai gọi `ctx.insertMarkdown` (GĐ2) — render qua chính
+ * `renderer.render()` rồi post-process KaTeX trên fragment tách biệt, không
+ * tự dựng HTML tay — @vscode/markdown-it-katex đã ship (section 2), không
+ * cần đổi renderer.
+ */
+const MATH_FORMULA = 'x^2+y^2=z^2';
+const MATH_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Inline math', badge: 'Phổ biến', action: () => ctx.insertMarkdown(`$${MATH_FORMULA}$`) },
+  { label: 'Block math', action: () => ctx.insertMarkdown(`$$${MATH_FORMULA}$$`) },
+];
+
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
 // code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
@@ -271,6 +284,13 @@ const toolbarItems: ToolbarItem[] = [
     action: () => insertCodeBlock('javascript'),
     dropdown: CODE_BLOCK_DROPDOWN,
     dropdownTitle: 'Choose code language',
+  },
+  {
+    label: '∑',
+    title: 'Math (default: inline, KaTeX)',
+    action: () => ctx.insertMarkdown(`$${MATH_FORMULA}$`),
+    dropdown: MATH_DROPDOWN,
+    dropdownTitle: 'Choose math type',
   },
   {
     label: '@',
