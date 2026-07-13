@@ -181,6 +181,25 @@ const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Heading 6', action: () => formatHeading('h6') },
 ];
 
+/**
+ * Dropdown của Code block split-button (US-4.10) — 10 ngôn ngữ, JavaScript
+ * đánh dấu "Phổ biến" (mặc định của mặt chính). Mọi lựa chọn dùng chung
+ * `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo vùng
+ * chọn (US-4.4) giữ nguyên cho cả 10 ngôn ngữ, chỉ khác class `language-*`.
+ */
+const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
+  { label: 'JavaScript', badge: 'Phổ biến', action: () => insertCodeBlock('javascript') },
+  { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
+  { label: 'Python', action: () => insertCodeBlock('python') },
+  { label: 'Bash', action: () => insertCodeBlock('bash') },
+  { label: 'JSON', action: () => insertCodeBlock('json') },
+  { label: 'HTML', action: () => insertCodeBlock('html') },
+  { label: 'CSS', action: () => insertCodeBlock('css') },
+  { label: 'SQL', action: () => insertCodeBlock('sql') },
+  { label: 'Markdown', action: () => insertCodeBlock('markdown') },
+];
+
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
 // code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
@@ -245,7 +264,14 @@ const toolbarItems: ToolbarItem[] = [
     opensAsyncPrompt: true,
   },
   { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode, separatorBefore: true },
-  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Code block', action: insertCodeBlock },
+  {
+    label: '{ }',
+    icon: FMT_ICONS.codeBlock,
+    title: 'Code block (default: JavaScript)',
+    action: () => insertCodeBlock('javascript'),
+    dropdown: CODE_BLOCK_DROPDOWN,
+    dropdownTitle: 'Choose code language',
+  },
   {
     label: '@',
     icon: CLAUDE_COPY_ICON,
@@ -1087,17 +1113,19 @@ function rangeToHtml(range: Range): string {
 }
 
 /**
- * Chèn code block. Nếu đang chọn một đoạn text ở giữa câu (trong cùng một
- * đoạn văn/heading), tách phần trước/sau vùng chọn ra thành block riêng rồi
- * mới chèn <pre> xen giữa — nếu không tách trước, insertHTML một block-level
- * element (<pre>) giữa nội dung inline sẽ phó mặc cho trình duyệt tự tách
- * đoạn, thứ tự trước/sau không được đảm bảo.
+ * Chèn code block, gắn `language-{lang}` (US-4.10 — trước đây luôn cố định
+ * `language-plaintext`, xem US-4.4). Nếu đang chọn một đoạn text ở giữa câu
+ * (trong cùng một đoạn văn/heading), tách phần trước/sau vùng chọn ra thành
+ * block riêng rồi mới chèn <pre> xen giữa — nếu không tách trước, insertHTML
+ * một block-level element (<pre>) giữa nội dung inline sẽ phó mặc cho trình
+ * duyệt tự tách đoạn, thứ tự trước/sau không được đảm bảo.
  */
-function insertCodeBlock(): void {
+function insertCodeBlock(lang: string): void {
   const sel = window.getSelection();
   const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
   const selectedText = sel?.toString() ?? '';
   const codeContent = escapeHtml(selectedText || 'code');
+  const langClass = escapeAttr(lang);
 
   const anchor = range ? closestElement(range.startContainer) : null;
   const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
@@ -1109,7 +1137,7 @@ function insertCodeBlock(): void {
     document.execCommand(
       'insertHTML',
       false,
-      `<pre><code class="language-plaintext">${codeContent}</code></pre><p><br></p>`
+      `<pre><code class="language-${langClass}">${codeContent}</code></pre><p><br></p>`
     );
     return;
   }
@@ -1135,7 +1163,7 @@ function insertCodeBlock(): void {
   document.execCommand(
     'insertHTML',
     false,
-    `${beforeBlock}<pre><code class="language-plaintext">${codeContent}</code></pre>${afterBlock}`
+    `${beforeBlock}<pre><code class="language-${langClass}">${codeContent}</code></pre>${afterBlock}`
   );
 }
 
