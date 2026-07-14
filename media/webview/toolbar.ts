@@ -147,7 +147,7 @@ interface ToolbarDropdownEntry {
   label: string;
   icon?: string;
   /** Nhãn nhỏ đánh dấu lựa chọn phổ biến/mặc định (vd. "Phổ biến"). */
-  badge?: string;
+  badge?: string; // EN only (bug report 2026-07-14, mục 7) — vd "Common"
   action: () => void;
 }
 
@@ -191,6 +191,9 @@ export function syncTocButton(): void {
   updateTocButton();
 }
 
+/** Cấp heading mặc định khi caret không nằm trong heading nào (US-4.9/US-4.16). */
+const DEFAULT_HEADING = 'h2';
+
 /**
  * Dropdown của Heading split-button (US-4.9) — Paragraph, H1–H6, H2 đánh dấu
  * "Phổ biến" (mặc định của mặt chính). Mọi lựa chọn đều gọi `formatHeading`
@@ -200,7 +203,7 @@ export function syncTocButton(): void {
 const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Paragraph', action: () => formatHeading('p') },
   { label: 'Heading 1', action: () => formatHeading('h1') },
-  { label: 'Heading 2', badge: 'Phổ biến', action: () => formatHeading('h2') },
+  { label: 'Heading 2', badge: 'Common', action: () => formatHeading(DEFAULT_HEADING) },
   { label: 'Heading 3', action: () => formatHeading('h3') },
   { label: 'Heading 4', action: () => formatHeading('h4') },
   { label: 'Heading 5', action: () => formatHeading('h5') },
@@ -208,14 +211,17 @@ const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Code block split-button (US-4.10) — 10 ngôn ngữ, JavaScript
- * đánh dấu "Phổ biến" (mặc định của mặt chính). Mọi lựa chọn dùng chung
- * `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo vùng
- * chọn (US-4.4) giữ nguyên cho cả 10 ngôn ngữ, chỉ khác class `language-*`.
+ * Dropdown của Code block split-button (US-4.10) — 9 ngôn ngữ, JavaScript
+ * đánh dấu "Phổ biến" (mặc định của mặt chính). "Markdown" bị bỏ khỏi danh
+ * sách (bug report 2026-07-13): người dùng đã ở trong Markdown editor nên
+ * cần tô sáng cho code lồng trong bên trong, không có nhu cầu gắn
+ * `language-markdown` cho chính khối Markdown lồng nhau. Mọi lựa chọn dùng
+ * chung `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo
+ * vùng chọn (US-4.4) giữ nguyên cho cả 9 ngôn ngữ, chỉ khác class `language-*`.
  */
 const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
-  { label: 'JavaScript', badge: 'Phổ biến', action: () => insertCodeBlock('javascript') },
+  { label: 'JavaScript', badge: 'Common', action: () => insertCodeBlock('javascript') },
   { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
   { label: 'Python', action: () => insertCodeBlock('python') },
   { label: 'Bash', action: () => insertCodeBlock('bash') },
@@ -223,7 +229,6 @@ const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'HTML', action: () => insertCodeBlock('html') },
   { label: 'CSS', action: () => insertCodeBlock('css') },
   { label: 'SQL', action: () => insertCodeBlock('sql') },
-  { label: 'Markdown', action: () => insertCodeBlock('markdown') },
 ];
 
 /**
@@ -236,16 +241,33 @@ const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
 const MATH_FORMULA = 'x^2+y^2=z^2';
 const insertInlineMath = () => ctx.insertMarkdown(`$${MATH_FORMULA}$`);
 const MATH_DROPDOWN: ToolbarDropdownEntry[] = [
-  { label: 'Inline math', badge: 'Phổ biến', action: insertInlineMath },
+  { label: 'Inline math', badge: 'Common', action: insertInlineMath },
   { label: 'Block math', action: () => ctx.insertMarkdown(`$$${MATH_FORMULA}$$`) },
 ];
 
 /**
- * Template Mermaid (US-4.12) — 1 flowchart mẫu, chèn qua `ctx.insertMarkdown`
- * giống Math ở trên. mermaidView.renderAll() (gọi trong insertMarkdownAtCaret,
- * main.ts) tự dựng SVG cho khối vừa chèn — không cần đổi mermaid.ts.
+ * Templates Mermaid (US-4.12, mở rộng ở US-4.19/bug report 2026-07-14 mục
+ * 10) — trước đó chỉ có 1 flowchart mẫu cố định (Open Question bị defer ở
+ * US-4.12), giờ thêm dropdown 4 loại phổ biến, cùng pattern split-button với
+ * Heading/Code block/Math. Chèn qua `ctx.insertMarkdown` như cũ —
+ * mermaidView.renderAll() (gọi trong insertMarkdownAtCaret, main.ts) tự dựng
+ * SVG cho khối vừa chèn, không cần đổi mermaid.ts (mermaid.js tự nhận diện
+ * loại diagram từ nội dung nguồn).
  */
-const MERMAID_TEMPLATE = '```mermaid\ngraph TD; A[Start] --> B{Decision} --> C[End]\n```';
+const MERMAID_FLOWCHART_TEMPLATE = '```mermaid\ngraph TD; A[Start] --> B{Decision} --> C[End]\n```';
+const MERMAID_SEQUENCE_TEMPLATE =
+  '```mermaid\nsequenceDiagram\n  Alice->>Bob: Hello Bob, how are you?\n  Bob-->>Alice: I am good, thanks!\n```';
+const MERMAID_CLASS_TEMPLATE =
+  '```mermaid\nclassDiagram\n  Animal <|-- Dog\n  Animal : +String name\n  Animal : +makeSound()\n```';
+const MERMAID_STATE_TEMPLATE =
+  '```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running : start\n  Running --> Idle : stop\n  Running --> [*]\n```';
+const insertMermaidFlowchart = () => ctx.insertMarkdown(MERMAID_FLOWCHART_TEMPLATE);
+const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Flowchart', badge: 'Common', action: insertMermaidFlowchart },
+  { label: 'Sequence diagram', action: () => ctx.insertMarkdown(MERMAID_SEQUENCE_TEMPLATE) },
+  { label: 'Class diagram', action: () => ctx.insertMarkdown(MERMAID_CLASS_TEMPLATE) },
+  { label: 'State diagram', action: () => ctx.insertMarkdown(MERMAID_STATE_TEMPLATE) },
+];
 
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
@@ -262,12 +284,13 @@ const toolbarItems: ToolbarItem[] = [
     id: 'fmt-strike',
   },
   {
-    label: 'H2',
+    label: DEFAULT_HEADING.toUpperCase(),
     title: 'Heading (click again on the same level to revert to paragraph)',
-    action: () => formatHeading('h2'),
+    action: () => formatHeading(currentHeadingTag()),
     dropdown: HEADING_DROPDOWN,
     dropdownTitle: 'Choose heading level',
     separatorBefore: true,
+    id: 'fmt-heading',
   },
   {
     label: '⌫',
@@ -349,8 +372,10 @@ const toolbarItems: ToolbarItem[] = [
   {
     label: '⎇',
     icon: FMT_ICONS.mermaid,
-    title: 'Insert Mermaid diagram template',
-    action: () => ctx.insertMarkdown(MERMAID_TEMPLATE),
+    title: 'Mermaid diagram (default: flowchart)',
+    action: insertMermaidFlowchart,
+    dropdown: MERMAID_DROPDOWN,
+    dropdownTitle: 'Choose diagram type',
   },
   {
     label: '☰',
@@ -828,6 +853,29 @@ function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
       closePopover();
       invokeItem(entry.item);
     });
+  }
+}
+
+/**
+ * Cấp heading (h1–h6) chứa caret hiện tại, hoặc DEFAULT_HEADING nếu caret
+ * không nằm trong heading nào (US-4.16 — nhãn mặt chính của split-button
+ * live-sync theo caret, đảo lại quyết định "static label" ban đầu của US-4.9).
+ * Dùng chung cho action mặt chính (currentHeadingTag() làm tham số cho
+ * formatHeading) VÀ updateHeadingLabel() bên dưới — đảm bảo nút luôn hiển thị
+ * đúng cấp mà click vào nó sẽ áp dụng/toggle.
+ */
+function currentHeadingTag(): string {
+  const sel = window.getSelection();
+  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  return heading && content.contains(heading) ? heading.tagName.toLowerCase() : DEFAULT_HEADING;
+}
+
+/** Cập nhật nhãn (text) của mặt chính Heading split-button theo `currentHeadingTag()`. */
+function updateHeadingLabel(): void {
+  const btn = document.getElementById('fmt-heading');
+  if (btn) {
+    btn.textContent = currentHeadingTag().toUpperCase();
   }
 }
 
@@ -1358,10 +1406,14 @@ export function toggleInlineCode(): void {
 // ---------------------------------------------------------------------------
 // Active-state sync theo caret (US-4.15) — Bold/Italic/Strikethrough/Inline
 // code/Blockquote/Bullet/Numbered/Task đồng bộ class `.active` (đã ship, xem
-// updateTocButton) theo vị trí caret. Heading/Code block/Math (US-4.9–4.11)
-// CỐ Ý bị loại — split-button của các nút đó luôn hiện nhãn mặc định tĩnh,
-// không live-sync theo caret (chính AC của US-4.9), đây là quyết định riêng,
-// không phải thiếu sót.
+// updateTocButton) theo vị trí caret. Code block/Math (US-4.10/4.11) CỐ Ý bị
+// loại — split-button của các nút đó luôn hiện nhãn mặc định tĩnh, không
+// live-sync theo caret, đây là quyết định riêng, không phải thiếu sót. Heading
+// (US-4.9) từng cũng bị loại tương tự, nhưng US-4.16 (2026-07-13) đảo lại
+// quyết định đó cho riêng PHẦN NHÃN (xem updateHeadingLabel) — Heading vẫn
+// KHÔNG có `.active` background (giữ nguyên phần đó của US-4.9/4.15), chỉ
+// text hiển thị (H1..H6) đổi theo caret, một concern tách biệt hoàn toàn với
+// vòng lặp ACTIVE_SYNC_IDS bên dưới.
 // ---------------------------------------------------------------------------
 
 const ACTIVE_SYNC_IDS = [
@@ -1440,6 +1492,7 @@ function setupActiveFormattingSync(): void {
     activeSyncRafId = requestAnimationFrame(() => {
       activeSyncRafId = undefined;
       recomputeActiveFormatting();
+      updateHeadingLabel();
     });
   });
 }

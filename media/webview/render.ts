@@ -29,6 +29,12 @@ export interface RenderResult {
 export const FRONT_MATTER_CLASS = 'md-front-matter';
 export const MATH_INLINE_CLASS = 'md-math-inline';
 export const MATH_BLOCK_CLASS = 'md-math-block';
+/** Toolbar chỉ có ở Math BLOCK (đủ chỗ cho 1 hàng riêng, giống Mermaid) — Math INLINE dùng nút "Edit" nhỏ nằm ngay trong dòng, xem MATH_TOGGLE_CLASS. */
+export const MATH_TOOLBAR_CLASS = 'md-math-toolbar';
+/** Nút mở popup sửa TeX (US-4.19, bug report 2026-07-14 — thay cho toggle inline render⇄source của US-4.18). */
+export const MATH_TOGGLE_CLASS = 'md-math-toggle';
+/** Khung chứa công thức KaTeX đã dựng — contenteditable=false, luôn hiển thị (không còn view "source" ẩn/hiện, xem math-edit.ts). */
+export const MATH_RENDER_CLASS = 'md-math-render';
 export const MERMAID_CLASS = 'md-mermaid';
 export const MERMAID_TOOLBAR_CLASS = 'md-mermaid-toolbar';
 export const MERMAID_TOGGLE_CLASS = 'md-mermaid-toggle';

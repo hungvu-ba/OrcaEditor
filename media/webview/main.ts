@@ -24,6 +24,7 @@ import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
 import { initMermaid } from './mermaid';
+import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { closestElement, createDomHelpers } from './dom-utils';
 import { initPrompt } from './prompt';
@@ -56,6 +57,7 @@ const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
 const toc = initToc(content);
 const mermaidView = initMermaid(content);
+initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
@@ -247,6 +249,31 @@ function ensureTrailingParagraph(): void {
     const p = document.createElement('p');
     p.appendChild(document.createElement('br'));
     content.appendChild(p);
+  }
+}
+
+/**
+ * Khối "atom" toàn phần: mọi vùng nhìn thấy đều contenteditable=false, nên
+ * KHÔNG có vị trí caret nào bên trong lẫn "ngay sau" nó nếu phần tử kế tiếp
+ * cũng là một khối bẫy caret (hoặc không có phần tử kế tiếp — trường hợp con
+ * cuối của blockquote/li, nơi ensureTrailingParagraph không với tới).
+ */
+const ATOM_BLOCK_SELECTOR = '.md-mermaid, .md-math-block';
+
+/**
+ * Đảm bảo SAU MỖI khối Mermaid/math block đều có chỗ đặt caret: nếu phần tử
+ * kế tiếp không phải block gõ được (hoặc không tồn tại) thì chèn một <p> rỗng
+ * ngay sau. Cùng lý do an-toàn-serialize với ensureTrailingParagraph: <p> rỗng
+ * bị rule 'emptyParagraph' của turndown bỏ khi lưu nên không đổi Markdown.
+ */
+function ensureCaretSpotAfterAtomBlocks(): void {
+  for (const atom of Array.from(content.querySelectorAll(ATOM_BLOCK_SELECTOR))) {
+    const next = atom.nextElementSibling;
+    if (!next || next.matches(TRAILING_TRAP_SELECTOR)) {
+      const p = document.createElement('p');
+      p.appendChild(document.createElement('br'));
+      atom.parentNode?.insertBefore(p, atom.nextSibling);
+    }
   }
 }
 
@@ -506,10 +533,27 @@ function insertPastedMarkdown(text: string): void {
  * Mermaid US-4.12), khác "dán" chỉ ở tên gọi/ngữ cảnh gọi: text luôn là một
  * mảnh nhỏ tự sinh (vd. `$x^2$`, fence ```mermaid```), nên tái dùng nguyên
  * pipeline renderPasteHtml → insertHTML → mermaidView.renderAll() của
- * insertPastedMarkdown là đủ, không cần logic riêng.
+ * insertPastedMarkdown, cộng thêm một bước riêng cho khối atom (Mermaid /
+ * math block): chèn kèm <p> rỗng ngay sau khối để caret có chỗ đứng gõ tiếp
+ * (cùng pattern với nút HR/Code block/Table — insertHTML đặt caret vào block
+ * cuối của chuỗi chèn), rồi rà lại TẤT CẢ khối atom trong tài liệu — chèn
+ * ngay cạnh một khối Mermaid có sẵn sẽ làm hai khối dính nhau, không còn chỗ
+ * click caret vào giữa.
  */
 function insertMarkdownAtCaret(text: string): void {
-  insertPastedMarkdown(text);
+  const html = renderPasteHtml(text);
+  if (!html) {
+    document.execCommand('insertText', false, text);
+    return;
+  }
+  const probe = document.createElement('div');
+  probe.innerHTML = html;
+  const endsWithAtom = probe.lastElementChild?.matches(ATOM_BLOCK_SELECTOR) ?? false;
+  document.execCommand('insertHTML', false, endsWithAtom ? `${html}<p><br></p>` : html);
+  if (endsWithAtom) {
+    ensureCaretSpotAfterAtomBlocks();
+  }
+  mermaidView.renderAll();
 }
 
 /**

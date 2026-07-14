@@ -330,6 +330,10 @@ body.md-line-numbers #toolbar {
   background: rgba(0, 0, 0, 0.25);
 }
 
+/* Kéo được từ bất kỳ đâu trên box (bug report 2026-07-14, mục 6) — trừ input/
+ * nút/danh sách gợi ý (xem DRAG_IGNORE_SELECTOR, dom-utils.ts), nên chỉ cần
+ * cursor:grab trên chính box; các phần tử tương tác bên trong tự override lại
+ * cursor của chúng (input → text, button → pointer). */
 .prompt-box {
   display: flex;
   flex-direction: column;
@@ -342,9 +346,19 @@ body.md-line-numbers #toolbar {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   color: var(--vscode-foreground);
   font-size: 13px;
+  cursor: grab;
+}
+
+.prompt-box.dragging {
+  cursor: grabbing;
+}
+
+.prompt-box label {
+  cursor: inherit;
 }
 
 .prompt-box input {
+  cursor: text;
   font-family: inherit;
   font-size: 13px;
   padding: 4px 6px;
@@ -441,7 +455,10 @@ body.md-line-numbers #toolbar {
   font-size: 0.85em;
 }
 
-/* --- Math atom (KaTeX): không chỉnh sửa trực tiếp --- */
+/* --- Math atom (KaTeX): công thức đã dựng, có nút "Edit" mở popup sửa TeX
+ * (US-4.19, bug report 2026-07-14 — thay toggle inline render⇄source của
+ * US-4.18). BLOCK có toolbar riêng (đủ chỗ cho 1 hàng); INLINE không có chỗ
+ * nên nút "Edit" nằm ngay trong dòng, ngay sau công thức. --- */
 .md-math-inline,
 .md-math-block {
   cursor: default;
@@ -457,6 +474,141 @@ body.md-line-numbers #toolbar {
   outline: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.5));
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+.md-math-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.md-math-toggle {
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.md-math-toggle:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.md-math-toggle::after {
+  content: 'Edit';
+}
+
+.md-math-inline .md-math-toggle {
+  font-size: 9px;
+  padding: 0 4px;
+  margin-left: 2px;
+  vertical-align: super;
+}
+
+/* --- Popup sửa TeX (US-4.19): textarea + gợi ý cú pháp KaTeX, định vị bằng
+ * positionNear (dom-utils.ts) nên không đè lên công thức đang sửa. --- */
+.md-math-edit-popover {
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 320px;
+  max-width: calc(100vw - 24px);
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  color: var(--vscode-foreground);
+  font-size: 13px;
+  cursor: grab;
+}
+
+.md-math-edit-popover.dragging {
+  cursor: grabbing;
+}
+
+.md-math-edit-input {
+  box-sizing: border-box;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  resize: both;
+  width: 100%;
+  min-width: 200px;
+  min-height: 48px;
+  max-width: calc(100vw - 48px);
+  padding: 6px 8px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+.md-math-edit-cheatsheet {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.md-math-cheat-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  font-family: inherit;
+  padding: 3px 7px;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  text-align: left;
+}
+
+.md-math-cheat-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.md-math-cheat-label {
+  font-size: 11px;
+}
+
+.md-math-cheat-snippet {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.md-math-edit-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.md-math-edit-buttons button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.md-math-edit-buttons button:last-child {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
 }
 
 /* --- Mermaid: khối ```mermaid``` hiển thị biểu đồ, có nút chuyển sang xem mã
@@ -495,11 +647,11 @@ body.md-line-numbers #toolbar {
 }
 
 .md-mermaid-toggle::after {
-  content: 'Xem mã nguồn';
+  content: 'View source';
 }
 
 .md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after {
-  content: 'Xem biểu đồ';
+  content: 'View chart';
 }
 
 .md-mermaid-chart {

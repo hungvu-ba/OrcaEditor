@@ -84,3 +84,13 @@
 | 0.6.9 | 2026-07-13 | Feature: thêm nút Clear formatting (eraser) trong cụm Edit cạnh Undo/Redo — execCommand("removeFormat") trên vùng chọn (US-4.13). |
 | 0.6.9 | 2026-07-13 | Feature: gộp nút Copy @file/View raw source vào popover "more options" (⋮) cạnh TOC, thay vì luôn hiện — phân biệt icon với "..." tràn (US-4.14). |
 | 0.6.9 | 2026-07-13 | Feature: nút Bold/Italic/Strike/Inline code/Blockquote/Bullet/Numbered/Task tự sáng theo caret (selectionchange), loại trừ Heading/Code block/Math (US-4.15). |
+| 0.6.9 | 2026-07-13 | Fix: nút Heading hiện đúng cấp heading (H1–H6) tại caret thay vì luôn tĩnh "H2" (US-4.16). |
+| 0.6.9 | 2026-07-13 | Feature: popup chèn Link/Image kéo-thả được (drag handle riêng, không dịch chuyển lớp nền mờ) (US-17.2). |
+| 0.6.9 | 2026-07-13 | Fix: bỏ "Markdown" khỏi danh sách ngôn ngữ dropdown code block — còn 9 ngôn ngữ (US-4.10). |
+| 0.6.9 | 2026-07-13 | Feature: công thức Math (KaTeX) chèn xong sửa lại được — nút toggle công thức ⇄ TeX thô, giống Mermaid (US-4.18). |
+| 0.6.9 | 2026-07-14 | Fix: popup chèn Link/Image kéo được từ bất kỳ đâu trên box, không chỉ 1 thanh handle mỏng — trừ input/nút/gợi ý file (US-17.2). |
+| 0.6.9 | 2026-07-14 | Fix: dịch nốt text tiếng Việt còn sót trong toolbar sang tiếng Anh — badge "Phổ biến"→"Common", nút toggle Mermaid "Xem mã nguồn/biểu đồ"→"View source/chart". |
+| 0.6.9 | 2026-07-14 | Feature: sửa công thức Math (KaTeX) qua popup nổi có textarea + gợi ý cú pháp, thay toggle inline cũ — không đè công thức, hết bug caret lạc (US-4.19). |
+| 0.6.9 | 2026-07-14 | Feature: nút Mermaid thêm dropdown 4 loại sơ đồ (Flowchart/Sequence/Class/State) thay vì chỉ 1 flowchart cố định (US-4.20). |
+| 0.6.9 | 2026-07-14 | Fix: popup sửa công thức KaTeX cho resize textarea 2 chiều, kéo thả cả popup, cheat-sheet hiện cú pháp ngay trên nút (US-4.22). |
+| 0.6.9 | 2026-07-14 | Fix: chèn Mermaid/math block từ toolbar tự thêm dòng trống sau khối để đặt caret; rà mọi khối atom liền kề đều có chỗ caret ngay sau. |
