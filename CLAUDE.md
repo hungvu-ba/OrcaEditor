@@ -33,3 +33,7 @@ Khi tạo requirement chi tiết **mới**:
 2.  Nếu là tính năng hoàn toàn mới (chưa có mục trong HLR) → **luôn thêm 1 mục số mới** (số kế tiếp, vd 17, 18...) vào cuối mục lục HLR ngay khi tạo file chi tiết — **không** để ở khu vực riêng ngoài mục lục chờ code xong mới đánh số. Gắn status `📝 Planned` (chưa code) hoặc `🚧 WIP` (đang code) ngay từ đầu, rồi cập nhật lên `✅ Shipped` khi hoàn tất.
 3.  File design-log/brainstorm bổ trợ cho 1 mục đã có sẵn (vd log chi tiết cho tính năng đã có bullet gọn trong 1 mục khác) cũng phải qua đúng flow trên: được cấp 1 số mục riêng trong HLR (không nhét vào ghi chú của mục khác), và mục gốc chỉ trỏ sang bằng 1 dòng tham chiếu ngắn.
 4.  Không được để HLR lệch khỏi các file chi tiết — mỗi lần sửa nội dung 1 file chi tiết làm thay đổi phạm vi hoặc status của tính năng, phải rà lại bullet + status tương ứng trong HLR.
+
+## Quy tắc bắt buộc: Git workflow
+
+Khi thực hiện bất kỳ thao tác git nào (branch, commit, merge, PR, release, hotfix, worktree...), phải đọc và tuân theo [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — file này định nghĩa cấu trúc branch, quy ước commit, vòng đời feature/release/hotfix, và cách trình bày (giải thích cho người mới + sitemap trạng thái sau mỗi commit).
