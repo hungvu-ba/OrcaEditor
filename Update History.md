@@ -79,3 +79,5 @@
 | 0.6.9 | 2026-07-12 | Feature: đổi tên extension thành "Orca MD Editor", id marketplace thành hungvu.orca-md-editor (do tên cũ orca-editor bị khóa sau khi lỡ vsce unpublish=delete); giữ nguyên namespace orcaEditor.* nội bộ. |
 | 0.6.9 | 2026-07-13 | Feature: kết quả tìm xuyên file (US-15.6) đổi sang accordion theo file — cap ưu tiên số file thay vì tổng match, badge/overflow đúng số thật, "+N match khác" mở Search panel scope đúng 1 file. |
 | 0.6.9 | 2026-07-13 | Feature: xếp hạng kết quả tìm xuyên file (US-15.7) theo fileScore — heading/definition/vị trí/tên file/độ hiếm từ khoá, thay vì thứ tự tìm thấy. |
+| 0.6.9 | 2026-07-14 | Feature: kết quả tìm xuyên file (US-15.6) — file chỉ 1 match show thẳng snippet luôn, bỏ accordion cho riêng case này; ≥2 match vẫn giữ accordion như cũ. |
+| 0.6.9 | 2026-07-14 | Feature: mở rộng popover kết quả tìm xuyên file (US-15.9) từ 320×360px lên 400×min(70vh,560)px, giữ nguyên cơ chế neo/clamp vị trí. |

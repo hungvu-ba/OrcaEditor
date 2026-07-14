@@ -941,9 +941,13 @@ body.toc-open #select-overview {
   z-index: 490;
   display: flex;
   flex-direction: column;
-  width: 320px;
+  /* [US-15.9] Baseline tăng từ 320×360 lên 400×min(70vh,560) — phải khớp
+   * CROSS_FILE_POPOVER_WIDTH_PX / _MAX_HEIGHT_CAP_PX / _MAX_HEIGHT_VH_RATIO
+   * (constants.ts), dùng trong positionPopover() để clamp vị trí đúng theo
+   * kích thước mới. */
+  width: 400px;
   max-width: calc(100vw - 32px);
-  max-height: 360px;
+  max-height: min(70vh, 560px);
   overflow: hidden;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
@@ -1053,6 +1057,23 @@ body.toc-open #select-overview {
 
 .cross-file-search-group-header[aria-expanded='true'] .cross-file-search-chevron {
   transform: rotate(90deg);
+}
+
+/* [US-15.6, đổi 2026-07-14] Dòng file khi chỉ có 1 match: <div> tĩnh (không
+ * phải <button>) vì không có gì để toggle — bỏ affordance click (cursor,
+ * hover) nhưng vẫn dùng chung layout/padding với .cross-file-search-group-header. */
+.cross-file-search-group-header-static {
+  cursor: default;
+}
+
+.cross-file-search-group-header-static:hover {
+  background: transparent;
+}
+
+/* Chevron "giả" chỉ để canh lề tên file/badge thẳng hàng với các dòng ≥2
+ * match (có chevron thật) trong cùng danh sách — không hiện visual gì. */
+.cross-file-search-chevron-hidden {
+  visibility: hidden;
 }
 
 .cross-file-search-group-info {
