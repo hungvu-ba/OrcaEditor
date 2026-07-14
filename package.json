@@ -1,7 +1,7 @@
 {
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
-  "description": "Markdown preview like VS Code's built-in Markdown Preview, with direct WYSIWYG editing on the preview.",
+  "description": "A WYSIWYG editor built for .md files — effortless everyday editing, plus comfortable reading and cross-file search for looking things up.",
   "version": "0.6.9",
   "publisher": "hungvu",
   "icon": "images/icon.png",
