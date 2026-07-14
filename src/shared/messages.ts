@@ -32,6 +32,8 @@ export interface CrossFileMatch {
   lineText: string;
   /** Dòng liền sau, đã trim (rỗng nếu là dòng cuối file). */
   contextAfter: string;
+  /** Offset ký tự XẤP XỈ của match trong toàn bộ nội dung file gốc (0-based) — dùng cho positionBoost khi xếp hạng (US-15.7), không dùng để mở file (đã có line/character). */
+  charOffset: number;
 }
 
 /** Kết quả nhóm theo file cho tìm xuyên file. */
@@ -42,6 +44,10 @@ export interface CrossFileMatchGroup {
   fileName: string;
   /** Đường dẫn tương đối so với workspace, hiển thị dưới tên file. */
   relativePath: string;
+  /** Tổng số match THẬT tìm được trong file (trước khi cắt còn tối đa 10 để gửi đi) — dùng cho badge + dòng "+N match khác". */
+  totalInFile: number;
+  /** Độ dài nội dung file gốc (số ký tự) — mẫu số cho positionBoost khi xếp hạng (US-15.7). */
+  fileLength: number;
   matches: CrossFileMatch[];
 }
 
@@ -72,7 +78,8 @@ export type WebviewToHost =
   | { type: 'viewSource' }
   | { type: 'crossFileSearch:request'; requestId: number; query: string; scope: CrossFileSearchScope; matchCase: boolean; wholeWord: boolean }
   | { type: 'crossFileSearch:openResult'; uri: string; line: number; character: number; length: number; matchText: string }
-  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope }
+  /** relativePath: có khi bấm "+N match khác trong file này" (GĐ4) — Search panel chỉ hiện kết quả đúng file đó thay vì toàn scope. */
+  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope; relativePath?: string }
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
   | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string };
 

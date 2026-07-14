@@ -69,8 +69,17 @@ export const ICON_HOVER_GRACE_MS = 400;
  */
 export const SELECT_OVERVIEW_THROTTLE_MS = 150;
 
-/** Số ký tự ngữ cảnh tối đa mỗi bên (trái/phải) quanh match trong snippet kết quả — cắt bằng "…" để match luôn nằm trong vùng nhìn thấy của popover 320px, không bị `text-overflow: ellipsis` nuốt mất khi dòng gốc quá dài (cross-file-search.ts). */
+/** Số ký tự ngữ cảnh tối đa mỗi bên (trái/phải) quanh match trong snippet kết quả — cắt bằng "…" để match luôn nằm trong vùng nhìn thấy của popover, không bị `text-overflow: ellipsis` nuốt mất khi dòng gốc quá dài (cross-file-search.ts). */
 export const SNIPPET_CONTEXT_CHARS = 40;
+
+/** [US-15.9] Bề rộng popover kết quả tìm kiếm xuyên file — phải khớp `width` của `.cross-file-search-popover` (editor.css), dùng lại trong `positionPopover()` để clamp vị trí (cross-file-search.ts). */
+export const CROSS_FILE_POPOVER_WIDTH_PX = 400;
+
+/** [US-15.9] Trần chiều cao tuyệt đối (px) của popover, kết hợp với tỉ lệ viewport — phải khớp `max-height: min(70vh, …)` của `.cross-file-search-popover` (editor.css). */
+export const CROSS_FILE_POPOVER_MAX_HEIGHT_CAP_PX = 560;
+
+/** [US-15.9] Tỉ lệ chiều cao viewport dùng làm trần chiều cao popover — phải khớp phần `70vh` trong `max-height: min(70vh, …)` của `.cross-file-search-popover` (editor.css). */
+export const CROSS_FILE_POPOVER_MAX_HEIGHT_VH_RATIO = 0.7;
 
 // --- Chống trùng lặp xử lý sự kiện ---
 

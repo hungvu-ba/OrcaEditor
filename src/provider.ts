@@ -11,6 +11,7 @@ import type {
 } from './shared/messages';
 import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
+import { rankFileGroups } from './shared/rank-utils';
 
 /**
  * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
@@ -257,7 +258,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'crossFileSearch:openInSearchPanel': {
-          void this.openInSearchPanel(msg.query, msg.scope);
+          void this.openInSearchPanel(msg.query, msg.scope, msg.relativePath);
           break;
         }
         case 'pasteImage': {
@@ -407,12 +408,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /** "Xem thêm trong Search panel" — đẩy query sang panel Search chuẩn của VS Code khi popover không đủ chỗ hiển thị hết. */
-  private async openInSearchPanel(query: string, scope: CrossFileSearchScope): Promise<void> {
+  /**
+   * "Xem thêm trong Search panel" — đẩy query sang panel Search chuẩn của VS Code khi popover
+   * không đủ chỗ hiển thị hết.
+   *
+   * `relativePath` (GĐ4, US-15.6 điểm 3): có khi bấm dòng "+N match khác trong file này" của 1
+   * group cụ thể — scope Search panel về ĐÚNG file đó thay vì glob rộng `markdown`/`allFiles`.
+   */
+  private async openInSearchPanel(query: string, scope: CrossFileSearchScope, relativePath?: string): Promise<void> {
     try {
       await vscode.commands.executeCommand('workbench.action.findInFiles', {
         query,
-        filesToInclude: scope === 'markdown' ? '*.md,*.markdown' : '',
+        filesToInclude: relativePath ?? (scope === 'markdown' ? '*.md,*.markdown' : ''),
         isCaseSensitive: false,
       });
     } catch (err) {
@@ -599,10 +606,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   // nhiều file cùng lúc, theo scope 'markdown' | 'allFiles'.
   /** Số file tối đa quét nội dung — glob rộng (đặc biệt allFiles) có thể rất lớn. */
   private static readonly CROSS_FILE_SEARCH_MAX_FILES = 500;
-  /** Tổng số match tối đa trả về, gộp mọi file. */
-  private static readonly CROSS_FILE_SEARCH_MAX_RESULTS = 20;
-  /** Số file (nhóm) tối đa có mặt trong kết quả. */
+  /** Số file (nhóm) tối đa có mặt trong kết quả — điều kiện dừng CHÍNH khi quét (cap theo số file). */
   private static readonly CROSS_FILE_SEARCH_MAX_GROUPS = 5;
+  /** Cap an toàn thuần kỹ thuật khi quét match TRONG 1 file — tránh 1 file cực lớn (hàng chục nghìn match) làm treo regex; tách biệt khỏi cap hiển thị. */
+  private static readonly CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN = 500;
+  /** Số match tối đa serialize (gửi cho webview) cho MỖI file — phần còn lại lộ qua field `totalInFile` của group đó. */
+  private static readonly CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_DISPLAY = 10;
   /** scope 'allFiles': loại thêm ảnh/binary phổ biến ngoài các thư mục build/deps. */
   private static readonly CROSS_FILE_SEARCH_EXCLUDE_ALL =
     '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,' +
@@ -696,12 +705,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    *   buffer `vscode.workspace.textDocuments` để bắt cả nội dung chưa save;
    *   file khác đọc từ đĩa qua workspace.fs.
    * - File đang mở trong CHÍNH editor này (document) bị loại trừ hoàn toàn.
-   * - Giới hạn kết quả: tối đa CROSS_FILE_SEARCH_MAX_RESULTS match, gộp trong
-   *   tối đa CROSS_FILE_SEARCH_MAX_GROUPS file đầu tiên có match — quét file
-   *   theo thứ tự findFiles trả về, dừng thu thập file MỚI khi đã đủ nhóm,
-   *   nhưng vẫn cho file đang được thu thập dở dùng nốt phần ngân sách 20 kết
-   *   quả còn lại. `truncated` = true nếu còn file/kết quả chưa quét (kể cả
-   *   khi chính findFiles đã bị cắt ở CROSS_FILE_SEARCH_MAX_FILES).
+   * - Giới hạn kết quả theo SỐ FILE là chính: tối đa CROSS_FILE_SEARCH_MAX_GROUPS
+   *   file có match được trả về — quét file theo thứ tự findFiles trả về, dừng
+   *   thu thập file MỚI ngay khi đã đủ nhóm. Trong MỖI file, số match thật tìm
+   *   được KHÔNG bị chặn bởi tổng toàn cục nữa (tránh 1 file nhiều match ăn hết
+   *   ngân sách khiến file khác không được quét tới) — chỉ có 1 cap an toàn kỹ
+   *   thuật riêng theo file (CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN) để
+   *   tránh treo regex ở file cực lớn. Số match SERIALIZE cho webview mỗi file
+   *   bị cắt còn tối đa CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_DISPLAY; tổng số
+   *   thật giữ lại ở field `totalInFile` để webview hiện badge + dòng overflow.
+   *   `truncated` = true nếu còn FILE chưa quét (đủ 5 nhóm nhưng còn uri chưa
+   *   xét, hoặc chính findFiles đã bị cắt ở CROSS_FILE_SEARCH_MAX_FILES).
    */
   private async crossFileSearch(
     document: vscode.TextDocument,
@@ -740,10 +754,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         if (uri.toString() === document.uri.toString()) {
           continue; // loại trừ hoàn toàn file đang mở, không tính vào cap
         }
-        if (
-          totalMatches >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS ||
-          groups.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_GROUPS
-        ) {
+        if (groups.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_GROUPS) {
           truncated = true;
           break;
         }
@@ -766,17 +777,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
         const lines = text.split(/\r\n|\r|\n/);
         const fileMatches: CrossFileMatch[] = [];
-        let hitCap = false;
-        for (let lineNo = 0; lineNo < lines.length && !hitCap; lineNo++) {
+        let hitFileScanCap = false;
+        // Offset xấp xỉ (US-15.7 positionBoost) của đầu dòng hiện tại trong `text`
+        // gốc — split() làm mất ký tự xuống dòng thật (\n hay \r\n) nên cộng dồn
+        // +1/dòng chỉ là gần đúng, đủ dùng cho tín hiệu xếp hạng (không dùng để
+        // định vị mở file — line/character vẫn là nguồn sự thật cho việc đó).
+        let lineStartOffset = 0;
+        for (let lineNo = 0; lineNo < lines.length && !hitFileScanCap; lineNo++) {
+          const rawLine = lines[lineNo];
           // Trim TRƯỚC rồi so khớp trên chuỗi đã trim, để character luôn khớp
           // đúng vị trí trong lineText trả về (bất biến bắt buộc: webview chỉ
           // slice(character, character+length) từ lineText, không tự tìm lại).
-          const trimmedLine = lines[lineNo].trim();
-          // Cap còn lại cho toàn lượt — chỉ cần tối đa từng ấy match trên 1 dòng.
-          const remaining = MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS - (totalMatches + fileMatches.length);
+          const trimmedLine = rawLine.trim();
+          const leadingWhitespace = rawLine.length - rawLine.trimStart().length;
+          // Cap an toàn kỹ thuật RIÊNG CHO FILE NÀY — không còn dùng ngân sách
+          // toàn cục, để 1 file nhiều match không chặn việc quét file khác.
+          const remaining =
+            MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN - fileMatches.length;
           if (remaining <= 0) {
-            hitCap = true;
-            truncated = true;
+            hitFileScanCap = true;
             break;
           }
           const offsets = findTextMatches(trimmedLine, query, opts, remaining);
@@ -788,13 +807,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               contextBefore: lineNo > 0 ? lines[lineNo - 1].trim() : '',
               lineText: trimmedLine,
               contextAfter: lineNo < lines.length - 1 ? lines[lineNo + 1].trim() : '',
+              charOffset: lineStartOffset + leadingWhitespace + start,
             });
-            if (totalMatches + fileMatches.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_RESULTS) {
-              hitCap = true;
-              truncated = true;
+            if (fileMatches.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN) {
+              hitFileScanCap = true;
               break;
             }
           }
+          lineStartOffset += rawLine.length + 1;
         }
 
         if (fileMatches.length === 0) {
@@ -805,7 +825,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           uri: uri.toString(),
           fileName: segments[segments.length - 1],
           relativePath: vscode.workspace.asRelativePath(uri, false),
-          matches: fileMatches,
+          totalInFile: fileMatches.length,
+          fileLength: text.length,
+          matches: fileMatches.slice(0, MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_DISPLAY),
         });
         totalMatches += fileMatches.length;
       }
@@ -824,7 +846,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       usedFallback = true;
     }
 
-    return { groups: result.groups, truncated: result.truncated, usedFallback };
+    // US-15.7: xếp hạng theo mức độ liên quan (fileScore) thay vì giữ nguyên
+    // thứ tự findFiles trả về. `uris.length` = tổng file đủ điều kiện quét nội
+    // dung, dùng làm mẫu số idf trong rankFileGroups.
+    const rankedGroups = rankFileGroups(result.groups, query, uris.length);
+
+    return { groups: rankedGroups, truncated: result.truncated, usedFallback };
   }
 
   /** Đuôi file tương ứng mỗi MIME ảnh clipboard hỗ trợ — SVG cố ý bỏ qua (kịch bản khai thác XSS/script trong SVG dán từ clipboard không đáng để đánh đổi). */
