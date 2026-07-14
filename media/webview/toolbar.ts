@@ -2,7 +2,17 @@
  * Toolbar định dạng chính: format text (bold/italic/heading/list/quote...),
  * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file cho Claude.
  */
-import { addCheckbox, closestElement, escapeAttr, escapeHtml, svgIcon, type DomHelpers } from './dom-utils';
+import hljs from 'highlight.js/lib/common';
+import {
+  addCheckbox,
+  closestElement,
+  encodeLinkPath,
+  escapeAttr,
+  escapeHtml,
+  isAbsoluteUrl,
+  svgIcon,
+  type DomHelpers,
+} from './dom-utils';
 import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
@@ -1287,6 +1297,16 @@ function rangeToHtml(range: Range): string {
  * block riêng rồi mới chèn <pre> xen giữa — nếu không tách trước, insertHTML
  * một block-level element (<pre>) giữa nội dung inline sẽ phó mặc cho trình
  * duyệt tự tách đoạn, thứ tự trước/sau không được đảm bảo.
+ *
+ * Khi vùng chọn trải dài qua NHIỀU block (vd. chọn từ giữa đoạn này sang giữa
+ * đoạn kế tiếp, kể cả khi có đoạn trắng xen giữa) — bug 2026-07-14: trước đây
+ * chỉ lấy `block` từ `range.startContainer` rồi `selectNode(block)` khi thay
+ * thế, nên các block khác nằm trong vùng chọn (kể cả đoạn trắng ở giữa) không
+ * hề bị xoá, trong khi `codeContent` (lấy từ `sel.toString()`) đã chứa toàn bộ
+ * text của các block đó → nội dung bị nhân đôi. Fix: tìm thêm `endBlock` từ
+ * `range.endContainer`, dùng nó làm điểm kết cho afterRange/afterBlock, và khi
+ * thay thế phải chọn từ trước `block` đến sau `endBlock` để xoá hết mọi block
+ * nằm giữa (không chỉ riêng `block`).
  */
 function insertCodeBlock(lang: string): void {
   const sel = window.getSelection();
@@ -1297,8 +1317,18 @@ function insertCodeBlock(lang: string): void {
 
   const anchor = range ? closestElement(range.startContainer) : null;
   const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  const endAnchor = range ? closestElement(range.endContainer) : null;
+  const endBlock = endAnchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
 
-  if (!range || !selectedText || !block || !content.contains(block) || block === content) {
+  if (
+    !range ||
+    !selectedText ||
+    !block ||
+    !endBlock ||
+    !content.contains(block) ||
+    !content.contains(endBlock) ||
+    block === content
+  ) {
     // Không có vùng chọn hợp lệ trong một đoạn văn/heading (vd. caret rỗng,
     // hoặc đang ở trong list/bảng) — giữ hành vi cũ: chèn code block mẫu
     // ngay tại vị trí caret, không cần tách trước/sau.
@@ -1307,6 +1337,7 @@ function insertCodeBlock(lang: string): void {
       false,
       `<pre><code class="language-${langClass}">${codeContent}</code></pre><p><br></p>`
     );
+    highlightNewCodeBlocks();
     return;
   }
 
@@ -1317,15 +1348,17 @@ function insertCodeBlock(lang: string): void {
 
   const afterRange = document.createRange();
   afterRange.setStart(range.endContainer, range.endOffset);
-  afterRange.setEnd(block, block.childNodes.length);
+  afterRange.setEnd(endBlock, endBlock.childNodes.length);
   const afterHtml = rangeToHtml(afterRange);
 
   const tag = block.tagName.toLowerCase();
+  const endTag = endBlock.tagName.toLowerCase();
   const beforeBlock = beforeHtml.trim() ? `<${tag}>${beforeHtml}</${tag}>` : '';
-  const afterBlock = `<${tag}>${afterHtml.trim() ? afterHtml : '<br>'}</${tag}>`;
+  const afterBlock = `<${endTag}>${afterHtml.trim() ? afterHtml : '<br>'}</${endTag}>`;
 
   const blockRange = document.createRange();
-  blockRange.selectNode(block);
+  blockRange.setStartBefore(block);
+  blockRange.setEndAfter(endBlock);
   sel?.removeAllRanges();
   sel?.addRange(blockRange);
   document.execCommand(
@@ -1333,6 +1366,20 @@ function insertCodeBlock(lang: string): void {
     false,
     `${beforeBlock}<pre><code class="language-${langClass}">${codeContent}</code></pre>${afterBlock}`
   );
+  highlightNewCodeBlocks();
+}
+
+/**
+ * Bug 2026-07-14: code block mới chèn qua toolbar không có highlight cú pháp
+ * (chỉ text trơn) — chỉ sau khi save/đóng/mở lại (đi qua lại pipeline
+ * markdown-it + hljs ở render.ts) mới có màu. Áp `hljs.highlightElement`
+ * ngay tại chỗ cho các <code class="language-*"> vừa chèn (chưa có class
+ * "hljs" đánh dấu đã highlight) để khớp ngay với kết quả render từ nguồn.
+ */
+function highlightNewCodeBlocks(): void {
+  content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
+    hljs.highlightElement(el as HTMLElement);
+  });
 }
 
 function insertLink(): void {
@@ -1348,10 +1395,16 @@ function insertLink(): void {
       if (sel && !sel.isCollapsed) {
         document.execCommand('createLink', false, url);
       } else {
+        // encodeLinkPath CHỈ áp cho path tương đối (không có scheme) — URL
+        // tuyệt đối giữ nguyên, encode sẽ phá "://" và query string "?a=1&b=2"
+        // (bug đã xác nhận qua test/roundtrip/toolbar-insert.ts: path tương
+        // đối có dấu cách không encode làm markdown đổi hình dạng ở lần
+        // render→serialize thứ 2, xem insertImage() bên dưới).
+        const href = isAbsoluteUrl(url) ? url : encodeLinkPath(url);
         document.execCommand(
           'insertHTML',
           false,
-          `<a href="${escapeAttr(url)}">${escapeHtml(displayText ?? url)}</a>`
+          `<a href="${escapeAttr(href)}">${escapeHtml(displayText ?? url)}</a>`
         );
       }
       ctx.scheduleSync();
@@ -1365,7 +1418,12 @@ function insertImage(): void {
     if (!src) {
       return;
     }
-    document.execCommand('insertHTML', false, `<img src="${escapeAttr(src)}" alt="">`);
+    // Cùng lý do với insertLink() ở trên: chỉ encode path tương đối, giữ
+    // nguyên URL tuyệt đối — trước đây KHÔNG encode gì cả (khác paste-image.ts
+    // insertImageAt, vốn luôn encode vì relPath luôn là path tương đối), khiến
+    // path có dấu cách không ổn định qua lần render→serialize thứ 2.
+    const href = isAbsoluteUrl(src) ? src : encodeLinkPath(src);
+    document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
     ctx.scheduleSync();
   });
 }

@@ -27,6 +27,15 @@ export function encodeLinkPath(p: string): string {
     .join('/');
 }
 
+/**
+ * true nếu chuỗi có dạng URL tuyệt đối (có scheme, vd "https://", "mailto:") —
+ * dùng để KHÔNG áp encodeLinkPath lên URL (sẽ phá "://" và query string
+ * "?a=1&b=2"): chỉ path tương đối trong workspace mới cần/được encode.
+ */
+export function isAbsoluteUrl(s: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s);
+}
+
 export function saveSelection(): Range | undefined {
   const sel = window.getSelection();
   return sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : undefined;
