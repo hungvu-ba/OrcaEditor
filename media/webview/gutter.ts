@@ -248,7 +248,12 @@ export function initLineGutter(
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
-    content.focus();
+    // preventScroll: focus/selection không được tự ý cuộn — scrollIntoView
+    // smooth ở scrollToSourceLine (chạy SAU, xem lý do thứ tự ở đó) mới là
+    // nguồn cuộn duy nhất, tránh bug "nhảy về vị trí caret cũ" khi kết quả
+    // search nằm ngoài viewport (focus() mặc định tự cuộn ngay lập tức và
+    // cắt ngang animation smooth đang chạy dở).
+    content.focus({ preventScroll: true });
   }
 
   function scrollToSourceLine(line: number, character?: number, length?: number, matchText?: string): boolean {
@@ -285,11 +290,14 @@ export function initLineGutter(
     if (!target) {
       return false;
     }
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     // Chỉ select khi block khớp CHÍNH XÁC dòng nguồn (không phải fallback "gần nhất").
     // Có `matchText` → tìm theo mỏ neo text nên select được cả block đa dòng (start !== end);
     // không có matchText thì vẫn giới hạn ở block đơn dòng như cũ (offset thô chỉ đáng tin khi
     // block trải đúng MỘT dòng nguồn — xem selectWithinBlock).
+    // Set selection TRƯỚC rồi mới scrollIntoView SAU CÙNG: nếu scroll trước,
+    // focus()/addRange() theo sau có thể tự cuộn (kể cả có preventScroll ở
+    // Safari cũ) và cắt ngang animation smooth, khiến view "nhảy về" vị trí
+    // caret cũ thay vì dừng đúng ở kết quả search mới.
     if (
       exactMatch &&
       exactMatchInfo &&
@@ -300,6 +308,7 @@ export function initLineGutter(
     ) {
       selectWithinBlock(target, character, length, matchText);
     }
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     return true;
   }
 
