@@ -32,11 +32,20 @@ const webviewConfig = {
   minify: production,
 };
 
+/**
+ * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
+ * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
+ * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
+ */
+const roundtripFeatureFiles = fs
+  .readdirSync('test/roundtrip')
+  .filter((f) => f.endsWith('.ts') && !f.startsWith('_'));
+
 /** @type {import('esbuild').BuildOptions} */
 const testConfig = {
-  entryPoints: ['test/roundtrip.ts'],
+  entryPoints: roundtripFeatureFiles.map((f) => `test/roundtrip/${f}`),
   bundle: true,
-  outfile: 'dist/test/roundtrip.js',
+  outdir: 'dist/test/roundtrip',
   format: 'cjs',
   platform: 'node',
   target: 'node18',
