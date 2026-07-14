@@ -99,3 +99,7 @@
 | 0.6.9 | 2026-07-14 | Fix: popup sửa công thức KaTeX cho resize textarea 2 chiều, kéo thả cả popup, cheat-sheet hiện cú pháp ngay trên nút (US-4.22). |
 | 0.6.9 | 2026-07-14 | Fix: chèn Mermaid/math block từ toolbar tự thêm dòng trống sau khối để đặt caret; rà mọi khối atom liền kề đều có chỗ caret ngay sau. |
 | 0.6.9 | 2026-07-14 | Docs: đồng bộ Requirement - 15 (US-15.6/15.7/15.9 Shipped) và HLR từ worktree cross-file-search-v3 vào dự án chính; không đổi code. |
+| 0.6.9 | 2026-07-14 | Docs: cập nhật design-log kiến trúc theo code mới nhất; lập plan refactor Block-Indexed Architecture — HLR mục 18 + Requirement - 18 (US-18.1–18.3, 📝 Planned). |
+| 0.6.9 | 2026-07-14 | Feature: popover kết quả tìm xuyên file kéo-thả được, dùng chung makeDraggable() với popup Insert Link/Image và popup sửa Math (US-17.1). |
+| 0.6.9 | 2026-07-14 | Fix: click kết quả tìm xuyên file ngoài viewport bị nhảy về caret cũ — set selection trước, scrollIntoView smooth sau cùng + focus preventScroll để không cắt ngang animation. |
+| 0.6.9 | 2026-07-14 | Fix: Ctrl+F Next tới match ngoài viewport rồi bấm ra content bị nhảy về caret cũ — đóng search box giờ focus() có preventScroll, không tự cuộn về caret. |

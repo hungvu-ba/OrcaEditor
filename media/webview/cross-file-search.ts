@@ -24,6 +24,7 @@ import {
   CROSS_FILE_POPOVER_MAX_HEIGHT_VH_RATIO,
 } from './constants';
 import { buildMatchOptionToggles } from './match-options';
+import { makeDraggable } from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
 import type { CrossFileMatchGroup, CrossFileSearchScope, WebviewToHost } from '../../src/shared/messages';
 import type { MatchOptions } from '../../src/shared/text-match';
@@ -86,6 +87,15 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   const popover = document.createElement('div');
   popover.className = 'cross-file-search-popover';
   popover.hidden = true;
+  // Kéo (drag) popover đi chỗ khác để lộ nội dung phía sau đang bị nó che —
+  // dùng chung makeDraggable() (dom-utils.ts) như popup Insert Link/Image
+  // (prompt.ts, US-17.2) và popover sửa Math (math-edit.ts, US-4.19). Vùng
+  // tương tác (select scope, toggle Aa/ab, kết quả, nút "See more") đã tự
+  // động bị loại khỏi vùng kéo qua DRAG_IGNORE_SELECTOR (select/button) nên
+  // không cần đánh dấu `data-no-drag` thủ công. positionPopover() vẫn ghi đè
+  // left/top mỗi lần mở lại → vị trí kéo tự reset về anchor mặc định ở lần
+  // mở kế tiếp (US-17.1).
+  makeDraggable(popover);
 
   // Option Match Case / Whole Word (C4). Mặc định Whole Word = ON, Match Case
   // = OFF — cùng registry/khuôn với Ctrl+F (search.ts).

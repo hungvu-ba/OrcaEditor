@@ -2,7 +2,7 @@
 
 ## Quy tắc bắt buộc: Update History
 
-Mỗi khi sửa một lỗi (bug fix) hoặc thêm một tính năng (feature), phải ghi lại một dòng ngắn gọn (tối đa 30 từ) vào file \[Update History.md\](Update History.md) ở thư mục gốc.
+Mỗi khi sửa một lỗi (bug fix) hoặc thêm một tính năng (feature), phải ghi lại một dòng ngắn gọn (tối đa 30 từ) vào file \[Update History.md\](Update History.md) ở thư mục gốc repo code này (`Markdown Preview VS Code/`).
 
 Cấu trúc bảng:  `Date | Update Content`
 
@@ -13,9 +13,9 @@ Thêm dòng mới vào cuối bảng, không sửa các dòng cũ.
 
 ## Quy tắc bắt buộc: Cấu trúc Requirement (HLR = master list)
 
-`Requirement/High-Level Requirement.md` (HLR) là **master list**, liệt kê mục lục tính năng đánh số tuần tự (hiện tại 1–16, tăng dần — không giới hạn ở 14). Mỗi mục lớn phải liên kết 2 chiều với 1 file requirement chi tiết:
+Requirement được quản lý trong **repo riêng** `../OrcaEditor-Requirements/` (sibling folder, thêm vào cùng VS Code workspace với repo code này — xem `OrcaEditor.code-workspace`). `../OrcaEditor-Requirements/High-Level Requirement.md` (HLR) là **master list**, liệt kê mục lục tính năng đánh số tuần tự (hiện tại 1–18, tăng dần — không giới hạn ở 14). Mỗi mục lớn phải liên kết 2 chiều với 1 file requirement chi tiết:
 
--   File chi tiết đặt tên `Requirement/Requirement - NN <Tên tiếng Anh>.md` (NN = số thứ tự 2 chữ số khớp số mục trong HLR — **không có ngoại lệ đặt tên không đánh số**, kể cả file design-log/brainstorm bổ trợ).
+-   File chi tiết đặt tên `../OrcaEditor-Requirements/Requirement - NN <Tên tiếng Anh>.md` (NN = số thứ tự 2 chữ số khớp số mục trong HLR — **không có ngoại lệ đặt tên không đánh số**, kể cả file design-log/brainstorm bổ trợ).
 -   Đầu file chi tiết phải có dòng **Sources:** trỏ về `[High-Level Requirement.md](High-Level%20Requirement.md)` kèm số mục tương ứng (vd. "section 7").
 -   Trong HLR, ngay dưới heading `## N. <Tên>`, phải có dòng `📄 *Chi tiết: [Requirement - NN <Tên>.md](...)* — <Status>` trỏ tới file chi tiết đó, kèm tag Status.
 

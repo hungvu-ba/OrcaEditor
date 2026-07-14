@@ -3,7 +3,6 @@ dist/
 out/
 *.vsix
 .DS_Store
-Requirement/
 Plan/
 sample/
 test/

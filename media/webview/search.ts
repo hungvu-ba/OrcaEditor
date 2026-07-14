@@ -355,7 +355,11 @@ export function initSearch(content: HTMLElement): SearchController {
     count.textContent = '';
     usedFallback = false;
     fallbackNote.hidden = true;
-    content.focus();
+    // preventScroll: caret thật của contenteditable có thể đang ở vị trí cũ
+    // (trước khi search, vd đầu file) — focus() mặc định sẽ tự cuộn nó vào
+    // tầm nhìn, đè mất vị trí match vừa điều hướng tới (bug: bấm ra content
+    // sau khi Next tới match ngoài viewport bị nhảy về caret cũ).
+    content.focus({ preventScroll: true });
   }
 
   // -------------------------------------------------------------------------

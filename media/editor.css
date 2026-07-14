@@ -1184,6 +1184,14 @@ body.toc-open #select-overview {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   color: var(--vscode-foreground);
   font-size: 12px;
+  /* Kéo được từ bất kỳ đâu trên popover trừ vùng tương tác (US-17.1, dùng
+   * chung makeDraggable() — xem DRAG_IGNORE_SELECTOR, dom-utils.ts), cùng
+   * pattern .prompt-box/.md-math-edit-popover. */
+  cursor: grab;
+}
+
+.cross-file-search-popover.dragging {
+  cursor: grabbing;
 }
 
 .cross-file-search-popover[hidden] {
