@@ -1,0 +1,7 @@
+- [ ] Việc chưa làm
+- [x] Việc đã xong
+- [ ] Việc có **đậm** và `code`
+  - [ ] Việc con chưa xong
+  - [x] Việc con đã xong
+- Mục thường xen giữa
+- [x] Việc cuối

@@ -26,6 +26,7 @@ import { initToc } from './toc';
 import { initMermaid } from './mermaid';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
+import { buildBlockMap, type BlockEntry } from './block-map';
 import { closestElement, createDomHelpers } from './dom-utils';
 import { initPrompt } from './prompt';
 import { initPasteImage } from './paste-image';
@@ -77,6 +78,8 @@ initInputRules(content, { scheduleSync, dom });
 /** Markdown hiện tại mà webview đã biết (đã render hoặc đã gửi lên). */
 let currentText = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
+/** Block Map (HLR mục 18, US-18.1) — chỉ mục block cấp cao nhất, dựng lại ở cuối mỗi renderDocument(). */
+let blockMap: BlockEntry[] = [];
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -212,6 +215,7 @@ function renderDocument(markdown: string): void {
   if (lineNumbersEnabled) {
     lineGutter.refreshFromDom();
   }
+  blockMap = buildBlockMap(content, markdown, blockMap);
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
