@@ -5,7 +5,9 @@ out/
 .DS_Store
 Plan/
 sample/
-test/
+test/2026-*/
+test/images/
+test/bug.md
 Claude Code Monitor - Spec.md
 WIP/
 _bmad/

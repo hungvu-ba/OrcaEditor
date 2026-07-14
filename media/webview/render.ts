@@ -149,49 +149,60 @@ export class MarkdownRenderer {
   }
 
   /**
-   * Lấy range dòng nguồn (1-based, bao gồm) của từng phần tử ĐƯỢC ĐÁNH SỐ trong
-   * gutter, theo đúng thứ tự tài liệu — KHÔNG sinh lại HTML. Dùng để cập nhật
-   * gutter số dòng sau mỗi lần gõ (debounce) mà không phải re-render toàn bộ
-   * #content (tránh mất caret/undo). Front-matter (nếu có) luôn là phần tử đầu.
+   * Lấy range dòng nguồn (1-based, bao gồm) của từng block CẤP CAO NHẤT theo
+   * đúng thứ tự tài liệu — KHÔNG sinh lại HTML. Dùng để cập nhật gutter số
+   * dòng sau mỗi lần gõ (debounce) mà không phải re-render toàn bộ #content
+   * (tránh mất caret/undo). Front-matter (nếu có) luôn là phần tử đầu.
    *
-   * Với danh sách cấp cao nhất (<ul>/<ol>), đánh số theo TỪNG list_item (mọi độ
-   * sâu) thay vì cả khối — khớp đúng với cách gutter.ts liệt kê phần tử (mỗi
-   * <li> một số), nếu không cả list chỉ hiện một số ở dòng đầu.
+   * Danh sách cấp cao nhất (<ul>/<ol>) trả về kèm `itemRanges` — range của
+   * TỪNG list_item (mọi độ sâu) — để gutter.ts đánh số riêng từng bullet thay
+   * vì chỉ một số ở dòng đầu cả khối; đây cũng là ranh giới gutter dùng để thu
+   * hẹp "bail-out" xuống đúng khối list bị lệch số lượng item, thay vì bỏ cả
+   * tài liệu (xem refreshFromMarkdown trong gutter.ts).
    */
-  public computeTopLevelLineRanges(markdown: string): LineRange[] {
+  public computeTopLevelBlockRanges(markdown: string): TopLevelBlockRange[] {
     this.capturedFrontMatter = undefined;
     this.capturedFrontMatterRange = undefined;
     this.capturedMathBlockRanges = [];
     const tokens = this.md.parse(markdown, {});
-    const ranges: LineRange[] = [];
+    const groups: TopLevelBlockRange[] = [];
     if (this.capturedFrontMatter !== undefined) {
       const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
-      ranges.push({ start: start0 + 1, end: end0 });
+      groups.push({ range: { start: start0 + 1, end: end0 } });
     }
-    let insideTopLevelList = false;
+    let currentList: TopLevelBlockRange | undefined;
     for (const token of tokens as unknown as BlockToken[]) {
       const isListContainer = token.type === 'bullet_list_open' || token.type === 'ordered_list_open';
       const isListContainerClose = token.type === 'bullet_list_close' || token.type === 'ordered_list_close';
       if (token.level === 0 && isListContainer) {
-        insideTopLevelList = true;
+        currentList = token.map ? { range: { start: token.map[0] + 1, end: token.map[1] }, itemRanges: [] } : undefined;
+        if (currentList) {
+          groups.push(currentList);
+        }
         continue;
       }
       if (token.level === 0 && isListContainerClose) {
-        insideTopLevelList = false;
+        currentList = undefined;
         continue;
       }
-      if (insideTopLevelList) {
+      if (currentList) {
         if (token.type === 'list_item_open' && token.map) {
-          ranges.push({ start: token.map[0] + 1, end: token.map[1] });
+          currentList.itemRanges?.push({ start: token.map[0] + 1, end: token.map[1] });
         }
         continue;
       }
       if (token.level === 0 && token.nesting !== -1 && token.map && !token.hidden) {
-        ranges.push({ start: token.map[0] + 1, end: token.map[1] });
+        groups.push({ range: { start: token.map[0] + 1, end: token.map[1] } });
       }
     }
-    return ranges;
+    return groups;
   }
+}
+
+/** Range dòng nguồn của MỘT block cấp cao nhất; `itemRanges` chỉ có khi block là <ul>/<ol>. */
+export interface TopLevelBlockRange {
+  range: LineRange;
+  itemRanges?: LineRange[];
 }
 
 /**

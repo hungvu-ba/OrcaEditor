@@ -34,6 +34,15 @@ Khi tạo requirement chi tiết **mới**:
 3.  File design-log/brainstorm bổ trợ cho 1 mục đã có sẵn (vd log chi tiết cho tính năng đã có bullet gọn trong 1 mục khác) cũng phải qua đúng flow trên: được cấp 1 số mục riêng trong HLR (không nhét vào ghi chú của mục khác), và mục gốc chỉ trỏ sang bằng 1 dòng tham chiếu ngắn.
 4.  Không được để HLR lệch khỏi các file chi tiết — mỗi lần sửa nội dung 1 file chi tiết làm thay đổi phạm vi hoặc status của tính năng, phải rà lại bullet + status tương ứng trong HLR.
 
+## Quy tắc bắt buộc: Test roundtrip cho tính năng đổi `.md`
+
+Bất kỳ tính năng/thay đổi code nào làm thay đổi **nội dung raw `.md`** (toolbar format, input rules, table editing, chèn link/ảnh/math/mermaid, paste ảnh, list/task list, mọi thao tác đi qua turndown/serialize...) đều **bắt buộc phải có test roundtrip tự động chạy bằng Node** trong `test/roundtrip/`, không được coi là xong nếu chỉ test tay.
+
+-   Test roundtrip nằm ở `test/roundtrip/<feature>.ts`, tách theo feature (rendering, table, lists, dom-normalize, toolbar, input-rules...) để chạy lại riêng từng cái: `npm run test:roundtrip:<feature>`. Chạy gộp tất cả: `npm run test:roundtrip` (tự dò mọi file trong `test/roundtrip/`, không cần khai báo tay từng cái).
+-   Hạ tầng dùng chung (`serializeHtml`, `checkRoundtrip`, `Runner`...) nằm ở `test/roundtrip/_lib.ts` — file feature mới chỉ cần `import` từ đó, không copy lại logic.
+-   Vì nhiều thao tác editor dùng `document.execCommand`/Selection API (chỉ có ở webview thật, không chạy được trong Node/domino), pattern chuẩn là **DOM-outcome test**: dựng HTML mô tả đúng DOM mà thao tác đó tạo ra (đọc source để biết chính xác cấu trúc, không đoán), feed vào `serializeHtml()`, so khớp markdown kỳ vọng, rồi kiểm tra ổn định khi render lại + serialize lần 2 (giống các case có sẵn trong `test/roundtrip/table.ts`/`lists.ts`).
+-   Khi thêm/sửa 1 mục trong HLR làm thay đổi cách 1 tính năng ghi ra `.md`, phải rà lại test roundtrip tương ứng — thiếu test coi như chưa xong việc, kể cả khi tsc/eslint pass.
+
 ## Quy tắc bắt buộc: Git workflow
 
 Khi thực hiện bất kỳ thao tác git nào (branch, commit, merge, PR, release, hotfix, worktree...), phải đọc và tuân theo [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — file này định nghĩa cấu trúc branch, quy ước commit, vòng đời feature/release/hotfix, và cách trình bày (giải thích cho người mới + sitemap trạng thái sau mỗi commit).
