@@ -103,3 +103,8 @@
 | 0.6.9 | 2026-07-14 | Feature: popover kết quả tìm xuyên file kéo-thả được, dùng chung makeDraggable() với popup Insert Link/Image và popup sửa Math (US-17.1). |
 | 0.6.9 | 2026-07-14 | Fix: click kết quả tìm xuyên file ngoài viewport bị nhảy về caret cũ — set selection trước, scrollIntoView smooth sau cùng + focus preventScroll để không cắt ngang animation. |
 | 0.6.9 | 2026-07-14 | Fix: Ctrl+F Next tới match ngoài viewport rồi bấm ra content bị nhảy về caret cũ — đóng search box giờ focus() có preventScroll, không tự cuộn về caret. |
+| 0.6.9 | 2026-07-14 | Feature: US-18.1 Block Map — module block-map.ts (id/type/srcRange/mdSlice), gutter refactor đọc chung, bail-out thu hẹp. |
+| 0.6.9 | 2026-07-14 | Fix: code block mới chèn qua toolbar không có syntax highlight, chỉ hiện sau khi save/mở lại — nay hljs.highlightElement ngay tại chỗ. |
+| 0.6.9 | 2026-07-14 | Fix: chèn code block khi vùng chọn xuyên nhiều đoạn (kể cả qua đoạn trắng) làm nhân đôi nội dung — xoá đúng hết mọi block nằm giữa. |
+| 0.6.9 | 2026-07-14 | Feature: tách test roundtrip theo feature (test/roundtrip/*.ts, chạy riêng từng cái); thêm test cho toolbar/input-rules/math-edit/paste-image, phát hiện bug insertImage() mất ổn định với path có dấu cách. |
+| 0.6.9 | 2026-07-14 | Fix: insertLink()/insertImage() (toolbar) không encode path tương đối có dấu cách, làm markdown đổi hình dạng khi lưu/mở lại — nay encodeLinkPath() trừ URL tuyệt đối. |
