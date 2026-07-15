@@ -205,6 +205,15 @@ const domCases: DomCase[] = [
     html: `<p><img src="${escapeAttr(encodeLinkPath('my images/pic 1.png'))}" alt=""></p>`,
     expect: (md) => md.includes('![](my%20images/pic%201.png)'),
   },
+  {
+    // paste-image kèm width (đo naturalWidth/devicePixelRatio để giữ kích thước
+    // gốc thay vì bị max-width:100% kéo full cửa sổ). img có attribute ngoài
+    // src/alt/title → turndown giữ nguyên HTML thô (rule htmlImgWithAttrs), width
+    // được lưu vào .md và ổn định qua render→serialize lần 2.
+    name: 'paste-image insertImageAt kèm width → serialize thành <img> HTML thô giữ width',
+    html: `<p><img src="${escapeAttr(encodeLinkPath('images/pic.png'))}" alt="" width="640"></p>`,
+    expect: (md) => md.includes('width="640"') && md.includes('src="images/pic.png"'),
+  },
 ];
 
 for (const c of domCases) {

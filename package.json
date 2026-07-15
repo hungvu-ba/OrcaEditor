@@ -139,6 +139,53 @@
           "type": "boolean",
           "default": true,
           "description": "On save, permanently delete pasted images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically."
+        },
+        "orcaEditor.readability.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
+        },
+        "orcaEditor.readability.preset": {
+          "type": "string",
+          "enum": ["comfortable", "default", "compact", "dyslexia", "academic"],
+          "enumDescriptions": [
+            "Comfortable Reading: ~70ch measure, roomy line-height, serif reading font.",
+            "Default: current behavior — full width, follow VS Code theme/font.",
+            "Compact: ~90ch measure, tighter spacing to fit more on screen.",
+            "Dyslexia-friendly: accessibility font (Atkinson Hyperlegible / OpenDyslexic if installed) with increased letter/word/line spacing.",
+            "Academic Paper: narrow ~62ch column, classic book serif, roomy line-height — an essay/paper look (ai-2027.com style). Best paired with the Paper palette."
+          ],
+          "default": "comfortable",
+          "description": "Which reading preset to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a preset from the caret dropdown on the toolbar Reading Mode button applies to the current tab only (not saved back here)."
+        },
+        "orcaEditor.readability.palette": {
+          "type": "string",
+          "enum": ["followTheme", "light", "dark", "sepia", "highContrast", "paper"],
+          "enumDescriptions": [
+            "Follow the VS Code theme colors (current behavior).",
+            "Warm ivory background with near-black text (reduced glare/halation).",
+            "Deep grey background with ivory text (reduced halation).",
+            "Warm low-blue sepia — easy on the eyes at night.",
+            "Maximum-contrast palette for accessibility.",
+            "Paper: bright warm-white (#fffff8) background with near-black text — a printed-page look (ai-2027.com style). Best paired with the Academic Paper preset."
+          ],
+          "default": "sepia",
+          "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
+        },
+        "orcaEditor.readability.linkUnderline": {
+          "type": "boolean",
+          "default": false,
+          "description": "Always underline links in Reading Mode (not only on hover) so links are distinguishable without relying on color (WCAG, color-blindness)."
+        },
+        "orcaEditor.readability.fontFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Optional reading font override applied in Reading Mode. Type the name of a font installed on your machine (nothing is bundled/downloaded). Leave empty to use the preset's default font stack."
+        },
+        "orcaEditor.readability.zen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Focus Mode: hide the toolbar and line-number gutter and center the text column. This is the starting default for newly opened tabs; the Focus button on the toolbar applies only to the current tab for the session (not saved back here). Press Esc to exit."
         }
       }
     }
@@ -157,6 +204,7 @@
     "test:roundtrip:toolbar-insert": "node esbuild.js --test && node dist/test/roundtrip/toolbar-insert.js",
     "test:roundtrip:math-edit": "node esbuild.js --test && node dist/test/roundtrip/math-edit.js",
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
+    "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",

@@ -225,7 +225,14 @@ function addAlignAttrToTables(md: MarkdownIt): void {
   };
   for (const rule of ['th_open', 'td_open'] as const) {
     md.renderer.rules[rule] = (tokens, idx, options, _env, self) => {
+      const token = (tokens as unknown as TokenLike[])[idx];
       applyAlign(tokens as unknown as TokenLike[], idx);
+      // US-19.7 (accessibility): mọi <th> của bảng GFM là header CỘT → scope="col".
+      // Display-only: turndown chuyển bảng về pipe syntax nên scope bị strip khi
+      // ghi lại `.md` (xem test/roundtrip/accessibility.ts), không rò tag.
+      if (rule === 'th_open' && !token.attrGet('scope')) {
+        token.attrSet('scope', 'col');
+      }
       return self.renderToken(tokens, idx, options);
     };
   }

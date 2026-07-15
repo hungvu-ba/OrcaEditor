@@ -43,6 +43,12 @@ Bất kỳ tính năng/thay đổi code nào làm thay đổi **nội dung raw `
 -   Vì nhiều thao tác editor dùng `document.execCommand`/Selection API (chỉ có ở webview thật, không chạy được trong Node/domino), pattern chuẩn là **DOM-outcome test**: dựng HTML mô tả đúng DOM mà thao tác đó tạo ra (đọc source để biết chính xác cấu trúc, không đoán), feed vào `serializeHtml()`, so khớp markdown kỳ vọng, rồi kiểm tra ổn định khi render lại + serialize lần 2 (giống các case có sẵn trong `test/roundtrip/table.ts`/`lists.ts`).
 -   Khi thêm/sửa 1 mục trong HLR làm thay đổi cách 1 tính năng ghi ra `.md`, phải rà lại test roundtrip tương ứng — thiếu test coi như chưa xong việc, kể cả khi tsc/eslint pass.
 
+## Quy tắc bắt buộc: Ngôn ngữ output vs. hội thoại
+
+Mọi **output của dự án** — code, comment, tên biến/hàm, chuỗi hiển thị trong UI (webview, toolbar, thông báo lỗi/empty-state...), commit message, tài liệu (`Update History.md`, requirement, docs khác) — **luôn viết bằng tiếng Anh**, không có ngoại lệ.
+
+Chỉ **câu trả lời của AI trong khung chat/conversation** với người dùng mới dùng tiếng Việt. Không dịch ngược code/tài liệu sang tiếng Việt vì lý do "cho dễ đọc".
+
 ## Quy tắc bắt buộc: Git workflow
 
 Khi thực hiện bất kỳ thao tác git nào (branch, commit, merge, PR, release, hotfix, worktree...), phải đọc và tuân theo [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — file này định nghĩa cấu trúc branch, quy ước commit, vòng đời feature/release/hotfix, và cách trình bày (giải thích cho người mới + sitemap trạng thái sau mỗi commit).

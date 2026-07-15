@@ -41,6 +41,20 @@ export function saveSelection(): Range | undefined {
   return sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : undefined;
 }
 
+/**
+ * US-19.7: người dùng bật "reduce motion" ở OS → mọi cuộn bằng JS phải nhảy
+ * thẳng thay vì animate mượt (bổ trợ cho khối CSS `prefers-reduced-motion`,
+ * vốn chỉ tắt được transition/animation/`scroll-behavior` khai báo trong CSS,
+ * không chạm tới scrollIntoView/scrollTo có behavior:'smooth' đặt trong JS).
+ */
+export function scrollBehavior(): ScrollBehavior {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 'auto'
+    : 'smooth';
+}
+
 export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
   const input = document.createElement('input');
   input.type = 'checkbox';

@@ -2,6 +2,16 @@
  * Style riêng cho phần chỉnh sửa WYSIWYG (toolbar, popup, atom, front-matter)
  *--------------------------------------------------------------------------*/
 
+/* Toolbar sticky (top:0) che mất phần trên khung nhìn → chừa đúng chiều cao nó
+ * khi cuộn-tới-phần-tử (scrollIntoView block:'start' của nhảy heading/anchor/
+ * reveal source line). `--toolbar-height` do main.ts đo & cập nhật theo
+ * ResizeObserver; +8px thở cho khớp margin dưới toolbar. Thiếu dòng này thì
+ * heading đầu file bị toolbar che, không cuộn lên xem được (đã chạm đỉnh trang). */
+html,
+body {
+  scroll-padding-top: calc(var(--toolbar-height, 48px) + 8px);
+}
+
 /* --- Vùng soạn thảo --- */
 #content {
   outline: none;
@@ -208,6 +218,24 @@ body.md-line-numbers #toolbar {
   white-space: nowrap;
   background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
   color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+
+/* Hàng "đang áp" trong dropdown mang trạng thái chọn (vd palette đọc US-19.10):
+ * đậm nhẹ + dấu ✓ ở mép phải. Chỉ dropdown có `value` mới bật (đa số dropdown
+ * hành-động-1-lần không dùng). */
+.toolbar-popover-item.selected {
+  font-weight: 600;
+}
+.toolbar-popover-item.selected::after {
+  content: '✓';
+  margin-left: auto;
+  padding-left: 8px;
+  opacity: 0.85;
+}
+/* Nếu hàng vừa selected vừa có badge (vd Follow VS Code = Default) thì badge đã
+ * chiếm margin-left:auto → ✓ chỉ cần cách badge một khoảng, không đẩy phải nữa. */
+.toolbar-popover-item.selected:has(.toolbar-popover-badge)::after {
+  margin-left: 8px;
 }
 
 /* --- Split-button (mặt chính + caret): Heading/Code block/Math (US-4.9–4.11).
@@ -985,7 +1013,7 @@ body.toc-open #select-viewport-band {
  *--------------------------------------------------------------------------*/
 
 :root {
-  --toc-width: 260px;
+  --toc-width: 300px;
 }
 
 /* Chừa chỗ cho panel: nội dung không bị che sau mục lục. Toolbar (margin -26px)
@@ -1022,6 +1050,31 @@ body.toc-open #select-overview {
 
 #toc-panel[hidden] {
   display: none;
+}
+
+/* Handle kéo đổi rộng panel — nằm sát mép trái, phủ lên border-left. */
+#toc-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: ew-resize;
+  z-index: 1;
+  background: transparent;
+}
+
+#toc-resize:hover,
+body.toc-resizing #toc-resize {
+  background: var(--vscode-textLink-foreground, #3794ff);
+  opacity: 0.4;
+}
+
+/* Trong lúc kéo: chặn select text + giữ con trỏ ew-resize toàn trang. */
+body.toc-resizing {
+  cursor: ew-resize;
+  user-select: none;
 }
 
 #toc-header {
@@ -1075,6 +1128,15 @@ body.toc-open #select-overview {
   color: var(--vscode-textLink-foreground, #3794ff);
   border-left-color: var(--vscode-textLink-foreground, #3794ff);
   background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.12));
+}
+
+/* Mục đang hover/đang đọc bung đủ chữ (wrap nhiều dòng) thay vì cắt "…" —
+ * bù cho trường hợp heading dài hơn cả bề rộng panel. */
+.toc-item:hover,
+.toc-item.active {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .toc-level-1 { padding-left: 14px; font-weight: 600; }
@@ -1432,4 +1494,365 @@ body.toc-open #select-overview {
 
 .cross-file-search-more:hover {
   text-decoration: underline;
+}
+
+/* ===========================================================================
+ * Reading Mode chrome (HLR mục 19) — Zen (US-19.9), image zoom (US-19.4),
+ * focus-visible cho keyboard nav (US-19.7). Styling nội dung ở markdown.css.
+ * ==========================================================================*/
+
+/* --- US-19.9 Zen / Focus mode ---
+ * Ẩn toolbar + gutter số dòng, để measure của US-19.2 (markdown.css) căn cột
+ * chữ giữa. Rê chuột sát mép trên → hé lộ lại toolbar (readability.ts thêm
+ * .reading-zen-reveal). Thoát bằng Esc (readability.ts). */
+/* Cách 3: đưa toolbar RA KHỎI flow (position: fixed overlay) rồi mới trượt lên.
+ * Sticky + transform trên cùng element khiến `translateY(-100%)` chỉ ẩn được một
+ * phần (còn sót "nửa thanh" nhìn như lỗi). Fixed pin theo viewport → trượt lên
+ * ẩn dứt khoát 100%; rê chuột sát mép trên (.reading-zen-reveal) → thanh nổi
+ * trượt xuống lại. margin: 0 để bỏ negative-margin bleed của bản sticky. */
+body.reading-zen #toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  margin: 0;
+  z-index: 200;
+  transform: translateY(-100%);
+  transition: transform 0.2s ease;
+  pointer-events: none;
+}
+body.reading-zen.reading-zen-reveal #toolbar {
+  transform: translateY(0);
+  pointer-events: auto;
+  /* Lớp phủ tạm nổi trên nội dung — shadow để đọc ra là chủ đích, không phải vỡ layout. */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+/* Toolbar overlay không chiếm chỗ → nếu để nguyên, khi reveal nó CHE dòng đầu
+ * tài liệu mà không cuộn lên được (đã ở scrollTop=0). Chỉ chừa padding (đẩy chữ
+ * xuống, trượt cùng nhịp 0.2s với toolbar) khi reveal xảy ra Ở GẦN ĐỈNH —
+ * .reading-zen-reveal-push do readability.ts thêm kèm reveal khi scrollY còn
+ * trong vùng toolbar che mà không cuộn thoát được. Reveal giữa tài liệu chỉ phủ
+ * tạm lên chữ (cuộn được bình thường), KHÔNG đẩy layout — giảm số lần xê dịch
+ * content. Ẩn toolbar thì padding về 0, không có khoảng trắng thừa. */
+body.reading-zen #content {
+  transition: padding-top 0.2s ease;
+}
+body.reading-zen.reading-zen-reveal-push #content {
+  padding-top: calc(var(--toolbar-height, 48px) + 8px);
+}
+/* Bug 0715: lúc mở tab, state seed từ host (readability.applyFromHost) phải áp
+ * TỨC THỜI — không chạy animation trượt toolbar/đẩy padding; animation chỉ dành
+ * cho user bấm nút Focus/rê chuột. Class thêm trước apply(), gỡ sau khi paint. */
+body.reading-no-anim #toolbar,
+body.reading-no-anim #content {
+  transition: none !important;
+}
+body.reading-zen #line-gutter {
+  display: none;
+}
+/* Zen bỏ luôn chỗ chừa cho gutter số dòng (nếu đang bật) để cột chữ căn giữa
+ * đúng theo measure, không lệch trái. */
+body.reading-zen.md-line-numbers {
+  padding-left: 0;
+}
+body.reading-zen.md-line-numbers #toolbar {
+  margin-left: 0;
+  padding-left: 26px;
+}
+
+/* --- US-19.6: chrome (TOC + pop-up) phóng cỡ chữ theo preset ---
+ * Đọc biến --reading-ui-font-size (định nghĩa per-preset ở markdown.css). Fallback
+ * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
+ * tắt đều giữ nguyên. Chỉ áp khi Reading Mode/Zen bật (body.reading-mode). Đây là
+ * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
+body.reading-mode .toc-item {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+body.reading-mode .toolbar-popover-item {
+  font-size: var(--reading-ui-font-size, 12px);
+}
+body.reading-mode .prompt-box input,
+body.reading-mode .prompt-suggestion {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+body.reading-mode #search-input {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+
+/* --- US-19.11 (bug 0715 mục 1): chrome (toolbar/popover/table-toolbar) đi theo
+ * reading palette ---
+ * Palette (US-19.5) chỉ tô màu `#content`; toolbar vẫn dùng --vscode-* (nền tối)
+ * nên "lệch" với vùng chữ sepia/ivory. Khi có palette (body.reading-palette-*),
+ * chrome kế thừa --rp-* để đồng bộ một hệ màu. followTheme = không có class này
+ * → chrome giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout. */
+body[class*='reading-palette-'] #toolbar,
+body[class*='reading-palette-'] #table-toolbar {
+  background: var(--rp-bg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] #toolbar button,
+body[class*='reading-palette-'] #table-toolbar button,
+body[class*='reading-palette-'] #toolbar .split-main,
+body[class*='reading-palette-'] #toolbar .split-caret {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #toolbar .toolbar-sep,
+body[class*='reading-palette-'] #toolbar .split-divider,
+body[class*='reading-palette-'] #table-toolbar .toolbar-sep {
+  background: var(--rp-border);
+}
+body[class*='reading-palette-'] #toolbar button:hover,
+body[class*='reading-palette-'] #table-toolbar button:hover,
+body[class*='reading-palette-'] #toolbar .split-btn:hover,
+body[class*='reading-palette-'] #toolbar .split-main:hover,
+body[class*='reading-palette-'] #toolbar .split-caret:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] #toolbar button.active {
+  background: var(--rp-chrome-active);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+/* Popover (dropdown preset/palette, menu tràn) cũng theo palette. */
+body[class*='reading-palette-'] .toolbar-popover {
+  background: var(--rp-bg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .toolbar-popover-item {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .toolbar-popover-item:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .toolbar-popover-item.selected {
+  background: var(--rp-chrome-active);
+}
+
+/* --- US-19.11 (mở rộng): mọi chrome nổi còn lại đi theo reading palette ---
+ * Trước đây palette chỉ phủ #content + toolbar/popover, khiến TOC, hộp tìm,
+ * các popup (chèn link/ảnh, sửa TeX, tìm chéo file), toast vẫn giữ --vscode-*
+ * (tông theme tối) → lệch hẳn khỏi vùng đọc sáng ivory/sepia. Nhóm rule dưới
+ * đây remap chúng sang --rp-* để đồng bộ một hệ màu; followTheme không có class
+ * này nên giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout.
+ * --rp-elev-bg = bề mặt nổi (widget/input) hơi đậm hơn nền để tách lớp. */
+
+/* Table of Contents (panel phải) */
+body[class*='reading-palette-'] #toc-panel {
+  background: var(--rp-bg);
+  border-left-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #toc-header {
+  border-bottom-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .toc-item {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .toc-item:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .toc-item.active {
+  color: var(--rp-link);
+  border-left-color: var(--rp-link);
+  background: var(--rp-chrome-active);
+}
+
+/* Hộp tìm trong file (Ctrl+F) + input + nút */
+body[class*='reading-palette-'] #search-box {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #search-input {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] #search-box button,
+body[class*='reading-palette-'] .match-option-btn {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #search-box button:hover:not(:disabled),
+body[class*='reading-palette-'] .match-option-btn:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .match-option-btn.active {
+  background: var(--rp-chrome-active);
+  border-color: var(--rp-border);
+}
+
+/* Popup chèn link/ảnh (.prompt-*), popup sửa TeX (.md-math-edit-popover) */
+body[class*='reading-palette-'] .prompt-box,
+body[class*='reading-palette-'] .md-math-edit-popover {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .prompt-box input,
+body[class*='reading-palette-'] .md-math-edit-input {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .prompt-suggestions {
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .prompt-suggestion:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .prompt-suggestion.active {
+  background: var(--rp-chrome-active);
+  color: var(--rp-fg);
+}
+
+/* Tìm chéo file: icon nổi + popover kết quả */
+body[class*='reading-palette-'] .cross-file-search-icon,
+body[class*='reading-palette-'] .cross-file-search-popover {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .cross-file-search-header {
+  border-bottom-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .cross-file-search-scope {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .cross-file-search-group-header:hover {
+  background: var(--rp-chrome-hover);
+}
+
+/* Toast góc phải (cảnh báo lưu HTML...) + tooltip hover nút toolbar */
+body[class*='reading-palette-'] #wysiwyg-toast,
+body[class*='reading-palette-'] #toolbar-tooltip {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+
+/* --- Embedded blocks (math dựng KaTeX, mermaid, front-matter) như "card" rõ
+ * ràng dưới palette ---
+ * Vấn đề: các khối này vốn trong suốt (math) hoặc dùng viền/nền --vscode-* (tông
+ * theme tối) nên trên nền ivory/sepia "chìm" — viền mờ, nền không khác nền trang
+ * (bug report ảnh 2026-07-15). followTheme giữ nguyên như cũ. Dùng --rp-elev-bg
+ * (bề mặt nổi) + --rp-embed-border (viền đậm hơn --rp-border) để tách khối. */
+
+/* Math block: cho hẳn nền + viền card (mặc định math block trong suốt). */
+body[class*='reading-palette-'] .md-math-block {
+  background: var(--rp-elev-bg);
+  border: 1px solid var(--rp-embed-border);
+  border-radius: 6px;
+  padding: 8px 14px;
+}
+/* Hover outline (math inline/block) theo viền embed thay vì --vscode-* mờ. */
+body[class*='reading-palette-'] .md-math-inline:hover,
+body[class*='reading-palette-'] .md-math-block:hover {
+  outline-color: var(--rp-embed-border);
+}
+/* Nút "Edit" của math + toggle "View source" của mermaid → màu palette. */
+body[class*='reading-palette-'] .md-math-toggle {
+  background: var(--rp-bg);
+  border-color: var(--rp-embed-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .md-math-toggle:hover,
+body[class*='reading-palette-'] .md-mermaid-toggle:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .md-mermaid-toggle {
+  color: var(--rp-fg);
+}
+
+/* Mermaid card: viền ngoài + dải toolbar tách nền với vùng biểu đồ. */
+body[class*='reading-palette-'] .md-mermaid {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-embed-border);
+}
+body[class*='reading-palette-'] .md-mermaid-toolbar {
+  background: var(--rp-bg);
+  border-bottom-color: var(--rp-embed-border);
+}
+
+/* Front matter (khối YAML gấp gọn, viền dashed). */
+body[class*='reading-palette-'] .md-front-matter {
+  border-color: var(--rp-embed-border);
+}
+
+/* Highlight tìm kiếm & vùng chọn tìm chéo (CSS Custom Highlight API): màu vàng/
+ * cam cố định vốn chọn cross-theme, nhưng trên nền palette rất sáng (ivory/HC)
+ * chữ nằm dưới cam đặc kém tương phản → ép màu chữ match hiện tại theo palette
+ * để luôn đọc rõ. Nền giữ nguyên tông vàng/cam (đã bán trong suốt, hợp mọi nền). */
+body[class*='reading-palette-'] ::highlight(search-current) {
+  color: var(--rp-selection-fg);
+}
+
+/* --- US-19.7 Keyboard nav: focus indicator rõ ràng --- */
+#toolbar button:focus-visible,
+.toolbar-popover-item:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -1px;
+}
+#content a:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* --- US-19.4 Image click-to-zoom ---
+ * Nút 🔍 nổi khi hover ảnh (gắn vào <body>, không đụng #content → roundtrip-safe). */
+#img-zoom-btn {
+  position: fixed;
+  z-index: 250;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+#img-zoom-btn:hover {
+  background: rgba(0, 0, 0, 0.78);
+}
+#img-zoom-btn svg {
+  display: block;
+  pointer-events: none;
+}
+
+/* Lightbox overlay: xem full-size, scroll để zoom, kéo để pan, Esc/click nền đóng. */
+#img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+  overflow: hidden;
+}
+#img-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#img-lightbox-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+  pointer-events: none;
 }

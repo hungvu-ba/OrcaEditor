@@ -7,6 +7,9 @@ import type {
   CrossFileMatchGroup,
   CrossFileSearchScope,
   HostToWebview,
+  ReadabilityConfig,
+  ReadingPalette,
+  ReadingPreset,
   WebviewToHost,
 } from './shared/messages';
 import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
@@ -124,7 +127,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     webview.options = { enableScripts: true, localResourceRoots };
-    webview.html = this.getHtml(webview, documentDir);
+    // Bug 0715 (US-19.9): bake sẵn trạng thái đọc vào HTML để first paint đã
+    // đúng — mở tab khi Zen bật thì toolbar phải ẩn NGAY từ đầu, không hiện ra
+    // rồi trượt lên (animation trượt chỉ dành cho user bấm nút Focus).
+    const initialReadability = readReadabilityConfig(
+      vscode.workspace.getConfiguration('orcaEditor', document.uri)
+    );
+    webview.html = this.getHtml(webview, documentDir, initialReadability);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
@@ -178,10 +187,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
+      // KHÔNG gửi enabled/preset/zen qua configUpdate: trạng thái đọc per-tab,
+      // session-only (bug 0715 mục 4) — chỉ seed 1 lần lúc 'init'. NGOẠI LỆ:
+      // palette là theme GLOBAL (US-19.11, bug 0715 mục 3) → bơm palette hiện tại
+      // cho mọi tab để đồng bộ màu; webview chỉ áp palette, không đụng state khác.
       void postToWebview({
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
         showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+        palette: wysiwygCfg.get<ReadingPalette>('readability.palette', 'sepia'),
       });
     });
 
@@ -215,6 +229,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
+              readability: readReadabilityConfig(wysiwygCfg),
             },
           });
           break;
@@ -264,6 +279,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         case 'pasteImage': {
           const result = await this.savePastedImage(document, msg.mime, msg.dataBase64);
           void postToWebview({ type: 'pasteImageResult', requestId: msg.requestId, ...result });
+          break;
+        }
+        case 'setReadingPalette': {
+          // US-19.11 (bug 0715 mục 3): palette là theme GLOBAL cho mọi tab .md.
+          // Ghi Global → onDidChangeConfiguration ở MỌI panel bắn configUpdate
+          // (kèm palette) xuống webview tương ứng → tất cả tab đồng bộ.
+          await vscode.workspace
+            .getConfiguration('orcaEditor', document.uri)
+            .update('readability.palette', msg.palette, vscode.ConfigurationTarget.Global);
           break;
         }
       }
@@ -1131,7 +1155,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return false;
   }
 
-  private getHtml(webview: vscode.Webview, documentDir: vscode.Uri): string {
+  private getHtml(
+    webview: vscode.Webview,
+    documentDir: vscode.Uri,
+    readability: ReadabilityConfig
+  ): string {
     const distUri = (...parts: string[]) =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', ...parts));
 
@@ -1158,6 +1186,20 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       "frame-src 'none'",
     ].join('; ');
 
+    // Bug 0715 (US-19.9): class trạng thái đọc phải có mặt NGAY từ first paint
+    // — nếu chờ message 'init' mới áp (readability.applyFromHost) thì toolbar
+    // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
+    // giật vì toolbar rời flow. Giá trị preset/palette đã được whitelist trong
+    // readReadabilityConfig nên an toàn để nội suy vào attribute.
+    const stylingActive = readability.enabled || readability.zen;
+    const bodyClasses = [
+      ...(stylingActive ? ['reading-mode'] : []),
+      ...(readability.zen ? ['reading-zen'] : []),
+      ...(readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
+      ...(stylingActive && readability.linkUnderline ? ['reading-link-underline'] : []),
+    ].join(' ');
+    const contentClasses = stylingActive ? `reading-preset-${readability.preset}` : '';
+
     return /* html */ `<!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -1170,10 +1212,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   <link rel="stylesheet" href="${distUri('webview', 'editor.css')}">
   <title>Markdown WYSIWYG Preview</title>
 </head>
-<body>
-  <div id="toolbar" aria-label="Formatting toolbar"></div>
+<body class="${bodyClasses}">
+  <div id="toolbar" role="toolbar" aria-label="Formatting toolbar"></div>
   <div id="line-gutter" aria-hidden="true"></div>
-  <div id="content" contenteditable="true" spellcheck="false"></div>
+  <div id="content" class="${contentClasses}" role="main" aria-label="Document content" contenteditable="true" spellcheck="false"></div>
   <script nonce="${nonce}" src="${distUri('webview', 'main.js')}"></script>
 </body>
 </html>`;
@@ -1183,4 +1225,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 function getNonce(): string {
   // S7: dùng CSPRNG thay cho Math.random để nonce không đoán được.
   return crypto.randomBytes(16).toString('base64');
+}
+
+/** Giá trị hợp lệ của preset/palette — settings.json có thể chứa chuỗi tùy ý,
+ * phải whitelist trước khi nội suy vào class attribute của HTML (getHtml). */
+const READING_PRESETS: readonly ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
+const READING_PALETTES: readonly ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
+
+/** Đọc trạng thái Reading Mode (US-19.x) từ config `orcaEditor.readability.*`. */
+function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
+  const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
+  const palette = cfg.get<ReadingPalette>('readability.palette', 'sepia');
+  return {
+    enabled: cfg.get<boolean>('readability.enabled', true),
+    preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
+    palette: READING_PALETTES.includes(palette) ? palette : 'sepia',
+    linkUnderline: cfg.get<boolean>('readability.linkUnderline', false),
+    fontFamily: cfg.get<string>('readability.fontFamily', ''),
+    zen: cfg.get<boolean>('readability.zen', false),
+  };
 }

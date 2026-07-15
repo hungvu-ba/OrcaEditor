@@ -11,6 +11,8 @@
  */
 
 import { REBUILD_DEBOUNCE_MS } from './constants';
+import { scrollBehavior } from './dom-utils';
+import type { VsCodeApi } from './vscode-api';
 
 export interface TocController {
   /** Dựng lại danh sách mục lục (khi nội dung đổi) nếu panel đang mở. Có debounce. */
@@ -28,11 +30,21 @@ interface TocEntry {
 
 const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
 
-export function initToc(content: HTMLElement): TocController {
+/** Giới hạn bề rộng panel khi kéo (px). Max còn bị kẹp thêm theo viewport lúc kéo. */
+const TOC_MIN_WIDTH = 200;
+const TOC_MAX_WIDTH = 600;
+
+export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController {
   // --- Panel bên phải ---
   const panel = document.createElement('aside');
   panel.id = 'toc-panel';
   panel.hidden = true;
+
+  const resizer = document.createElement('div');
+  resizer.id = 'toc-resize';
+  resizer.setAttribute('role', 'separator');
+  resizer.setAttribute('aria-orientation', 'vertical');
+  resizer.setAttribute('aria-label', 'Resize table of contents');
 
   const header = document.createElement('div');
   header.id = 'toc-header';
@@ -45,8 +57,48 @@ export function initToc(content: HTMLElement): TocController {
   list.id = 'toc-list';
   list.setAttribute('aria-label', 'Table of Contents');
 
-  panel.append(header, list);
+  panel.append(resizer, header, list);
   document.body.appendChild(panel);
+
+  // --- Bề rộng: khôi phục width đã lưu, cho kéo đổi rộng ---
+
+  function clampWidth(px: number): number {
+    const max = Math.min(TOC_MAX_WIDTH, Math.round(window.innerWidth * 0.6));
+    return Math.max(TOC_MIN_WIDTH, Math.min(max, px));
+  }
+
+  function applyWidth(px: number): void {
+    document.documentElement.style.setProperty('--toc-width', `${px}px`);
+  }
+
+  const savedWidth = vscode?.getState()?.tocWidth;
+  if (typeof savedWidth === 'number' && savedWidth > 0) {
+    applyWidth(clampWidth(savedWidth));
+  }
+
+  resizer.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    resizer.setPointerCapture(e.pointerId);
+    document.body.classList.add('toc-resizing');
+
+    const onMove = (ev: PointerEvent): void => {
+      // Panel neo mép phải (right:0) → width = mép phải viewport trừ vị trí con trỏ.
+      const width = clampWidth(window.innerWidth - ev.clientX);
+      applyWidth(width);
+      updateActive();
+    };
+    const onUp = (ev: PointerEvent): void => {
+      resizer.releasePointerCapture(ev.pointerId);
+      document.body.classList.remove('toc-resizing');
+      resizer.removeEventListener('pointermove', onMove);
+      resizer.removeEventListener('pointerup', onUp);
+      const width = clampWidth(window.innerWidth - ev.clientX);
+      // merge: giữ scrollTop do main.ts ghi.
+      vscode?.setState({ ...vscode.getState(), tocWidth: width });
+    };
+    resizer.addEventListener('pointermove', onMove);
+    resizer.addEventListener('pointerup', onUp);
+  });
 
   // --- Trạng thái ---
   let open = false;
@@ -65,7 +117,7 @@ export function initToc(content: HTMLElement): TocController {
 
   function scrollToHeading(heading: HTMLElement): void {
     const top = heading.getBoundingClientRect().top + window.scrollY - toolbarHeight() - 8;
-    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
   }
 
   // -------------------------------------------------------------------------

@@ -479,8 +479,8 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
       empty.className = 'cross-file-search-empty';
       empty.textContent =
         currentScope === 'markdown'
-          ? 'Không tìm thấy trong project. Thử đổi phạm vi sang "All files".'
-          : 'Không tìm thấy trong project.';
+          ? 'No results in project. Try switching scope to "All files".'
+          : 'No results in project.';
       resultsEl.appendChild(empty);
       moreEl.hidden = true;
       return;

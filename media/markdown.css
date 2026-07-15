@@ -153,6 +153,18 @@ table {
   margin-bottom: 0.7em;
 }
 
+/* US-19.3: bảng scroll ngang trong KHUNG RIÊNG của nó khi tổng min-width các cột
+ * vượt bề rộng khung ("scroll island" của US-19.2) — prose không bao giờ scroll
+ * ngang. display:block cho phép overflow-x hoạt động trên chính <table> (không
+ * cần bọc wrapper → DOM sạch, roundtrip-safe); width:max-content giữ bảng nhỏ co
+ * theo nội dung như cũ, max-width:100% chặn tràn khung → chạm mới scroll. */
+table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 th {
   text-align: left;
   border-bottom: 1px solid;
@@ -161,6 +173,31 @@ th {
 th,
 td {
   padding: 5px 10px;
+  /* US-19.3: sàn 14ch chặn cột co tới mức wrap thành "2 ký tự × 25 dòng" khi
+   * panel hẹp — chạm ngưỡng này thì bảng scroll ngang trong "đảo riêng" thay vì
+   * bóp cột wrap từng từ (bug report 2026-07-15 mục 3; 8ch cũ vẫn quá nhỏ). Trần
+   * ~40ch để cột quá rộng thì wrap thay vì ăn hết không gian ngang; overflow-wrap
+   * normal để từ dài hơn sàn tự nới (min-content), KHÔNG cắt giữa từ.
+   * Sàn 14ch này chỉ là TRẦN cho cột có nội dung thật sự dài — fitTableColumns()
+   * (table.ts) đo bề rộng tự nhiên từng cột sau mỗi lần render/sửa bảng rồi ghi
+   * đè min-width (inline, min(14ch, tự nhiên)) để cột nội dung ngắn (vd "#") co
+   * vừa nội dung thay vì bị ép rộng bằng cột dài nhất (bug report 2026-07-15
+   * mục ảnh bảng nghiệp vụ). */
+  min-width: 14ch;
+  max-width: 40ch;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Dùng bởi fitTableColumns() (table.ts) khi đo bề rộng tự nhiên (max-content)
+ * từng ô: tạm gỡ sàn/trần + cấm wrap để đo đúng độ rộng 1 dòng, rồi gỡ class
+ * ngay trong cùng tick JS (chưa có khung hình nào được vẽ ra giữa chừng) →
+ * không nháy hình. */
+.md-table-col-fit-measuring th,
+.md-table-col-fit-measuring td {
+  white-space: nowrap;
+  min-width: 0;
+  max-width: none;
 }
 
 table > tbody > tr + tr > td {
@@ -206,6 +243,45 @@ td[align='center'] {
 th[align='right'],
 td[align='right'] {
   text-align: right;
+}
+
+/* US-19.14: header cột "dính" — bản clone nổi của thead (table-sticky-header.ts).
+ * Nằm NGOÀI #content (roundtrip-safe) nên phải tự bù nền/màu chữ theo theme +
+ * palette ở đây; viền/màu chữ của <th>/<table> vẫn hưởng selector chung (`th`,
+ * `.vscode-* th`) vì clone là <th>/<table> thật trong <body>. z-index dưới
+ * toolbar (100), trên nội dung. pointer-events:none — chỉ là phụ trợ đọc, mọi
+ * thao tác vẫn đi vào bảng thật bên dưới. */
+#sticky-table-header {
+  position: fixed;
+  overflow: hidden;
+  z-index: 90;
+  display: none;
+  pointer-events: none;
+  background: var(--rp-bg, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  color: var(--rp-fg, inherit);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12);
+}
+#sticky-table-header.visible {
+  display: block;
+}
+#sticky-table-header table {
+  /* Ghi đè rule `table` chung (US-19.3): clone phải giữ ĐÚNG bề rộng nội dung
+   * (đo px, set inline) để scroll ngang khớp cột — KHÔNG bị `max-width:100%` bóp
+   * lại, KHÔNG tự sinh scrollbar (khung ngoài đã overflow:hidden + translateX). */
+  display: table;
+  table-layout: fixed;
+  border-collapse: collapse;
+  margin: 0;
+  max-width: none;
+  overflow: visible;
+}
+#sticky-table-header th {
+  background: var(--rp-bg, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  /* Bề rộng cột set inline = bề rộng BORDER-BOX đo từ th thật (getBoundingClientRect).
+   * Không có box-sizing:border-box toàn cục → mặc định content-box sẽ CỘNG THÊM
+   * padding(20px)+viền vào mỗi cột, dồn lệch dần sang phải. border-box để width
+   * set vào khớp đúng phép đo, cột dính thẳng cột thân bảng. */
+  box-sizing: border-box;
 }
 
 /* --- Blockquote --- */
@@ -421,4 +497,566 @@ ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
 }
 .vscode-light .hljs-strong {
   font-weight: bold;
+}
+
+/* ===========================================================================
+ * Reading Mode / Readability (HLR mục 19)
+ * Chỉ CSS class/var trên <body>/#content bật/tắt (readability.ts) — KHÔNG đụng
+ * nội dung `.md`. "Reading styling có hiệu lực" = body.reading-mode (đặt khi
+ * Reading Mode HOẶC Zen bật).
+ * ==========================================================================*/
+
+/* --- US-19.2 Measure/Width engine ---
+ * #content bị giới hạn theo "container" (cho phép table/ảnh/code bleed rộng hơn
+ * cột chữ — break-out), cột chữ (prose) hẹp hơn ở --reading-measure, căn trái
+ * (margin auto chỉ ở #content để căn giữa cả khối). Đo bằng `ch` để độc lập
+ * font-size; panel hẹp thì max-width tự nhường 100% (clamp tự nhiên), prose
+ * wrap — KHÔNG scroll ngang. Preset đặt giá trị 2 biến này bên dưới. */
+body.reading-mode #content {
+  max-width: var(--reading-container, none);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* --- US-19.2 Hệ thống độ rộng cột (Reading Mode) — 2 TẦNG, đồng nhất mép trái ---
+ *
+ * Mọi block cấp cao nhất căn trái tại mép trái #content (margin-inline 0) → CHUNG
+ * MỘT mép trái, không so le. Chỉ mép PHẢI phân tầng theo loại nội dung:
+ *
+ *   Tầng PROSE  (--reading-measure, ~70ch): p, heading, hr, list, dl, blockquote,
+ *     front-matter — cột chữ tối ưu để đọc (đo bằng `ch` = số ký tự/dòng, độc lập
+ *     cỡ chữ nên mọi preset giữ đúng độ dài dòng dù font-size khác nhau).
+ *   Tầng WIDE   (--reading-container, ~1.14× measure): table, pre(code), math,
+ *     mermaid — nội dung cần bề ngang nên ĐƯỢC rộng hơn cột chữ, nhưng bị chặn ở
+ *     container để mép phải chỉ nhô ra vừa phải, không nhảy giật so với prose.
+ *
+ * BẪY FONT: `ch` bám font của CHÍNH element. Heading (weight 600, Academic thêm
+ * letter-spacing) và code (mono) có `ch` rộng/khác body → nếu giới hạn bằng `ch`
+ * của chúng thì mép phải lệch khỏi cột chữ. Nên:
+ *   - Heading giới hạn bằng % của container (--reading-measure-frac = measure/
+ *     container) — `%` đo theo px của #content (font body) → miễn nhiễm weight/
+ *     letter-spacing/serif, mép phải khớp đúng <p>.
+ *   - Wide block giới hạn bằng `max-width:100%` (= 100% #content = container px) —
+ *     cũng miễn nhiễm font mono của code.
+ * Preset đặt --reading-measure / --reading-container / --reading-measure-frac. */
+
+/* Tầng PROSE: cột chữ body-font — đo trực tiếp bằng `ch` là đúng. */
+body.reading-mode
+  #content
+  > :is(p, ul, ol, dl, blockquote, hr, .md-front-matter) {
+  max-width: var(--reading-measure, none);
+}
+
+/* Heading: giới hạn bằng % container để weight/letter-spacing không làm gạch chân
+ * nhô quá cột chữ (xem "BẪY FONT" trên). */
+body.reading-mode #content > :is(h1, h2, h3, h4, h5, h6) {
+  max-width: var(--reading-measure-frac, none);
+}
+
+/* Tầng WIDE: table/code/math/mermaid được rộng tới container, căn trái chung mép
+ * với prose. max-width:100% = px của #content (không dùng `ch` của block → không
+ * dính font mono/serif). Bảng nhỏ vẫn co theo nội dung (width:max-content ở rule
+ * `table`), chỉ chạm 100% mới scroll trong "đảo riêng" (US-19.3). */
+body.reading-mode #content > :is(table, pre, .md-math-block, .md-mermaid) {
+  max-width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* hr: UA mặc định `margin-inline: auto` → căn giữa trong container (rộng hơn cột
+ * chữ) nên trông ngắn & lệch so với <p> căn trái. Ép về trái cho khớp cột. */
+body.reading-mode #content > hr {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* Too-narrow state (US-19.2): panel quá hẹp → hint mờ thay vì render vỡ. */
+@media (max-width: 240px) {
+  body.reading-mode #content::before {
+    content: 'Panel too narrow — widen for better reading';
+    display: block;
+    margin-bottom: 12px;
+    padding: 6px 8px;
+    font-size: 0.85em;
+    opacity: 0.6;
+    border: 1px dashed currentColor;
+    border-radius: 4px;
+  }
+}
+
+/* --- US-19.6 Typography ---
+ * Tái dùng plumbing --markdown-* sẵn có; preset đặt --reading-font-stack +
+ * --markdown-line-height + --reading-font-size. --reading-font-override (ô nhập
+ * tự do, US-19.6) thắng stack của preset. Code luôn giữ mono (không đổi theo
+ * reading font).
+ *
+ * Font-size (US-19.6): mỗi preset đặt CỠ CHỮ NỀN (body) riêng — heading dùng
+ * `em` (2/1.5/1.25… ở đầu file) nên tự co giãn theo base → cả thang type scale
+ * đổi đồng bộ, giữ đúng tỉ lệ. Default KHÔNG đặt biến → `inherit` = giữ nguyên
+ * cỡ chữ VS Code (--markdown-font-size). Đo cột bằng `ch` nên cỡ chữ to/nhỏ chỉ
+ * đổi bề rộng tuyệt đối, số ký tự/dòng giữ nguyên (chủ đích US-19.2). */
+body.reading-mode #content {
+  font-family: var(--reading-font-override, var(--reading-font-stack, inherit));
+  line-height: var(--reading-line-height, inherit);
+  font-size: var(--reading-font-size, inherit);
+}
+
+body.reading-mode #content code,
+body.reading-mode #content pre {
+  font-family: var(--vscode-editor-font-family, 'SF Mono', Monaco, Menlo, Consolas, monospace);
+}
+
+/* Comfortable Reading (mặc định lần đầu): dùng font của VS Code (như Default,
+ * bug 0715 #5 — không ép serif nữa), chỉ giãn dòng/thu hẹp cột + tăng nhẹ cỡ chữ
+ * cho dễ đọc long-form (16px, quanh mốc đọc sách web). */
+#content.reading-preset-comfortable {
+  --reading-font-size: 16px;
+  --reading-line-height: 1.7;
+  --reading-measure: 70ch; /* cột chữ */
+  --reading-container: 80ch; /* wide cap ~1.14× cột chữ (bảng/code rộng vừa phải) */
+  --reading-measure-frac: 87.5%; /* 70/80 — heading khớp cột <p> (miễn nhiễm font) */
+}
+
+/* Default: y hệt hành vi hiện tại (full width, follow theme/font/cỡ chữ VS Code)
+ * — KHÔNG đặt --reading-font-size để giữ inherit = --markdown-font-size. */
+#content.reading-preset-default {
+  --reading-measure: none;
+  --reading-container: none;
+  --reading-measure-frac: none; /* full width — heading/hr trải hết như cũ */
+}
+
+/* Compact: rộng hơn, giãn dòng chặt + cỡ chữ nhỏ hơn để nhét nhiều nội dung. */
+#content.reading-preset-compact {
+  --reading-font-size: 13px;
+  --reading-line-height: 1.5;
+  --reading-measure: 90ch;
+  --reading-container: 102ch; /* ~1.13× cột chữ */
+  --reading-measure-frac: 88.2%; /* 90/102 */
+}
+
+/* Dyslexia-friendly (US-19.6/19.7): font accessibility (dùng nếu máy đã cài,
+ * OFL — không bundle ở MVP), cỡ chữ lớn nhất (18px, theo khuyến nghị đọc dễ),
+ * tăng letter/word/line-spacing, cột hẹp dễ theo dòng. */
+#content.reading-preset-dyslexia {
+  --reading-font-stack: 'Atkinson Hyperlegible', 'OpenDyslexic', Verdana, Tahoma, sans-serif;
+  --reading-font-size: 18px;
+  --reading-line-height: 1.8;
+  --reading-measure: 65ch;
+  --reading-container: 74ch; /* ~1.14× cột chữ */
+  --reading-measure-frac: 87.8%; /* 65/74 */
+  letter-spacing: 0.03em;
+  word-spacing: 0.08em;
+}
+
+/* Literata (bundled, US-19.15): book serif của Google (OFL 1.1) commission cho
+ * Google Play Books — subset Latin + Latin-ext + Vietnamese (đủ dấu tiếng Việt,
+ * khác font hệ thống Iowan Old Style vốn thiếu dấu). Chỉ nạp 4 style thực dùng cho
+ * essay: 400/600/700 thường + 400/700 italic. url() tương đối so với vị trí file
+ * CSS đã build (dist/webview/markdown.css) → fonts/literata/*.woff2. Bản quyền +
+ * OFL.txt kèm trong media/fonts/literata/. */
+/* vietnamese */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-italic-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-italic-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-italic-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-italic-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-italic-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Literata';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-italic-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-normal-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-normal-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/literata/literata-400-normal-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/literata/literata-600-normal-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/literata/literata-600-normal-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/literata/literata-600-normal-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-normal-vietnamese.woff2') format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-normal-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Literata';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('fonts/literata/literata-700-normal-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ET Book (bundled, US-19.15): chính là font PRIMARY của ai-2027.com (Tufte CSS
+ * dùng et-book đầu stack) — serif kiểu Bembo cho look essay in. License MIT (free,
+ * thương mại OK), KHÔNG cài sẵn trên OS nào nên phải bundle. Chỉ có định dạng
+ * .woff (webview Chromium chạy tốt). 3 style: roman/italic/bold. ET Book KHÔNG có
+ * dấu tiếng Việt → chỉ dùng cho tài liệu tiếng Anh; tiếng Việt đi Literata (xem
+ * dưới). Bản quyền LICENSE kèm trong media/fonts/et-book/. */
+@font-face {
+  font-family: 'et-book';
+  font-style: normal;
+  font-weight: normal;
+  font-display: swap;
+  src: url('fonts/et-book/et-book-roman.woff') format('woff');
+}
+@font-face {
+  font-family: 'et-book';
+  font-style: italic;
+  font-weight: normal;
+  font-display: swap;
+  src: url('fonts/et-book/et-book-italic.woff') format('woff');
+}
+@font-face {
+  font-family: 'et-book';
+  font-style: normal;
+  font-weight: bold;
+  font-display: swap;
+  src: url('fonts/et-book/et-book-bold.woff') format('woff');
+}
+
+/* Academic Paper (US-19.15): look bài luận ai-2027.com — cột chữ hẹp, căn trái
+ * (ragged-right), giãn dòng rộng. Font khớp stack Tufte CSS của trang gốc: ET Book
+ * (bundled) primary → Palatino family fallback. MẶC ĐỊNH (tài liệu tiếng Anh/không
+ * dấu Việt) render bằng ET Book y hệt ai-2027.com. Literata (bundled) đứng cuối
+ * làm fallback đảm bảo cho máy thiếu ET Book+Palatino trước khi rơi về serif hệ
+ * thống. Ghép với palette `paper` cho nền kem trắng ấm để trọn look. */
+#content.reading-preset-academic {
+  --reading-font-stack: 'et-book', Palatino, 'Palatino Linotype', 'Palatino LT STD',
+    'Book Antiqua', Georgia, 'Literata', 'Times New Roman', serif;
+  /* Cỡ chữ lớn kiểu essay in (ai-2027.com dùng ET Book ~20px) — 19px cho serif
+   * đọc "thảnh thơi" trên cột hẹp 62ch; heading em tự scale theo. */
+  --reading-font-size: 19px;
+  --reading-line-height: 1.75;
+  --reading-measure: 62ch;
+  --reading-container: 71ch; /* ~1.15× cột chữ */
+  --reading-measure-frac: 87.3%; /* 62/71 */
+}
+/* Tài liệu tiếng Việt (US-19.15: readability.ts dò ký tự đặc trưng VN → gắn
+ * `content-lang-vi`): đưa Literata (bundled, subset Vietnamese đủ dấu, đồng nhất
+ * mọi OS) LÊN ĐẦU vì Palatino trên nhiều máy thiếu/kém dấu tiếng Việt. Palatino
+ * family chỉ còn là fallback. */
+#content.reading-preset-academic.content-lang-vi {
+  --reading-font-stack: 'Literata', Palatino, 'Palatino Linotype', 'Book Antiqua',
+    Georgia, 'Times New Roman', serif;
+}
+/* Heading serif in hoa nhỏ hơn body-scale để nhịp giống trang giấy in. */
+#content.reading-preset-academic :is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* --- US-19.6 Chrome font-size theo preset (TOC + pop-up) ---
+ * Embedded block (math/mermaid/code/front-matter) nằm TRONG #content nên tự scale
+ * theo --reading-font-size, không cần khai báo thêm. TOC + pop-up là chrome NGOÀI
+ * #content → --reading-font-size không với tới; cần biến riêng --reading-ui-font-size
+ * đặt trên <body> để chrome kế thừa được. Keyed theo preset qua :has(#content...)
+ * (pattern :has đã dùng ở .toolbar-popover-item.selected). Application (font-size
+ * thực tế) nằm ở editor.css cùng khối chrome-palette.
+ *
+ * Chrome scale NHẸ hơn body (giữ UI gọn, nút không phình) nhưng bám theo cỡ đọc để
+ * đồng bộ. Default preset KHÔNG đặt biến → chrome giữ nguyên cỡ VS Code mặc định. */
+body.reading-mode:has(#content.reading-preset-comfortable) {
+  --reading-ui-font-size: 14px;
+}
+body.reading-mode:has(#content.reading-preset-compact) {
+  --reading-ui-font-size: 12px;
+}
+body.reading-mode:has(#content.reading-preset-dyslexia) {
+  --reading-ui-font-size: 15px;
+}
+body.reading-mode:has(#content.reading-preset-academic) {
+  --reading-ui-font-size: 14px;
+}
+
+/* --- US-19.5 Reading palettes ---
+ * followTheme (mặc định) = KHÔNG áp class màu (kế thừa --vscode-*, hành vi cũ).
+ * Mỗi palette là 1 bộ đóng gói qua các biến --rp-*; hand-tune long-form (tránh
+ * #000/#fff tuyền, giảm chói/halation). Syntax highlight (.hljs-*) giữ nguyên
+ * màu token — rule `pre code` chỉ đặt màu cho text-node trần, span .hljs-* có
+ * rule riêng (thắng kế thừa) nên không bị đè. */
+body[class*='reading-palette-'] {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #content {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #content a {
+  color: var(--rp-link);
+}
+body[class*='reading-palette-'] #content a:hover {
+  color: var(--rp-link-hover);
+}
+body[class*='reading-palette-'] #content :not(pre) > code {
+  background-color: var(--rp-code-bg);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #content pre {
+  background-color: var(--rp-pre-bg);
+  border-color: var(--rp-embed-border);
+}
+body[class*='reading-palette-'] #content pre code {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #content blockquote {
+  background: var(--rp-quote-bg);
+  border-color: var(--rp-quote-border);
+}
+body[class*='reading-palette-'] #content th,
+body[class*='reading-palette-'] #sticky-table-header th {
+  border-color: var(--rp-th-border);
+}
+body[class*='reading-palette-'] #content h1,
+body[class*='reading-palette-'] #content h2,
+body[class*='reading-palette-'] hr,
+body[class*='reading-palette-'] #content table > tbody > tr + tr > td {
+  border-color: var(--rp-border);
+}
+/* Vùng chọn văn bản (native ::selection): mặc định thừa hưởng selection color của
+ * VS Code theme — thường lệch tông (xanh theme tối) trên nền ivory/sepia và có thể
+ * kém tương phản. Khi có palette, ép selection theo tint của palette để chữ dưới
+ * vùng chọn luôn đọc rõ. */
+body[class*='reading-palette-'] #content ::selection {
+  background: var(--rp-selection-bg);
+  color: var(--rp-selection-fg);
+}
+body[class*='reading-palette-'] #content ::-moz-selection {
+  background: var(--rp-selection-bg);
+  color: var(--rp-selection-fg);
+}
+
+/* Light: nền ngà ấm, chữ gần-đen. */
+body.reading-palette-light {
+  --rp-bg: #f7f3ea;
+  --rp-fg: #1c1b18;
+  --rp-link: #1a5fb4;
+  --rp-link-hover: #123f7a;
+  --rp-code-bg: rgba(0, 0, 0, 0.06);
+  --rp-pre-bg: #efe9dc;
+  --rp-border: rgba(0, 0, 0, 0.16);
+  --rp-th-border: rgba(0, 0, 0, 0.55);
+  --rp-quote-bg: rgba(0, 0, 0, 0.04);
+  --rp-quote-border: #c9bfa8;
+  --rp-chrome-hover: rgba(0, 0, 0, 0.08);
+  --rp-chrome-active: rgba(0, 0, 0, 0.14);
+  /* Bề mặt nổi (widget/popover/input) — hơi đậm hơn nền để tách lớp. */
+  --rp-elev-bg: #efe9dc;
+  /* Viền cho embedded block (math/mermaid/code/front-matter) — đậm hơn --rp-border
+   * để "card" đọc rõ trên nền ivory (khắc phục border mờ khi dùng --vscode-*). */
+  --rp-embed-border: rgba(0, 0, 0, 0.24);
+  /* Vùng chọn văn bản: tint theo màu link, đủ tương phản với chữ tối. */
+  --rp-selection-bg: rgba(26, 95, 180, 0.22);
+  --rp-selection-fg: var(--rp-fg);
+}
+
+/* Dark: xám đậm, chữ ngà (chống halation). */
+body.reading-palette-dark {
+  --rp-bg: #1e1f22;
+  --rp-fg: #e6e1d5;
+  --rp-link: #7aa2f7;
+  --rp-link-hover: #a5c0ff;
+  --rp-code-bg: rgba(255, 255, 255, 0.07);
+  --rp-pre-bg: #26272b;
+  --rp-border: rgba(255, 255, 255, 0.16);
+  --rp-th-border: rgba(255, 255, 255, 0.55);
+  --rp-quote-bg: rgba(255, 255, 255, 0.05);
+  --rp-quote-border: #4a4b50;
+  --rp-chrome-hover: rgba(255, 255, 255, 0.1);
+  --rp-chrome-active: rgba(255, 255, 255, 0.18);
+  --rp-elev-bg: #26272b;
+  --rp-embed-border: rgba(255, 255, 255, 0.22);
+  --rp-selection-bg: rgba(122, 162, 247, 0.32);
+  --rp-selection-fg: var(--rp-fg);
+}
+
+/* Sepia: vàng ấm low-blue (dịu mắt ban đêm). */
+body.reading-palette-sepia {
+  --rp-bg: #f4ecd8;
+  --rp-fg: #3b2f22;
+  --rp-link: #8a4b1a;
+  --rp-link-hover: #653514;
+  --rp-code-bg: rgba(90, 60, 20, 0.1);
+  --rp-pre-bg: #ece2c9;
+  --rp-border: rgba(90, 60, 20, 0.25);
+  --rp-th-border: rgba(90, 60, 20, 0.55);
+  --rp-quote-bg: rgba(90, 60, 20, 0.07);
+  --rp-quote-border: #b89b6a;
+  --rp-chrome-hover: rgba(90, 60, 20, 0.12);
+  --rp-chrome-active: rgba(90, 60, 20, 0.2);
+  --rp-elev-bg: #ece2c9;
+  --rp-embed-border: rgba(90, 60, 20, 0.34);
+  --rp-selection-bg: rgba(138, 75, 26, 0.24);
+  --rp-selection-fg: var(--rp-fg);
+}
+
+/* Paper (US-19.15): nền kem trắng ấm #fffff8 + chữ gần-đen warm, kiểu trang
+ * ai-2027.com/Tufte — sáng hơn `light` (ngà #f7f3ea), tông giấy in. Link nâu-mực
+ * cổ điển. Ghép đẹp nhất với preset `academic`. */
+body.reading-palette-paper {
+  --rp-bg: #fffff8;
+  --rp-fg: #111110;
+  --rp-link: #2554a0;
+  --rp-link-hover: #163a75;
+  --rp-code-bg: rgba(0, 0, 0, 0.05);
+  --rp-pre-bg: #f4f4ea;
+  --rp-border: rgba(0, 0, 0, 0.14);
+  --rp-th-border: rgba(0, 0, 0, 0.6);
+  --rp-quote-bg: rgba(0, 0, 0, 0.03);
+  --rp-quote-border: #d8d4bf;
+  --rp-chrome-hover: rgba(0, 0, 0, 0.07);
+  --rp-chrome-active: rgba(0, 0, 0, 0.13);
+  --rp-elev-bg: #f7f6ec;
+  --rp-embed-border: rgba(0, 0, 0, 0.22);
+  --rp-selection-bg: rgba(37, 84, 160, 0.2);
+  --rp-selection-fg: var(--rp-fg);
+}
+
+/* High-contrast (accessibility): tương phản tối đa, viền đậm. */
+body.reading-palette-highContrast {
+  --rp-bg: #ffffff;
+  --rp-fg: #000000;
+  --rp-link: #0000ee;
+  --rp-link-hover: #0000aa;
+  --rp-code-bg: rgba(0, 0, 0, 0.1);
+  --rp-pre-bg: #f0f0f0;
+  --rp-border: #000000;
+  --rp-th-border: #000000;
+  --rp-quote-bg: rgba(0, 0, 0, 0.06);
+  --rp-quote-border: #000000;
+  --rp-chrome-hover: rgba(0, 0, 0, 0.12);
+  --rp-chrome-active: rgba(0, 0, 0, 0.2);
+  --rp-elev-bg: #f0f0f0;
+  --rp-embed-border: #000000;
+  /* HC: vùng chọn đặc, viền đậm để tương phản tối đa. */
+  --rp-selection-bg: #b4d5fe;
+  --rp-selection-fg: #000000;
+}
+
+/* --- US-19.5/19.7 Link underline ---
+ * Tuỳ chọn luôn gạch chân link (không chỉ dựa màu — WCAG mù màu). */
+body.reading-link-underline #content a {
+  text-decoration: underline;
+}
+
+/* --- US-19.7 prefers-reduced-motion (GLOBAL, không gán vào reading mode) ---
+ * Tắt/rút ngắn animation + transition + smooth-scroll khai báo trong CSS
+ * (mermaid, transition UI, scroll-behavior). Smooth-scroll đặt trong JS được
+ * xử lý riêng qua scrollBehavior() (dom-utils.ts). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  html,
+  body {
+    scroll-behavior: auto !important;
+  }
 }

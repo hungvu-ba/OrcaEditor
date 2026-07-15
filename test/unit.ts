@@ -177,26 +177,31 @@ const fromWebview: WebviewToHost[] = [
   { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
   { type: 'crossFileSearch:openInSearchPanel', query: 'q', scope: 'allFiles' },
   { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
+  { type: 'setReadingPalette', palette: 'sepia' },
 ];
+const readabilityFixture = {
+  enabled: false, preset: 'comfortable', palette: 'followTheme',
+  linkUnderline: false, fontFamily: '', zen: false,
+} as const;
 const toWebview: HostToWebview[] = [
   { type: 'init', text: 'x', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown',
+    crossFileSearchScope: 'markdown', readability: readabilityFixture,
   } },
   { type: 'init', text: 'x', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown',
+    crossFileSearchScope: 'markdown', readability: readabilityFixture,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
-  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true },
+  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, palette: 'followTheme' },
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
   { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
 ];
-check('contract: WebviewToHost phủ đủ 10 biến thể', fromWebview.length === 10);
+check('contract: WebviewToHost phủ đủ 11 biến thể', fromWebview.length === 11);
 check('contract: HostToWebview phủ đủ 8 biến thể (init có/không reveal + scrollToPosition + pasteImage)', toWebview.length === 8);
 
 // ---------------------------------------------------------------------------
