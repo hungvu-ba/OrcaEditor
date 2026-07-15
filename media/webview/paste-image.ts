@@ -19,6 +19,14 @@ export interface PasteImageController {
   tryPasteImageFromClipboardApi(): Promise<boolean>;
   /** Gọi từ message handler của main.ts khi nhận 'pasteImageResult' từ host. */
   notifyResult(requestId: number, relativePath?: string, error?: string): void;
+  /**
+   * US-17.6 (M4): ảnh kéo-thả từ ngoài vào — tái dùng nguyên luồng save+insert
+   * của paste, chỉ khác ở NGUỒN gọi và vị trí chèn (range tại điểm thả, không
+   * phải selection hiện tại lúc paste). `fillCell` = true khi điểm thả nằm
+   * trong 1 ô bảng (US-17.4) → chèn `style="width:100%"` thay vì width đo
+   * được, để ảnh khít theo cột thay vì theo kích thước gốc.
+   */
+  saveDroppedImage(blob: Blob, mime: string, range: Range | undefined, fillCell: boolean): void;
 }
 
 export function initPasteImage(
@@ -26,23 +34,25 @@ export function initPasteImage(
   ctx: { scheduleSync: () => void; dom: DomHelpers }
 ): PasteImageController {
   let seq = 0;
-  /** Mỗi request đang chờ host lưu file: caret lúc dán + độ rộng hiển thị đo được (px, đã chia devicePixelRatio). */
-  const pending = new Map<number, { range: Range | undefined; width?: number }>();
-  /** Dấu thời gian requestSave gần nhất — chặn trùng khi cả keydown fallback lẫn 'paste' event thật cùng tìm thấy ảnh cho cùng 1 lượt dán (xem PASTE_IMAGE_DEDUPE_MS). */
+  /** Mỗi request đang chờ host lưu file: caret lúc dán + độ rộng hiển thị đo được (px, đã chia devicePixelRatio) + có chèn vào ô bảng (US-17.4, width:100%) hay không. */
+  const pending = new Map<number, { range: Range | undefined; width?: number; fillCell?: boolean }>();
+  /** Dấu thời gian requestSave gần nhất — chặn trùng khi cả keydown fallback lẫn 'paste' event thật cùng tìm thấy ảnh cho cùng 1 lượt dán (xem PASTE_IMAGE_DEDUPE_MS). Chỉ áp cho paste (2 đường có thể race); drop (M4) luôn có đúng 1 nguồn nên bỏ qua chặn này. */
   let lastRequestAt = 0;
 
-  function insertImageAt(range: Range | undefined, relPath: string, width?: number): void {
+  function insertImageAt(range: Range | undefined, relPath: string, width?: number, fillCell?: boolean): void {
     ctx.dom.restoreSelection(range);
     // Có width đo được → chèn kèm attribute để ảnh giữ kích thước gốc (theo CSS
     // px, đã chia devicePixelRatio cho screenshot retina) thay vì bị max-width:100%
     // kéo giãn full bề ngang cửa sổ. Ảnh to hơn cửa sổ vẫn được max-width:100%
     // thu nhỏ lại cho vừa. img có attribute ngoài src/alt/title → turndown giữ
-    // nguyên HTML thô (rule htmlImgWithAttrs) nên width được lưu vào .md.
-    const widthAttr = width ? ` width="${width}"` : '';
+    // nguyên HTML thô (rule htmlImgWithAttrs) nên width/style được lưu vào .md.
+    // fillCell (US-17.4, thả ảnh vào ô bảng) ưu tiên hơn width đo được — ảnh
+    // khít theo cột (co giãn theo cột) chứ không giữ kích thước gốc cố định.
+    const sizeAttr = fillCell ? ' style="width:100%"' : width ? ` width="${width}"` : '';
     document.execCommand(
       'insertHTML',
       false,
-      `<img src="${escapeAttr(encodeLinkPath(relPath))}" alt=""${widthAttr}>`
+      `<img src="${escapeAttr(encodeLinkPath(relPath))}" alt=""${sizeAttr}>`
     );
     ctx.scheduleSync();
   }
@@ -72,14 +82,19 @@ export function initPasteImage(
     probe.src = url;
   }
 
-  function requestSave(blob: Blob, mime: string): void {
+  /**
+   * `explicit` (US-17.6, M4 — drop): range đã biết (điểm thả) + có nằm trong
+   * ô bảng hay không, bỏ qua dedupe (drop chỉ có đúng 1 nguồn gọi, không có
+   * race kiểu keydown-fallback/paste event như clipboard paste ở dưới).
+   */
+  function requestSave(blob: Blob, mime: string, explicit?: { range: Range | undefined; fillCell: boolean }): void {
     const now = Date.now();
-    if (now - lastRequestAt < PASTE_IMAGE_DEDUPE_MS) {
+    if (!explicit && now - lastRequestAt < PASTE_IMAGE_DEDUPE_MS) {
       return; // Đã được đường paste kia (keydown fallback / 'paste' event thật) xử lý cho cùng lượt dán này.
     }
     lastRequestAt = now;
     const requestId = ++seq;
-    pending.set(requestId, { range: saveSelection() });
+    pending.set(requestId, { range: explicit ? explicit.range : saveSelection(), fillCell: explicit?.fillCell });
     measureWidth(requestId, blob);
     const reader = new FileReader();
     reader.onload = () => {
@@ -93,6 +108,10 @@ export function initPasteImage(
     };
     reader.onerror = () => pending.delete(requestId);
     reader.readAsDataURL(blob);
+  }
+
+  function saveDroppedImage(blob: Blob, mime: string, range: Range | undefined, fillCell: boolean): void {
+    requestSave(blob, mime, { range, fillCell });
   }
 
   function findImageItem(items: DataTransferItemList | undefined): DataTransferItem | undefined {
@@ -132,11 +151,11 @@ export function initPasteImage(
     const entry = pending.get(requestId);
     pending.delete(requestId);
     if (relPath) {
-      insertImageAt(entry?.range, relPath, entry?.width);
+      insertImageAt(entry?.range, relPath, entry?.width, entry?.fillCell);
     } else if (error) {
       showToast(error);
     }
   }
 
-  return { handlePasteEvent, tryPasteImageFromClipboardApi, notifyResult };
+  return { handlePasteEvent, tryPasteImageFromClipboardApi, notifyResult, saveDroppedImage };
 }

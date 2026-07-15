@@ -120,25 +120,25 @@
           "default": "markdown",
           "description": "Default scope for the cross-file search triggered from a text selection in the preview. Can be overridden per-search via the dropdown in the results popover."
         },
-        "orcaEditor.pasteImage.location": {
+        "orcaEditor.assetsPaste.location": {
           "type": "string",
-          "enum": ["siblingImagesFolder", "customFolder"],
+          "enum": ["siblingAssetsFolder", "customFolder"],
           "enumDescriptions": [
-            "Save into an `images/` subfolder next to the Markdown file being edited.",
-            "Save into the folder specified by orcaEditor.pasteImage.customFolderPath."
+            "Save into an `assets/` subfolder next to the Markdown file being edited.",
+            "Save into the folder specified by orcaEditor.assetsPaste.customFolderPath."
           ],
-          "default": "siblingImagesFolder",
-          "description": "Where to save images pasted from the clipboard into the editor."
+          "default": "siblingAssetsFolder",
+          "description": "Where to save images pasted from the clipboard or dropped into the editor, and files dropped from outside the editor. Renamed from orcaEditor.pasteImage.* (default folder changed from images/ to assets/) when drag-and-drop support was added — existing images already saved under images/ are not moved."
         },
-        "orcaEditor.pasteImage.customFolderPath": {
+        "orcaEditor.assetsPaste.customFolderPath": {
           "type": "string",
           "default": "",
-          "description": "Folder to save pasted images into when orcaEditor.pasteImage.location is \"customFolder\". Relative paths resolve against the workspace folder containing the Markdown file; absolute paths are used as-is."
+          "description": "Folder to save pasted/dropped images and dropped files into when orcaEditor.assetsPaste.location is \"customFolder\". Relative paths resolve against the workspace folder containing the Markdown file; absolute paths are used as-is."
         },
-        "orcaEditor.pasteImage.orphanCleanup.enabled": {
+        "orcaEditor.assetsPaste.orphanCleanup.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "On save, permanently delete pasted images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically."
+          "description": "On save, permanently delete pasted/dropped images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically. Does not apply to non-image files dropped into the editor — those are never auto-deleted."
         },
         "orcaEditor.readability.enabled": {
           "type": "boolean",

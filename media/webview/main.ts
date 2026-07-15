@@ -31,6 +31,7 @@ import { initDragDrop } from './drag-drop';
 import { closestElement, createDomHelpers, scrollBehavior } from './dom-utils';
 import { initPrompt } from './prompt';
 import { initPasteImage } from './paste-image';
+import { initExternalDrop } from './external-drop';
 import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
 import { initToolbar, syncTocButton, syncReadingButtons, toggleInlineCode, isPopoverOpen } from './toolbar';
@@ -71,6 +72,9 @@ const dom = createDomHelpers(content);
 const dragDrop = initDragDrop(content, { scheduleSync, dom, lineGutter });
 const prompt = initPrompt(vscode, dom);
 const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
+// US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
+// its save+insert flow) and insertMarkdownAtCaret (hoisted function, declared below).
+const externalDrop = initExternalDrop(content, { vscode, pasteImage, insertMarkdown: insertMarkdownAtCaret });
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
@@ -200,6 +204,10 @@ window.addEventListener('message', (event) => {
     }
     case 'pasteImageResult': {
       pasteImage.notifyResult(msg.requestId, msg.relativePath, msg.error);
+      break;
+    }
+    case 'dropFileResult': {
+      externalDrop.notifyResult(msg.requestId, msg.relativePath, msg.error);
       break;
     }
     case 'crossFileSearch:result': {

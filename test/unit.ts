@@ -12,6 +12,7 @@ import {
   imageNamePrefix,
   normalizeForSearch,
   relativePath,
+  sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
@@ -146,6 +147,23 @@ eq('prefix: chỉ ký tự CJK → rỗng (fallback không prefix)', imageNamePr
 check('prefix: giới hạn độ dài 40 ký tự', imageNamePrefix('a'.repeat(100)).length === 40);
 
 // ---------------------------------------------------------------------------
+// sanitizeDroppedFileName (US-17.6, M4) — client-controlled File.name must
+// not be trusted as a filesystem path when saving a dropped file to assets/.
+// ---------------------------------------------------------------------------
+eq('dropFileName: tên bình thường giữ nguyên', sanitizeDroppedFileName('report.pdf'), 'report.pdf');
+check(
+  'dropFileName: path traversal bị trung hoà (không còn dấu / nào, không thể đi lên thư mục cha)',
+  !sanitizeDroppedFileName('../../etc/passwd').includes('/')
+);
+check(
+  'dropFileName: backslash (Windows-style) cũng bị trung hoà',
+  !sanitizeDroppedFileName('..\\..\\secrets.txt').includes('\\')
+);
+eq('dropFileName: dấu chấm dẫn đầu (hidden file / thư mục hiện tại) bị bỏ', sanitizeDroppedFileName('.htaccess'), 'htaccess');
+eq('dropFileName: rỗng sau khi làm sạch → fallback "file"', sanitizeDroppedFileName('...'), 'file');
+eq('dropFileName: rỗng ngay từ đầu → fallback "file"', sanitizeDroppedFileName(''), 'file');
+
+// ---------------------------------------------------------------------------
 // classifyLink — allowlist scheme
 // ---------------------------------------------------------------------------
 
@@ -177,6 +195,7 @@ const fromWebview: WebviewToHost[] = [
   { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
   { type: 'crossFileSearch:openInSearchPanel', query: 'q', scope: 'allFiles' },
   { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
+  { type: 'dropFile', requestId: 1, name: 'report.pdf', dataBase64: 'AA==' },
   { type: 'setReadingPalette', palette: 'sepia' },
 ];
 const readabilityFixture = {
@@ -200,9 +219,10 @@ const toWebview: HostToWebview[] = [
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
   { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
+  { type: 'dropFileResult', requestId: 1, relativePath: 'assets/report.pdf' },
 ];
-check('contract: WebviewToHost phủ đủ 11 biến thể', fromWebview.length === 11);
-check('contract: HostToWebview phủ đủ 8 biến thể (init có/không reveal + scrollToPosition + pasteImage)', toWebview.length === 8);
+check('contract: WebviewToHost phủ đủ 12 biến thể', fromWebview.length === 12);
+check('contract: HostToWebview phủ đủ 9 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile)', toWebview.length === 9);
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho

@@ -166,6 +166,15 @@ body.dd-dragging .dd-handle {
   object-fit: contain;
 }
 
+/* --- External file drop (HLR section 17, US-17.6, M4) ---
+ * Destination cell highlight while dragging an external image over a table
+ * cell (F8) — signals "drop here" before the file is actually released. */
+.dd-drop-target-cell {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -2px;
+  background: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.15));
+}
+
 /* --- List item drag & drop + indent/outdent (HLR section 17, US-17.5, M3) ---
  * .dd-li-handle reuses .dd-handle's look; positioned relative to the hovered
  * <li>'s own (indented) left edge, not a fixed gutter offset like the block

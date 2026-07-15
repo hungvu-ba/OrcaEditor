@@ -12,7 +12,14 @@ import type {
   ReadingPreset,
   WebviewToHost,
 } from './shared/messages';
-import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
+import {
+  classifyLink,
+  computeMinimalEdit,
+  imageNamePrefix,
+  normalizeForSearch,
+  relativePath,
+  sanitizeDroppedFileName,
+} from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 
@@ -279,6 +286,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         case 'pasteImage': {
           const result = await this.savePastedImage(document, msg.mime, msg.dataBase64);
           void postToWebview({ type: 'pasteImageResult', requestId: msg.requestId, ...result });
+          break;
+        }
+        case 'dropFile': {
+          const result = await this.saveDroppedFile(document, msg.name, msg.dataBase64);
+          void postToWebview({ type: 'dropFileResult', requestId: msg.requestId, ...result });
           break;
         }
         case 'setReadingPalette': {
@@ -891,16 +903,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private static readonly PASTE_IMAGE_MARKER = 'pasted-image-';
 
   /**
-   * Thư mục lưu ảnh dán, theo setting `orcaEditor.pasteImage.location`:
-   *  - siblingImagesFolder (mặc định): thư mục con `images/` cạnh file .md.
+   * Thư mục lưu ảnh dán / ảnh-file kéo thả, theo setting `orcaEditor.assetsPaste.location`
+   * (US-17.6, M4 — đổi từ `orcaEditor.pasteImage.*` + mặc định `images/` → `assets/`;
+   * KHÔNG migrate ảnh cũ, chỉ đổi đích cho ảnh/file MỚI — quyết định 2026-07-15):
+   *  - siblingAssetsFolder (mặc định): thư mục con `assets/` cạnh file .md.
    *  - customFolder: thư mục ở `customFolderPath` (tuyệt đối, hoặc tương đối
    *    so với workspace folder chứa document).
-   * Dùng chung bởi savePastedImage (ghi file) và cleanupOrphanImages (quét).
+   * Dùng chung bởi savePastedImage/saveDroppedFile (ghi file) và cleanupOrphanImages (quét).
    */
-  private resolveImagesDir(document: vscode.TextDocument): vscode.Uri {
+  private resolveAssetsDir(document: vscode.TextDocument): vscode.Uri {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage', document.uri);
-    const location = cfg.get<'siblingImagesFolder' | 'customFolder'>('location', 'siblingImagesFolder');
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
+    const location = cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder');
     const customFolderPath = cfg.get<string>('customFolderPath', '').trim();
 
     if (location === 'customFolder' && customFolderPath) {
@@ -910,7 +924,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         ? vscode.Uri.file(customFolderPath)
         : vscode.Uri.joinPath(base, customFolderPath);
     }
-    return vscode.Uri.joinPath(documentDir, 'images');
+    return vscode.Uri.joinPath(documentDir, 'assets');
   }
 
   /**
@@ -944,7 +958,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveImagesDir(document);
+    const targetDir = this.resolveAssetsDir(document);
 
     if (!(await this.isInsideAllowedRoots(document, targetDir))) {
       return { error: 'Configured paste-image folder is outside the allowed workspace.' };
@@ -963,6 +977,55 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     return { relativePath: relativePath(documentDir.path, targetUri.path) };
+  }
+
+  /**
+   * Save a non-image file dropped from outside the editor (US-17.6, M4) into
+   * the same `assets/` folder as pasted images (resolveAssetsDir) — unlike
+   * pasted images, which get a generated + prefixed name for orphan-cleanup
+   * bookkeeping, dropped files keep their ORIGINAL name (so a linked
+   * `report.pdf` reads as `report.pdf`, not a hash) with a numeric suffix
+   * added only if that name is already taken. Not covered by
+   * cleanupOrphanImages — deleting an unused dropped file is manual for now
+   * (scope cut: extending orphan detection to arbitrary `[text](path)` links,
+   * not just `<img>`, is a larger change deferred to a later pass).
+   */
+  private async saveDroppedFile(
+    document: vscode.TextDocument,
+    name: string,
+    dataBase64: string
+  ): Promise<{ relativePath?: string; error?: string }> {
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const targetDir = this.resolveAssetsDir(document);
+
+    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+      return { error: 'Configured assets folder is outside the allowed workspace.' };
+    }
+
+    try {
+      await vscode.workspace.fs.createDirectory(targetDir);
+      const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
+      await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+      return { relativePath: relativePath(documentDir.path, targetUri.path) };
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
+      return { error: 'Failed to save dropped file.' };
+    }
+  }
+
+  /** First non-colliding "name.ext" / "name (2).ext" / "name (3).ext"... under `dir`. */
+  private async uniqueAssetUri(dir: vscode.Uri, fileName: string): Promise<vscode.Uri> {
+    const ext = path.extname(fileName);
+    const stem = fileName.slice(0, fileName.length - ext.length);
+    for (let n = 1; ; n++) {
+      const candidate = n === 1 ? fileName : `${stem} (${n})${ext}`;
+      const uri = vscode.Uri.joinPath(dir, candidate);
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch {
+        return uri; // stat threw → doesn't exist yet
+      }
+    }
   }
 
   /**
@@ -1010,12 +1073,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * được phát hiện. Mọi lỗi ở đây chỉ log, không làm fail thao tác save.
    */
   private async cleanupOrphanImages(document: vscode.TextDocument): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage.orphanCleanup', document.uri);
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste.orphanCleanup', document.uri);
     if (!cfg.get<boolean>('enabled', true)) {
       return;
     }
 
-    const imagesDir = this.resolveImagesDir(document);
+    const imagesDir = this.resolveAssetsDir(document);
     if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
       return;
     }
@@ -1100,7 +1163,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
-    const imagesDir = this.resolveImagesDir(document);
+    const imagesDir = this.resolveAssetsDir(document);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
       if (!text.includes(fileName)) {
         continue;

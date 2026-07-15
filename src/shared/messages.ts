@@ -113,6 +113,14 @@ export type WebviewToHost =
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
   | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string }
   /**
+   * US-17.6 (M4): file kéo thả từ ngoài (Explorer/Finder) không phải ảnh —
+   * host copy vào folder assets (resolveAssetsDir) rồi trả đường dẫn tương
+   * đối; webview chèn `[name](path)` tại vị trí thả. Ảnh kéo thả dùng lại
+   * message `pasteImage` sẵn có (external-drop.ts gọi thẳng vào luồng
+   * paste-image.ts), KHÔNG qua message này.
+   */
+  | { type: 'dropFile'; requestId: number; name: string; dataBase64: string }
+  /**
    * US-19.11 (bug 0715 mục 3): user đổi reading palette trên toolbar. Palette là
    * lớp theme GLOBAL cho mọi tab .md — host ghi `orcaEditor.readability.palette`
    * ở scope Global, rồi onDidChangeConfiguration bơm palette mới xuống mọi
@@ -154,4 +162,6 @@ export type HostToWebview =
   /** C6b: file .md đã mở sẵn ở tab khác — gửi thẳng tới panel đó thay vì qua 'init'. Cùng ý nghĩa `length` như `reveal` ở trên. */
   | { type: 'scrollToPosition'; line: number; character: number; length: number; matchText?: string }
   /** Kết quả lưu ảnh dán từ clipboard — relativePath thiếu khi lưu thất bại (kèm error để hiện toast). */
-  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string };
+  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string }
+  /** Kết quả lưu file kéo thả (US-17.6, M4) — cùng hình dạng với pasteImageResult. */
+  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string };
