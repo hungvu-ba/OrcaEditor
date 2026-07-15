@@ -61,7 +61,8 @@ const search = initSearch(content);
 // truyền accessor isOpen() của search thay vì cả controller để giữ phụ thuộc tối thiểu.
 const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
-const toc = initToc(content, vscode);
+// US-17.7: TOC-drag reorders a section — needs scheduleSync (declared below; safe to reference here, function declarations hoist).
+const toc = initToc(content, vscode, { scheduleSync });
 const mermaidView = initMermaid(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);

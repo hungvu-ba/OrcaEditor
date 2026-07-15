@@ -146,6 +146,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   function positionHandle(block: HTMLElement | null): void {
     if (!block) {
       handleEl.style.display = 'none';
+      menuBtnEl.style.display = 'none';
       return;
     }
     const contentRect = content.getBoundingClientRect();
@@ -153,7 +154,132 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     handleEl.style.display = 'flex';
     handleEl.style.top = `${blockRect.top}px`;
     handleEl.style.left = `${contentRect.left - 20}px`;
+    menuBtnEl.style.display = 'flex';
+    menuBtnEl.style.top = `${blockRect.top + 20}px`;
+    menuBtnEl.style.left = `${contentRect.left - 20}px`;
   }
+
+  // ---------------------------------------------------------------------
+  // Handle menu (US-17.7, M5): click the ⋮ button (not a drag) → "Move up /
+  // Move down / Move to <heading>…" — a mouse-only shortcut for long blocks
+  // that would otherwise need a long drag (F11: no keyboard nav in MVP).
+  // Reuses the exact same computeHeadingSectionSpan/sibling-move.ts primitives
+  // as an actual drag — a menu move IS a drag, just with the gap picked from
+  // a list instead of a drop-line position.
+  // ---------------------------------------------------------------------
+
+  const menuBtnEl = document.createElement('div');
+  menuBtnEl.className = 'dd-menu-btn';
+  menuBtnEl.textContent = '⋮';
+  menuBtnEl.style.display = 'none';
+  menuBtnEl.setAttribute('role', 'button');
+  menuBtnEl.setAttribute('aria-label', 'Block actions');
+  document.body.appendChild(menuBtnEl);
+
+  const menuPopupEl = document.createElement('div');
+  menuPopupEl.className = 'dd-menu-popup';
+  menuPopupEl.style.display = 'none';
+  document.body.appendChild(menuPopupEl);
+
+  function isMenuOpen(): boolean {
+    return menuPopupEl.style.display !== 'none';
+  }
+
+  function closeMenu(): void {
+    menuPopupEl.style.display = 'none';
+    menuPopupEl.replaceChildren();
+  }
+
+  function moveBlockToGap(block: HTMLElement, gap: number): void {
+    const blocks = draggableBlocks();
+    const idx = blocks.indexOf(block);
+    if (idx < 0) {
+      return;
+    }
+    const span = computeHeadingSectionSpan(block, blocks);
+    const spanEndIdx = idx + span.length - 1;
+    const clampedGap = Math.max(0, Math.min(gap, blocks.length));
+    if (!isValidSiblingGap(clampedGap, idx, spanEndIdx)) {
+      return;
+    }
+    const result = computeSiblingMove(blocks, idx, spanEndIdx, clampedGap, (prev, cur) => isAtomBlock(prev) && isAtomBlock(cur));
+    applySiblingMove(content, result);
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+  }
+
+  function addMenuItem(label: string, disabled: boolean, onClick: () => void): void {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'dd-menu-item';
+    item.textContent = label;
+    item.disabled = disabled;
+    item.addEventListener('click', () => {
+      closeMenu();
+      if (!disabled) {
+        onClick();
+      }
+    });
+    menuPopupEl.appendChild(item);
+  }
+
+  function openMenu(block: HTMLElement): void {
+    closeMenu();
+    const blocks = draggableBlocks();
+    const idx = blocks.indexOf(block);
+    if (idx < 0) {
+      return;
+    }
+    const span = computeHeadingSectionSpan(block, blocks);
+    const spanEndIdx = idx + span.length - 1;
+
+    addMenuItem('Move up', idx === 0, () => moveBlockToGap(block, idx - 1));
+    addMenuItem('Move down', spanEndIdx >= blocks.length - 1, () => moveBlockToGap(block, spanEndIdx + 2));
+
+    const headings = blocks.filter((b) => headingLevel(b) !== null && !span.includes(b));
+    if (headings.length > 0) {
+      const sep = document.createElement('div');
+      sep.className = 'dd-menu-sep';
+      menuPopupEl.appendChild(sep);
+      const label = document.createElement('div');
+      label.className = 'dd-menu-label';
+      label.textContent = 'Move to…';
+      menuPopupEl.appendChild(label);
+      for (const h of headings) {
+        const gapIdx = blocks.indexOf(h) + 1; // just after this heading's own line
+        const text = (h.textContent ?? '').trim() || '(untitled)';
+        addMenuItem(text, false, () => moveBlockToGap(block, gapIdx));
+      }
+    }
+
+    const rect = menuBtnEl.getBoundingClientRect();
+    menuPopupEl.style.display = 'block';
+    menuPopupEl.style.top = `${rect.bottom + 4}px`;
+    menuPopupEl.style.left = `${rect.left}px`;
+  }
+
+  menuBtnEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!hoveredBlock) {
+      return;
+    }
+    if (isMenuOpen()) {
+      closeMenu();
+    } else {
+      openMenu(hoveredBlock);
+    }
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (isMenuOpen() && e.target !== menuBtnEl && !menuPopupEl.contains(e.target as Node)) {
+      closeMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isMenuOpen()) {
+      closeMenu();
+    }
+  });
 
   // ---------------------------------------------------------------------
   // List-item hover handle (US-17.5, M3) — independent of the block handle
@@ -392,6 +518,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   function startDragging(): void {
     state = 'dragging';
     handleEl.style.display = 'none';
+    menuBtnEl.style.display = 'none';
+    closeMenu();
     liHandleEl.style.display = 'none';
     if (kind === 'block') {
       ghostEl.replaceChildren(dragSpan[0].cloneNode(true) as HTMLElement);
@@ -585,6 +713,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       cleanupVisuals();
       resetState();
     }
+    closeMenu();
     hoveredBlock = null;
     hoveredLi = null;
     positionHandle(null);

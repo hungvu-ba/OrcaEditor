@@ -78,6 +78,21 @@ const domCases: DomCase[] = [
       );
     },
   },
+  {
+    // US-17.7 (M5): "move an existing image" — grounds the scope decision that
+    // an image standing alone in its own paragraph is ALREADY a normal
+    // top-level block (block-map.ts classifies any <p> as 'paragraph'
+    // regardless of contents, and draggableTopLevelBlocks only checks for a
+    // markdown source range) — so it's already draggable via the M1 engine
+    // with zero new code, no different from reordering any other paragraph.
+    name: 'M5: an image alone in its own paragraph reorders exactly like any other block — dragged image paragraph lands first',
+    html: '<p><img src="assets/diagram.png" alt=""></p><p>Intro.</p>',
+    expect: (md) => {
+      const img = md.indexOf('![]');
+      const intro = md.indexOf('Intro.');
+      return img >= 0 && img < intro && md.includes('assets/diagram.png');
+    },
+  },
 ];
 
 for (const c of domCases) {
