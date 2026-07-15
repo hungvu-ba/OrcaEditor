@@ -141,16 +141,18 @@ function isNarrowViewport(): boolean {
 
 /**
  * Có nên tự mở panel mục lục lúc khởi tạo không? Ngoài cờ config + viewport đủ
- * rộng, còn yêu cầu tài liệu có ÍT NHẤT 1 heading — file mới/rỗng hoặc không có
- * heading thì TOC luôn trống ("No headings yet"), tự bật lên chỉ tổ chiếm chỗ
- * (bug report 2026-07-15 mục 6). Người dùng vẫn bật tay bằng nút toolbar được.
+ * rộng, còn yêu cầu tài liệu có ÍT NHẤT 2 heading — file rỗng/không heading thì
+ * TOC luôn trống ("No headings yet"), còn tài liệu chỉ có đúng 1 heading thì
+ * mục lục không giúp điều hướng gì (chỉ 1 mục trỏ về đầu file đang đọc); cả
+ * hai trường hợp tự bật lên chỉ tổ chiếm chỗ (bug report 2026-07-15 mục 6).
+ * Người dùng vẫn bật tay bằng nút toolbar được.
  */
 function shouldAutoOpenToc(flag: boolean | undefined): boolean {
   return (
     flag !== false &&
     !toc.isOpen() &&
     !isNarrowViewport() &&
-    content.querySelector('h1, h2, h3, h4, h5, h6') !== null
+    content.querySelectorAll('h1, h2, h3, h4, h5, h6').length > 1
   );
 }
 

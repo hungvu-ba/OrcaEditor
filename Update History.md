@@ -174,3 +174,5 @@
 | 0.6.10 | 2026-07-15 | Tweak: narrowed the Zen mode toolbar keep-visible hover margin (HIDE_MARGIN_PX 96→76px) per feedback that it was too wide. |
 | 0.6.10 | 2026-07-15 | Fix (US-19.19 revert): TOC panel moved back to top:0 (the below-toolbar fix left its sideBar background not reaching the screen top, looking like a floating box); toolbar now overlaps it via z-index (100→160, above TOC's 150) instead, matching how Zen mode already worked. |
 | 0.6.10 | 2026-07-15 | Feature (US-19.19): "TABLE OF CONTENTS" panel title font-size bumped to H2 scale (11px → 1.5em, matches h2 in markdown.css and scales with the user's configured font size). |
+| 0.6.10 | 2026-07-15 | Feature: truncated TOC headings now show a custom-drawn tooltip on hover/focus (reusing the toolbar's tooltip module), consistent with icon buttons. |
+| 0.6.10 | 2026-07-15 | Feature: TOC no longer auto-opens on file open when the document has only 1 heading (was: only suppressed for 0 headings) — a single-entry TOC adds no navigation value. |
