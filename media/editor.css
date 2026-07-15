@@ -149,6 +149,23 @@ body.dd-dragging .dd-handle {
   border-radius: 1px;
 }
 
+/* --- Table row/column drag & drop (HLR section 17, US-17.4, M2) ---
+ * Row/column handles reuse .dd-handle's look (same class list); .dd-row-handle
+ * sits just left of the table (same offset as the block handle's own left
+ * margin), .dd-col-handle sits just above the header row it belongs to. */
+.dd-row-handle,
+.dd-col-handle {
+  cursor: grab;
+}
+
+/* Image dropped into a table cell (US-17.4) gets width:100% (fill the cell) —
+ * cap the height so a tall/portrait image doesn't blow out the row. */
+#content td img,
+#content th img {
+  max-height: 240px;
+  object-fit: contain;
+}
+
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
  * (biểu đồ Mermaid, công thức KaTeX): số ở mép trên là dòng bắt đầu, số này ở
  * mép dưới là dòng kết thúc. Dịch nhẹ lên trên để số không tràn ra ngoài block,

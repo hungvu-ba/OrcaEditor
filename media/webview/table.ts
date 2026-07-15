@@ -6,6 +6,7 @@
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, showToast, svgIcon, type DomHelpers } from './dom-utils';
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
+import { computeSiblingMove, applySiblingMove, isValidSiblingGap } from './sibling-move';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -151,6 +152,8 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
       showTableToolbar(cell);
     }
   });
+
+  initTableDragDrop();
 
   return { hideTableToolbar };
 }
@@ -558,4 +561,466 @@ export function insertTable(): void {
   if (table) {
     fitTableColumns(table);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Row/column drag & drop (HLR section 17, US-17.4, M2)
+//
+// Row reorder reuses sibling-move.ts as-is: tbody rows are plain element
+// siblings, exactly the case that primitive was generalized for (see
+// drag-drop.ts, US-17.3, for the full undo-mechanism rationale).
+//
+// Column reorder is a DIFFERENT shape — a "column" isn't a DOM sibling run,
+// it's one cell per row scattered across every <tr>. Rather than juggling N
+// separate Ranges (which would cost N undo steps, breaking F1), the whole
+// <table> is cloned, every row's cells are reordered in the clone, and the
+// ENTIRE table is swapped in with a single Range (selectNode(table)) +
+// execCommand('insertHTML') call — one undo step for the whole column move,
+// same technique, applied to a subtree-rebuild instead of a sibling-reorder.
+// Each cell keeps its own align/style attributes since real cell elements
+// move as a unit — no separate column-alignment bookkeeping needed.
+// ---------------------------------------------------------------------------
+
+type TableDragKind = 'row' | 'col';
+type TableDragState = 'idle' | 'armed' | 'dragging';
+
+const TD_DRAG_THRESHOLD_PX = 4;
+const TD_HANDLE_GLYPH = '⠿';
+
+let tdState: TableDragState = 'idle';
+let tdKind: TableDragKind = 'row';
+let tdStartX = 0;
+let tdStartY = 0;
+let tdTable: HTMLTableElement | null = null;
+let tdRows: HTMLTableRowElement[] = [];
+let tdRowIdx = -1;
+let tdColIndex = -1;
+let tdCurrentGap = -1;
+let tdCurrentGapValid = false;
+
+let rowHandleEl: HTMLDivElement;
+let colHandleEl: HTMLDivElement;
+let tdDropLineEl: HTMLDivElement;
+let tdGhostEl: HTMLDivElement;
+
+let hoveredRow: HTMLTableRowElement | null = null;
+let hoveredCol: { table: HTMLTableElement; index: number } | null = null;
+
+function tbodyRows(table: HTMLTableElement): HTMLTableRowElement[] {
+  const tbody = table.querySelector('tbody');
+  return tbody ? (Array.from(tbody.children).filter((el) => el.tagName === 'TR') as HTMLTableRowElement[]) : [];
+}
+
+/** Row under the cursor — trigger zone extends `rowHandleEl`'s width to the left of the table so hovering the handle's own column still counts. */
+function findRowAt(clientX: number, clientY: number): HTMLTableRowElement | null {
+  for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
+    const tRect = table.getBoundingClientRect();
+    if (clientY < tRect.top || clientY > tRect.bottom || clientX < tRect.left - 24 || clientX > tRect.right) {
+      continue;
+    }
+    for (const row of tbodyRows(table)) {
+      const r = row.getBoundingClientRect();
+      if (clientY >= r.top && clientY <= r.bottom) {
+        return row;
+      }
+    }
+  }
+  return null;
+}
+
+/** Header cell under the cursor — trigger zone extends `colHandleEl`'s height above the table. */
+function findHeaderCellAt(clientX: number, clientY: number): { table: HTMLTableElement; index: number } | null {
+  for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
+    const headerRow = table.tHead?.rows[0];
+    if (!headerRow) {
+      continue;
+    }
+    const hRect = headerRow.getBoundingClientRect();
+    if (clientY < hRect.top - 24 || clientY > hRect.bottom || clientX < hRect.left || clientX > hRect.right) {
+      continue;
+    }
+    for (let i = 0; i < headerRow.cells.length; i++) {
+      const r = headerRow.cells[i].getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right) {
+        return { table, index: i };
+      }
+    }
+  }
+  return null;
+}
+
+function positionRowHandle(row: HTMLTableRowElement | null): void {
+  if (!row) {
+    rowHandleEl.style.display = 'none';
+    return;
+  }
+  const table = row.closest('table') as HTMLTableElement;
+  const tRect = table.getBoundingClientRect();
+  const rRect = row.getBoundingClientRect();
+  rowHandleEl.style.display = 'flex';
+  rowHandleEl.style.top = `${rRect.top}px`;
+  rowHandleEl.style.left = `${tRect.left - 20}px`;
+}
+
+function positionColHandle(col: { table: HTMLTableElement; index: number } | null): void {
+  if (!col) {
+    colHandleEl.style.display = 'none';
+    return;
+  }
+  const headerRow = col.table.tHead?.rows[0];
+  const cell = headerRow?.cells[col.index];
+  if (!cell) {
+    colHandleEl.style.display = 'none';
+    return;
+  }
+  const cRect = cell.getBoundingClientRect();
+  colHandleEl.style.display = 'flex';
+  colHandleEl.style.left = `${cRect.left + cRect.width / 2 - 8}px`;
+  colHandleEl.style.top = `${cRect.top - 20}px`;
+}
+
+function sameCol(a: { table: HTMLTableElement; index: number } | null, b: { table: HTMLTableElement; index: number } | null): boolean {
+  return a === b || (!!a && !!b && a.table === b.table && a.index === b.index);
+}
+
+function rowGapAt(rows: HTMLTableRowElement[], clientY: number): number {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i].getBoundingClientRect();
+    if (clientY < r.top + r.height / 2) {
+      return i;
+    }
+  }
+  return rows.length;
+}
+
+function colGapAt(table: HTMLTableElement, clientX: number): number {
+  const headerRow = table.tHead?.rows[0];
+  if (!headerRow) {
+    return 0;
+  }
+  for (let i = 0; i < headerRow.cells.length; i++) {
+    const r = headerRow.cells[i].getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) {
+      return i;
+    }
+  }
+  return headerRow.cells.length;
+}
+
+function tdCleanupVisuals(): void {
+  if (tdKind === 'row' && tdTable) {
+    tdRows[tdRowIdx]?.classList.remove('dd-source-muted');
+  } else if (tdKind === 'col' && tdTable) {
+    for (const row of Array.from(tdTable.rows)) {
+      row.cells[tdColIndex]?.classList.remove('dd-source-muted');
+    }
+  }
+  tdGhostEl.style.display = 'none';
+  tdGhostEl.replaceChildren();
+  tdDropLineEl.style.display = 'none';
+  document.body.classList.remove('dd-dragging');
+}
+
+function tdResetState(): void {
+  tdState = 'idle';
+  tdTable = null;
+  tdRows = [];
+  tdRowIdx = -1;
+  tdColIndex = -1;
+  tdCurrentGapValid = false;
+  hoveredRow = null;
+  hoveredCol = null;
+  document.removeEventListener('mousemove', onTdMouseMove);
+  document.removeEventListener('mouseup', onTdMouseUp);
+  document.removeEventListener('keydown', onTdKeyDown);
+}
+
+function finishRowMove(): void {
+  if (!tdTable) {
+    return;
+  }
+  const tbody = tdTable.querySelector('tbody');
+  if (!tbody) {
+    return;
+  }
+  const result = computeSiblingMove(tdRows, tdRowIdx, tdRowIdx, tdCurrentGap);
+  const movedEl = applySiblingMove(tbody, result);
+  const firstCell = movedEl?.querySelector('td, th');
+  if (firstCell) {
+    ctx.dom.placeCaretIn(firstCell);
+  }
+  fitTableColumns(tdTable);
+  ctx.scheduleSync();
+}
+
+/** Column move: whole-table rebuild + single execCommand — see the block comment above this section. */
+function finishColMove(): void {
+  const table = tdTable;
+  if (!table) {
+    return;
+  }
+  const fromIdx = tdColIndex;
+  const gap = tdCurrentGap;
+  const clone = table.cloneNode(true) as HTMLTableElement;
+  const insertionIndex = gap > fromIdx ? gap - 1 : gap;
+  for (const row of Array.from(clone.rows)) {
+    const cells = Array.from(row.cells);
+    const moved = cells[fromIdx];
+    if (!moved) {
+      continue;
+    }
+    cells.splice(fromIdx, 1);
+    cells.splice(insertionIndex, 0, moved);
+    row.replaceChildren(...cells);
+  }
+  const prevSibling = table.previousElementSibling;
+  const parent = table.parentElement;
+  const range = document.createRange();
+  range.selectNode(table);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  document.execCommand('insertHTML', false, clone.outerHTML);
+
+  const newTable = (prevSibling ? prevSibling.nextElementSibling : parent?.firstElementChild) as HTMLTableElement | null;
+  if (newTable) {
+    fitTableColumns(newTable);
+    const headerCell = newTable.tHead?.rows[0]?.cells[insertionIndex];
+    if (headerCell) {
+      ctx.dom.placeCaretIn(headerCell, true);
+    }
+  }
+  ctx.scheduleSync();
+}
+
+function tdUpdateGhostPosition(clientX: number, clientY: number): void {
+  tdGhostEl.style.left = `${clientX + 12}px`;
+  tdGhostEl.style.top = `${clientY + 12}px`;
+}
+
+function tdUpdateRowDropLine(clientY: number): void {
+  if (!tdTable) {
+    return;
+  }
+  const gap = rowGapAt(tdRows, clientY);
+  tdCurrentGap = gap;
+  tdCurrentGapValid = isValidSiblingGap(gap, tdRowIdx, tdRowIdx);
+  if (!tdCurrentGapValid || tdRows.length === 0) {
+    tdDropLineEl.style.display = 'none';
+    return;
+  }
+  const tRect = tdTable.getBoundingClientRect();
+  let y: number;
+  if (gap === 0) {
+    y = tdRows[0].getBoundingClientRect().top;
+  } else if (gap === tdRows.length) {
+    y = tdRows[tdRows.length - 1].getBoundingClientRect().bottom;
+  } else {
+    y = (tdRows[gap - 1].getBoundingClientRect().bottom + tdRows[gap].getBoundingClientRect().top) / 2;
+  }
+  tdDropLineEl.className = 'dd-drop-line';
+  tdDropLineEl.style.display = 'block';
+  tdDropLineEl.style.top = `${y}px`;
+  tdDropLineEl.style.left = `${tRect.left}px`;
+  tdDropLineEl.style.width = `${tRect.width}px`;
+  tdDropLineEl.style.height = '2px';
+}
+
+function tdUpdateColDropLine(clientX: number): void {
+  if (!tdTable) {
+    return;
+  }
+  const headerRow = tdTable.tHead?.rows[0];
+  if (!headerRow) {
+    return;
+  }
+  const gap = colGapAt(tdTable, clientX);
+  tdCurrentGap = gap;
+  tdCurrentGapValid = isValidSiblingGap(gap, tdColIndex, tdColIndex);
+  const tRect = tdTable.getBoundingClientRect();
+  if (!tdCurrentGapValid) {
+    tdDropLineEl.style.display = 'none';
+    return;
+  }
+  let x: number;
+  if (gap === 0) {
+    x = headerRow.cells[0].getBoundingClientRect().left;
+  } else if (gap === headerRow.cells.length) {
+    x = headerRow.cells[headerRow.cells.length - 1].getBoundingClientRect().right;
+  } else {
+    x = (headerRow.cells[gap - 1].getBoundingClientRect().right + headerRow.cells[gap].getBoundingClientRect().left) / 2;
+  }
+  tdDropLineEl.className = 'dd-drop-line dd-drop-line-vertical';
+  tdDropLineEl.style.display = 'block';
+  tdDropLineEl.style.left = `${x}px`;
+  tdDropLineEl.style.top = `${tRect.top}px`;
+  tdDropLineEl.style.height = `${tRect.height}px`;
+  tdDropLineEl.style.width = '2px';
+}
+
+function tdStartDragging(): void {
+  tdState = 'dragging';
+  rowHandleEl.style.display = 'none';
+  colHandleEl.style.display = 'none';
+  if (tdKind === 'row' && tdTable) {
+    const row = tdRows[tdRowIdx];
+    tdGhostEl.replaceChildren(row.cloneNode(true) as HTMLElement);
+    row.classList.add('dd-source-muted');
+  } else if (tdKind === 'col' && tdTable) {
+    const headerRow = tdTable.tHead?.rows[0];
+    const cell = headerRow?.cells[tdColIndex];
+    if (cell) {
+      tdGhostEl.replaceChildren(cell.cloneNode(true) as HTMLElement);
+    }
+    for (const row of Array.from(tdTable.rows)) {
+      row.cells[tdColIndex]?.classList.add('dd-source-muted');
+    }
+  }
+  tdGhostEl.style.display = 'block';
+  document.body.classList.add('dd-dragging');
+}
+
+function onTdMouseMove(e: MouseEvent): void {
+  if (tdState === 'armed') {
+    if (Math.hypot(e.clientX - tdStartX, e.clientY - tdStartY) < TD_DRAG_THRESHOLD_PX) {
+      return;
+    }
+    tdStartDragging();
+  }
+  if (tdState !== 'dragging') {
+    return;
+  }
+  tdUpdateGhostPosition(e.clientX, e.clientY);
+  if (tdKind === 'row') {
+    tdUpdateRowDropLine(e.clientY);
+  } else {
+    tdUpdateColDropLine(e.clientX);
+  }
+}
+
+function onTdMouseUp(): void {
+  if (tdState === 'dragging') {
+    const shouldMove = tdCurrentGapValid;
+    const kind = tdKind;
+    tdCleanupVisuals();
+    if (shouldMove) {
+      if (kind === 'row') {
+        finishRowMove();
+      } else {
+        finishColMove();
+      }
+    }
+  } else {
+    tdCleanupVisuals();
+  }
+  tdResetState();
+}
+
+function onTdKeyDown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    tdCleanupVisuals();
+    tdResetState();
+  }
+}
+
+function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number): void {
+  const table = row.closest('table') as HTMLTableElement | null;
+  if (!table) {
+    return;
+  }
+  tdKind = 'row';
+  tdState = 'armed';
+  tdStartX = clientX;
+  tdStartY = clientY;
+  tdTable = table;
+  tdRows = tbodyRows(table);
+  tdRowIdx = tdRows.indexOf(row);
+  document.addEventListener('mousemove', onTdMouseMove);
+  document.addEventListener('mouseup', onTdMouseUp);
+  document.addEventListener('keydown', onTdKeyDown);
+}
+
+function armColDrag(table: HTMLTableElement, index: number, clientX: number, clientY: number): void {
+  tdKind = 'col';
+  tdState = 'armed';
+  tdStartX = clientX;
+  tdStartY = clientY;
+  tdTable = table;
+  tdColIndex = index;
+  document.addEventListener('mousemove', onTdMouseMove);
+  document.addEventListener('mouseup', onTdMouseUp);
+  document.addEventListener('keydown', onTdKeyDown);
+}
+
+function initTableDragDrop(): void {
+  rowHandleEl = document.createElement('div');
+  rowHandleEl.className = 'dd-handle dd-row-handle';
+  rowHandleEl.textContent = TD_HANDLE_GLYPH;
+  rowHandleEl.style.display = 'none';
+  document.body.appendChild(rowHandleEl);
+
+  colHandleEl = document.createElement('div');
+  colHandleEl.className = 'dd-handle dd-col-handle';
+  colHandleEl.textContent = TD_HANDLE_GLYPH;
+  colHandleEl.style.display = 'none';
+  document.body.appendChild(colHandleEl);
+
+  tdGhostEl = document.createElement('div');
+  tdGhostEl.className = 'dd-ghost';
+  tdGhostEl.style.display = 'none';
+  document.body.appendChild(tdGhostEl);
+
+  tdDropLineEl = document.createElement('div');
+  tdDropLineEl.className = 'dd-drop-line';
+  tdDropLineEl.style.display = 'none';
+  document.body.appendChild(tdDropLineEl);
+
+  content.addEventListener('mousemove', (e) => {
+    if (tdState !== 'idle') {
+      return;
+    }
+    const row = findRowAt(e.clientX, e.clientY);
+    if (row !== hoveredRow) {
+      hoveredRow = row;
+      positionRowHandle(row);
+    }
+    if (row) {
+      if (hoveredCol) {
+        hoveredCol = null;
+        positionColHandle(null);
+      }
+      return;
+    }
+    const col = findHeaderCellAt(e.clientX, e.clientY);
+    if (!sameCol(col, hoveredCol)) {
+      hoveredCol = col;
+      positionColHandle(col);
+    }
+  });
+
+  content.addEventListener('mouseleave', () => {
+    if (tdState !== 'idle') {
+      return;
+    }
+    hoveredRow = null;
+    hoveredCol = null;
+    positionRowHandle(null);
+    positionColHandle(null);
+  });
+
+  rowHandleEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !hoveredRow) {
+      return;
+    }
+    e.preventDefault();
+    armRowDrag(hoveredRow, e.clientX, e.clientY);
+  });
+
+  colHandleEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !hoveredCol) {
+      return;
+    }
+    e.preventDefault();
+    armColDrag(hoveredCol.table, hoveredCol.index, e.clientX, e.clientY);
+  });
 }

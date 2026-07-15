@@ -22,6 +22,7 @@
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
+import { isValidSiblingGap, computeSiblingMove, applySiblingMove } from './sibling-move';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -54,33 +55,39 @@ function isAtomBlock(el: Element): boolean {
   return el.classList.contains(MERMAID_CLASS) || el.classList.contains(MATH_BLOCK_CLASS);
 }
 
-export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDropController {
-  /** Top-level children with a real markdown source range — excludes the trailing caret-trap <p> (same filter as block-map.ts). */
-  function draggableBlocks(): HTMLElement[] {
-    return (Array.from(content.children) as HTMLElement[]).filter((el) => readSrcRange(el) !== null);
+/**
+ * Section-move (F7 companion, also reused for TOC-drag — US-17.7/M5): dragging
+ * a heading carries every following block up to (not including) the next
+ * heading of the same or higher level — same "which level closes this
+ * section" rule TOC would need for a tree, but TOC only builds a flat list
+ * (toc.ts) so this lives here instead. Module-scope (not a closure over
+ * `content`) so other callers can reuse it against their own block list.
+ */
+export function computeHeadingSectionSpan(startEl: HTMLElement, blocks: HTMLElement[]): HTMLElement[] {
+  const startIdx = blocks.indexOf(startEl);
+  const level = headingLevel(startEl);
+  if (level === null) {
+    return [startEl];
   }
+  const span = [startEl];
+  for (let i = startIdx + 1; i < blocks.length; i++) {
+    const lvl = headingLevel(blocks[i]);
+    if (lvl !== null && lvl <= level) {
+      break;
+    }
+    span.push(blocks[i]);
+  }
+  return span;
+}
 
-  /**
-   * Section-move (F7 companion): dragging a heading carries every following
-   * block up to (not including) the next heading of the same or higher level —
-   * same "which level closes this section" rule TOC would need for a tree, but
-   * TOC only builds a flat list (toc.ts) so this is computed locally here.
-   */
-  function computeDragSpan(startEl: HTMLElement, blocks: HTMLElement[]): HTMLElement[] {
-    const startIdx = blocks.indexOf(startEl);
-    const level = headingLevel(startEl);
-    if (level === null) {
-      return [startEl];
-    }
-    const span = [startEl];
-    for (let i = startIdx + 1; i < blocks.length; i++) {
-      const lvl = headingLevel(blocks[i]);
-      if (lvl !== null && lvl <= level) {
-        break;
-      }
-      span.push(blocks[i]);
-    }
-    return span;
+/** Top-level children of `content` with a real markdown source range — excludes the trailing caret-trap <p> (same filter as block-map.ts). Exported for reuse (TOC-drag, US-17.7/M5). */
+export function draggableTopLevelBlocks(content: HTMLElement): HTMLElement[] {
+  return (Array.from(content.children) as HTMLElement[]).filter((el) => readSrcRange(el) !== null);
+}
+
+export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDropController {
+  function draggableBlocks(): HTMLElement[] {
+    return draggableTopLevelBlocks(content);
   }
 
   /** Gap index g means "insert before blocks[g]" (g === blocks.length means "insert at the end"). */
@@ -94,75 +101,18 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     return blocks.length;
   }
 
-  /** A gap inside (or bracketing at the same spot as) the dragged span is a no-op/self-drop — reject (F7). */
-  function isValidGap(gap: number, spanStartIdx: number, spanEndIdx: number): boolean {
-    return gap <= spanStartIdx || gap > spanEndIdx;
-  }
-
-  /**
-   * Builds the replacement HTML for the affected range [lowOrig, highOrig] of
-   * `blocks`, plus the sibling-hop count to reach the moved block's first
-   * element in the live DOM afterwards (for caret placement). Inserts an
-   * empty `<p><br></p>` spacer wherever the reorder would otherwise land two
-   * atom blocks (Mermaid/math — no caret position inside or directly after
-   * them, main.ts ensureCaretSpotAfterAtomBlocks) back-to-back — done INSIDE
-   * this single HTML string so it stays part of the one execCommand call
-   * instead of a second DOM edit that would cost a second undo step.
-   */
-  function buildInsertion(
-    newSpanBlocks: HTMLElement[],
-    movedFirstIdx: number,
-    beforeEl: HTMLElement | null,
-    afterEl: HTMLElement | null
-  ): { html: string; movedHopCount: number } {
-    const parts: string[] = [];
-    let movedHopCount = 0;
-    for (let i = 0; i < newSpanBlocks.length; i++) {
-      const prev = i === 0 ? beforeEl : newSpanBlocks[i - 1];
-      const cur = newSpanBlocks[i];
-      if (prev && isAtomBlock(prev) && isAtomBlock(cur)) {
-        parts.push('<p><br></p>');
-      }
-      if (i === movedFirstIdx) {
-        movedHopCount = parts.length;
-      }
-      parts.push(cur.outerHTML);
-    }
-    const last = newSpanBlocks[newSpanBlocks.length - 1];
-    if (last && afterEl && isAtomBlock(last) && isAtomBlock(afterEl)) {
-      parts.push('<p><br></p>');
-    }
-    return { html: parts.join(''), movedHopCount };
-  }
-
-  /** Performs the move (one execCommand call) and returns the moved block's new live element, for caret placement. */
+  /** Performs the move (one execCommand call, via sibling-move.ts) and returns the moved block's new live element, for caret placement. */
   function performMove(span: HTMLElement[], blocks: HTMLElement[], gap: number): HTMLElement | null {
     const spanStartIdx = blocks.indexOf(span[0]);
     const spanEndIdx = spanStartIdx + span.length - 1;
-    const remaining = blocks.filter((_, i) => i < spanStartIdx || i > spanEndIdx);
-    const insertionIndex = gap <= spanStartIdx ? gap : gap - span.length;
-    const newOrder = [...remaining.slice(0, insertionIndex), ...span, ...remaining.slice(insertionIndex)];
-    const lowOrig = Math.min(spanStartIdx, gap);
-    const highOrig = Math.max(spanEndIdx, gap - 1);
-    const newSpanBlocks = newOrder.slice(lowOrig, highOrig + 1);
-    const movedFirstIdx = newOrder.indexOf(span[0]) - lowOrig;
-    const beforeEl = lowOrig > 0 ? blocks[lowOrig - 1] : null;
-    const afterEl = highOrig < blocks.length - 1 ? blocks[highOrig + 1] : null;
-    const { html, movedHopCount } = buildInsertion(newSpanBlocks, movedFirstIdx, beforeEl, afterEl);
-
-    const range = document.createRange();
-    range.setStartBefore(blocks[lowOrig]);
-    range.setEndAfter(blocks[highOrig]);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    document.execCommand('insertHTML', false, html);
-
-    let el: Element | null = beforeEl ? beforeEl.nextElementSibling : content.firstElementChild;
-    for (let i = 0; i < movedHopCount && el; i++) {
-      el = el.nextElementSibling;
-    }
-    return el as HTMLElement | null;
+    const result = computeSiblingMove(
+      blocks,
+      spanStartIdx,
+      spanEndIdx,
+      gap,
+      (prev, cur) => isAtomBlock(prev) && isAtomBlock(cur)
+    );
+    return applySiblingMove(content, result);
   }
 
   // ---------------------------------------------------------------------
@@ -288,7 +238,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     const spanEndIdx = spanStartIdx + dragSpan.length - 1;
     const gap = gapAt(dragBlocks, clientY);
     currentGap = gap;
-    currentGapValid = isValidGap(gap, spanStartIdx, spanEndIdx);
+    currentGapValid = isValidSiblingGap(gap, spanStartIdx, spanEndIdx);
     if (!currentGapValid) {
       dropLineEl.style.display = 'none';
       return;
@@ -406,7 +356,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     startX = clientX;
     startY = clientY;
     dragBlocks = draggableBlocks();
-    dragSpan = computeDragSpan(block, dragBlocks);
+    dragSpan = computeHeadingSectionSpan(block, dragBlocks);
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
     document.addEventListener('keydown', onDocKeyDown);
