@@ -27,6 +27,7 @@ import { initMermaid } from './mermaid';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, type BlockEntry } from './block-map';
+import { initDragDrop } from './drag-drop';
 import { closestElement, createDomHelpers, scrollBehavior } from './dom-utils';
 import { initPrompt } from './prompt';
 import { initPasteImage } from './paste-image';
@@ -65,6 +66,9 @@ initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
+// US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
+// scheduleSync (declared below; safe to reference here, function declarations hoist).
+const dragDrop = initDragDrop(content, { scheduleSync, dom, lineGutter });
 const prompt = initPrompt(vscode, dom);
 const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
@@ -302,6 +306,8 @@ function renderDocument(markdown: string): void {
   toc.refresh();
   // Bảng vừa dựng lại — bỏ cache header dính cũ, tính lại theo DOM mới.
   stickyTableHeader.refresh();
+  // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
+  dragDrop.refresh();
 }
 
 /**

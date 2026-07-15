@@ -205,6 +205,7 @@
     "test:roundtrip:math-edit": "node esbuild.js --test && node dist/test/roundtrip/math-edit.js",
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
     "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
+    "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",

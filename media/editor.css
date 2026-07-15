@@ -12,6 +12,21 @@ body {
   scroll-padding-top: calc(var(--toolbar-height, 48px) + 8px);
 }
 
+/* US-17.3: reserve a left margin for the drag handle at all times, even when
+ * the line-numbers gutter (below) is off — the handle is `position: fixed`
+ * (viewport rects, not offsetTop) so it doesn't need body to be a positioned
+ * ancestor, just the empty space to sit in. #toolbar compensates with a
+ * matching negative margin so it stays full-width. body.md-line-numbers below
+ * overrides this with its own (larger) padding-left when both are active. */
+body {
+  padding-left: 20px;
+}
+
+#toolbar {
+  margin-left: -20px;
+  padding-left: 20px;
+}
+
 /* --- Vùng soạn thảo --- */
 #content {
   outline: none;
@@ -56,6 +71,82 @@ body.md-line-numbers #toolbar {
   text-align: right;
   color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
   white-space: nowrap;
+}
+
+/* --- Drag & drop block reorder (HLR section 17, US-17.3) --- */
+
+/* Single hover-tracking handle (not one marker per block like the line
+ * gutter) — follows the block under the cursor, positioned via
+ * getBoundingClientRect() so it doesn't depend on the numbered-gutter's
+ * offsetTop coordinate system being active. */
+.dd-handle {
+  position: fixed;
+  width: 16px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
+  border-radius: 3px;
+  z-index: 20;
+}
+
+.dd-handle:hover {
+  color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+body.dd-dragging {
+  cursor: grabbing;
+}
+
+body.dd-dragging .dd-handle {
+  cursor: grabbing;
+}
+
+/* Dragged block(s) stay in place (mutated only once, on drop) but read as "picked up". */
+.dd-source-muted {
+  opacity: 0.4;
+}
+
+.dd-ghost {
+  position: fixed;
+  z-index: 30;
+  max-width: min(480px, 70vw);
+  max-height: 160px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.85;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--vscode-editor-background, #fff);
+  border: 1px solid var(--vscode-focusBorder, #007acc);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.dd-ghost-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--vscode-badge-background, #007acc);
+}
+
+.dd-drop-line {
+  position: fixed;
+  height: 2px;
+  z-index: 25;
+  pointer-events: none;
+  background: var(--vscode-focusBorder, #007acc);
+  border-radius: 1px;
 }
 
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
