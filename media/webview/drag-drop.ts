@@ -1,5 +1,6 @@
 /**
- * Drag & drop reorder for top-level blocks (HLR section 17, US-17.3).
+ * Drag & drop reorder for top-level blocks (US-17.3) and list items
+ * (US-17.5, M3) — HLR section 17.
  *
  * Undo mechanism (F1, spike decision): a move never mutates the DOM directly
  * (appendChild/insertBefore/remove) — that would desync the browser's native
@@ -38,9 +39,13 @@ export interface DragDropController {
 }
 
 type DragState = 'idle' | 'armed' | 'dragging';
+type DragKind = 'block' | 'li';
+/** M3: horizontal drag past this threshold re-indents the list item IN PLACE instead of reordering it — a drag gesture is either a vertical reorder OR a horizontal indent/outdent, not a combined diagonal move (see drag-drop.ts M3 header note in the requirement doc for the scope call). */
+type IndentDir = 'in' | 'out' | null;
 
 const HEADING_RE = /^H([1-6])$/;
 const DRAG_THRESHOLD_PX = 4;
+const LIST_INDENT_THRESHOLD_PX = 32;
 const AUTOSCROLL_EDGE_PX = 56;
 const AUTOSCROLL_SPEED_PX = 16;
 const AUTOSCROLL_INTERVAL_MS = 16;
@@ -150,6 +155,43 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     handleEl.style.left = `${contentRect.left - 20}px`;
   }
 
+  // ---------------------------------------------------------------------
+  // List-item hover handle (US-17.5, M3) — independent of the block handle
+  // above: hovering inside a list matches BOTH (the <ul>/<ol> is itself a
+  // top-level block, AND the specific <li> under the cursor), so both
+  // handles can show at once. They don't collide visually — the block
+  // handle sits at a fixed offset from #content's own left edge (the
+  // reserved gutter margin), while the li handle sits relative to that
+  // specific <li>'s own (indented) left edge, which is further right for
+  // any nested item and only close to the block handle for a depth-0 item.
+  // ---------------------------------------------------------------------
+
+  const liHandleEl = document.createElement('div');
+  liHandleEl.className = 'dd-handle dd-li-handle';
+  liHandleEl.textContent = HANDLE_GLYPH;
+  liHandleEl.style.display = 'none';
+  document.body.appendChild(liHandleEl);
+
+  let hoveredLi: HTMLLIElement | null = null;
+
+  /** elementFromPoint (not a rect scan like findBlockAt) so nested lists resolve to the INNERMOST <li> under the cursor, not an ancestor. */
+  function findLiAt(clientX: number, clientY: number): HTMLLIElement | null {
+    const el = document.elementFromPoint(clientX, clientY);
+    const li = (el as HTMLElement | null)?.closest?.('li');
+    return li && content.contains(li) ? (li as HTMLLIElement) : null;
+  }
+
+  function positionLiHandle(li: HTMLLIElement | null): void {
+    if (!li) {
+      liHandleEl.style.display = 'none';
+      return;
+    }
+    const r = li.getBoundingClientRect();
+    liHandleEl.style.display = 'flex';
+    liHandleEl.style.top = `${r.top}px`;
+    liHandleEl.style.left = `${r.left - 20}px`;
+  }
+
   function onContentHover(e: MouseEvent): void {
     if (state !== 'idle') {
       return;
@@ -159,13 +201,20 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       hoveredBlock = block;
       positionHandle(block);
     }
+    const li = findLiAt(e.clientX, e.clientY);
+    if (li !== hoveredLi) {
+      hoveredLi = li;
+      positionLiHandle(li);
+    }
   }
 
   content.addEventListener('mousemove', onContentHover);
   content.addEventListener('mouseleave', () => {
     if (state === 'idle') {
       hoveredBlock = null;
+      hoveredLi = null;
       positionHandle(null);
+      positionLiHandle(null);
     }
   });
 
@@ -187,12 +236,22 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   // ---------------------------------------------------------------------
 
   let state: DragState = 'idle';
+  let kind: DragKind = 'block';
   let startX = 0;
   let startY = 0;
   let dragBlocks: HTMLElement[] = [];
   let dragSpan: HTMLElement[] = [];
   let currentGap = 0;
   let currentGapValid = false;
+
+  // M3 list-item drag state — reuses the same ghost/drop-line/threshold/Esc
+  // machinery above, just a different target shape (one <li> among its own
+  // parent list's direct children, not a run of #content's top-level children).
+  let liDragged: HTMLLIElement | null = null;
+  let liParent: HTMLElement | null = null;
+  let liSiblings: HTMLLIElement[] = [];
+  let liIdx = -1;
+  let liIndentDir: IndentDir = null;
 
   const ghostEl = document.createElement('div');
   ghostEl.className = 'dd-ghost';
@@ -233,7 +292,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     ghostEl.style.top = `${clientY + 12}px`;
   }
 
-  function updateDropLine(clientY: number): void {
+  function updateBlockDropLine(clientY: number): void {
     const spanStartIdx = dragBlocks.indexOf(dragSpan[0]);
     const spanEndIdx = spanStartIdx + dragSpan.length - 1;
     const gap = gapAt(dragBlocks, clientY);
@@ -254,52 +313,134 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       const nextTop = dragBlocks[gap].getBoundingClientRect().top;
       y = (prevBottom + nextTop) / 2;
     }
+    dropLineEl.className = 'dd-drop-line';
     dropLineEl.style.display = 'block';
     dropLineEl.style.top = `${y}px`;
     dropLineEl.style.left = `${contentRect.left}px`;
     dropLineEl.style.width = `${contentRect.width}px`;
+    dropLineEl.style.height = '2px';
+  }
+
+  /** gap index among `liSiblings` (mirrors gapAt, kept separate since the element list is per-drag, not a closure over `content`). */
+  function liGapAt(clientY: number): number {
+    for (let i = 0; i < liSiblings.length; i++) {
+      const r = liSiblings[i].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) {
+        return i;
+      }
+    }
+    return liSiblings.length;
+  }
+
+  /**
+   * M3: horizontal drag past LIST_INDENT_THRESHOLD_PX switches to re-indent
+   * mode — draws a short indent guide near the hovered item instead of a
+   * full-width line, and drop() will call execCommand('indent'/'outdent')
+   * (see performListIndent) instead of a sibling reorder. Reuses the native
+   * indent/outdent mechanism already proven for Tab/Shift+Tab in main.ts
+   * (including its DOM-quirk cleanup at serialize time, normalizeListDom) —
+   * safer than hand-rolling custom nesting DOM surgery.
+   */
+  function updateLiDropLine(clientX: number, clientY: number): void {
+    if (!liParent || !liDragged) {
+      return;
+    }
+    const dx = clientX - startX;
+    const gap = liGapAt(clientY);
+    currentGap = gap;
+    if (Math.abs(dx) > LIST_INDENT_THRESHOLD_PX) {
+      liIndentDir = dx > 0 ? 'in' : 'out';
+      currentGapValid =
+        liIndentDir === 'in' ? liIdx > 0 : !!liParent.parentElement?.closest('li') && content.contains(liParent);
+      if (!currentGapValid) {
+        dropLineEl.style.display = 'none';
+        return;
+      }
+      const anchor = liSiblings[Math.min(Math.max(gap, 0), liSiblings.length - 1)] ?? liDragged;
+      const r = anchor.getBoundingClientRect();
+      dropLineEl.className = 'dd-drop-line dd-indent-guide';
+      dropLineEl.style.display = 'block';
+      dropLineEl.style.top = `${r.top}px`;
+      dropLineEl.style.left = `${r.left + (liIndentDir === 'in' ? 24 : -24)}px`;
+      dropLineEl.style.width = '20px';
+      dropLineEl.style.height = '2px';
+      return;
+    }
+    liIndentDir = null;
+    currentGapValid = isValidSiblingGap(gap, liIdx, liIdx);
+    if (!currentGapValid || liSiblings.length === 0) {
+      dropLineEl.style.display = 'none';
+      return;
+    }
+    const parentRect = liParent.getBoundingClientRect();
+    let y: number;
+    if (gap === 0) {
+      y = liSiblings[0].getBoundingClientRect().top;
+    } else if (gap === liSiblings.length) {
+      y = liSiblings[liSiblings.length - 1].getBoundingClientRect().bottom;
+    } else {
+      y = (liSiblings[gap - 1].getBoundingClientRect().bottom + liSiblings[gap].getBoundingClientRect().top) / 2;
+    }
+    dropLineEl.className = 'dd-drop-line';
+    dropLineEl.style.display = 'block';
+    dropLineEl.style.top = `${y}px`;
+    dropLineEl.style.left = `${parentRect.left}px`;
+    dropLineEl.style.width = `${parentRect.width}px`;
+    dropLineEl.style.height = '2px';
   }
 
   function startDragging(): void {
     state = 'dragging';
     handleEl.style.display = 'none';
-    ghostEl.replaceChildren((dragSpan[0].cloneNode(true) as HTMLElement));
-    if (dragSpan.length > 1) {
-      const badge = document.createElement('div');
-      badge.className = 'dd-ghost-badge';
-      badge.textContent = String(dragSpan.length);
-      ghostEl.appendChild(badge);
+    liHandleEl.style.display = 'none';
+    if (kind === 'block') {
+      ghostEl.replaceChildren(dragSpan[0].cloneNode(true) as HTMLElement);
+      if (dragSpan.length > 1) {
+        const badge = document.createElement('div');
+        badge.className = 'dd-ghost-badge';
+        badge.textContent = String(dragSpan.length);
+        ghostEl.appendChild(badge);
+      }
+      dragSpan.forEach((el) => el.classList.add('dd-source-muted'));
+    } else if (liDragged) {
+      ghostEl.replaceChildren(liDragged.cloneNode(true) as HTMLElement);
+      liDragged.classList.add('dd-source-muted');
     }
     ghostEl.style.display = 'block';
-    dragSpan.forEach((el) => el.classList.add('dd-source-muted'));
     document.body.classList.add('dd-dragging');
   }
 
   function cleanupVisuals(): void {
     dragSpan.forEach((el) => el.classList.remove('dd-source-muted'));
+    liDragged?.classList.remove('dd-source-muted');
     ghostEl.style.display = 'none';
     ghostEl.replaceChildren();
     dropLineEl.style.display = 'none';
+    dropLineEl.className = 'dd-drop-line';
     document.body.classList.remove('dd-dragging');
     stopAutoScroll();
   }
 
   function resetState(): void {
     state = 'idle';
+    kind = 'block';
     dragBlocks = [];
     dragSpan = [];
     currentGapValid = false;
+    liDragged = null;
+    liParent = null;
+    liSiblings = [];
+    liIdx = -1;
+    liIndentDir = null;
     hoveredBlock = null;
+    hoveredLi = null;
     document.removeEventListener('mousemove', onDocMouseMove);
     document.removeEventListener('mouseup', onDocMouseUp);
     document.removeEventListener('keydown', onDocKeyDown);
   }
 
-  function finishMove(): void {
-    const span = dragSpan;
-    const blocks = dragBlocks;
-    const gap = currentGap;
-    const movedEl = performMove(span, blocks, gap);
+  function finishBlockMove(): void {
+    const movedEl = performMove(dragSpan, dragBlocks, currentGap);
     if (movedEl) {
       const r = document.createRange();
       r.selectNodeContents(movedEl);
@@ -309,8 +450,39 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       sel?.addRange(r);
       content.focus();
     }
-    deps.lineGutter.refreshFromDom();
-    deps.scheduleSync();
+  }
+
+  /** Places the caret inside `li` then calls the native indent/outdent command — same mechanism as Tab/Shift+Tab in main.ts, including its existing Chromium DOM-quirk cleanup at serialize time. */
+  function performListIndent(li: HTMLLIElement, dir: 'indent' | 'outdent'): void {
+    const range = document.createRange();
+    range.selectNodeContents(li);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    content.focus();
+    document.execCommand(dir);
+  }
+
+  function finishLiMove(): void {
+    if (!liParent || !liDragged) {
+      return;
+    }
+    if (liIndentDir) {
+      performListIndent(liDragged, liIndentDir === 'in' ? 'indent' : 'outdent');
+      return;
+    }
+    const result = computeSiblingMove(liSiblings, liIdx, liIdx, currentGap);
+    const movedEl = applySiblingMove(liParent, result);
+    if (movedEl) {
+      const r = document.createRange();
+      r.selectNodeContents(movedEl);
+      r.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+      content.focus();
+    }
   }
 
   function onDocMouseMove(e: MouseEvent): void {
@@ -326,16 +498,27 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     updateGhostPosition(e.clientX, e.clientY);
-    updateDropLine(e.clientY);
+    if (kind === 'block') {
+      updateBlockDropLine(e.clientY);
+    } else {
+      updateLiDropLine(e.clientX, e.clientY);
+    }
     maintainAutoScroll(e.clientY);
   }
 
   function onDocMouseUp(): void {
     if (state === 'dragging') {
       const shouldMove = currentGapValid;
+      const dragKind = kind;
       cleanupVisuals();
       if (shouldMove) {
-        finishMove();
+        if (dragKind === 'block') {
+          finishBlockMove();
+        } else {
+          finishLiMove();
+        }
+        deps.lineGutter.refreshFromDom();
+        deps.scheduleSync();
       }
     } else {
       cleanupVisuals();
@@ -353,10 +536,29 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   function armDrag(block: HTMLElement, clientX: number, clientY: number): void {
     state = 'armed';
+    kind = 'block';
     startX = clientX;
     startY = clientY;
     dragBlocks = draggableBlocks();
     dragSpan = computeHeadingSectionSpan(block, dragBlocks);
+    document.addEventListener('mousemove', onDocMouseMove);
+    document.addEventListener('mouseup', onDocMouseUp);
+    document.addEventListener('keydown', onDocKeyDown);
+  }
+
+  function armLiDrag(li: HTMLLIElement, clientX: number, clientY: number): void {
+    const parent = li.parentElement;
+    if (!parent) {
+      return;
+    }
+    state = 'armed';
+    kind = 'li';
+    startX = clientX;
+    startY = clientY;
+    liDragged = li;
+    liParent = parent;
+    liSiblings = Array.from(parent.children).filter((c) => c.tagName === 'LI') as HTMLLIElement[];
+    liIdx = liSiblings.indexOf(li);
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
     document.addEventListener('keydown', onDocKeyDown);
@@ -370,13 +572,23 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     armDrag(hoveredBlock, e.clientX, e.clientY);
   });
 
+  liHandleEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !hoveredLi || isComposing) {
+      return;
+    }
+    e.preventDefault();
+    armLiDrag(hoveredLi, e.clientX, e.clientY);
+  });
+
   function refresh(): void {
     if (state !== 'idle') {
       cleanupVisuals();
       resetState();
     }
     hoveredBlock = null;
+    hoveredLi = null;
     positionHandle(null);
+    positionLiHandle(null);
   }
 
   return { refresh };

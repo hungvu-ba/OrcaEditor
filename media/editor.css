@@ -166,6 +166,22 @@ body.dd-dragging .dd-handle {
   object-fit: contain;
 }
 
+/* --- List item drag & drop + indent/outdent (HLR section 17, US-17.5, M3) ---
+ * .dd-li-handle reuses .dd-handle's look; positioned relative to the hovered
+ * <li>'s own (indented) left edge, not a fixed gutter offset like the block
+ * handle, so it naturally sits further right for nested items. */
+.dd-li-handle {
+  cursor: grab;
+}
+
+/* Short horizontal-drag indicator shown instead of the full-width drop line
+ * once the drag crosses LIST_INDENT_THRESHOLD_PX — signals "this will change
+ * nesting level" rather than "this will reorder here". */
+.dd-indent-guide {
+  border-radius: 2px;
+  opacity: 0.9;
+}
+
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
  * (biểu đồ Mermaid, công thức KaTeX): số ở mép trên là dòng bắt đầu, số này ở
  * mép dưới là dòng kết thúc. Dịch nhẹ lên trên để số không tràn ra ngoài block,
