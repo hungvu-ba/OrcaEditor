@@ -17,12 +17,9 @@ import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
-import {
-  READING_PALETTE_LABELS,
-  READING_PRESET_LABELS,
-  type ReadabilityController,
-} from './readability';
-import type { ReadingPalette, ReadingPreset } from '../../src/shared/messages';
+import { READING_STYLES, type ReadabilityController } from './readability';
+import { attachTooltip, hideTooltip } from './tooltip';
+import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
@@ -60,15 +57,6 @@ const READING_ICON = svgIcon(
 /** Icon Zen / Focus (US-19.9): 4 góc khung — gợi tập trung vào cột chữ giữa. */
 const ZEN_ICON = svgIcon(
   `<path d="M2.75 5.5v-2.75h2.75M13.25 5.5v-2.75h-2.75M2.75 10.5v2.75h2.75M13.25 10.5v2.75h-2.75" ${FMT_STROKE}/>`
-);
-
-/** Icon palette đọc (US-19.10): vòng tròn màu — gợi chọn bảng màu đọc. */
-const PALETTE_ICON = svgIcon(
-  `<circle cx="8" cy="8" r="5.25" ${FMT_STROKE}/>` +
-    '<circle cx="8" cy="4.9" r="0.95" fill="currentColor" stroke="none"/>' +
-    '<circle cx="10.9" cy="7.4" r="0.95" fill="currentColor" stroke="none"/>' +
-    '<circle cx="9.6" cy="10.8" r="0.95" fill="currentColor" stroke="none"/>' +
-    '<circle cx="5.1" cy="7.4" r="0.95" fill="currentColor" stroke="none"/>'
 );
 
 /** Icon clipboard có ký tự @ — copy @file cho chat Claude Code. */
@@ -189,11 +177,21 @@ interface ToolbarDropdownEntry {
   badge?: string; // EN only (bug report 2026-07-14, mục 7) — vd "Common"
   action: () => void;
   /**
-   * Giá trị định danh hàng (vd. tên palette) — gán vào `data-dropdown-value` để
-   * đồng bộ dấu chọn "đang áp" (US-19.10, xem syncReadingButtons). Không có →
-   * hàng không mang trạng thái chọn (đa số dropdown hành-động-1-lần).
+   * Giá trị định danh hàng (vd. id bundle reading style) — gán vào
+   * `data-dropdown-value` để đồng bộ dấu chọn "đang áp" (xem syncReadingButtons).
+   * Không có → hàng không mang trạng thái chọn (đa số dropdown hành-động-1-lần).
    */
   value?: string;
+  /**
+   * US-19.18: hover 1 hàng trong dropdown → preview theme lên file hiện tại mà
+   * KHÔNG commit; rời hàng (hoặc đóng popover không chọn) → `onHoverCancel` trả
+   * lại theme gốc. Chỉ dropdown Reading Mode dùng cặp này; các dropdown khác
+   * (Heading, Math...) để trống, addPopoverRow không gắn listener khi thiếu.
+   */
+  onHoverPreview?: () => void;
+  onHoverCancel?: () => void;
+  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi 10 bundle bên dưới). */
+  separatorBefore?: boolean;
 }
 
 interface ToolbarItem {
@@ -243,48 +241,30 @@ export function syncTocButton(): void {
 }
 
 /**
- * Đồng bộ trạng thái "đang bật" của nút Reading Mode + Zen (US-19.1/19.9) —
- * gọi từ readability controller mỗi khi state đổi (id nằm trên split-main của
- * Reading Mode, trên chính <button> của Zen). Chỉ gọi sau initToolbar (từ
+ * Đồng bộ trạng thái "đang bật" của nút Reading Mode + Zen (US-19.1/19.9/19.18)
+ * — gọi từ readability controller mỗi khi state đổi (id nằm trên split-main
+ * của Reading Mode, trên chính <button> của Zen). Chỉ gọi sau initToolbar (từ
  * readability controller) nên ctx luôn đã gán.
  */
 export function syncReadingButtons(): void {
-  // Preset 'default' = "follow VS Code" (trung tính) → KHÔNG coi là đã chọn: nút
-  // chính không sáng `.active` và không hàng nào trong dropdown mang dấu ✓ (giống
-  // followTheme của palette). Chỉ preset thực (comfortable/compact/dyslexia) mới sáng.
-  const preset = ctx.readability.getPreset();
-  const presetSelected = preset !== 'default';
-  document.getElementById('reading-toggle')?.classList.toggle('active', ctx.readability.isEnabled() && presetSelected);
+  const enabled = ctx.readability.isEnabled();
+  document.getElementById('reading-toggle')?.classList.toggle('active', enabled);
   document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
-  syncPaletteControl();
-  // Dấu ✓ preset đang áp trong dropdown Reading Mode (giống palette US-19.10).
-  syncDropdownSelection('reading-toggle', presetSelected ? preset : '');
+  // Dấu ✓ hàng bundle đang áp (US-19.18) — 'off' khi tắt hẳn, hoặc không hàng
+  // nào nếu state hiện tại (vd seed tay qua settings.json) không khớp bundle nào.
+  const current = enabled ? (ctx.readability.getStyleId() ?? '') : 'off';
+  syncDropdownSelection('reading-toggle', current);
 }
 
 /**
  * Đánh dấu `.selected` (dấu ✓) cho hàng đang áp trong dropdown split-button neo
- * theo `triggerId` — hàng có `data-dropdown-value === current`. Dùng chung cho
- * palette đọc (US-19.10) và preset Reading Mode.
+ * theo `triggerId` — hàng có `data-dropdown-value === current`.
  */
 function syncDropdownSelection(triggerId: string, current: string): void {
   const popover = document.querySelector(`.toolbar-popover[data-for-id="${triggerId}"]`);
   popover?.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
     row.classList.toggle('selected', row.dataset.dropdownValue === current);
   });
-}
-
-/**
- * Đồng bộ control palette đọc (US-19.10): mặt chính sáng `.active` khi palette
- * ≠ followTheme (đang lệch khỏi màu theme thuần), và hàng đang chọn trong
- * dropdown được đánh dấu `.selected`. Nhãn theme thuần (followTheme) không sáng
- * → khớp trạng thái "bám VS Code" mặc định (fix cảm giác lệch màu).
- */
-function syncPaletteControl(): void {
-  const current = ctx.readability.getPalette();
-  // followTheme = "Follow VS Code" (trung tính) → nút chính không sáng và không
-  // hàng nào mang dấu ✓ (không tính là palette được chọn).
-  document.getElementById('palette-toggle')?.classList.toggle('active', current !== 'followTheme');
-  syncDropdownSelection('palette-toggle', current === 'followTheme' ? '' : current);
 }
 
 /** Cấp heading mặc định khi caret không nằm trong heading nào (US-4.9/US-4.16). */
@@ -366,40 +346,42 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Reading Mode split-button (US-19.1) — 4 preset đọc. "Comfortable
- * Reading" đánh dấu "Default" (mặc định lần đầu). Chọn preset qua
- * `ctx.readability.setPreset` — kéo theo bật Reading Mode nếu đang tắt. ctx được
- * gán trong initToolbar trước khi mọi action chạy nên tham chiếu an toàn (cùng
- * pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
+ * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
+ * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 10 bundle
+ * preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp,
+ * xem `READING_STYLES` trong readability.ts và Requirement - 19
+ * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
+ * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
+ * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
+ * addPopoverRow). Chọn hàng qua `setStyle`/`disable` — kéo theo bật/tắt Reading
+ * Mode. ctx được gán trong initToolbar trước khi mọi action chạy nên tham
+ * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
+ *
+ * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
+ * reset" duy nhất, khác loại với 10 bundle bên dưới (đều là biến thể "bật");
+ * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
+ * phải cuộn qua hết 10 hàng mới thấy, và tách riêng bằng 1 vạch chia
+ * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
+ * chọn "style" thứ 11.
  */
-// Thứ tự theo tần suất/nhu cầu dùng thực tế: Comfortable (mặc định, đọc chung —
-// dùng nhiều nhất) → Academic Paper (đọc long-form essay/paper, look đầu tư nhất) →
-// Compact (đọc dày/lướt nhanh) → Default (chỉ theo VS Code, ít chủ động chọn) →
-// Dyslexia-friendly (accessibility niche, để cuối).
-const READING_PRESET_ORDER: ReadingPreset[] = ['comfortable', 'academic', 'compact', 'default', 'dyslexia'];
-const READING_DROPDOWN: ToolbarDropdownEntry[] = READING_PRESET_ORDER.map((preset) => ({
-  label: READING_PRESET_LABELS[preset],
-  badge: preset === 'comfortable' ? 'Default' : undefined,
-  value: preset,
-  action: () => ctx.readability.setPreset(preset),
-}));
-
-/**
- * Dropdown chọn palette đọc trên toolbar (US-19.10) — "Follow VS Code" bám
- * `--vscode-*` thuần (trung tính, không tính là chọn), 4 palette hand-tune còn
- * lại tự bật reading styling khi chọn (xem readability.setPalette). "Sepia" đánh
- * dấu "Default" (palette mặc định khi mới cài). Mỗi hàng mang `value` = tên
- * palette để syncPaletteControl đánh dấu hàng đang áp. Là split-button kiểu
- * "menu" (mainOpensDropdown) vì palette là lựa-chọn-1-trong-N, không có hành vi
- * mặt-chính mặc định.
- */
-const READING_PALETTE_ORDER: ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
-const PALETTE_DROPDOWN: ToolbarDropdownEntry[] = READING_PALETTE_ORDER.map((palette) => ({
-  label: READING_PALETTE_LABELS[palette],
-  badge: palette === 'sepia' ? 'Default' : undefined,
-  value: palette,
-  action: () => ctx.readability.setPalette(palette),
-}));
+const READING_DROPDOWN: ToolbarDropdownEntry[] = [
+  {
+    label: 'Follow VS Code (no reading style)',
+    value: 'off',
+    action: () => ctx.readability.disable(),
+    onHoverPreview: () => ctx.readability.previewStyle('off'),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+  },
+  ...READING_STYLES.map((style, i) => ({
+    label: style.label,
+    badge: style.id === 'comfortable-sepia' ? 'Default' : undefined,
+    value: style.id,
+    action: () => ctx.readability.setStyle(style.id),
+    onHoverPreview: () => ctx.readability.previewStyle(style.id),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+    separatorBefore: i === 0,
+  })),
+];
 
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
@@ -514,8 +496,10 @@ const toolbarItems: ToolbarItem[] = [
     icon: READING_ICON,
     title: 'Reading Mode (comfortable reading layout)',
     action: () => ctx.readability.toggle(),
+    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành 10 bundle đã
+    // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
-    dropdownTitle: 'Choose reading preset',
+    dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',
     alignRight: true,
   },
@@ -536,59 +520,8 @@ const toolbarItems: ToolbarItem[] = [
     },
     id: 'toc-toggle',
   },
-  // Palette đọc (US-19.10/19.11) là theme GLOBAL, ít khi đổi → đặt cuối nhóm
-  // phải (sau TOC, cạnh menu "...") thay vì chiếm ô đắc địa giữa Read/Focus.
-  {
-    label: 'Color',
-    icon: PALETTE_ICON,
-    title: 'Reading palette (default: Follow VS Code)',
-    action: () => {}, // menu-only: mặt chính mở dropdown (mainOpensDropdown)
-    dropdown: PALETTE_DROPDOWN,
-    dropdownTitle: 'Choose reading palette',
-    mainOpensDropdown: true,
-    id: 'palette-toggle',
-  },
 ];
 
-let tooltipEl: HTMLDivElement | undefined;
-
-/**
- * Tooltip tự vẽ bằng JS thay vì dựa vào title attribute gốc của trình duyệt —
- * title attribute im lặng không hiện được ở một số nút toolbar tuỳ vị trí
- * (nghi do tương tác giữa layout flex-wrap của #toolbar với việc trình duyệt
- * xác định "phần tử đang hover" cho riêng cơ chế tooltip, khác với hit-test
- * click bình thường), nên không thể tin cậy hoàn toàn vào title. Tự quản lý
- * show/hide qua mouseenter/focus và mouseleave/blur đảm bảo hiện thị nhất
- * quán bất kể vị trí nút.
- */
-function showTooltip(target: HTMLElement, text: string): void {
-  if (!tooltipEl) {
-    tooltipEl = document.createElement('div');
-    tooltipEl.id = 'toolbar-tooltip';
-    document.body.appendChild(tooltipEl);
-  }
-  tooltipEl.textContent = text;
-  tooltipEl.style.display = 'block';
-  const rect = target.getBoundingClientRect();
-  const tipRect = tooltipEl.getBoundingClientRect();
-  const left = Math.max(4, Math.min(rect.left + rect.width / 2 - tipRect.width / 2, window.innerWidth - tipRect.width - 4));
-  tooltipEl.style.left = `${left}px`;
-  tooltipEl.style.top = `${rect.bottom + 6}px`;
-}
-
-function hideTooltip(): void {
-  if (tooltipEl) {
-    tooltipEl.style.display = 'none';
-  }
-}
-
-/** Gắn tooltip tự vẽ (mouseenter/focus → hiện, mouseleave/blur → ẩn) cho 1 phần tử. */
-function attachTooltip(el: HTMLElement, text: string): void {
-  el.addEventListener('mouseenter', () => showTooltip(el, text));
-  el.addEventListener('mouseleave', hideTooltip);
-  el.addEventListener('focus', () => showTooltip(el, text));
-  el.addEventListener('blur', hideTooltip);
-}
 
 /**
  * Chạy 1 action bất kỳ: action + (focus lại #content trừ khi tự mở prompt bất
@@ -649,8 +582,27 @@ function buildPopover(extraClassName?: string): HTMLDivElement {
   el.className = extraClassName ? `toolbar-popover ${extraClassName}` : 'toolbar-popover';
   el.style.display = 'none';
   document.body.appendChild(el);
+  // US-19.18 follow-up ("thực hiện transition từ state đang chọn sang state
+  // mới, thay vì revert về state gốc rồi mới chuyển"): revert-to-committed chỉ
+  // gắn ở CHÍNH popoverEl, không ở từng hàng. `mouseleave` không bubble và chỉ
+  // bắn khi con trỏ rời khỏi TOÀN BỘ popoverEl (kể cả mọi hàng con) — di chuyển
+  // giữa 2 hàng liền kề (không có khe hở) không bao giờ kích hoạt event này, vì
+  // con trỏ chưa từng thật sự thoát khỏi popoverEl. Nhờ vậy preview của hàng A
+  // vẫn còn nguyên trên trang cho tới khi debounce của hàng B chạy xong rồi đè
+  // trực tiếp lên — CSS transition tự chuyển thẳng A→B. Chỉ khi rời hẳn cả
+  // popover thì mới thật sự revert về state đã commit.
+  el.addEventListener('mouseleave', () => {
+    activeHoverCancel?.();
+    activeHoverCancel = undefined;
+  });
   return el;
 }
+
+/**
+ * Hàng đang preview (nếu có) — cho closePopover() huỷ preview khi popover đóng
+ * mà user KHÔNG chọn (Escape/click ra ngoài), tránh kẹt theme preview (US-19.18).
+ */
+let activeHoverCancel: (() => void) | undefined;
 
 /** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
 function addPopoverRow(
@@ -659,7 +611,9 @@ function addPopoverRow(
   label: string,
   badge: string | undefined,
   onClick: () => void,
-  value?: string
+  value?: string,
+  onHoverPreview?: () => void,
+  onHoverCancel?: () => void
 ): void {
   const row = document.createElement('button');
   row.type = 'button';
@@ -685,14 +639,66 @@ function addPopoverRow(
   }
   row.addEventListener('mousedown', (e) => e.preventDefault());
   row.addEventListener('click', onClick);
+  if (onHoverPreview && onHoverCancel) {
+    // US-19.18 follow-up (bug report "theme apply quá nhanh gây choáng"): trễ
+    // READING_PREVIEW_DEBOUNCE_MS trước khi THẬT SỰ áp preview — rê chuột lướt
+    // qua nhiều hàng liên tục (không dừng ở hàng nào) sẽ không kích hoạt lần
+    // preview nào cả, chỉ hàng con trỏ dừng đủ lâu mới đổi theme. mouseleave
+    // luôn huỷ timer + revert ngay lập tức (không debounce chiều huỷ) nên rời
+    // hàng luôn phản hồi tức thì dù preview đã kịp áp hay chưa.
+    let previewTimer: ReturnType<typeof setTimeout> | undefined;
+    row.addEventListener('mouseenter', () => {
+      activeHoverCancel = onHoverCancel;
+      previewTimer = setTimeout(() => {
+        previewTimer = undefined;
+        onHoverPreview();
+      }, READING_PREVIEW_DEBOUNCE_MS);
+    });
+    row.addEventListener('mouseleave', () => {
+      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce
+      // của CHÍNH hàng này nếu nó chưa kịp bắn, để rời hàng trước khi preview
+      // áp thì không áp preview đó nữa (giữ nguyên preview trước đó, nếu có).
+      if (previewTimer !== undefined) {
+        clearTimeout(previewTimer);
+        previewTimer = undefined;
+      }
+    });
+  }
   popoverEl.appendChild(row);
 }
 
 /** Mở popoverEl neo theo triggerBtn (căn phải mép dưới nút) — đóng popover khác đang mở trước. */
+/**
+ * US-19.18: khoá cứng font-size của mọi `.toolbar-popover-item` trong popover
+ * bằng inline style tại thời điểm mở — bắt buộc phải là INLINE trên CHÍNH
+ * từng hàng (không phải custom property đặt trên popoverEl) vì rule cỡ chữ
+ * (editor.css US-19.6) gate theo SỰ CÓ MẶT của class `body.reading-mode`:
+ * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-font-
+ * size, 12px); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi
+ * body → rule này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên
+ * chỉ đóng băng custom property không đủ — phải khoá thẳng `font-size` trên
+ * từng hàng, thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự
+ * đổi cỡ chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể
+ * không bao giờ nhận được click — bắt bằng Playwright).
+ */
+function freezePopoverRowSize(popoverEl: HTMLElement): void {
+  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-font-size').trim() || '12px';
+  popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
+    row.style.fontSize = uiFontSize;
+  });
+}
+
+function unfreezePopoverRowSize(popoverEl: HTMLElement): void {
+  popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
+    row.style.removeProperty('font-size');
+  });
+}
+
 function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
   if (openPopoverEl && openPopoverEl !== popoverEl) {
     closePopover();
   }
+  freezePopoverRowSize(popoverEl);
   popoverEl.style.display = 'flex';
   const rect = triggerBtn.getBoundingClientRect();
   const menuRect = popoverEl.getBoundingClientRect();
@@ -706,9 +712,16 @@ function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
 function closePopover(): void {
   if (openPopoverEl) {
     openPopoverEl.style.display = 'none';
+    unfreezePopoverRowSize(openPopoverEl);
   }
   openPopoverEl = undefined;
   openPopoverTrigger = undefined;
+  // US-19.18: đóng popover khi đang preview (Escape/click ra ngoài, hoặc ngay
+  // trước khi chạy action của hàng vừa click — action tự apply() lại ngay sau
+  // nên không bị "revert rồi mất" gì cả, chỉ là 1 nhịp render thừa vô hại) →
+  // luôn huỷ preview để không kẹt theme tạm trên trang.
+  activeHoverCancel?.();
+  activeHoverCancel = undefined;
 }
 
 function togglePopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
@@ -818,6 +831,11 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
     popover.dataset.forId = item.id;
   }
   for (const entry of item.dropdown ?? []) {
+    if (entry.separatorBefore) {
+      const sep = document.createElement('div');
+      sep.className = 'toolbar-popover-sep';
+      popover.appendChild(sep);
+    }
     addPopoverRow(
       popover,
       entry.icon,
@@ -827,7 +845,9 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
         closePopover();
         invokeAction(entry.action, item.opensAsyncPrompt);
       },
-      entry.value
+      entry.value,
+      entry.onHoverPreview,
+      entry.onHoverCancel
     );
   }
   // Menu-only (vd palette US-19.10): mặt chính mở dropdown thay vì chạy action.

@@ -14,6 +14,7 @@ import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
 import { computeHeadingSectionSpan, draggableTopLevelBlocks } from './drag-drop';
 import { computeSiblingMove, applySiblingMove, isValidSiblingGap } from './sibling-move';
+import { showTooltip, hideTooltip } from './tooltip';
 import type { VsCodeApi } from './vscode-api';
 
 export interface TocController {
@@ -152,8 +153,17 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined, dep
       link.className = `toc-item toc-level-${level}`;
       const text = (heading.textContent ?? '').trim() || '(empty)';
       link.textContent = text;
-      link.title = text;
       link.href = '#';
+      // Chỉ hiện tooltip (tự vẽ, xem tooltip.ts) khi heading thực sự bị cắt
+      // bởi ellipsis — không phiền người dùng với heading đã hiện đủ chữ.
+      link.addEventListener('mouseenter', () => {
+        if (link.scrollWidth > link.clientWidth) showTooltip(link, text);
+      });
+      link.addEventListener('mouseleave', hideTooltip);
+      link.addEventListener('focus', () => {
+        if (link.scrollWidth > link.clientWidth) showTooltip(link, text);
+      });
+      link.addEventListener('blur', hideTooltip);
       // preventDefault + stopPropagation: preload của VS Code webview có listener
       // click ở document sẽ phân giải href qua <base> (https://file+.vscode-resource…)
       // rồi mở ra BROWSER nếu sự kiện lọt tới nó — kể cả khi đã preventDefault.

@@ -49,7 +49,7 @@ pre {
 
 a {
   color: var(--vscode-textLink-foreground);
-  text-decoration: none;
+  text-decoration: underline;
 }
 
 a:hover {
@@ -872,6 +872,27 @@ body.reading-mode:has(#content.reading-preset-academic) {
   --reading-ui-font-size: 14px;
 }
 
+/* --- Chrome font-family theo preset (TOC + pop-up) ---
+ * Same "chrome lives outside #content, custom properties don't cross the
+ * sibling boundary" problem as --reading-ui-font-size above, but for
+ * font-family: presets that set a custom --reading-font-stack need that
+ * stack hoisted onto <body> too so the TOC (#toc-panel, appended straight to
+ * document.body — see toc.ts) renders in the same font as the reading text.
+ * Only presets that actually override the font stack need an entry here;
+ * comfortable/compact/default inherit the VS Code font, so chrome already
+ * matches without hoisting (fallback `inherit` in editor.css handles them). */
+body.reading-mode:has(#content.reading-preset-dyslexia) {
+  --reading-ui-font-family: 'Atkinson Hyperlegible', 'OpenDyslexic', Verdana, Tahoma, sans-serif;
+}
+body.reading-mode:has(#content.reading-preset-academic) {
+  --reading-ui-font-family: 'et-book', Palatino, 'Palatino Linotype', 'Palatino LT STD',
+    'Book Antiqua', Georgia, 'Literata', 'Times New Roman', serif;
+}
+body.reading-mode:has(#content.reading-preset-academic.content-lang-vi) {
+  --reading-ui-font-family: 'Literata', Palatino, 'Palatino Linotype', 'Book Antiqua',
+    Georgia, 'Times New Roman', serif;
+}
+
 /* --- US-19.5 Reading palettes ---
  * followTheme (mặc định) = KHÔNG áp class màu (kế thừa --vscode-*, hành vi cũ).
  * Mỗi palette là 1 bộ đóng gói qua các biến --rp-*; hand-tune long-form (tránh
@@ -1036,10 +1057,67 @@ body.reading-palette-highContrast {
   --rp-selection-fg: #000000;
 }
 
-/* --- US-19.5/19.7 Link underline ---
- * Tuỳ chọn luôn gạch chân link (không chỉ dựa màu — WCAG mù màu). */
-body.reading-link-underline #content a {
+/* --- US-19.17 Link style theo reading preset (bug 0715 mục 7) ---
+ * Gạch chân giờ BẮT BUỘC trong Reading Mode (không còn tuỳ chọn bật/tắt — luôn
+ * dựa nhiều hơn 1 tín hiệu thị giác ngoài màu, WCAG 1.4.1/mù màu). Mỗi preset
+ * có cách xử lý riêng, khớp tinh thần đã có của preset đó (dyslexia ưu tiên rõ
+ * ràng, academic ưu tiên tông in ấn) thay vì 1 công thức chung cho mọi preset.
+ * Màu dùng color-mix() từ --rp-link/--rp-fg sẵn có của palette — không thêm
+ * biến --rp-* mới. Khi không có palette (followTheme), var(--rp-link/--rp-fg)
+ * invalid khiến color-mix() invalid → text-decoration-color/background-color
+ * tự rơi về initial value (currentColor/transparent), giữ nguyên theo theme
+ * VS Code như trước giờ. */
+body.reading-mode #content a {
   text-decoration: underline;
+  text-decoration-skip-ink: auto;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.14em;
+  text-decoration-color: color-mix(in srgb, var(--rp-link) 65%, transparent);
+  font-weight: 500;
+}
+
+/* Dyslexia: gạch chân dày hơn + nền tint nhẹ để link là 1 landmark thị giác rõ
+ * ràng hơn khi lướt mắt — đúng hướng accessibility-first của preset này. */
+body.reading-mode:has(#content.reading-preset-dyslexia) #content a {
+  font-weight: 600;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--rp-link, currentColor);
+  background-color: color-mix(in srgb, var(--rp-link) 10%, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+}
+
+/* Academic: bỏ gạch chân đậm màu "web link", ngả màu về ink (trộn với chữ
+ * thân bài) + offset rộng hơn cho dòng cao của serif — đúng tông trang in ấn
+ * thay vì hyperlink số hoá nổi bật. */
+body.reading-mode:has(#content.reading-preset-academic) #content a {
+  text-underline-offset: 0.22em;
+  text-decoration-color: color-mix(in srgb, var(--rp-link) 55%, var(--rp-fg) 45%);
+}
+
+/* --- US-19.18 follow-up: smooth color transition for palette preview/switch ---
+ * Bug report: instant color/typography swap on hover-preview felt jarring
+ * ("choáng" — dizzying). Only transition COLOR-related properties (cheap,
+ * compositor-only, no reflow) — layout properties (font-size, measure width)
+ * stay instant since animating text reflow across a whole document is janky
+ * and expensive. Applied UNCONDITIONALLY (not gated on .reading-mode) so
+ * switching palette OFF also transitions smoothly, not just ON. JS side also
+ * debounces the preview trigger itself (READING_PREVIEW_DEBOUNCE_MS,
+ * toolbar.ts) so quickly scanning past dropdown rows doesn't fire a flurry of
+ * these transitions. prefers-reduced-motion (below) neutralizes this globally. */
+body,
+#content,
+#content a,
+#content pre,
+#content :not(pre) > code,
+#content blockquote,
+#content th,
+#content td {
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    text-decoration-color 0.18s ease;
 }
 
 /* --- US-19.7 prefers-reduced-motion (GLOBAL, không gán vào reading mode) ---

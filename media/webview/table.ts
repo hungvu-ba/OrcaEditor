@@ -207,13 +207,18 @@ function showTableToolbar(cell: Element): void {
   }
 }
 
+// Column drag handle sits in a 20px-tall band directly above the table
+// (handle height 20px, offset `top - 20`); add 8px breathing room so the
+// toolbar doesn't overlap it.
+const TABLE_TOOLBAR_GAP_PX = 28;
+
 function positionTableToolbar(cell: Element): void {
   const table = cell.closest('table');
   if (!table) {
     return;
   }
   const rect = table.getBoundingClientRect();
-  const top = rect.top + window.scrollY - tableToolbar.offsetHeight - 6;
+  const top = rect.top + window.scrollY - tableToolbar.offsetHeight - TABLE_TOOLBAR_GAP_PX;
   // không chui dưới toolbar chính (sticky trên cùng)
   const minTop = window.scrollY + toolbarEl.offsetHeight + 4;
   tableToolbar.style.top = `${Math.max(top, minTop)}px`;
@@ -257,6 +262,15 @@ export function fitTableColumns(table: HTMLTableElement): void {
   // Bề rộng tự nhiên từng cột — gỡ tạm sàn/trần + cấm wrap (đồng bộ, không
   // nháy hình vì chưa có khung hình nào vẽ ra giữa lúc thêm/gỡ class).
   table.classList.add(MEASURE_CLASS);
+  // Clear previously-set inline min-width first — otherwise it outranks the
+  // class-selector override and the measurement pass can never go below a
+  // width set by an earlier fit, so columns could only grow, never shrink
+  // back after content got shorter.
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      cell.style.removeProperty('min-width');
+    }
+  }
   const colCount = Math.max(...rows.map((r) => r.cells.length));
   const naturalByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
@@ -1007,6 +1021,26 @@ function initTableDragDrop(): void {
     positionRowHandle(null);
     positionColHandle(null);
   });
+
+  // Handles use viewport coordinates from getBoundingClientRect(), recomputed
+  // only on mousemove over #content — a scroll with the mouse stationary
+  // otherwise leaves them stuck at the old position while the row/column
+  // underneath moves (mirrors the block-level drag handle in drag-drop.ts).
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (tdState !== 'idle') {
+        return;
+      }
+      if (hoveredRow) {
+        positionRowHandle(hoveredRow);
+      }
+      if (hoveredCol) {
+        positionColHandle(hoveredCol);
+      }
+    },
+    { passive: true, capture: true }
+  );
 
   rowHandleEl.addEventListener('mousedown', (e) => {
     if (e.button !== 0 || !hoveredRow) {

@@ -45,7 +45,7 @@ Bất kỳ tính năng/thay đổi code nào làm thay đổi **nội dung raw `
 
 ## Quy tắc bắt buộc: Ngôn ngữ output vs. hội thoại
 
-Mọi **output của dự án** — code, comment, tên biến/hàm, chuỗi hiển thị trong UI (webview, toolbar, thông báo lỗi/empty-state...), commit message, tài liệu (`Update History.md`, requirement, docs khác) — **luôn viết bằng tiếng Anh**, không có ngoại lệ.
+Mọi **output của dự án** — code, **toàn bộ comment trong code** (inline comment, block comment, JSDoc/TSDoc, TODO/FIXME, comment trong test...), tên biến/hàm, chuỗi hiển thị trong UI (webview, toolbar, thông báo lỗi/empty-state...), commit message, tài liệu (`Update History.md`, requirement, docs khác) — **luôn viết bằng tiếng Anh**, không có ngoại lệ, kể cả comment ngắn hay ghi chú tạm trong lúc code.
 
 Chỉ **câu trả lời của AI trong khung chat/conversation** với người dùng mới dùng tiếng Việt. Không dịch ngược code/tài liệu sang tiếng Việt vì lý do "cho dễ đọc".
 

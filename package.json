@@ -172,11 +172,6 @@
           "default": "sepia",
           "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
         },
-        "orcaEditor.readability.linkUnderline": {
-          "type": "boolean",
-          "default": false,
-          "description": "Always underline links in Reading Mode (not only on hover) so links are distinguishable without relying on color (WCAG, color-blindness)."
-        },
         "orcaEditor.readability.fontFamily": {
           "type": "string",
           "default": "",
@@ -206,6 +201,7 @@
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
     "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
+    "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test": "npm run test:roundtrip && npm run test:unit",
     "vscode:prepublish": "node esbuild.js --production",

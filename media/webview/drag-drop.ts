@@ -335,14 +335,45 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   content.addEventListener('mousemove', onContentHover);
-  content.addEventListener('mouseleave', () => {
-    if (state === 'idle') {
-      hoveredBlock = null;
-      hoveredLi = null;
-      positionHandle(null);
-      positionLiHandle(null);
+  content.addEventListener('mouseleave', (e: MouseEvent) => {
+    if (state !== 'idle') {
+      return;
     }
+    // The handles live outside #content (appended to document.body, offset to
+    // its left), so moving the cursor onto them fires #content's mouseleave —
+    // don't clear the hover state in that case, only when leaving toward
+    // something unrelated to the handles themselves.
+    const related = e.relatedTarget as Node | null;
+    if (
+      related &&
+      (handleEl.contains(related) ||
+        menuBtnEl.contains(related) ||
+        menuPopupEl.contains(related) ||
+        liHandleEl.contains(related))
+    ) {
+      return;
+    }
+    hoveredBlock = null;
+    hoveredLi = null;
+    positionHandle(null);
+    positionLiHandle(null);
   });
+
+  // Handles use position:fixed + viewport coordinates from
+  // getBoundingClientRect(), recomputed only on mousemove over #content — a
+  // scroll with the mouse stationary otherwise leaves them stuck at the old
+  // position while the block underneath moves.
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (state !== 'idle') {
+        return;
+      }
+      positionHandle(hoveredBlock);
+      positionLiHandle(hoveredLi);
+    },
+    { passive: true, capture: true }
+  );
 
   // ---------------------------------------------------------------------
   // IME guard (F5)

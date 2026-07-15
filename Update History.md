@@ -147,4 +147,30 @@
 | 0.6.10 | 2026-07-15 | Feature (US-17.5, M3): drag reorder list items (nested sub-tree included) and horizontal-drag indent/outdent via native execCommand. |
 | 0.6.10 | 2026-07-15 | Feature (US-17.6, M4): drag images/files from Explorer/Finder into the editor, saved to assets/. Breaking: renamed config orcaEditor.pasteImage.* to orcaEditor.assetsPaste.*, default folder images/ to assets/ (no migration of existing images). |
 | 0.6.10 | 2026-07-15 | Feature (US-17.7, M5): handle menu (Move up/down/to a heading) and TOC-item drag both reorder sections; standalone image paragraphs already draggable via M1, confirmed with a test. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #1): drag handle no longer hides on mouseleave when the cursor moves onto it; only hides when hovering a different block. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #2): block and table row/column drag handles reposition on scroll instead of staying frozen at stale coordinates. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #3): table toolbar gap above the table increased (6→28px) so it no longer overlaps the column drag handle. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #4): table column autofit no longer ratchets wider only — clears stale inline min-width before remeasuring so columns can shrink again. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #5): Focus Mode padding-top is now always reserved instead of toggled by toolbar reveal, removing the layout jump. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #6): TOC font-family now follows the Reading Mode preset, hoisted onto body like the existing font-size/palette pattern. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #7): hyperlinks are always underlined by default now, not only on hover or via Reading Mode's opt-in toggle. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #8): TOC items always wrap to show the full heading text instead of ellipsis-truncating with a tooltip fallback. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #9): pasted image width measurement is now awaited before insert, fixing a race that could drop the width attribute. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.17, bug 0715 #7): link underline color/thickness/weight/background now adapt per reading preset (dyslexia, academic, others); removed dead linkUnderline setting. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #3): pasted images always lost their width (CSP blocked the blob: URL used to measure them); now measured via an already-allowed data: URL instead. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): Reading Mode dropdown now lists 10 curated preset+palette bundles + "Follow VS Code"; hover live-previews the palette colors; removed the separate Color/Palette toolbar control. |
+| 0.6.10 | 2026-07-15 | Tooling: added bmad-quick-dev and bmad-testarch-automate skills (ported from Dev/.cursor/skills) to .claude/skills/ for spec-driven implementation and test-automation workflows. |
 | 0.6.10 | 2026-07-15 | Fix (bug 0715 #2): TOC items truncate with ellipsis + native tooltip instead of wrapping to 2 lines; truncation now tracks the resizable panel width. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18 follow-up): Reading Mode dropdown hover now previews full typography/measure too, not just palette colors; fixed a self-reflow bug by locking each row's font-size inline while the dropdown is open. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): "Follow VS Code" in the Reading Mode dropdown did nothing while Focus/Zen mode was on, since Zen alone keeps reading styling active; disable() now also exits Zen. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): reading style dropdown hover now debounces 120ms before previewing (skip rows the cursor just passes over) and color changes ease in over 0.18s instead of snapping instantly. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): hovering between two rows in the reading style dropdown now transitions directly from the current preview to the new one, instead of snapping back to the committed style first. |
+| 0.6.10 | 2026-07-15 | Feature: scale up main toolbar 1.25x (button/icon/separator size) — was too small, hard to click precisely. |
+| 0.6.10 | 2026-07-15 | Fix: Zen mode toolbar hover-reveal zone now scales with real toolbar height instead of hardcoded 64/120px, easier to hit. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): clicking the main Reading Mode icon to turn it off now reuses disable() (also exits Zen) instead of just flipping `enabled`, which looked like a no-op while Zen was on. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): moved "Follow VS Code" to the top of the Reading Mode dropdown (was last), separated from the 10 style bundles by a divider — faster access to the reset action. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.19): TOC panel now starts below the toolbar instead of overlapping it — toolbar no longer shrinks/gets covered inconsistently between Zen and Normal mode when TOC is open. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.20): Zen/Focus mode is now global across all open .md tabs (session-only, not persisted to Settings) instead of per-tab — toggling it in one tab switches every open tab. |
+| 0.6.10 | 2026-07-15 | Tweak: narrowed the Zen mode toolbar keep-visible hover margin (HIDE_MARGIN_PX 96→76px) per feedback that it was too wide. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.19 revert): TOC panel moved back to top:0 (the below-toolbar fix left its sideBar background not reaching the screen top, looking like a floating box); toolbar now overlaps it via z-index (100→160, above TOC's 150) instead, matching how Zen mode already worked. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.19): "TABLE OF CONTENTS" panel title font-size bumped to H2 scale (11px → 1.5em, matches h2 in markdown.css and scales with the user's configured font size). |

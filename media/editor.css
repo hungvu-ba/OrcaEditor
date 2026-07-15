@@ -279,16 +279,26 @@ body.dd-dragging .dd-handle {
  * flex-wrap: nowrap + overflow: hidden — thay vì để tràn xuống dòng 2 khi
  * cửa sổ hẹp (gây xô lệch layout), các nút cuối dãy được toolbar.ts ẩn dần
  * và gom vào menu "..." (.toolbar-more / .toolbar-overflow-menu). */
+/* Scale-up ratio 1.25x (bug report: toolbar felt too small) — chosen so every
+ * base value (16/24/26/2/4px) lands on a clean integer at ×1.25, keeping
+ * buttons/icons/separators proportional instead of some pieces growing more
+ * than others. */
 #toolbar {
   position: sticky;
   top: 0;
-  z-index: 100;
+  /* 160, không phải 100: phải LỚN HƠN #toc-panel (150) để toolbar (full-width,
+   * xem `body.toc-open #toolbar` dưới) đè lên đúng dải trên cùng của TOC khi
+   * TOC mở — TOC nhờ vậy giữ `top: 0` (nền sideBar chạy hết lên đỉnh màn hình,
+   * không hở), toolbar chỉ đơn giản "nằm trên" TOC ở phần chồng lấn, giống
+   * title bar nằm trên sidebar — vẫn thấp hơn table-toolbar/img-zoom (200+)
+   * nên không đụng các overlay nổi trong #content. */
+  z-index: 160;
   display: flex;
   flex-wrap: nowrap;
   overflow: hidden;
   align-items: center;
-  gap: 2px;
-  padding: 4px 0;
+  gap: 3px;
+  padding: 5px 0;
   margin: 0 -26px 8px;
   padding-left: 26px;
   padding-right: 26px;
@@ -302,11 +312,11 @@ body.dd-dragging .dd-handle {
   align-items: center;
   justify-content: center;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
-  min-width: 26px;
-  height: 24px;
-  padding: 0 6px;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
@@ -314,8 +324,14 @@ body.dd-dragging .dd-handle {
   cursor: pointer;
 }
 
+/* Icon markup is hand-drawn at a fixed 16×16 viewBox (see svgIcon() in
+ * dom-utils.ts) — overriding the display size here (vector, so it stays
+ * crisp) keeps every icon in sync with the button scale-up without having to
+ * edit each icon definition individually. */
 #toolbar button svg {
   display: block;
+  width: 20px;
+  height: 20px;
   pointer-events: none;
 }
 
@@ -332,12 +348,12 @@ body.dd-dragging .dd-handle {
 #toolbar .toolbar-sep {
   flex-shrink: 0;
   width: 1px;
-  height: 16px;
-  margin: 0 4px;
+  height: 20px;
+  margin: 0 5px;
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-/* Tooltip tự vẽ cho nút toolbar — xem showTooltip() trong toolbar.ts. */
+/* Tooltip tự vẽ dùng chung (nút toolbar, mục TOC bị cắt...) — xem showTooltip() trong tooltip.ts. */
 #toolbar-tooltip {
   position: fixed;
   display: none;
@@ -383,6 +399,15 @@ body.dd-dragging .dd-handle {
   border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* Vạch chia giữa các nhóm hàng trong dropdown (vd Reading Mode: "Follow VS
+ * Code" tách khỏi 10 bundle bên dưới, xem ToolbarDropdownEntry.separatorBefore
+ * trong toolbar.ts) — cùng kiểu với `.dd-menu-sep`. */
+.toolbar-popover-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
 }
 
 .toolbar-popover-item {
@@ -469,9 +494,9 @@ body.dd-dragging .dd-handle {
   align-items: center;
   justify-content: center;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
-  height: 24px;
+  height: 30px;
   border: none;
   background: transparent;
   color: var(--vscode-foreground);
@@ -479,18 +504,20 @@ body.dd-dragging .dd-handle {
 }
 
 #toolbar .split-main {
-  min-width: 20px;
-  padding: 0 6px;
+  min-width: 25px;
+  padding: 0 8px;
 }
 
 #toolbar .split-caret {
-  min-width: 16px;
-  padding: 0 3px;
+  min-width: 20px;
+  padding: 0 4px;
 }
 
 #toolbar .split-main svg,
 #toolbar .split-caret svg {
   display: block;
+  width: 20px;
+  height: 20px;
   pointer-events: none;
 }
 
@@ -502,7 +529,7 @@ body.dd-dragging .dd-handle {
 #toolbar .split-divider {
   flex-shrink: 0;
   width: 1px;
-  margin: 4px 0;
+  margin: 5px 0;
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
@@ -1224,9 +1251,21 @@ body.toc-open #select-viewport-band {
   --toc-width: 300px;
 }
 
-/* Chừa chỗ cho panel: nội dung không bị che sau mục lục. Toolbar (margin -26px)
- * nhờ đó kết thúc đúng ở mép trái panel. */
+/* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục. */
 body.toc-open {
+  padding-right: calc(26px + var(--toc-width));
+}
+
+/* Toolbar bù lại margin/padding phải để LUÔN tràn hết viewport bất kể TOC mở
+ * hay đóng — full-width (thay vì co hẹp dừng trước panel như bản cũ) để
+ * z-index 160 (> #toc-panel 150, xem #toolbar) thật sự có chỗ đè lên dải trên
+ * cùng của TOC; nếu toolbar vẫn co hẹp thì không có phần chồng lấn nào để
+ * z-index phân xử. Trước đây chỉ normal mode co hẹp theo --toc-width, Zen
+ * mode (#toolbar position:fixed, bỏ qua padding của body) KHÔNG co — 2 mode
+ * dài toolbar khác nhau khi mở TOC, gây confuse; bỏ hẳn việc co hẹp để cả 2
+ * mode nhất quán full-width. */
+body.toc-open #toolbar {
+  margin-right: calc(-26px - var(--toc-width));
   padding-right: calc(26px + var(--toc-width));
 }
 
@@ -1243,6 +1282,14 @@ body.toc-open #select-overview {
   right: var(--toc-width);
 }
 
+/* top: 0 (không phải var(--toolbar-height)) — bản trước từng đẩy panel xuống
+ * dưới toolbar để tránh chồng lấn, nhưng khiến nền sideBar hở hẳn 1 dải trống
+ * phía trên (không tới đỉnh màn hình), trông như hộp nổi lơ lửng thay vì
+ * sidebar liền mạch (bug report kèm ảnh chụp). Quay lại top:0 — nền sideBar
+ * chạy hết lên đỉnh; z-index 150 < #toolbar (160) nên đoạn chồng lấn (dải
+ * trên cùng, cao = toolbarHeight) bị toolbar (full-width, opaque) đè lên,
+ * giống title bar nằm trên sidebar — không hở, không cần né chồng lấn theo
+ * cách "ai đứng dưới ai" nữa vì giờ LUÔN toolbar thắng ở cả 2 mode. */
 #toc-panel {
   position: fixed;
   top: 0;
@@ -1294,7 +1341,9 @@ body.toc-resizing {
 }
 
 #toc-title {
-  font-size: 11px;
+  /* H2 level (markdown.css: h2 { font-size: 1.5em }) — `em` (not a fixed px)
+   * nên vẫn tỉ lệ đúng theo --markdown-font-size nếu user đổi cỡ chữ preview. */
+  font-size: 1.5em;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1726,24 +1775,27 @@ body.reading-zen.reading-zen-reveal #toolbar {
   /* Lớp phủ tạm nổi trên nội dung — shadow để đọc ra là chủ đích, không phải vỡ layout. */
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
-/* Toolbar overlay không chiếm chỗ → nếu để nguyên, khi reveal nó CHE dòng đầu
- * tài liệu mà không cuộn lên được (đã ở scrollTop=0). Chỉ chừa padding (đẩy chữ
- * xuống, trượt cùng nhịp 0.2s với toolbar) khi reveal xảy ra Ở GẦN ĐỈNH —
- * .reading-zen-reveal-push do readability.ts thêm kèm reveal khi scrollY còn
- * trong vùng toolbar che mà không cuộn thoát được. Reveal giữa tài liệu chỉ phủ
- * tạm lên chữ (cuộn được bình thường), KHÔNG đẩy layout — giảm số lần xê dịch
- * content. Ẩn toolbar thì padding về 0, không có khoảng trắng thừa. */
+/* Toolbar overlay không chiếm chỗ trong flow (position: fixed) → nếu #content
+ * không tự chừa trước khoảng đó, mỗi lần reveal/hide sẽ phải đổi padding-top
+ * kèm animation, gây giật layout (bug: padding "nhảy" theo lúc hé lộ). Chừa
+ * SẴN khoảng trắng bằng chiều cao toolbar NGAY KHI vào Zen — hằng định suốt
+ * lúc Zen bật, không phụ thuộc trạng thái reveal — để toolbar chỉ overlay đè
+ * lên vùng đã chừa (transform riêng của nó), không đụng tới padding-top nữa. */
 body.reading-zen #content {
-  transition: padding-top 0.2s ease;
-}
-body.reading-zen.reading-zen-reveal-push #content {
   padding-top: calc(var(--toolbar-height, 48px) + 8px);
 }
 /* Bug 0715: lúc mở tab, state seed từ host (readability.applyFromHost) phải áp
  * TỨC THỜI — không chạy animation trượt toolbar/đẩy padding; animation chỉ dành
  * cho user bấm nút Focus/rê chuột. Class thêm trước apply(), gỡ sau khi paint. */
+body.reading-no-anim,
 body.reading-no-anim #toolbar,
-body.reading-no-anim #content {
+body.reading-no-anim #content,
+body.reading-no-anim #content a,
+body.reading-no-anim #content pre,
+body.reading-no-anim #content :not(pre) > code,
+body.reading-no-anim #content blockquote,
+body.reading-no-anim #content th,
+body.reading-no-anim #content td {
   transition: none !important;
 }
 body.reading-zen #line-gutter {
@@ -1766,6 +1818,15 @@ body.reading-zen.md-line-numbers #toolbar {
  * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
 body.reading-mode .toc-item {
   font-size: var(--reading-ui-font-size, 13px);
+}
+/* Bug fix: TOC font-family didn't follow the reading preset/free-text font
+ * override — #toc-panel is a sibling of #content (appended to document.body,
+ * see toc.ts), so --reading-font-override set inline on #content never
+ * reached it. readability.ts now also hoists --reading-font-override onto
+ * <body>; --reading-ui-font-family (markdown.css) covers the per-preset stack. */
+body.reading-mode #toc-panel,
+body.reading-mode .toc-item {
+  font-family: var(--reading-font-override, var(--reading-ui-font-family, inherit));
 }
 body.reading-mode .toolbar-popover-item {
   font-size: var(--reading-ui-font-size, 12px);
@@ -1923,7 +1984,7 @@ body[class*='reading-palette-'] .cross-file-search-group-header:hover {
   background: var(--rp-chrome-hover);
 }
 
-/* Toast góc phải (cảnh báo lưu HTML...) + tooltip hover nút toolbar */
+/* Toast góc phải (cảnh báo lưu HTML...) + tooltip hover (toolbar/TOC) */
 body[class*='reading-palette-'] #wysiwyg-toast,
 body[class*='reading-palette-'] #toolbar-tooltip {
   background: var(--rp-elev-bg);

@@ -33,15 +33,17 @@ export type ReadingPalette = 'followTheme' | 'light' | 'dark' | 'sepia' | 'highC
 
 /**
  * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host CHỈ dùng để gửi giá trị
- * seed ban đầu (đọc từ `orcaEditor.readability.*`) trong 'init'; sau đó trạng
- * thái là per-tab, session-only ở webview (bug 0715 mục 4) — không persist ngược
- * về config. Webview áp bằng CSS var/class, KHÔNG đụng nội dung `.md`.
+ * seed ban đầu (đọc từ `orcaEditor.readability.*`) trong 'init'; sau đó
+ * `enabled`/`preset`/`palette`/`fontFamily` là per-tab, session-only ở webview
+ * (bug 0715 mục 4) — không persist ngược về config. `zen` là NGOẠI LỆ
+ * (US-19.19): global-in-memory ở host, đổi ở 1 tab lan sang mọi tab .md đang
+ * mở qua message `zenChanged` (webview áp bằng CSS var/class, KHÔNG đụng nội
+ * dung `.md`).
  */
 export interface ReadabilityConfig {
   enabled: boolean;
   preset: ReadingPreset;
   palette: ReadingPalette;
-  linkUnderline: boolean;
   fontFamily: string;
   zen: boolean;
 }
@@ -121,12 +123,12 @@ export type WebviewToHost =
    */
   | { type: 'dropFile'; requestId: number; name: string; dataBase64: string }
   /**
-   * US-19.11 (bug 0715 mục 3): user đổi reading palette trên toolbar. Palette là
-   * lớp theme GLOBAL cho mọi tab .md — host ghi `orcaEditor.readability.palette`
-   * ở scope Global, rồi onDidChangeConfiguration bơm palette mới xuống mọi
-   * webview qua `configUpdate.palette`. Khác Reading Mode/Zen (per-tab, không
-   * gửi lên host). */
-  | { type: 'setReadingPalette'; palette: ReadingPalette };
+   * US-19.19: Zen/Focus mode vừa đổi ở TAB NÀY — host giữ lại làm state
+   * global-in-memory (KHÔNG persist Settings) rồi phát cho MỌI panel .md
+   * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Khác
+   * preset/palette/enabled (vẫn per-tab, session-only — US-19.18).
+   */
+  | { type: 'zenChanged'; zen: boolean };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -146,13 +148,7 @@ export type HostToWebview =
     }
   | { type: 'update'; text: string }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
-  /**
-   * `palette` (US-19.11): reading palette hiện tại đọc từ config Global — bơm cho
-   * MỌI tab .md để đồng bộ theme (bug 0715 mục 3). Đây là NGOẠI LỆ có chủ đích so
-   * với "không broadcast readability qua configUpdate": chỉ riêng palette đi
-   * global, còn enabled/preset/zen vẫn per-tab (không nằm trong message này).
-   */
-  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean; palette: ReadingPalette }
+  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean }
   /**
    * C4: `usedFallback` = true khi host đã âm thầm hạ một truy vấn Whole Word 0
    * kết quả xuống substring cho chính response này — webview hiện thông báo +
@@ -164,4 +160,6 @@ export type HostToWebview =
   /** Kết quả lưu ảnh dán từ clipboard — relativePath thiếu khi lưu thất bại (kèm error để hiện toast). */
   | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string }
   /** Kết quả lưu file kéo thả (US-17.6, M4) — cùng hình dạng với pasteImageResult. */
-  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string };
+  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string }
+  /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | { type: 'zenChanged'; zen: boolean };

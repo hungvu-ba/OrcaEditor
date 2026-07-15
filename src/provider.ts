@@ -80,6 +80,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
 
   /**
+   * US-19.19: Zen/Focus mode giờ là trạng thái GLOBAL (khác enabled/preset/
+   * palette — vẫn per-tab, US-19.18) — bật/tắt ở 1 tab lan sang MỌI tab .md
+   * đang mở. `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
+   * theo `orcaEditor.readability.zen` như cũ. Chỉ sống trong bộ nhớ process
+   * (KHÔNG ghi persist Settings — Zen là "phiên tập trung" tạm thời, không
+   * nên tự động bật lại mỗi khi mở lại VS Code); tắt/mở lại VS Code thì về
+   * đúng default trong settings.json.
+   */
+  private globalZen: boolean | undefined;
+
+  /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
    * (panel .md CHƯA tồn tại), đọc + xoá đúng 1 lần khi resolveCustomTextEditor
    * gửi message 'init' cho document đó. Dùng một lần: nếu không xoá ngay, mở
@@ -87,6 +98,32 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * cũ.
    */
   private pendingReveal = new Map<string, { line: number; character: number; length: number; matchText?: string }>();
+
+  /**
+   * US-19.19: đọc ReadabilityConfig từ settings.json rồi ghi đè `zen` bằng
+   * `globalZen` (nếu đã có tab nào đổi trong phiên này) — dùng ở CẢ bake HTML
+   * lúc first paint LẪN message 'init', để tab mới mở luôn khớp trạng thái
+   * Zen hiện tại của mọi tab khác thay vì lúc nào cũng đọc lại default tĩnh.
+   */
+  private resolveReadability(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
+    const readability = readReadabilityConfig(cfg);
+    return this.globalZen === undefined ? readability : { ...readability, zen: this.globalZen };
+  }
+
+  /**
+   * US-19.19: gửi Zen mới cho MỌI panel .md đang mở (mọi uri), trừ panel vừa
+   * tự đổi (đã apply cục bộ rồi, gửi lại sẽ là round-trip thừa vô hại nhưng
+   * không cần thiết).
+   */
+  private broadcastZen(zen: boolean, exclude: vscode.WebviewPanel): void {
+    for (const panels of this.panelsByUri.values()) {
+      for (const panel of panels) {
+        if (panel !== exclude) {
+          void panel.webview.postMessage({ type: 'zenChanged', zen } satisfies HostToWebview);
+        }
+      }
+    }
+  }
 
   /** Kênh log dùng chung — tạo một lần, dùng cho các lỗi bị nuốt ở catch rộng. */
   private static outputChannel: vscode.OutputChannel | undefined;
@@ -136,8 +173,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     webview.options = { enableScripts: true, localResourceRoots };
     // Bug 0715 (US-19.9): bake sẵn trạng thái đọc vào HTML để first paint đã
     // đúng — mở tab khi Zen bật thì toolbar phải ẩn NGAY từ đầu, không hiện ra
-    // rồi trượt lên (animation trượt chỉ dành cho user bấm nút Focus).
-    const initialReadability = readReadabilityConfig(
+    // rồi trượt lên (animation trượt chỉ dành cho user bấm nút Focus). Zen
+    // dùng resolveReadability (US-19.19: global) để tab mới mở khớp Zen hiện
+    // tại của các tab khác, không chỉ default tĩnh trong settings.json.
+    const initialReadability = this.resolveReadability(
       vscode.workspace.getConfiguration('orcaEditor', document.uri)
     );
     webview.html = this.getHtml(webview, documentDir, initialReadability);
@@ -194,15 +233,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
-      // KHÔNG gửi enabled/preset/zen qua configUpdate: trạng thái đọc per-tab,
-      // session-only (bug 0715 mục 4) — chỉ seed 1 lần lúc 'init'. NGOẠI LỆ:
-      // palette là theme GLOBAL (US-19.11, bug 0715 mục 3) → bơm palette hiện tại
-      // cho mọi tab để đồng bộ màu; webview chỉ áp palette, không đụng state khác.
+      // KHÔNG gửi enabled/preset/palette/zen qua configUpdate: enabled/preset/
+      // palette per-tab, session-only (bug 0715 mục 4; US-19.18 đưa palette
+      // vào cùng vòng đời này) — chỉ seed 1 lần lúc 'init'. zen giờ global
+      // (US-19.19) nhưng vẫn không gửi qua ĐÂY — kênh này chỉ phát khi user
+      // đổi orcaEditor.* trong Settings, zen có kênh broadcast runtime riêng
+      // (xem case 'zenChanged').
       void postToWebview({
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
         showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
-        palette: wysiwygCfg.get<ReadingPalette>('readability.palette', 'sepia'),
       });
     });
 
@@ -236,7 +276,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
-              readability: readReadabilityConfig(wysiwygCfg),
+              readability: this.resolveReadability(wysiwygCfg),
             },
           });
           break;
@@ -293,13 +333,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({ type: 'dropFileResult', requestId: msg.requestId, ...result });
           break;
         }
-        case 'setReadingPalette': {
-          // US-19.11 (bug 0715 mục 3): palette là theme GLOBAL cho mọi tab .md.
-          // Ghi Global → onDidChangeConfiguration ở MỌI panel bắn configUpdate
-          // (kèm palette) xuống webview tương ứng → tất cả tab đồng bộ.
-          await vscode.workspace
-            .getConfiguration('orcaEditor', document.uri)
-            .update('readability.palette', msg.palette, vscode.ConfigurationTarget.Global);
+        case 'zenChanged': {
+          // US-19.19: Zen giờ global — nhớ trong bộ nhớ process (seed tab mới
+          // mở sau đó) rồi phát cho mọi panel .md khác đang mở.
+          this.globalZen = msg.zen;
+          this.broadcastZen(msg.zen, webviewPanel);
           break;
         }
       }
@@ -1258,8 +1296,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),
-      ...(readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
-      ...(stylingActive && readability.linkUnderline ? ['reading-link-underline'] : []),
+      // US-19.18: palette giờ gate theo stylingActive giống preset (không còn
+      // là lớp GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
+      ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
     ].join(' ');
     const contentClasses = stylingActive ? `reading-preset-${readability.preset}` : '';
 
@@ -1303,7 +1342,6 @@ function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityC
     enabled: cfg.get<boolean>('readability.enabled', true),
     preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
     palette: READING_PALETTES.includes(palette) ? palette : 'sepia',
-    linkUnderline: cfg.get<boolean>('readability.linkUnderline', false),
     fontFamily: cfg.get<string>('readability.fontFamily', ''),
     zen: cfg.get<boolean>('readability.zen', false),
   };

@@ -79,16 +79,15 @@ const externalDrop = initExternalDrop(content, { vscode, pasteImage, insertMarkd
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
-// Reading Mode (US-19.x) — controller lái CSS class/var. State per-tab, session-
-// only (bug 0715 mục 4): sống trong webview instance này, KHÔNG persist về host.
+// Reading Mode (US-19.x) — controller lái CSS class/var. enabled/preset/palette
+// per-tab, session-only (bug 0715 mục 4): sống trong webview instance này,
+// KHÔNG persist về host. zen là ngoại lệ global (US-19.19, xem onZenChange).
 const readability = initReadability({
   content,
   syncButtons: syncReadingButtons,
-  // US-19.11 (bug 0715 mục 3): palette là theme GLOBAL — báo host ghi config +
-  // đồng bộ mọi tab .md. Reading Mode/Zen vẫn per-tab (không gửi lên host).
-  onPaletteChange: (palette) => vscode.postMessage({ type: 'setReadingPalette', palette }),
   // Zen reveal không được ẩn toolbar khi đang mở dropdown (xem ReadabilityDeps).
   isPopoverOpen,
+  onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
 });
 initImageZoom(content);
 initToolbar(content, toolbarEl, {
@@ -222,10 +221,11 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'configUpdate': {
-      // Reading Mode/preset/zen KHÔNG áp qua configUpdate: state per-tab,
-      // session-only (bug 0715 mục 4). NGOẠI LỆ: palette là theme GLOBAL
-      // (US-19.11, bug 0715 mục 3) → luôn đồng bộ theo host cho mọi tab .md.
-      readability.applyPaletteFromHost(msg.palette);
+      // Reading Mode/preset/palette KHÔNG áp qua configUpdate: state per-tab,
+      // session-only (bug 0715 mục 4; US-19.18 đưa palette vào cùng vòng đời
+      // này). Zen cũng không áp qua đây dù giờ global (US-19.19) — nó có kênh
+      // broadcast riêng ('zenChanged'), configUpdate chỉ phát khi user đổi
+      // orcaEditor.* trong Settings, không phải lúc runtime toggle.
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       if (lineNumbersEnabled) {
@@ -238,6 +238,12 @@ window.addEventListener('message', (event) => {
         syncTocButton();
       }
       lastAutoOpenToc = msg.autoOpenToc;
+      break;
+    }
+    case 'zenChanged': {
+      // US-19.19: Zen vừa đổi ở TAB KHÁC, host broadcast lại — chỉ apply cục
+      // bộ (applyZenFromHost không gọi lại onZenChange, tránh vòng lặp).
+      readability.applyZenFromHost(msg.zen);
       break;
     }
   }
