@@ -1338,15 +1338,6 @@ body.toc-resizing {
   background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.12));
 }
 
-/* Mục đang hover/đang đọc bung đủ chữ (wrap nhiều dòng) thay vì cắt "…" —
- * bù cho trường hợp heading dài hơn cả bề rộng panel. */
-.toc-item:hover,
-.toc-item.active {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-}
-
 .toc-level-1 { padding-left: 14px; font-weight: 600; }
 .toc-level-2 { padding-left: 26px; }
 .toc-level-3 { padding-left: 38px; }
