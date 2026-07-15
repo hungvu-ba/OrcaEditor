@@ -221,6 +221,62 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
   return cell.closest('table');
 }
 
+/** Class tạm dùng để đo bề rộng tự nhiên (không wrap) của ô — xem markdown.css. */
+const MEASURE_CLASS = 'md-table-col-fit-measuring';
+
+/**
+ * Co từng cột về vừa nội dung khi nội dung ngắn hơn sàn 14ch mặc định (thay vì
+ * mọi cột đều bị ép rộng bằng cột dài nhất — bug report 2026-07-15, ảnh bảng
+ * nghiệp vụ với cột "#" rộng bằng cột "Mô tả"). Với mỗi cột: đo bề rộng tự
+ * nhiên (1 dòng, không wrap) của ô rộng nhất trong cột, rồi ghi min-width =
+ * nhỏ hơn giữa sàn CSS 14ch và bề rộng đó — cột ngắn co vừa nội dung, cột dài
+ * vẫn giữ sàn 14ch (chống wrap vụn thành "2 ký tự × N dòng", US-19.3).
+ */
+export function fitTableColumns(table: HTMLTableElement): void {
+  const rows = Array.from(table.rows);
+  if (rows.length === 0) {
+    return;
+  }
+
+  // Sàn CSS (14ch + padding + box model hiện tại) đo qua 1 <td> rỗng tạm thêm
+  // vào bảng — hưởng ĐÚNG CSS mặc định (th,td { min-width: 14ch }) nên khỏi
+  // phải tính lại padding/box-sizing thủ công.
+  const probeRow = document.createElement('tr');
+  probeRow.style.visibility = 'hidden';
+  probeRow.appendChild(document.createElement('td'));
+  (table.tBodies[0] ?? table).appendChild(probeRow);
+  const floorPx = probeRow.cells[0].getBoundingClientRect().width;
+  probeRow.remove();
+  if (!(floorPx > 0)) {
+    return; // không đo được (bảng đang ẩn...) — giữ nguyên sàn CSS mặc định
+  }
+
+  // Bề rộng tự nhiên từng cột — gỡ tạm sàn/trần + cấm wrap (đồng bộ, không
+  // nháy hình vì chưa có khung hình nào vẽ ra giữa lúc thêm/gỡ class).
+  table.classList.add(MEASURE_CLASS);
+  const colCount = Math.max(...rows.map((r) => r.cells.length));
+  const naturalByCol: number[] = new Array(colCount).fill(0);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      const w = row.cells[i].getBoundingClientRect().width;
+      if (w > naturalByCol[i]) {
+        naturalByCol[i] = w;
+      }
+    }
+  }
+  table.classList.remove(MEASURE_CLASS);
+
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      const cell = row.cells[i];
+      // box-sizing:border-box để giá trị px ghi vào khớp đúng bề rộng đã đo
+      // (getBoundingClientRect trả border-box), không bị cộng thêm padding/viền.
+      cell.style.boxSizing = 'border-box';
+      cell.style.minWidth = `${Math.ceil(Math.min(floorPx, naturalByCol[i]))}px`;
+    }
+  }
+}
+
 function emptyCell(tag: 'td' | 'th'): HTMLTableCellElement {
   const el = document.createElement(tag);
   el.appendChild(document.createElement('br')); // placeholder để đặt được caret
@@ -255,7 +311,7 @@ function insertRow(cell: HTMLTableCellElement, where: 'above' | 'below', focusCo
     col = 1; // ô số thứ tự đã được điền sẵn — đưa caret sang ô nhập liệu kế tiếp
   }
   ctx.dom.placeCaretIn(newRow.cells[col]);
-  afterTableEdit();
+  afterTableEdit(table);
 }
 
 function insertColumn(cell: HTMLTableCellElement, where: 'left' | 'right'): void {
@@ -284,7 +340,7 @@ function insertColumn(cell: HTMLTableCellElement, where: 'left' | 'right'): void
       ctx.dom.placeCaretIn(targetRow.cells[index]);
     }
   }
-  afterTableEdit();
+  afterTableEdit(table);
 }
 
 function deleteRow(cell: HTMLTableCellElement): void {
@@ -324,7 +380,7 @@ function deleteRow(cell: HTMLTableCellElement): void {
       ctx.dom.placeCaretIn(next.cells[Math.min(cell.cellIndex, next.cells.length - 1)]);
     }
   }
-  afterTableEdit();
+  afterTableEdit(table);
 }
 
 function deleteColumn(cell: HTMLTableCellElement): void {
@@ -347,7 +403,7 @@ function deleteColumn(cell: HTMLTableCellElement): void {
   if (row) {
     ctx.dom.placeCaretIn(row.cells[Math.min(index, row.cells.length - 1)]);
   }
-  afterTableEdit();
+  afterTableEdit(table);
 }
 
 function deleteTable(cell: HTMLTableCellElement): void {
@@ -383,7 +439,10 @@ export function navigateCells(cell: HTMLTableCellElement, dir: 1 | -1): void {
   ctx.dom.placeCaretIn(cells[next], true);
 }
 
-function afterTableEdit(): void {
+function afterTableEdit(table?: HTMLTableElement): void {
+  if (table) {
+    fitTableColumns(table);
+  }
   ctx.scheduleSync();
   updateTableToolbar();
 }
@@ -495,5 +554,8 @@ export function insertTable(): void {
   const firstCell = table?.querySelector('th, td');
   if (firstCell) {
     ctx.dom.placeCaretIn(firstCell, true);
+  }
+  if (table) {
+    fitTableColumns(table);
   }
 }

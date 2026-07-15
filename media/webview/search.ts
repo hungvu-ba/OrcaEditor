@@ -12,6 +12,7 @@
  */
 
 import { INPUT_DEBOUNCE_MS, REFRESH_DEBOUNCE_MS } from './constants';
+import { scrollBehavior } from './dom-utils';
 import {
   buildOverviewTicks,
   collectHaystack,
@@ -269,7 +270,7 @@ export function initSearch(content: HTMLElement): SearchController {
     const topGuard = (toolbar?.offsetHeight ?? 0) + 60;
     if (rect.top < topGuard || rect.bottom > window.innerHeight - 40) {
       const target = window.scrollY + rect.top - window.innerHeight / 2;
-      window.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+      window.scrollTo({ top: Math.max(0, target), behavior: scrollBehavior() });
     }
   }
 

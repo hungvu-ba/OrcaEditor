@@ -18,6 +18,34 @@ export interface FileSuggestion {
 /** Phạm vi tìm xuyên file (setting `orcaEditor.crossFileSearch.scope`). */
 export type CrossFileSearchScope = 'markdown' | 'allFiles';
 
+/**
+ * Preset đọc (US-19.1) — mỗi preset gói measure + line-height + font.
+ * `academic` (US-19.15) = look bài luận serif kiểu ai-2027.com (cột hẹp, serif
+ * cổ điển, giãn dòng rộng); ghép đẹp nhất với palette `paper`.
+ */
+export type ReadingPreset = 'comfortable' | 'default' | 'compact' | 'dyslexia' | 'academic';
+
+/**
+ * Bảng màu đọc (US-19.5) — `followTheme` = kế thừa theme VS Code (mặc định).
+ * `paper` (US-19.15) = nền kem trắng ấm #fffff8 + chữ gần-đen kiểu ai-2027.com.
+ */
+export type ReadingPalette = 'followTheme' | 'light' | 'dark' | 'sepia' | 'highContrast' | 'paper';
+
+/**
+ * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host CHỈ dùng để gửi giá trị
+ * seed ban đầu (đọc từ `orcaEditor.readability.*`) trong 'init'; sau đó trạng
+ * thái là per-tab, session-only ở webview (bug 0715 mục 4) — không persist ngược
+ * về config. Webview áp bằng CSS var/class, KHÔNG đụng nội dung `.md`.
+ */
+export interface ReadabilityConfig {
+  enabled: boolean;
+  preset: ReadingPreset;
+  palette: ReadingPalette;
+  linkUnderline: boolean;
+  fontFamily: string;
+  zen: boolean;
+}
+
 /** Một match tìm thấy trong 1 file, kèm snippet ngữ cảnh ~1 dòng trước/sau. */
 export interface CrossFileMatch {
   /** Dòng chứa match (0-based), dùng để mở file đúng vị trí. */
@@ -66,6 +94,8 @@ export interface InitConfig {
   showLineNumbers: boolean;
   /** Giá trị mặc định ban đầu của dropdown scope trong popover tìm xuyên file. */
   crossFileSearchScope: CrossFileSearchScope;
+  /** Trạng thái Reading Mode ban đầu (US-19.x). */
+  readability: ReadabilityConfig;
 }
 
 /** Message webview → host (discriminated theo `type`). */
@@ -81,7 +111,14 @@ export type WebviewToHost =
   /** relativePath: có khi bấm "+N match khác trong file này" (GĐ4) — Search panel chỉ hiện kết quả đúng file đó thay vì toàn scope. */
   | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope; relativePath?: string }
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
-  | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string };
+  | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string }
+  /**
+   * US-19.11 (bug 0715 mục 3): user đổi reading palette trên toolbar. Palette là
+   * lớp theme GLOBAL cho mọi tab .md — host ghi `orcaEditor.readability.palette`
+   * ở scope Global, rồi onDidChangeConfiguration bơm palette mới xuống mọi
+   * webview qua `configUpdate.palette`. Khác Reading Mode/Zen (per-tab, không
+   * gửi lên host). */
+  | { type: 'setReadingPalette'; palette: ReadingPalette };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -101,7 +138,13 @@ export type HostToWebview =
     }
   | { type: 'update'; text: string }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
-  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean }
+  /**
+   * `palette` (US-19.11): reading palette hiện tại đọc từ config Global — bơm cho
+   * MỌI tab .md để đồng bộ theme (bug 0715 mục 3). Đây là NGOẠI LỆ có chủ đích so
+   * với "không broadcast readability qua configUpdate": chỉ riêng palette đi
+   * global, còn enabled/preset/zen vẫn per-tab (không nằm trong message này).
+   */
+  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean; palette: ReadingPalette }
   /**
    * C4: `usedFallback` = true khi host đã âm thầm hạ một truy vấn Whole Word 0
    * kết quả xuống substring cho chính response này — webview hiện thông báo +

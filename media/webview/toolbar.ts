@@ -17,12 +17,20 @@ import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
+import {
+  READING_PALETTE_LABELS,
+  READING_PRESET_LABELS,
+  type ReadabilityController,
+} from './readability';
+import type { ReadingPalette, ReadingPreset } from '../../src/shared/messages';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
   scheduleSync: () => void;
   dom: DomHelpers;
   toc: TocController;
+  /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
+  readability: ReadabilityController;
   promptInput: PromptController['promptInput'];
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
   insertMarkdown: (text: string) => void;
@@ -40,6 +48,27 @@ const TOC_ICON = svgIcon(
   `<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.75" ${FMT_STROKE}/>` +
     `<path d="M9.75 2.75v10.5" ${FMT_STROKE}/>` +
     '<path d="M3.75 6.25h3.5M3.75 8.75h3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.55"/>'
+);
+
+/** Icon Reading Mode (US-19.1): quyển sách mở — gợi chế độ đọc. */
+const READING_ICON = svgIcon(
+  `<path d="M8 4.3C6.4 3.3 4.1 3.1 2.5 3.5v8.1C4.1 11.2 6.4 11.4 8 12.4" ${FMT_STROKE}/>` +
+    `<path d="M8 4.3C9.6 3.3 11.9 3.1 13.5 3.5v8.1C11.9 11.2 9.6 11.4 8 12.4" ${FMT_STROKE}/>` +
+    `<path d="M8 4.3v8.1" ${FMT_STROKE}/>`
+);
+
+/** Icon Zen / Focus (US-19.9): 4 góc khung — gợi tập trung vào cột chữ giữa. */
+const ZEN_ICON = svgIcon(
+  `<path d="M2.75 5.5v-2.75h2.75M13.25 5.5v-2.75h-2.75M2.75 10.5v2.75h2.75M13.25 10.5v2.75h-2.75" ${FMT_STROKE}/>`
+);
+
+/** Icon palette đọc (US-19.10): vòng tròn màu — gợi chọn bảng màu đọc. */
+const PALETTE_ICON = svgIcon(
+  `<circle cx="8" cy="8" r="5.25" ${FMT_STROKE}/>` +
+    '<circle cx="8" cy="4.9" r="0.95" fill="currentColor" stroke="none"/>' +
+    '<circle cx="10.9" cy="7.4" r="0.95" fill="currentColor" stroke="none"/>' +
+    '<circle cx="9.6" cy="10.8" r="0.95" fill="currentColor" stroke="none"/>' +
+    '<circle cx="5.1" cy="7.4" r="0.95" fill="currentColor" stroke="none"/>'
 );
 
 /** Icon clipboard có ký tự @ — copy @file cho chat Claude Code. */
@@ -159,6 +188,12 @@ interface ToolbarDropdownEntry {
   /** Nhãn nhỏ đánh dấu lựa chọn phổ biến/mặc định (vd. "Phổ biến"). */
   badge?: string; // EN only (bug report 2026-07-14, mục 7) — vd "Common"
   action: () => void;
+  /**
+   * Giá trị định danh hàng (vd. tên palette) — gán vào `data-dropdown-value` để
+   * đồng bộ dấu chọn "đang áp" (US-19.10, xem syncReadingButtons). Không có →
+   * hàng không mang trạng thái chọn (đa số dropdown hành-động-1-lần).
+   */
+  value?: string;
 }
 
 interface ToolbarItem {
@@ -189,6 +224,12 @@ interface ToolbarItem {
   dropdown?: ToolbarDropdownEntry[];
   /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
   dropdownTitle?: string;
+  /**
+   * true → mặt chính của split-button MỞ dropdown thay vì chạy `action` (nút
+   * kiểu "menu chọn 1 trong N" không có hành vi mặc định rõ ràng, vd chọn
+   * palette đọc US-19.10). Mặc định (false) giữ hành vi cũ: mặt chính = action.
+   */
+  mainOpensDropdown?: boolean;
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -199,6 +240,51 @@ function updateTocButton(): void {
 /** Gọi từ ngoài (main.ts) sau khi tự mở mục lục theo cấu hình lúc khởi tạo. */
 export function syncTocButton(): void {
   updateTocButton();
+}
+
+/**
+ * Đồng bộ trạng thái "đang bật" của nút Reading Mode + Zen (US-19.1/19.9) —
+ * gọi từ readability controller mỗi khi state đổi (id nằm trên split-main của
+ * Reading Mode, trên chính <button> của Zen). Chỉ gọi sau initToolbar (từ
+ * readability controller) nên ctx luôn đã gán.
+ */
+export function syncReadingButtons(): void {
+  // Preset 'default' = "follow VS Code" (trung tính) → KHÔNG coi là đã chọn: nút
+  // chính không sáng `.active` và không hàng nào trong dropdown mang dấu ✓ (giống
+  // followTheme của palette). Chỉ preset thực (comfortable/compact/dyslexia) mới sáng.
+  const preset = ctx.readability.getPreset();
+  const presetSelected = preset !== 'default';
+  document.getElementById('reading-toggle')?.classList.toggle('active', ctx.readability.isEnabled() && presetSelected);
+  document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
+  syncPaletteControl();
+  // Dấu ✓ preset đang áp trong dropdown Reading Mode (giống palette US-19.10).
+  syncDropdownSelection('reading-toggle', presetSelected ? preset : '');
+}
+
+/**
+ * Đánh dấu `.selected` (dấu ✓) cho hàng đang áp trong dropdown split-button neo
+ * theo `triggerId` — hàng có `data-dropdown-value === current`. Dùng chung cho
+ * palette đọc (US-19.10) và preset Reading Mode.
+ */
+function syncDropdownSelection(triggerId: string, current: string): void {
+  const popover = document.querySelector(`.toolbar-popover[data-for-id="${triggerId}"]`);
+  popover?.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.dropdownValue === current);
+  });
+}
+
+/**
+ * Đồng bộ control palette đọc (US-19.10): mặt chính sáng `.active` khi palette
+ * ≠ followTheme (đang lệch khỏi màu theme thuần), và hàng đang chọn trong
+ * dropdown được đánh dấu `.selected`. Nhãn theme thuần (followTheme) không sáng
+ * → khớp trạng thái "bám VS Code" mặc định (fix cảm giác lệch màu).
+ */
+function syncPaletteControl(): void {
+  const current = ctx.readability.getPalette();
+  // followTheme = "Follow VS Code" (trung tính) → nút chính không sáng và không
+  // hàng nào mang dấu ✓ (không tính là palette được chọn).
+  document.getElementById('palette-toggle')?.classList.toggle('active', current !== 'followTheme');
+  syncDropdownSelection('palette-toggle', current === 'followTheme' ? '' : current);
 }
 
 /** Cấp heading mặc định khi caret không nằm trong heading nào (US-4.9/US-4.16). */
@@ -278,6 +364,42 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
   { label: 'Class diagram', action: () => ctx.insertMarkdown(MERMAID_CLASS_TEMPLATE) },
   { label: 'State diagram', action: () => ctx.insertMarkdown(MERMAID_STATE_TEMPLATE) },
 ];
+
+/**
+ * Dropdown của Reading Mode split-button (US-19.1) — 4 preset đọc. "Comfortable
+ * Reading" đánh dấu "Default" (mặc định lần đầu). Chọn preset qua
+ * `ctx.readability.setPreset` — kéo theo bật Reading Mode nếu đang tắt. ctx được
+ * gán trong initToolbar trước khi mọi action chạy nên tham chiếu an toàn (cùng
+ * pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
+ */
+// Thứ tự theo tần suất/nhu cầu dùng thực tế: Comfortable (mặc định, đọc chung —
+// dùng nhiều nhất) → Academic Paper (đọc long-form essay/paper, look đầu tư nhất) →
+// Compact (đọc dày/lướt nhanh) → Default (chỉ theo VS Code, ít chủ động chọn) →
+// Dyslexia-friendly (accessibility niche, để cuối).
+const READING_PRESET_ORDER: ReadingPreset[] = ['comfortable', 'academic', 'compact', 'default', 'dyslexia'];
+const READING_DROPDOWN: ToolbarDropdownEntry[] = READING_PRESET_ORDER.map((preset) => ({
+  label: READING_PRESET_LABELS[preset],
+  badge: preset === 'comfortable' ? 'Default' : undefined,
+  value: preset,
+  action: () => ctx.readability.setPreset(preset),
+}));
+
+/**
+ * Dropdown chọn palette đọc trên toolbar (US-19.10) — "Follow VS Code" bám
+ * `--vscode-*` thuần (trung tính, không tính là chọn), 4 palette hand-tune còn
+ * lại tự bật reading styling khi chọn (xem readability.setPalette). "Sepia" đánh
+ * dấu "Default" (palette mặc định khi mới cài). Mỗi hàng mang `value` = tên
+ * palette để syncPaletteControl đánh dấu hàng đang áp. Là split-button kiểu
+ * "menu" (mainOpensDropdown) vì palette là lựa-chọn-1-trong-N, không có hành vi
+ * mặt-chính mặc định.
+ */
+const READING_PALETTE_ORDER: ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
+const PALETTE_DROPDOWN: ToolbarDropdownEntry[] = READING_PALETTE_ORDER.map((palette) => ({
+  label: READING_PALETTE_LABELS[palette],
+  badge: palette === 'sepia' ? 'Default' : undefined,
+  value: palette,
+  action: () => ctx.readability.setPalette(palette),
+}));
 
 // Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
 // Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
@@ -388,6 +510,23 @@ const toolbarItems: ToolbarItem[] = [
     dropdownTitle: 'Choose diagram type',
   },
   {
+    label: 'Read',
+    icon: READING_ICON,
+    title: 'Reading Mode (comfortable reading layout)',
+    action: () => ctx.readability.toggle(),
+    dropdown: READING_DROPDOWN,
+    dropdownTitle: 'Choose reading preset',
+    id: 'reading-toggle',
+    alignRight: true,
+  },
+  {
+    label: 'Focus',
+    icon: ZEN_ICON,
+    title: 'Focus Mode (hide chrome, center text — Esc to exit)',
+    action: () => ctx.readability.toggleZen(),
+    id: 'zen-toggle',
+  },
+  {
     label: '☰',
     icon: TOC_ICON,
     title: 'Show/hide Table of Contents',
@@ -396,7 +535,18 @@ const toolbarItems: ToolbarItem[] = [
       updateTocButton();
     },
     id: 'toc-toggle',
-    alignRight: true,
+  },
+  // Palette đọc (US-19.10/19.11) là theme GLOBAL, ít khi đổi → đặt cuối nhóm
+  // phải (sau TOC, cạnh menu "...") thay vì chiếm ô đắc địa giữa Read/Focus.
+  {
+    label: 'Color',
+    icon: PALETTE_ICON,
+    title: 'Reading palette (default: Follow VS Code)',
+    action: () => {}, // menu-only: mặt chính mở dropdown (mainOpensDropdown)
+    dropdown: PALETTE_DROPDOWN,
+    dropdownTitle: 'Choose reading palette',
+    mainOpensDropdown: true,
+    id: 'palette-toggle',
   },
 ];
 
@@ -508,11 +658,15 @@ function addPopoverRow(
   icon: string | undefined,
   label: string,
   badge: string | undefined,
-  onClick: () => void
+  onClick: () => void,
+  value?: string
 ): void {
   const row = document.createElement('button');
   row.type = 'button';
   row.className = 'toolbar-popover-item';
+  if (value !== undefined) {
+    row.dataset.dropdownValue = value;
+  }
   if (icon) {
     const iconSpan = document.createElement('span');
     iconSpan.className = 'toolbar-popover-icon';
@@ -563,6 +717,17 @@ function togglePopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
   } else {
     openPopover(triggerBtn, popoverEl);
   }
+}
+
+/**
+ * Đang có popover nào mở không (dropdown split-button, menu tràn, more options).
+ * Zen reveal (readability.ts) dựa vào đây để KHÔNG ẩn toolbar khi user đang
+ * chọn trong dropdown — chuột rê xuống menu (y > 48) mà toolbar trượt đi thì
+ * popover mất neo giữa chừng. Wire qua deps ở main.ts, không import ngược
+ * (toolbar.ts đã import từ readability.ts, tránh vòng phụ thuộc).
+ */
+export function isPopoverOpen(): boolean {
+  return openPopoverEl !== undefined;
 }
 
 /** Một nút định dạng có thể bị ẩn vào menu tràn (".toolbar-more") khi hẹp chỗ. */
@@ -634,7 +799,6 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   main.setAttribute('aria-label', item.title);
   attachTooltip(main, item.title);
   main.addEventListener('mousedown', (e) => e.preventDefault());
-  main.addEventListener('click', () => invokeItem(item));
 
   const divider = document.createElement('span');
   divider.className = 'split-divider';
@@ -649,12 +813,32 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   caret.addEventListener('mousedown', (e) => e.preventDefault());
 
   const popover = buildPopover('toolbar-split-popover');
-  for (const entry of item.dropdown ?? []) {
-    addPopoverRow(popover, entry.icon, entry.label, entry.badge, () => {
-      closePopover();
-      invokeAction(entry.action, item.opensAsyncPrompt);
-    });
+  if (item.id) {
+    // Neo popover theo id để đồng bộ dấu chọn ngoài buildSplitButtonEl (US-19.10).
+    popover.dataset.forId = item.id;
   }
+  for (const entry of item.dropdown ?? []) {
+    addPopoverRow(
+      popover,
+      entry.icon,
+      entry.label,
+      entry.badge,
+      () => {
+        closePopover();
+        invokeAction(entry.action, item.opensAsyncPrompt);
+      },
+      entry.value
+    );
+  }
+  // Menu-only (vd palette US-19.10): mặt chính mở dropdown thay vì chạy action.
+  main.addEventListener('click', () => {
+    if (item.mainOpensDropdown) {
+      hideTooltip();
+      togglePopover(caret, popover);
+    } else {
+      invokeItem(item);
+    }
+  });
   caret.addEventListener('click', () => {
     hideTooltip();
     togglePopover(caret, popover);

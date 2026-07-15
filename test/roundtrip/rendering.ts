@@ -19,7 +19,7 @@ const files = fs
   .sort();
 
 if (files.length === 0) {
-  console.error('Không tìm thấy fixture nào trong', fixturesDir);
+  console.error('No fixtures found in', fixturesDir);
   process.exit(1);
 }
 

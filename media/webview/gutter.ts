@@ -39,6 +39,7 @@ import {
 } from './pipeline';
 import { collectHaystack, rangeAt } from './match-utils';
 import { ownOrNestedAttr } from './block-info';
+import { scrollBehavior } from './dom-utils';
 
 export interface LineGutter {
   /** Dựng lại toàn bộ (số + vị trí) từ chính data-line có sẵn trên DOM — gọi sau renderDocument(). */
@@ -369,7 +370,7 @@ export function initLineGutter(
     ) {
       selectWithinBlock(target, character, length, matchText);
     }
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
     return true;
   }
 
