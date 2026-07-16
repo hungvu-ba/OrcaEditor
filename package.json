@@ -95,11 +95,6 @@
     "configuration": {
       "title": "Orca MD Editor",
       "properties": {
-        "orcaEditor.claudeAutoInsert": {
-          "type": "boolean",
-          "default": false,
-          "description": "Copy @file button: insert @file directly into the Claude Code chat input instead of just copying it — requires briefly opening a text editor for the file then closing it right away (a mechanism required by Claude Code; you'll see a brief flicker). Default off: navigates to the chat tab, focuses the input, and copies @file to the clipboard so you can paste with ⌘V."
-        },
         "orcaEditor.autoOpenToc": {
           "type": "boolean",
           "default": true,

@@ -1,6 +1,6 @@
 /**
  * Toolbar định dạng chính: format text (bold/italic/heading/list/quote...),
- * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file cho Claude.
+ * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file reference.
  */
 import hljs from 'highlight.js/lib/common';
 import {
@@ -60,8 +60,8 @@ const ZEN_ICON = svgIcon(
   `<path d="M2.75 5.5v-2.75h2.75M13.25 5.5v-2.75h-2.75M2.75 10.5v2.75h2.75M13.25 10.5v2.75h-2.75" ${FMT_STROKE}/>`
 );
 
-/** Icon clipboard có ký tự @ — copy @file cho chat Claude Code. */
-const CLAUDE_COPY_ICON =
+/** Clipboard-with-@ icon — copies an @file reference. */
+const FILE_MENTION_ICON =
   '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
   '<rect x="3" y="2.75" width="10" height="12" rx="1.25" stroke="currentColor" stroke-width="1.2" fill="none"/>' +
   '<path d="M5.75 2.75V2a1 1 0 0 1 1-1h2.5a1 1 0 0 1 1 1v.75" stroke="currentColor" stroke-width="1.2" fill="none"/>' +
@@ -943,9 +943,10 @@ function createMoreButton(): HTMLButtonElement {
 }
 
 /**
- * Nút "⋮" (kebab dọc) — gộp Copy "@file" cho Claude / View raw Markdown
- * source vào 1 popover, thay cho 2 nút luôn-hiện trước đây (US-4.6/US-4.14).
- * Cùng action/message gốc (`addToClaudeContext`/`viewSource`), chỉ đổi UI.
+ * "⋮" (vertical kebab) button — merges Copy "@file" reference / View raw
+ * Markdown source into 1 popover, replacing the 2 always-visible buttons
+ * from before (US-4.6/US-4.14). Same underlying action/message
+ * (`copyFileMention`/`viewSource`), only the UI changed.
  */
 function createMoreOptionsButton(): HTMLButtonElement {
   const btn = document.createElement('button');
@@ -962,9 +963,9 @@ function createMoreOptionsButton(): HTMLButtonElement {
   // click, nên PHẢI có content.focus() tường minh — không thì focus kẹt lại
   // trên hàng vừa ẩn (display:none) thay vì quay về editor.
   const popover = buildPopover('toolbar-more-options-menu');
-  addPopoverRow(popover, CLAUDE_COPY_ICON, 'Copy "@file" for Claude Code chat', undefined, () => {
+  addPopoverRow(popover, FILE_MENTION_ICON, 'Copy "@file" reference', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'addToClaudeContext' }));
+    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }));
   });
   addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
     closePopover();

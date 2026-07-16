@@ -25,7 +25,7 @@ A fast, clean WYSIWYG editor for `.md` files: **preview Markdown with pixel-accu
 -   **Insert link with in-project file suggestions**: select text and click 🔗 → a popup automatically searches and lists workspace files whose name relates to that text (case/diacritic-insensitive — "Đăng ký sự kiện" matches `dang-ky-su-kien.md`). Type in the input to search by another term; pick a suggestion by clicking or ↑↓ + Enter to insert a relative link to that file. Entering a URL with a scheme (`https://`...) disables the suggestions.
 -   **Clickable task lists**: tick a checkbox directly in the preview → the file updates to `[x]`.
 -   **⌘+Click to open links** (external links open in the browser, relative links open the file in VS Code, `#` anchors scroll to the heading).
--   **Clipboard-@ toolbar button**: copies `@file` to the clipboard for the Claude Code chat — automatically navigates to the open chat tab (revealing it if hidden, keeping the conversation intact) and focuses the input, so you just paste with **⌘V**. For fully automatic insertion (there will be a brief flicker since a text editor is opened temporarily) enable the auto-insert setting.
+-   **Clipboard-@ toolbar button**: copies an `@file` reference to the clipboard — paste it into any AI chat that understands `@file` mention syntax (Claude Code, Copilot Chat, etc.).
 
 ## How to open
 

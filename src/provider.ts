@@ -23,25 +23,6 @@ import {
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 
-/**
- * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
- * manh: không có tín hiệu "đã sẵn sàng" nào để chờ, nên phải đợi cứng cho
- * webview/panel của Claude khởi tạo hoặc reveal xong trước bước kế. Máy chậm
- * hoặc Claude Code đổi thời gian khởi tạo có thể làm các mốc này không còn đủ
- * — chỉnh khi thấy chèn @mention thỉnh thoảng trượt. (finding C9)
- *
- * Không dùng media/webview/constants.ts: file này thuộc bundle Node của
- * extension, tách biệt với bundle webview.
- */
-/** Chờ tab chat Claude có sẵn thành visible sau khi reveal. */
-const CLAUDE_REVEAL_DELAY_MS = 300;
-/** Chờ webview chat Claude vừa mở khởi tạo xong. */
-const CLAUDE_OPEN_DELAY_MS = 700;
-/** Chờ text editor tạm mở xong trước khi chạy insertAtMention. */
-const CLAUDE_TEMP_EDITOR_DELAY_MS = 150;
-/** Chờ chat panel reveal xong trước khi đóng text editor tạm. */
-const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
-
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
 const UNDO_SETTLE_MS = 200;
 
@@ -307,8 +288,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
-    // cần đóng/mở lại preview (claudeAutoInsert không cần vì đã đọc live ở
-    // addToClaudeContext, tại thời điểm bấm nút).
+    // cần đóng/mở lại preview.
     const configSubscription = vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('orcaEditor', document.uri)) {
         return;
@@ -434,8 +414,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({ type: 'fileSearchResult', requestId: msg.requestId, files });
           break;
         }
-        case 'addToClaudeContext': {
-          void this.addToClaudeContext(document, webviewPanel.viewColumn);
+        case 'copyFileMention': {
+          void this.copyFileMention(document);
           break;
         }
         case 'viewSource': {
@@ -644,162 +624,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /**
-   * Thêm nhanh file hiện tại vào context chat của Claude Code.
-   *
-   * Cơ chế phía Claude Code: command insertAtMention đọc activeTextEditor và
-   * bắn sự kiện; sự kiện chỉ được xử lý khi ĐÃ có panel chat (consumer gửi
-   * "insert_at_mention" vào webview rồi tự reveal panel). Vì vậy thứ tự đúng:
-   *   1. Mở latest conversation (claude-vscode.editor.openLast) để chắc chắn
-   *      có panel nhận sự kiện, chờ panel khởi tạo.
-   *   2. Đưa file về làm activeTextEditor (webview WYSIWYG không được tính).
-   *   3. Gọi insertAtMention — chat tự reveal với "@file" trong ô nhập.
-   * Không có Claude Code thì fallback copy "@file" vào clipboard.
-   */
-  /** Tab webview chat của Claude Code — cách nhận diện giống chính Claude Code. */
-  private static isClaudeChatTab(tab: vscode.Tab): boolean {
-    return (
-      tab.input instanceof vscode.TabInputWebview &&
-      (tab.input as vscode.TabInputWebview).viewType.includes('claudeVSCodePanel')
-    );
-  }
-
-  private findClaudeChatTabs(): vscode.Tab[] {
-    return vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter(MarkdownWysiwygProvider.isClaudeChatTab);
-  }
-
-  /**
-   * Điều hướng tới một tab bất kỳ: focus đúng editor group theo viewColumn,
-   * rồi chọn tab theo vị trí trong group (cơ chế như phím Ctrl/Alt+1..9).
-   */
-  private async revealTab(tab: vscode.Tab): Promise<void> {
-    const FOCUS_GROUP_COMMANDS = [
-      'workbench.action.focusFirstEditorGroup',
-      'workbench.action.focusSecondEditorGroup',
-      'workbench.action.focusThirdEditorGroup',
-      'workbench.action.focusFourthEditorGroup',
-      'workbench.action.focusFifthEditorGroup',
-      'workbench.action.focusSixthEditorGroup',
-      'workbench.action.focusSeventhEditorGroup',
-      'workbench.action.focusEighthEditorGroup',
-    ];
-    const column = tab.group.viewColumn;
-    if (column >= 1 && column <= FOCUS_GROUP_COMMANDS.length) {
-      await vscode.commands.executeCommand(FOCUS_GROUP_COMMANDS[column - 1]);
-    }
-    const index = tab.group.tabs.indexOf(tab);
-    if (index >= 0 && index < 9) {
-      await vscode.commands.executeCommand(`workbench.action.openEditorAtIndex${index + 1}`);
-      return;
-    }
-    // Group có hơn 9 tab — duyệt tuần tự tới khi tab chat thành active
-    for (let i = 0; i < tab.group.tabs.length; i++) {
-      const active = vscode.window.tabGroups.all.find((g) => g.viewColumn === column)?.activeTab;
-      if (active && MarkdownWysiwygProvider.isClaudeChatTab(active)) {
-        return;
-      }
-      await vscode.commands.executeCommand('workbench.action.nextEditorInGroup');
-    }
-  }
-
-  private async addToClaudeContext(document: vscode.TextDocument, panelColumn?: vscode.ViewColumn): Promise<void> {
+  /** Copies the current file's "@relativePath" mention to the clipboard — works with any chat that understands @file mention syntax. */
+  private async copyFileMention(document: vscode.TextDocument): Promise<void> {
     const mention = `@${vscode.workspace.asRelativePath(document.uri, false)}`;
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     try {
-      const available = await vscode.commands.getCommands(true);
-
-      // 1) Đảm bảo tab chat Claude đang hiển thị: reveal tab có sẵn (giữ nguyên
-      //    hội thoại), chỉ mở mới khi chưa có chat nào.
-      const tabs = this.findClaudeChatTabs();
-      let visibleChat = tabs.find((t) => t.isActive);
-      if (!visibleChat && tabs.length > 0) {
-        await this.revealTab(tabs[0]);
-        await delay(CLAUDE_REVEAL_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      } else if (tabs.length === 0 && available.includes('claude-vscode.editor.openLast')) {
-        await vscode.commands.executeCommand('claude-vscode.editor.openLast');
-        await delay(CLAUDE_OPEN_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      }
-
-      // 2) Tự chèn @mention (mặc định): command insertAtMention của Claude Code
-      //    bắt buộc đọc activeTextEditor nên phải mở tạm text editor của file
-      //    rồi tự đóng lại — không còn cách nào khác để "paste thẳng" vào
-      //    webview của extension khác (VS Code không expose command paste cho
-      //    webview; Electron xử lý ⌘V ở tầng native).
-      const autoInsert = vscode.workspace
-        .getConfiguration('orcaEditor')
-        .get<boolean>('claudeAutoInsert', false);
-      const insertCmd = ['claude-vscode.insertAtMention', 'claude-code.insertAtMentioned'].find((c) =>
-        available.includes(c)
-      );
-      if (autoInsert && insertCmd) {
-        await this.insertMentionViaTempEditor(document, insertCmd, visibleChat, panelColumn);
-        vscode.window.setStatusBarMessage(`Đã chèn ${mention} vào chat Claude Code`, 4000);
-        return;
-      }
-
-      // 3) Mặc định: KHÔNG mở file — copy mention + focus thẳng ô nhập chat,
-      //    người dùng chỉ cần ⌘V.
-      await vscode.env.clipboard.writeText(`${mention} `);
-      if (available.includes('claude-vscode.focus')) {
-        await vscode.commands.executeCommand('claude-vscode.focus');
-      }
-      vscode.window.setStatusBarMessage(`Đã copy "${mention}" — nhấn ⌘V trong ô chat để chèn`, 6000);
-      return;
+      await vscode.env.clipboard.writeText(mention);
     } catch (err) {
-      // C8: log lỗi trước khi rơi xuống fallback clipboard để không nuốt lỗi.
-      MarkdownWysiwygProvider.log('addToClaudeContext failed, falling back to clipboard', err);
+      MarkdownWysiwygProvider.log('copyFileMention failed', err);
+      void vscode.window.showWarningMessage(`Could not copy "${mention}" to the clipboard.`);
+      return;
     }
-    await vscode.env.clipboard.writeText(mention);
-    void vscode.window.showInformationMessage(
-      `Copied "${mention}" — paste it into the Claude chat input to add the file to context.`
-    );
-  }
-
-  /**
-   * Chèn @mention tự động: mở tạm text editor của file (điều kiện bắt buộc để
-   * insertAtMention của Claude Code đọc được), chèn xong tự đóng — layout giữ
-   * nguyên. Mở ở group KHÁC group chứa chat để không che tab chat (mention chỉ
-   * được panel đang hiển thị xử lý).
-   */
-  private async insertMentionViaTempEditor(
-    document: vscode.TextDocument,
-    insertCmd: string,
-    visibleChat: vscode.Tab | undefined,
-    panelColumn?: vscode.ViewColumn
-  ): Promise<void> {
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-    const uriStr = document.uri.toString();
-    const findTextTab = () =>
-      vscode.window.tabGroups.all
-        .flatMap((g) => g.tabs)
-        .find((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uriStr);
-    // File đã được user tự mở dạng text từ trước thì không đóng của họ
-    const openedByUser = findTextTab() !== undefined;
-
-    const chatColumn = visibleChat?.group.viewColumn;
-    let targetColumn: vscode.ViewColumn | undefined = panelColumn;
-    if (chatColumn !== undefined && (targetColumn === undefined || targetColumn === chatColumn)) {
-      targetColumn =
-        vscode.window.tabGroups.all.map((g) => g.viewColumn).find((c) => c !== chatColumn) ??
-        vscode.ViewColumn.Beside;
-    }
-    await vscode.window.showTextDocument(document, {
-      viewColumn: targetColumn ?? vscode.ViewColumn.Active,
-      preview: true,
-      preserveFocus: false,
-    });
-    await delay(CLAUDE_TEMP_EDITOR_DELAY_MS);
-    await vscode.commands.executeCommand(insertCmd);
-
-    if (!openedByUser) {
-      await delay(CLAUDE_PANEL_REVEAL_DELAY_MS);
-      const tempTab = findTextTab();
-      if (tempTab) {
-        await vscode.window.tabGroups.close(tempTab);
-      }
-    }
+    vscode.window.setStatusBarMessage(`Copied "${mention}"`, 4000);
   }
 
   /** Mở chính file đang xem ở text editor thường (mã nguồn .md thô) cạnh bên. */

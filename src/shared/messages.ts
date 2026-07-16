@@ -117,7 +117,7 @@ export type WebviewToHost =
   | { type: 'redo'; pendingText?: string }
   | { type: 'openLink'; href: string }
   | { type: 'searchFiles'; query: string; requestId: number }
-  | { type: 'addToClaudeContext' }
+  | { type: 'copyFileMention' }
   | { type: 'viewSource' }
   | { type: 'crossFileSearch:request'; requestId: number; query: string; scope: CrossFileSearchScope; matchCase: boolean; wholeWord: boolean }
   | { type: 'crossFileSearch:openResult'; uri: string; line: number; character: number; length: number; matchText: string }

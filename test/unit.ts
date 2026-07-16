@@ -189,7 +189,7 @@ const fromWebview: WebviewToHost[] = [
   { type: 'edit', text: 'x' },
   { type: 'openLink', href: 'https://x' },
   { type: 'searchFiles', query: 'q', requestId: 1 },
-  { type: 'addToClaudeContext' },
+  { type: 'copyFileMention' },
   { type: 'viewSource' },
   { type: 'crossFileSearch:request', requestId: 1, query: 'q', scope: 'markdown', matchCase: false, wholeWord: true },
   { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
