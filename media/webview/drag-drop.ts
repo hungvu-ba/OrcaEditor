@@ -20,10 +20,18 @@
  * only needs "current top-level children with a real markdown source range",
  * which is exactly what readSrcRange() (already shared with block-map.ts and
  * gutter.ts) tells us, filtered straight off content.children.
+ *
+ * Note (US-17.7, M6): the "never mutates the DOM directly" rule above no
+ * longer holds universally — `finishLiMove`'s cross-level move runs a direct
+ * `normalizeListDom(content)` cleanup pass on the live DOM after the Range
+ * move. Safe now because undo/redo is fully TextDocument-based (main.ts /
+ * provider.ts replace #content.innerHTML wholesale on every undo/redo), so
+ * there is no native browser undo stack left to desync.
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
-import { isValidSiblingGap, computeSiblingMove, applySiblingMove, applyBlockMove } from './sibling-move';
+import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
+import { normalizeListDom } from './dom-serialize-prep';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -40,11 +48,12 @@ export interface DragDropController {
 
 type DragState = 'idle' | 'armed' | 'dragging';
 type DragKind = 'block' | 'li';
-/** M3: horizontal drag past this threshold re-indents the list item IN PLACE instead of reordering it — a drag gesture is either a vertical reorder OR a horizontal indent/outdent, not a combined diagonal move (see drag-drop.ts M3 header note in the requirement doc for the scope call). */
-type IndentDir = 'in' | 'out' | null;
 
 const HEADING_RE = /^H([1-6])$/;
 const DRAG_THRESHOLD_PX = 4;
+/** Horizontal drag distance (px) that shifts the target nesting depth by one level during an li
+ * drag (US-17.7, M6) — target depth is `liOrigDepth + round(dx / LIST_INDENT_THRESHOLD_PX)`,
+ * clamped to whatever depths are valid at the chosen vertical gap (liDepthRangeAtGap). */
 const LIST_INDENT_THRESHOLD_PX = 32;
 /** Must match `.dd-handle`'s CSS `width` (editor.css) — `climbLiFrom` reserves this much
  * space left of a `<li>`'s own handle position as "still hovering this item" before climbing
@@ -52,7 +61,7 @@ const LIST_INDENT_THRESHOLD_PX = 32;
 const HANDLE_WIDTH_PX = 22;
 /** Manual tuning knob: shifts the block handle this many px to the right of its default
  * anchor (flush against the block's own left edge). Adjust by hand to taste. */
-const BLOCK_HANDLE_SHIFT_RIGHT_PX = 12;
+const BLOCK_HANDLE_SHIFT_RIGHT_PX = 0;
 /** Gap between the li handle's right edge and the `<li>`'s OWN content-left edge, so the handle
  * sits snug just left of that item's own right-aligned marker (bullet/number) with a balanced
  * gap — not out at the enclosing list's left edge (which pushed a nested item's handle into its
@@ -66,7 +75,7 @@ const LI_HANDLE_MARKER_GAP_PX = 26;
 const LI_HANDLE_MIN_HEIGHT_PX = 20;
 /** Manual tuning knob: shifts the li handle (and its hitzone, via `liHandleAnchorLeft`) this many
  * px to the right of its default anchor. Adjust by hand to taste. */
-const LI_HANDLE_SHIFT_RIGHT_PX = 24;
+const LI_HANDLE_SHIFT_RIGHT_PX = 8;
 /** Size of the table-level handle's own corner hit zone (bug 0716 round 2, #1) — matches
  * `.dd-handle`'s base 22×24 footprint (editor.css). */
 const TABLE_HANDLE_WIDTH_PX = 22;
@@ -761,14 +770,19 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
    * menu doesn't visually open against a block with no highlight. */
   let menuTargetBlock: HTMLElement | null = null;
 
-  // M3 list-item drag state — reuses the same ghost/drop-line/threshold/Esc
-  // machinery above, just a different target shape (one <li> among its own
-  // parent list's direct children, not a run of #content's top-level children).
+  // List-item drag state (US-17.5 M3, extended to cross-level moves by US-17.7
+  // M6) — reuses the same ghost/drop-line/threshold/Esc machinery above. The
+  // drop target is chosen from EVERY <li> in the dragged item's own root list
+  // (the top-level <ul>/<ol> block containing it, flattened depth-tagged in
+  // document order and excluding the dragged item's own subtree), not just
+  // its original siblings: the vertical gap is picked by Y like before, and
+  // the nesting depth is derived from horizontal drag offset (X), clamped to
+  // whatever depths are valid at that gap (see liDepthRangeAtGap).
   let liDragged: HTMLLIElement | null = null;
-  let liParent: HTMLElement | null = null;
-  let liSiblings: HTMLLIElement[] = [];
-  let liIdx = -1;
-  let liIndentDir: IndentDir = null;
+  let liRootListEl: HTMLElement | null = null;
+  let liFlatEntries: FlatLiEntry[] = [];
+  let liOrigDepth = 1;
+  let currentLiDepth = 1;
 
   const ghostEl = document.createElement('div');
   ghostEl.className = 'dd-ghost';
@@ -838,71 +852,201 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     dropLineEl.style.height = '2px';
   }
 
-  /** gap index among `liSiblings` (mirrors gapAt, kept separate since the element list is per-drag, not a closure over `content`). */
-  function liGapAt(clientY: number): number {
-    for (let i = 0; i < liSiblings.length; i++) {
-      const r = liSiblings[i].getBoundingClientRect();
+  /** One entry of a root list's flattened, depth-tagged, document-order `<li>` walk — depth 1 is
+   * the root list's own direct children. */
+  interface FlatLiEntry {
+    li: HTMLLIElement;
+    depth: number;
+  }
+
+  /** Number of `<li>` ancestors of `li`, including itself — root-level items are depth 1. */
+  function liDepth(li: Element): number {
+    let depth = 0;
+    for (let cur: Element | null = li; cur; cur = cur.parentElement) {
+      if (cur.tagName === 'LI') {
+        depth++;
+      }
+    }
+    return depth;
+  }
+
+  /** The top-level `<ul>`/`<ol>` block that owns `li` (climbs past every ancestor `<li>`'s own
+   * enclosing list) — the scope a cross-level li drag stays within (spec: same root list only,
+   * no cross-list dragging). */
+  function liRootList(li: HTMLLIElement): HTMLElement | null {
+    let list: HTMLElement | null = li.parentElement;
+    while (list && list.tagName !== 'UL' && list.tagName !== 'OL') {
+      list = list.parentElement;
+    }
+    if (!list) {
+      return null;
+    }
+    for (;;) {
+      const ownerLi: Element | null = list.parentElement?.closest('li') ?? null;
+      if (!ownerLi) {
+        return list;
+      }
+      const outer: HTMLElement | null = ownerLi.parentElement;
+      if (!outer || (outer.tagName !== 'UL' && outer.tagName !== 'OL')) {
+        return list;
+      }
+      list = outer;
+    }
+  }
+
+  /** Flattens every `<li>` under `list` (depth-tagged, document order), excluding `exclude`'s own
+   * subtree entirely — the self-drop guard: no gap can ever fall inside the dragged item's own
+   * descendants, because they're simply never in this array (same spirit as isValidSiblingGap). */
+  function flattenLiList(list: Element, exclude: HTMLLIElement, depth: number, out: FlatLiEntry[]): void {
+    for (const child of Array.from(list.children)) {
+      if (child.tagName !== 'LI' || child === exclude) {
+        continue;
+      }
+      out.push({ li: child as HTMLLIElement, depth });
+      const nested = Array.from(child.children).find((c) => c.tagName === 'UL' || c.tagName === 'OL');
+      if (nested) {
+        flattenLiList(nested, exclude, depth + 1, out);
+      }
+    }
+  }
+
+  /** gap index among `entries` by Y position (mirrors gapAt). */
+  function liFlatGapAt(entries: FlatLiEntry[], clientY: number): number {
+    for (let i = 0; i < entries.length; i++) {
+      const r = entries[i].li.getBoundingClientRect();
       if (clientY < r.top + r.height / 2) {
         return i;
       }
     }
-    return liSiblings.length;
+    return entries.length;
   }
 
   /**
-   * M3: horizontal drag past LIST_INDENT_THRESHOLD_PX switches to re-indent
-   * mode — draws a short indent guide near the hovered item instead of a
-   * full-width line, and drop() will call execCommand('indent'/'outdent')
-   * (see performListIndent) instead of a sibling reorder. Reuses the native
-   * indent/outdent mechanism already proven for Tab/Shift+Tab in main.ts
-   * (including its DOM-quirk cleanup at serialize time, normalizeListDom) —
-   * safer than hand-rolling custom nesting DOM surgery.
+   * Valid depth range at `gap` (Design Notes, spec-li-nested-drag-relevel.md): between flattened
+   * item `i` (depth `d_i`) and item `i+1` (depth `d_(i+1)`), valid depths are `[d_(i+1), d_i+1]`
+   * — cannot be shallower than the following item (or the nesting would jump more than one level)
+   * and cannot nest deeper than one level under the preceding item. The two boundary gaps use
+   * virtual sentinel depths: 0 before the very first item (so the ceiling there is 1 — nothing
+   * precedes it to nest under) and 1 after the very last item (so a drop past everything can
+   * always land back at the top level).
+   */
+  function liDepthRangeAtGap(entries: FlatLiEntry[], gap: number): [min: number, max: number] {
+    const prevDepth = gap > 0 ? entries[gap - 1].depth : 0;
+    const nextDepth = gap < entries.length ? entries[gap].depth : 1;
+    return [nextDepth, prevDepth + 1];
+  }
+
+  /** Where a drop at `gap`/`depth` lands. `container` is the destination `<ul>`/`<ol>`, or null
+   * when it doesn't exist yet and must be created (a new `wrapperTag` list, as the last child of
+   * `newWrapperParent`) before inserting into it. */
+  interface LiDropTarget {
+    container: Element | null;
+    beforeEl: Element | null;
+    newWrapperParent: HTMLLIElement | null;
+    wrapperTag: 'UL' | 'OL';
+  }
+
+  /**
+   * Resolves the destination for a drop at `gap`/`depth`: climbs from the item just before the
+   * gap to its ancestor at the target depth and inserts as that ancestor's next sibling (sibling
+   * insert), or — when the target is exactly one level deeper than that item — targets its own
+   * nested list (creating one if it doesn't exist yet, first child otherwise). `gap === 0` (no
+   * item precedes it) always resolves to the very front of the root list itself.
+   */
+  function resolveLiDropTarget(rootList: HTMLElement, entries: FlatLiEntry[], gap: number, depth: number): LiDropTarget {
+    if (gap === 0) {
+      return { container: rootList, beforeEl: rootList.firstElementChild, newWrapperParent: null, wrapperTag: 'UL' };
+    }
+    const prev = entries[gap - 1];
+    if (depth === prev.depth + 1) {
+      const nested = Array.from(prev.li.children).find((c) => c.tagName === 'UL' || c.tagName === 'OL');
+      if (nested) {
+        return { container: nested, beforeEl: nested.firstElementChild, newWrapperParent: null, wrapperTag: 'UL' };
+      }
+      const wrapperTag: 'UL' | 'OL' = prev.li.parentElement?.tagName === 'OL' ? 'OL' : 'UL';
+      return { container: null, beforeEl: null, newWrapperParent: prev.li, wrapperTag };
+    }
+    let ancestor: HTMLLIElement = prev.li;
+    for (let steps = prev.depth - depth; steps > 0; steps--) {
+      const parentLi = ancestor.parentElement?.closest('li') as HTMLLIElement | null;
+      if (!parentLi) {
+        // Depth invariant broken (malformed DOM) — signal "no valid target" rather than
+        // resolving to a partially-climbed, wrong-depth ancestor.
+        return { container: null, beforeEl: null, newWrapperParent: null, wrapperTag: 'UL' };
+      }
+      ancestor = parentLi;
+    }
+    return { container: ancestor.parentElement, beforeEl: ancestor.nextElementSibling, newWrapperParent: null, wrapperTag: 'UL' };
+  }
+
+  /** A resolved target is invalid when it isn't buildable (no container and no wrapper to create
+   * one under) or when it resolves to inserting the dragged item right before ITSELF — i.e. its
+   * own current position, still live in the DOM at resolve time. That self-reference is the
+   * self-drop/no-op case (same spirit as `isValidSiblingGap`): landing on it would hand
+   * `applyLiReparentMove` a `beforeEl` that gets detached by its own delete step, so it must
+   * never reach the move — same UX as the existing self-drop guard (drop line hidden, drop
+   * rejected, no DOM change). */
+  function isLiDropTargetValid(li: HTMLLIElement, target: LiDropTarget): boolean {
+    if (!target.container && !target.newWrapperParent) {
+      return false;
+    }
+    return target.beforeEl !== li;
+  }
+
+  /** Visual left/width baseline for the drop line at a resolved target — the destination
+   * container's own rect when it already exists, or the would-be parent's rect nudged in by one
+   * indent step when the target nested list doesn't exist yet (about to be created on drop). */
+  function liDropLineRect(target: LiDropTarget): { left: number; width: number } {
+    if (target.container) {
+      const r = (target.container as Element).getBoundingClientRect();
+      return { left: r.left, width: r.width };
+    }
+    const r = target.newWrapperParent!.getBoundingClientRect();
+    return { left: r.left + 24, width: Math.max(20, r.width - 24) };
+  }
+
+  /**
+   * Picks the vertical gap by Y among every `<li>` in the dragged item's root list (not just its
+   * original siblings, US-17.7 M6) and the target nesting depth from horizontal drag offset (X),
+   * clamped to whatever depths are valid at that gap — then draws the drop line at the resolved
+   * destination's own indent level, live feedback before release.
    */
   function updateLiDropLine(clientX: number, clientY: number): void {
-    if (!liParent || !liDragged) {
+    if (!liRootListEl || !liDragged) {
       return;
     }
     const dx = clientX - startX;
-    const gap = liGapAt(clientY);
+    const gap = liFlatGapAt(liFlatEntries, clientY);
     currentGap = gap;
-    if (Math.abs(dx) > LIST_INDENT_THRESHOLD_PX) {
-      liIndentDir = dx > 0 ? 'in' : 'out';
-      currentGapValid =
-        liIndentDir === 'in' ? liIdx > 0 : !!liParent.parentElement?.closest('li') && content.contains(liParent);
-      if (!currentGapValid) {
-        dropLineEl.style.display = 'none';
-        return;
-      }
-      const anchor = liSiblings[Math.min(Math.max(gap, 0), liSiblings.length - 1)] ?? liDragged;
-      const r = anchor.getBoundingClientRect();
-      dropLineEl.className = 'dd-drop-line dd-indent-guide';
-      dropLineEl.style.display = 'block';
-      dropLineEl.style.top = `${r.top}px`;
-      dropLineEl.style.left = `${r.left + (liIndentDir === 'in' ? 24 : -24)}px`;
-      dropLineEl.style.width = '20px';
-      dropLineEl.style.height = '2px';
-      return;
-    }
-    liIndentDir = null;
-    currentGapValid = isValidSiblingGap(gap, liIdx, liIdx);
-    if (!currentGapValid || liSiblings.length === 0) {
+    const [minDepth, maxDepth] = liDepthRangeAtGap(liFlatEntries, gap);
+    const rawDepth = liOrigDepth + Math.round(dx / LIST_INDENT_THRESHOLD_PX);
+    currentLiDepth = Math.max(minDepth, Math.min(maxDepth, rawDepth));
+
+    const target = resolveLiDropTarget(liRootListEl, liFlatEntries, gap, currentLiDepth);
+    currentGapValid = isLiDropTargetValid(liDragged, target);
+    if (!currentGapValid) {
       dropLineEl.style.display = 'none';
       return;
     }
-    const parentRect = liParent.getBoundingClientRect();
+    const { left, width } = liDropLineRect(target);
     let y: number;
-    if (gap === 0) {
-      y = liSiblings[0].getBoundingClientRect().top;
-    } else if (gap === liSiblings.length) {
-      y = liSiblings[liSiblings.length - 1].getBoundingClientRect().bottom;
+    if (liFlatEntries.length === 0) {
+      y = liRootListEl.getBoundingClientRect().top;
+    } else if (gap === 0) {
+      y = liFlatEntries[0].li.getBoundingClientRect().top;
+    } else if (gap === liFlatEntries.length) {
+      y = liFlatEntries[liFlatEntries.length - 1].li.getBoundingClientRect().bottom;
     } else {
-      y = (liSiblings[gap - 1].getBoundingClientRect().bottom + liSiblings[gap].getBoundingClientRect().top) / 2;
+      y =
+        (liFlatEntries[gap - 1].li.getBoundingClientRect().bottom +
+          liFlatEntries[gap].li.getBoundingClientRect().top) /
+        2;
     }
     dropLineEl.className = 'dd-drop-line';
     dropLineEl.style.display = 'block';
     dropLineEl.style.top = `${y}px`;
-    dropLineEl.style.left = `${parentRect.left}px`;
-    dropLineEl.style.width = `${parentRect.width}px`;
+    dropLineEl.style.left = `${left}px`;
+    dropLineEl.style.width = `${width}px`;
     dropLineEl.style.height = '2px';
   }
 
@@ -957,10 +1101,10 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     dragSpan = [];
     currentGapValid = false;
     liDragged = null;
-    liParent = null;
-    liSiblings = [];
-    liIdx = -1;
-    liIndentDir = null;
+    liRootListEl = null;
+    liFlatEntries = [];
+    liOrigDepth = 1;
+    currentLiDepth = 1;
     armedBlock = null;
     // Skip clearing the outline here when a handle menu is open for this exact block —
     // openMenu() (called just before resetState() in the click path) has already claimed
@@ -992,29 +1136,39 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   }
 
-  /** Places the caret inside `li` then calls the native indent/outdent command — same mechanism as Tab/Shift+Tab in main.ts, including its existing Chromium DOM-quirk cleanup at serialize time. */
-  function performListIndent(li: HTMLLIElement, dir: 'indent' | 'outdent'): void {
-    const range = document.createRange();
-    range.selectNodeContents(li);
-    range.collapse(true);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    content.focus();
-    document.execCommand(dir);
-  }
-
+  /**
+   * Performs the resolved cross-level li move (US-17.7, M6): creates the destination nested list
+   * first if `resolveLiDropTarget` says it doesn't exist yet (a new `<ul>`/`<ol>`, inserted via
+   * Range like the move itself — not a raw `appendChild`), re-parents the dragged `<li>` (own
+   * subtree intact) via `applyLiReparentMove`, then runs the existing list-DOM normalizer as a
+   * safety net against any malformed shape before the caller schedules a sync.
+   */
   function finishLiMove(): void {
-    if (!liParent || !liDragged) {
+    if (!liRootListEl || !liDragged) {
       return;
     }
-    if (liIndentDir) {
-      performListIndent(liDragged, liIndentDir === 'in' ? 'indent' : 'outdent');
+    const target = resolveLiDropTarget(liRootListEl, liFlatEntries, currentGap, currentLiDepth);
+    if (!isLiDropTargetValid(liDragged, target)) {
       return;
     }
-    const result = computeSiblingMove(liSiblings, liIdx, liIdx, currentGap);
-    const movedEl = applySiblingMove(liParent, result);
-    if (movedEl) {
+    let container = target.container;
+    if (!container && target.newWrapperParent) {
+      const wrapper = document.createElement(target.wrapperTag.toLowerCase());
+      const wrapperRange = document.createRange();
+      wrapperRange.selectNodeContents(target.newWrapperParent);
+      wrapperRange.collapse(false);
+      wrapperRange.insertNode(wrapper);
+      container = wrapper;
+    }
+    if (!container) {
+      return;
+    }
+    const movedEl = applyLiReparentMove(liDragged, { container, beforeEl: target.beforeEl });
+    // Clean up any malformed shape (e.g. Chromium DOM quirks) BEFORE placing the caret — a
+    // normalization pass can relocate nodes, and doing it after selecting would risk silently
+    // moving the caret away from where the user actually dropped.
+    normalizeListDom(content);
+    if (movedEl && content.contains(movedEl)) {
       const r = document.createRange();
       r.selectNodeContents(movedEl);
       r.collapse(true);
@@ -1110,8 +1264,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   function armLiDrag(li: HTMLLIElement, clientX: number, clientY: number): void {
-    const parent = li.parentElement;
-    if (!parent) {
+    const rootList = liRootList(li);
+    if (!rootList) {
       return;
     }
     state = 'armed';
@@ -1119,9 +1273,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     startX = clientX;
     startY = clientY;
     liDragged = li;
-    liParent = parent;
-    liSiblings = Array.from(parent.children).filter((c) => c.tagName === 'LI') as HTMLLIElement[];
-    liIdx = liSiblings.indexOf(li);
+    liRootListEl = rootList;
+    const entries: FlatLiEntry[] = [];
+    flattenLiList(rootList, li, 1, entries);
+    liFlatEntries = entries;
+    liOrigDepth = liDepth(li);
+    currentLiDepth = liOrigDepth;
     li.classList.add('dd-hover-outline');
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);

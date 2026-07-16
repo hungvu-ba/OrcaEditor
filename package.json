@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A WYSIWYG editor built for .md files — effortless everyday editing, plus comfortable reading and cross-file search for looking things up.",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",

@@ -217,3 +217,5 @@
 | 0.6.10 | 2026-07-16 | Fix: dragged block's hover-outline background nearly vanished under its own 0.4 muted-opacity; also made drag outline/ghost colors follow Reading Mode's palette (was always VS Code blue, clashing with sepia/high-contrast). |
 | 0.6.10 | 2026-07-16 | Fix: list-item drag handles are now a uniform height aligned to each item's own marker row, instead of a parent handle spanning its whole nested subtree. |
 | 0.6.10 | 2026-07-16 | Feature: a list item's drag handle is now grabbable anywhere in its left gutter (tall invisible hit zone), not only on the small glyph — easier to grab a climbed parent. |
+| 0.6.10 | 2026-07-16 | Feature: dragging a list item by its handle can now move it to a different nesting depth within the same list in one gesture, not just reorder among original siblings. |
+| 0.7.0 | 2026-07-16 | Release: bumped version to 0.7.0, consolidating Reading Mode, drag & drop, toolbar redesign, TOC filter, and undo/redo delegation (US-4/17/18/19) into one \[0.7.0\] entry in CHANGELOG.md. |

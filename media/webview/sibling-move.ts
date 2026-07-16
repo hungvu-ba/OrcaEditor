@@ -87,23 +87,6 @@ export function computeSiblingMove(
   return { html: parts.join(''), low: siblings[lowOrig], high: siblings[highOrig], beforeEl, movedHopCount };
 }
 
-/** Performs the move (one Range + one execCommand call) and returns the moved element's new live anchor, for caret placement. `parent` is only used as the `firstElementChild` fallback when `beforeEl` is null. */
-export function applySiblingMove(parent: Element, result: SiblingMoveResult): HTMLElement | null {
-  const range = document.createRange();
-  range.setStartBefore(result.low);
-  range.setEndAfter(result.high);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  document.execCommand('insertHTML', false, result.html);
-
-  let el: Element | null = result.beforeEl ? result.beforeEl.nextElementSibling : parent.firstElementChild;
-  for (let i = 0; i < result.movedHopCount && el; i++) {
-    el = el.nextElementSibling;
-  }
-  return el as HTMLElement | null;
-}
-
 /**
  * Same signature/return shape as `applySiblingMove`, but replaces the
  * Range-select-then-`execCommand('insertHTML')` body with
@@ -136,4 +119,55 @@ export function applyBlockMove(parent: Element, result: SiblingMoveResult): HTML
     el = el.nextElementSibling;
   }
   return el as HTMLElement | null;
+}
+
+/** Where a cross-level `<li>` move (US-17.7, M6) lands: `container` is the destination
+ * `<ul>`/`<ol>`, and the moved item is inserted before `beforeEl` (or appended if null). */
+export interface LiReparentTarget {
+  container: Element;
+  beforeEl: Element | null;
+}
+
+/**
+ * Re-parents `li` (own nested subtree carried verbatim) into `target.container`. Unlike
+ * `applySiblingMove`/`applyBlockMove` — a same-parent reorder expressed as ONE Range spanning
+ * the whole affected run — a cross-level move's source and destination are two different
+ * parents, so this is two Range operations instead: one `Range.deleteContents()` to detach `li`
+ * (re-created from a `<template>` reparse of its own `outerHTML`, the same technique
+ * `applyBlockMove` uses and for the same reason — not `execCommand('insertHTML')`, which WebKit's
+ * `ReplaceSelectionCommand` can corrupt across a parent boundary), then a second
+ * `Range.insertNode()` at the destination.
+ */
+export function applyLiReparentMove(li: HTMLLIElement, target: LiReparentTarget): HTMLLIElement | null {
+  // Build+validate the replacement BEFORE detaching the original — `li` must stay live in the
+  // DOM until a valid replacement exists, so a parse failure never leaves the source deleted
+  // with nothing inserted in its place.
+  const template = document.createElement('template');
+  template.innerHTML = li.outerHTML;
+  const newLi = template.content.firstElementChild as HTMLLIElement | null;
+  if (!newLi) {
+    return null;
+  }
+
+  const oldParentList = li.parentElement;
+  const delRange = document.createRange();
+  delRange.selectNode(li);
+  delRange.deleteContents();
+  // A nested `<ul>`/`<ol>` left with no `<li>` children after the move is an orphaned wrapper —
+  // remove it. Only ever a nested sublist (its own parent is an `<li>`), never the root list
+  // block itself, since a cross-level move stays within the same root list and always has at
+  // least one other item remaining there.
+  if (oldParentList && oldParentList.parentElement?.tagName === 'LI' && oldParentList.children.length === 0) {
+    oldParentList.remove();
+  }
+
+  const insRange = document.createRange();
+  if (target.beforeEl) {
+    insRange.setStartBefore(target.beforeEl);
+  } else {
+    insRange.selectNodeContents(target.container);
+    insRange.collapse(false);
+  }
+  insRange.insertNode(newLi);
+  return newLi;
 }

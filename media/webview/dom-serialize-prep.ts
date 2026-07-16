@@ -47,7 +47,7 @@ export function prepareDomForSerialize(root: Element, doc: Document): void {
  * Chuẩn hóa về cây lồng nhau hợp lệ, khớp đúng mức thụt lề người dùng nhìn thấy,
  * trước khi phát hiện độ phức tạp và flatten.
  */
-function normalizeListDom(root: Element): void {
+export function normalizeListDom(root: Element): void {
   const isList = (n: Node | null): boolean => !!n && (n.nodeName === 'UL' || n.nodeName === 'OL');
   let guard = 0;
   for (;;) {
