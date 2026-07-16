@@ -13,6 +13,11 @@ sample/**
 WIP/**
 Requirement/**
 Plan/**
+.claude/**
+_bmad/**
+_bmad-output/**
+test-results/**
+playwright-report/**
 CLAUDE.md
 Claude Code Monitor - Spec.md
 Fix Plan.md
