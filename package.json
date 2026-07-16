@@ -1,7 +1,7 @@
 {
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
-  "description": "A WYSIWYG editor built for .md files — effortless everyday editing, plus comfortable reading and cross-file search for looking things up.",
+  "description": "A WYSIWYG editor built for .md files — effortless everyday editing that keeps the underlying Markdown source clean, plus comfortable reading and cross-file search for looking things up.",
   "version": "0.7.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
