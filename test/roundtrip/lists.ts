@@ -17,6 +17,28 @@ interface DomCase {
 }
 
 const domCases: DomCase[] = [
+  // HLR 22 (execCommand List/Block Verb Replacement) Phase 0.4: golden-rule
+  // roundtrip coverage for the <p><ul>/<p><ol> shape that
+  // insertUnorderedList/insertOrderedList leave behind (setBulletList/
+  // setNumberedList, toolbar.ts) when starting from a plain paragraph — turndown
+  // already serializes this correctly today; these lock that in so the Phase 2
+  // primitive replacement can't silently regress it (see
+  // test/webview/list-verbs-audit.spec.ts for the live-DOM characterization).
+  {
+    name: 'dom méo (insertUnorderedList: <ul> lồng trong <p> còn sót, nhiều đoạn) → 2 bullet đúng, không mất dòng',
+    html: '<p><ul><li>First</li><li>Second</li></ul></p>',
+    expect: (md) => /^-\s+First$/m.test(md) && /^-\s+Second$/m.test(md),
+  },
+  {
+    name: 'dom méo (insertUnorderedList: <ul> lồng trong <p> còn sót, 1 đoạn) → 1 bullet đúng',
+    html: '<p><ul><li>Hello world</li></ul></p>',
+    expect: (md) => /^-\s+Hello world$/m.test(md),
+  },
+  {
+    name: 'dom méo (insertOrderedList từ <p> thường, không phải convert ul->ol: <ol> lồng trong <p> còn sót) → đánh số đúng',
+    html: '<p><ol><li>First</li><li>Second</li></ol></p>',
+    expect: (md) => /^1\.\s+First$/m.test(md) && /^2\.\s+Second$/m.test(md),
+  },
   {
     name: 'dom méo (outdent li>li) ngoài bảng → hai bullet riêng, không "- A- B"',
     html: '<ul><li>A<li>B</li></li></ul>',
