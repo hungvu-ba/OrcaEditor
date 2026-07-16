@@ -1,6 +1,6 @@
 # Orca MD Editor
 
-A VS Code extension that lets you **preview Markdown with pixel-accurate rendering while editing directly in the preview** (WYSIWYG). Every change is synced back to the `.md` file in real time, keeping the underlying Markdown source clean.
+A fast, clean WYSIWYG editor for `.md` files: **preview Markdown with pixel-accurate rendering while editing directly in the preview**, drag-and-drop to reorder blocks/tables/lists, search across your whole project, and use a rich toolbar — all while every change syncs back to the `.md` file pristine and diff-friendly.
 
 ## Features
 
