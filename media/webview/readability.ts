@@ -6,16 +6,32 @@
  * đụng nội dung `.md`. Giá trị đo/typography/palette được định nghĩa thuần CSS
  * (markdown.css/editor.css); module này chỉ bật/tắt class.
  *
- * SCOPE (bug report 2026-07-15 mục 4): trạng thái đọc là **per-tab, session-
- * only** — sống trong CHÍNH webview instance này (giữ nguyên khi tab ẩn nhờ
- * retainContextWhenHidden), KHÔNG ghi về config Global nên bật/tắt ở tab này
- * không lan sang tab khác, và không được nhớ sau khi đóng tab. Giá trị khởi tạo
- * lấy từ `orcaEditor.readability.*` (applyFromHost lúc init) chỉ như DEFAULT cho
- * tab mới; mọi thao tác sau đó chỉ đổi state cục bộ, không persist ngược lại.
+ * SCOPE (bug 0716 #2, reversal 2026-07-16 — supersedes bug 0715 mục 4's
+ * per-tab design): `enabled`/`preset`/`palette` đều **global-in-memory ở
+ * host** (không persist Settings), cùng mô hình `zen` bên dưới — 1 trong 10
+ * bundle `READING_STYLES` đã kiểm chứng (US-19.18) đổi ở 1 tab lan sang MỌI
+ * tab .md đang mở và tab mới mở sau đó trong cùng phiên VS Code.
+ * toggle/setStyle/disable báo host qua `onReadingModeChange`, host broadcast
+ * lại, applyReadingModeFromHost() áp cục bộ khi tab này nhận broadcast từ tab
+ * khác (không gọi lại onReadingModeChange, tránh vòng lặp) — kênh riêng, độc
+ * lập với kênh `zen`. `fontFamily` KHÔNG nằm trong bundle global này — không
+ * có UI toggle runtime, vẫn seed 1 lần từ `orcaEditor.readability.fontFamily`
+ * mỗi tab (applyFromHost lúc init), không persist ngược.
+ *
+ * `zen` (US-19.19): global-in-memory ở host (không persist Settings) —
+ * toggleZen/exitZen/disable báo host qua `onZenChange`, host broadcast lại
+ * cho MỌI tab .md đang mở (kể cả tab mới mở sau đó trong cùng phiên VS Code,
+ * seed qua 'init'), applyZenFromHost() áp cục bộ khi tab này nhận broadcast
+ * từ tab khác (không gọi lại onZenChange, tránh vòng lặp).
  *
  * "Reading styling có hiệu lực" = Reading Mode bật HOẶC Zen bật — Zen tự kéo
  * theo styling đọc dù Reading Mode tắt (chốt US-19.9), nhưng vẫn là 2 toggle
  * độc lập (đọc đẹp mà giữ toolbar vẫn được).
+ *
+ * US-19.18 (bug 0715): palette KHÔNG còn là lớp GLOBAL độc lập của US-19.11 —
+ * giờ đi kèm 1:1 với preset qua 1 trong 10 bundle `READING_STYLES` đã kiểm
+ * chứng. Dropdown Reading Mode trên toolbar chỉ còn liệt kê 10 bundle này +
+ * dòng "Follow VS Code" (tắt hẳn Reading Mode).
  */
 import type {
   ReadabilityConfig,
@@ -25,15 +41,18 @@ import type {
 
 export interface ReadabilityDeps {
   content: HTMLElement;
+  /**
+   * Bug 0716 #1: provider.ts's getHtml() bakes an inline `style` directly onto
+   * #toolbar (first-paint seed, hides it before editor.css has a chance to
+   * load late and animate the transition — see getHtml()'s comment). That
+   * inline style always wins over the CSS class rule it mirrors, so once JS
+   * takes over (applyFromHost's first apply completes) it MUST be cleared, or
+   * the toolbar is permanently stuck hidden — CSS classes alone can never
+   * override it again (Esc/reveal/toggle all only flip classes).
+   */
+  toolbar: HTMLElement;
   /** Đồng bộ .active của nút Reading Mode/Zen trên toolbar theo state hiện tại. */
   syncButtons: () => void;
-  /**
-   * US-19.11 (bug 0715 mục 3): user đổi palette trên toolbar → báo host ghi
-   * config Global + broadcast cho mọi tab. Chỉ gọi khi CHÍNH tab này đổi palette
-   * (setPalette), KHÔNG gọi khi nhận palette từ host (applyPaletteFromHost) để
-   * tránh vòng lặp. Bỏ trống ở môi trường test (không có host).
-   */
-  onPaletteChange?: (palette: ReadingPalette) => void;
   /**
    * Đang có popover toolbar nào mở không (dropdown split-button, menu tràn...).
    * Khi có, KHÔNG được ẩn toolbar reveal dù con trỏ đã rê xuống dưới ngưỡng —
@@ -42,12 +61,31 @@ export interface ReadabilityDeps {
    * file này, không import thẳng để tránh vòng phụ thuộc). Bỏ trống trong test.
    */
   isPopoverOpen?: () => boolean;
+  /**
+   * US-19.19: Zen/Focus mode vừa đổi Ở CHÍNH TAB NÀY (toggleZen/exitZen/
+   * disable) → báo host broadcast sang mọi tab .md khác (Zen global, kênh
+   * riêng — xem onReadingModeChange bên dưới cho bundle enabled/preset/
+   * palette, giờ cũng global nhưng là 1 kênh độc lập). KHÔNG gọi khi state.zen
+   * đổi vì nhận broadcast từ tab khác (applyZenFromHost) — tránh vòng lặp. Bỏ
+   * trống ở môi trường test (không có host).
+   */
+  onZenChange?: (zen: boolean) => void;
+  /**
+   * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
+   * TAB NÀY (toggle/setStyle/disable) → báo host broadcast sang mọi tab .md
+   * khác (đảo ngược per-tab cũ của bug 0715 mục 4, giờ global giống Zen — kênh
+   * riêng, không gộp vào onZenChange). KHÔNG gọi khi 3 field này đổi vì nhận
+   * broadcast từ tab khác (applyReadingModeFromHost) — tránh vòng lặp.
+   * fontFamily KHÔNG nằm trong bundle này (không có UI toggle runtime). Bỏ
+   * trống ở môi trường test (không có host).
+   */
+  onReadingModeChange?: (state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }) => void;
 }
 
 const PRESETS: ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
 const PALETTES: ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
 
-/** Nhãn preset cho dropdown Reading Mode (toolbar) — EN, theo quy ước nhãn toolbar. */
+/** Nhãn preset — dùng để ghép label bundle (READING_STYLES) và font tiếng Việt lookup. */
 export const READING_PRESET_LABELS: Record<ReadingPreset, string> = {
   comfortable: 'Comfortable Reading',
   default: 'Default (follow VS Code)',
@@ -56,7 +94,7 @@ export const READING_PRESET_LABELS: Record<ReadingPreset, string> = {
   academic: 'Academic Paper',
 };
 
-/** Nhãn palette cho dropdown chọn màu đọc trên toolbar (US-19.10) — EN. */
+/** Nhãn palette — dùng để ghép label bundle (READING_STYLES). */
 export const READING_PALETTE_LABELS: Record<ReadingPalette, string> = {
   followTheme: 'Follow VS Code',
   light: 'Light (warm ivory)',
@@ -66,33 +104,75 @@ export const READING_PALETTE_LABELS: Record<ReadingPalette, string> = {
   paper: 'Paper (warm white)',
 };
 
+/** 1 bộ preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp). */
+export interface ReadingStyle {
+  id: string;
+  preset: ReadingPreset;
+  palette: ReadingPalette;
+  label: string;
+}
+
+/**
+ * US-19.18 (bug 0715): dropdown Reading Mode giờ chỉ liệt kê 10 bộ preset+palette
+ * đã kiểm chứng (thay vì 2 dropdown Reading/Palette độc lập = 30 tổ hợp reachable,
+ * nhiều tổ hợp trùng lặp/không ai tối ưu riêng). Xếp hạng + lý do chọn: xem
+ * Requirement - 19 Readability.md US-19.18. Palette giờ đi kèm 1:1 với bundle —
+ * không còn là lớp GLOBAL độc lập (thay thế phần đó của US-19.11).
+ */
+export const READING_STYLES: ReadingStyle[] = [
+  { id: 'comfortable-sepia', preset: 'comfortable', palette: 'sepia', label: 'Comfortable Reading — Sepia' },
+  { id: 'academic-paper', preset: 'academic', palette: 'paper', label: 'Academic Paper — Paper' },
+  { id: 'academic-sepia', preset: 'academic', palette: 'sepia', label: 'Academic Paper — Sepia' },
+  { id: 'comfortable-light', preset: 'comfortable', palette: 'light', label: 'Comfortable Reading — Light' },
+  { id: 'comfortable-dark', preset: 'comfortable', palette: 'dark', label: 'Comfortable Reading — Dark' },
+  { id: 'comfortable-paper', preset: 'comfortable', palette: 'paper', label: 'Comfortable Reading — Paper' },
+  { id: 'dyslexia-highContrast', preset: 'dyslexia', palette: 'highContrast', label: 'Dyslexia-friendly — High-contrast' },
+  { id: 'dyslexia-light', preset: 'dyslexia', palette: 'light', label: 'Dyslexia-friendly — Light' },
+  { id: 'compact-dark', preset: 'compact', palette: 'dark', label: 'Compact — Dark' },
+  { id: 'compact-highContrast', preset: 'compact', palette: 'highContrast', label: 'Compact — High-contrast' },
+];
+
 export interface ReadabilityController {
   isEnabled(): boolean;
   isZen(): boolean;
   getPreset(): ReadingPreset;
-  presets(): ReadingPreset[];
   getPalette(): ReadingPalette;
-  palettes(): ReadingPalette[];
-  /** Bật/tắt Reading Mode (tab-local). */
-  toggle(): void;
-  /** Chọn preset — kéo theo bật Reading Mode nếu đang tắt (tab-local). */
-  setPreset(preset: ReadingPreset): void;
+  /** id trong READING_STYLES khớp (preset, palette) hiện tại, hoặc undefined nếu không khớp bộ nào (seed tay qua settings.json). */
+  getStyleId(): string | undefined;
   /**
-   * Chọn palette đọc (US-19.10, tab-local). Palette màu chỉ hiển thị khi reading
-   * styling active → mọi palette THẬT (light/dark/sepia/highContrast) tự bật
-   * Reading Mode nếu đang tắt (nhất quán với setPreset). Riêng `followTheme` là
-   * lựa chọn trung tính (kế thừa `--vscode-*`, không áp class màu) nên KHÔNG ép
-   * bật — dùng như "reset về màu theme", không đổi layout nếu Reading Mode tắt.
+   * Bật/tắt Reading Mode (tab-local) — bật thì giữ nguyên preset/palette đã
+   * chọn gần nhất; tắt thì tương đương chọn hàng "Follow VS Code" (cũng thoát
+   * Zen nếu đang bật, xem disable()).
    */
-  setPalette(palette: ReadingPalette): void;
-  /** Áp palette do host broadcast (US-19.11) — không báo ngược host, không đụng state per-tab. */
-  applyPaletteFromHost(palette: ReadingPalette): void;
-  /** Bật/tắt Zen (tab-local). */
+  toggle(): void;
+  /** Áp 1 bundle từ READING_STYLES — bật Reading Mode nếu đang tắt (tab-local, không persist/broadcast). */
+  setStyle(id: string): void;
+  /** Dòng "Follow VS Code (no reading style)" — tắt hẳn Reading Mode, về theme gốc. */
+  disable(): void;
+  /**
+   * Preview khi hover 1 hàng trong dropdown (không đụng state đã commit) — áp
+   * tạm bundle/`'off'` lên DOM để user thấy trước theme sẽ đổi ra sao.
+   */
+  previewStyle(id: string | 'off'): void;
+  /** Huỷ preview — render lại đúng state đã commit (gọi khi rời hàng/đóng dropdown mà không chọn). */
+  cancelPreview(): void;
+  /** Bật/tắt Zen (US-19.19: global — báo host broadcast sang mọi tab .md khác). */
   toggleZen(): void;
-  /** Thoát Zen (Esc) — no-op nếu đang không ở Zen. */
+  /** Thoát Zen (Esc) — no-op nếu đang không ở Zen; cũng broadcast global (US-19.19). */
   exitZen(): void;
   /** Áp state seed nhận từ host lúc init (default cho tab) — không persist ngược. */
   applyFromHost(cfg: ReadabilityConfig): void;
+  /**
+   * US-19.19: nhận Zen mới do TAB KHÁC vừa đổi (host broadcast) — chỉ apply
+   * cục bộ, KHÔNG gọi lại `onZenChange` (tránh vòng lặp broadcast ngược host).
+   */
+  applyZenFromHost(zen: boolean): void;
+  /**
+   * Bug 0716 #2: nhận enabled/preset/palette mới do TAB KHÁC vừa đổi (host
+   * broadcast) — chỉ apply cục bộ, KHÔNG gọi lại `onReadingModeChange` (tránh
+   * vòng lặp broadcast ngược host).
+   */
+  applyReadingModeFromHost(next: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void;
   /**
    * US-19.15: dò nội dung tài liệu có phải tiếng Việt không → gắn/bỏ class
    * `content-lang-vi` để preset Academic Paper chọn font đúng (Việt→Literata,
@@ -111,40 +191,74 @@ export interface ReadabilityController {
 const VN_CHAR_RE = /[Ạ-ỹĂăĐđƠơƯư]/g;
 
 export function initReadability(deps: ReadabilityDeps): ReadabilityController {
-  const { content } = deps;
+  const { content, toolbar } = deps;
   const state: ReadabilityConfig = {
     enabled: true,
     preset: 'comfortable',
-    palette: 'sepia',
-    linkUnderline: false,
+    palette: 'followTheme',
     fontFamily: '',
     zen: false,
   };
+  /**
+   * Bug 0715 #14: flips true once applyFromHost()'s own reading-no-anim
+   * guard has been removed. Scopes applyZenFromHost()'s no-anim guard to
+   * ONLY the init-handshake race — a 'zenChanged' broadcast landing before
+   * this panel has finished its own init. After init, cross-tab Zen
+   * broadcasts must still animate normally (a live toggle from another tab
+   * is a real, visible state change, not a seed).
+   */
+  let initApplyDone = false;
 
   /** Reading styling đang có hiệu lực (Reading Mode HOẶC Zen). */
   function stylingActive(): boolean {
     return state.enabled || state.zen;
   }
 
+  /**
+   * Vẽ class preset+palette (+ `reading-mode`) lên body/#content cho 1 bộ bất
+   * kỳ — dùng chung cho apply() (state đã commit) VÀ previewStyle()/
+   * cancelPreview() (hover, full preview: màu + typography/measure, US-19.18).
+   * US-19.18: palette giờ gate theo `active` giống preset (không còn là lớp
+   * GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
+   *
+   * Preview đổi preset (kể cả tắt hẳn `reading-mode` khi preview "Follow VS
+   * Code") kéo theo `--reading-ui-font-size` (per preset, editor.css US-19.6)
+   * — biến cũng điều khiển cỡ chữ của CHÍNH `.toolbar-popover-item` — đổi
+   * theo, tự làm dropdown đang mở vỡ hình ngay lúc hover (hàng dưới dịch
+   * chuyển khỏi con trỏ). Fix ở toolbar.ts: `openPopover()` khoá cứng
+   * `font-size` bằng inline style trực tiếp trên TỪNG hàng khi mở (không chỉ
+   * đóng băng custom property — rule còn gate theo sự có mặt của class
+   * `reading-mode` nên riêng biến không đủ), nên preview ở đây cứ đổi class
+   * thoải mái — dropdown đã tự "điếc" với mọi thay đổi đó cho tới khi đóng lại.
+   */
+  function render(preset: ReadingPreset, palette: ReadingPalette, active: boolean): void {
+    const body = document.body;
+    body.classList.toggle('reading-mode', active);
+    for (const p of PRESETS) {
+      content.classList.toggle(`reading-preset-${p}`, active && preset === p);
+    }
+    for (const pal of PALETTES) {
+      body.classList.toggle(`reading-palette-${pal}`, active && pal !== 'followTheme' && palette === pal);
+    }
+  }
+
   function apply(): void {
     const body = document.body;
     const active = stylingActive();
-    body.classList.toggle('reading-mode', active);
+    render(state.preset, state.palette, active);
     body.classList.toggle('reading-zen', state.zen);
-    for (const p of PRESETS) {
-      content.classList.toggle(`reading-preset-${p}`, active && state.preset === p);
-    }
-    for (const pal of PALETTES) {
-      // US-19.11 (bug 0715 mục 3): palette là lớp theme GLOBAL, ĐỘC LẬP với
-      // Reading Mode/Zen — áp bất kể `active` (tab tắt Reading Mode vẫn đổi màu
-      // theo theme chung). followTheme = không áp class (kế thừa --vscode-*).
-      body.classList.toggle(`reading-palette-${pal}`, pal !== 'followTheme' && state.palette === pal);
-    }
-    body.classList.toggle('reading-link-underline', active && state.linkUnderline);
     if (active && state.fontFamily.trim()) {
       content.style.setProperty('--reading-font-override', state.fontFamily);
+      // Bug fix: #toc-panel lives outside #content (appended to document.body,
+      // see toc.ts) so an inline custom property scoped to #content never
+      // reaches it. Hoist the same override onto <body> too so the TOC (and
+      // any other chrome outside #content) follows the user's free-text font,
+      // mirroring the --reading-ui-font-size/--reading-ui-font-family hoisting
+      // pattern already used for preset font-size and palette color.
+      body.style.setProperty('--reading-font-override', state.fontFamily);
     } else {
       content.style.removeProperty('--reading-font-override');
+      body.style.removeProperty('--reading-font-override');
     }
     deps.syncButtons();
   }
@@ -169,38 +283,32 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     }
   });
   // Bug 0715 mục 4: nút Focus nằm ngay trên toolbar → bấm xong con trỏ vẫn ở dải
-  // trên (≤64), khiến toolbar hé lộ lại ngay dù user chỉ muốn rê xuống đọc. Cơ
-  // chế "arm": chỉ cho phép reveal SAU KHI con trỏ đã rời dải trên một lần
-  // (clientY > 120). Reset false mỗi lần vào/ra Zen (xem toggleZen/exitZen).
+  // trên, khiến toolbar hé lộ lại ngay dù user chỉ muốn rê xuống đọc. Cơ chế
+  // "arm": chỉ cho phép reveal SAU KHI con trỏ đã rời dải trên một lần (>
+  // HIDE_Y). Reset false mỗi lần vào/ra Zen (xem toggleZen/exitZen).
   let revealArmed = false;
 
   const REVEAL_CLASS = 'reading-zen-reveal';
-  // Đi kèm reveal khi ở gần đỉnh: chừa padding-top đẩy chữ xuống (xem editor.css).
-  const REVEAL_PUSH_CLASS = 'reading-zen-reveal-push';
 
   /**
-   * scrollY còn trong vùng "toolbar che mà không cuộn thoát được": phần tài liệu
-   * [0, toolbarH] chỉ đọc được khi scrollY < toolbarH — reveal lúc này phải ĐẨY
-   * chữ xuống, không được phủ. Giữa tài liệu thì phủ tạm vô hại (cuộn được).
+   * Ngưỡng hover gắn theo chiều cao THẬT của #toolbar (đo lại mỗi lần, không
+   * hardcode) — tự nới theo scale-up của #toolbar (editor.css) thay vì lệch
+   * dần/kẹt hẹp mỗi khi đổi cỡ nút. Trước đây hardcode 64/120px: dải hover quá
+   * mỏng so với chiều cao toolbar thật, khó rê trúng (feedback: "khó hover hơn
+   * trước"). SHOW_MARGIN nới hẳn ra ngoài mép toolbar cho dễ trúng; HIDE_MARGIN
+   * xa hơn nữa tạo vùng đệm (dead zone) chống nhấp nháy khi con trỏ dao động
+   * quanh mép toolbar vừa hiện (chỉnh 96→76 theo feedback: dải hover giữ hiện
+   * hơi rộng, thu hẹp lại).
    */
-  function nearTop(): boolean {
-    const toolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
-    return window.scrollY <= toolbarH + 8;
-  }
+  const SHOW_MARGIN_PX = 40;
+  const HIDE_MARGIN_PX = 76;
 
   function showReveal(): void {
     document.body.classList.add(REVEAL_CLASS);
-    // Quyết định đẩy-hay-phủ chốt tại thời điểm reveal (giảm số lần xê dịch
-    // layout); đã reveal dạng phủ rồi thì cuộn lên đỉnh mới nâng cấp thành đẩy
-    // (listener scroll bên dưới), không hạ cấp ngược lại giữa chừng.
-    if (nearTop()) {
-      document.body.classList.add(REVEAL_PUSH_CLASS);
-    }
   }
 
   function hideReveal(): void {
     document.body.classList.remove(REVEAL_CLASS);
-    document.body.classList.remove(REVEAL_PUSH_CLASS);
   }
 
   document.addEventListener('mousemove', (e) => {
@@ -210,36 +318,18 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       }
       return;
     }
-    // Rê chuột vào dải trên → hiện toolbar; kéo xuống quá ngưỡng → ẩn lại + arm.
-    // Dải hover rộng (~64px) cho dễ trúng; ẩn lại khi xuống quá ~120px.
-    if (e.clientY > 120) {
+    const toolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
+    if (e.clientY > toolbarH + HIDE_MARGIN_PX) {
       revealArmed = true;
-      // Đang mở dropdown (popover neo dưới toolbar, sâu quá 120px) thì giữ
+      // Đang mở dropdown (popover neo dưới toolbar, sâu quá ngưỡng) thì giữ
       // toolbar lại — ẩn giữa chừng làm popover mất neo khi user đang chọn.
       if (!deps.isPopoverOpen?.()) {
         hideReveal();
       }
-    } else if (e.clientY <= 64 && revealArmed) {
+    } else if (e.clientY <= toolbarH + SHOW_MARGIN_PX && revealArmed) {
       showReveal();
     }
   });
-  // Reveal dạng phủ (giữa tài liệu) mà user cuộn ngược lên đỉnh khi toolbar còn
-  // hiện → vùng chữ đầu lại bị che không thoát được: nâng cấp thành đẩy. Chỉ
-  // một chiều (phủ → đẩy), không gỡ push khi cuộn xuống để khỏi giật qua lại.
-  window.addEventListener(
-    'scroll',
-    () => {
-      if (
-        state.zen &&
-        document.body.classList.contains(REVEAL_CLASS) &&
-        !document.body.classList.contains(REVEAL_PUSH_CLASS) &&
-        nearTop()
-      ) {
-        document.body.classList.add(REVEAL_PUSH_CLASS);
-      }
-    },
-    { passive: true }
-  );
   // Con trỏ RỜI HẲN webview (thường là lia lên tab bar/title xuyên qua dải
   // trên — chính thao tác đó vừa bật reveal) → không còn mousemove nào bên
   // trong nữa, nhánh ẩn ở trên vĩnh viễn không chạy, toolbar kẹt hiện và che
@@ -263,42 +353,119 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   }
 
   function toggle(): void {
-    state.enabled = !state.enabled;
-    apply();
-  }
-
-  function setPreset(preset: ReadingPreset): void {
-    state.preset = preset;
-    // Chọn preset = có ý muốn đọc → bật Reading Mode nếu đang tắt.
-    if (!state.enabled) {
-      state.enabled = true;
+    // Tắt qua nút chính phải mang đúng nghĩa hàng "Follow VS Code" trong
+    // dropdown — dùng chung disable() thay vì chỉ lật `enabled`, vì nếu Zen
+    // đang bật thì `stylingActive() = enabled || zen` vẫn true dù `enabled`
+    // vừa tắt, khiến nút chính bấm xong nhìn như "không làm gì" (bug report:
+    // click để bỏ Reading Mode, kỳ vọng về Follow VS Code, nhưng không đổi gì).
+    if (state.enabled) {
+      disable();
+      return;
     }
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
+    state.enabled = true;
     apply();
+    notifyReadingModeChange(prev);
   }
 
-  function setPalette(palette: ReadingPalette): void {
-    state.palette = palette;
-    // US-19.11: palette đã tách khỏi reading styling (áp độc lập trong apply()) →
-    // KHÔNG còn ép bật Reading Mode. Báo host để ghi Global + đồng bộ mọi tab.
+  function getStyleId(): string | undefined {
+    return READING_STYLES.find((s) => s.preset === state.preset && s.palette === state.palette)?.id;
+  }
+
+  /** Áp 1 bundle đã kiểm chứng (US-19.18) — luôn bật Reading Mode, giờ global (bug 0716 #2, xem notifyReadingModeChange). */
+  function setStyle(id: string): void {
+    const style = READING_STYLES.find((s) => s.id === id);
+    if (!style) {
+      return;
+    }
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
+    state.preset = style.preset;
+    state.palette = style.palette;
+    state.enabled = true;
     apply();
-    deps.onPaletteChange?.(palette);
+    notifyReadingModeChange(prev);
   }
 
   /**
-   * Áp palette nhận từ host (US-19.11 broadcast, bug 0715 mục 3) — chỉ đổi màu
-   * theme chung, KHÔNG đụng enabled/preset/zen per-tab, KHÔNG báo ngược host
-   * (tránh vòng lặp). No-op nếu palette không đổi để khỏi rerender thừa.
+   * Dòng "Follow VS Code" — tắt hẳn Reading Mode. Phải tắt luôn Zen (không chỉ
+   * `enabled`): `stylingActive() = enabled || zen` (US-19.9, Zen tự kéo theo
+   * styling đọc dù Reading Mode tắt) — nếu Zen đang bật mà chỉ tắt `enabled`,
+   * `stylingActive()` vẫn true nên `apply()` tiếp tục render `state.preset`/
+   * `state.palette` CŨ (disable() không đụng 2 field này) y hệt như chưa bấm gì
+   * — đúng triệu chứng bug report: "preview thấy đổi nhưng chọn thì lại về
+   * style cũ". Reset luôn reveal (giống toggleZen/exitZen) vì Zen tắt rồi thì
+   * cơ chế "arm" của lần Zen tiếp theo phải bắt đầu lại từ đầu.
    */
-  function applyPaletteFromHost(palette: ReadingPalette): void {
-    if (state.palette === palette) {
+  function disable(): void {
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
+    state.enabled = false;
+    setZen(false);
+    resetZenReveal();
+    apply();
+    notifyReadingModeChange(prev);
+  }
+
+  /**
+   * US-19.19: MỌI thay đổi `state.zen` khởi phát TỪ TAB NÀY (toggleZen/
+   * exitZen/disable) phải đi qua đây để báo host broadcast sang các tab .md
+   * khác (Zen global, kênh riêng — xem notifyReadingModeChange bên dưới cho
+   * bundle enabled/preset/palette). Guard "không đổi thì thôi" tránh broadcast
+   * thừa (vd disable() gọi setZen(false) dù Zen vốn đã tắt sẵn). KHÔNG dùng
+   * cho applyZenFromHost (nhận broadcast từ tab khác) — hàm đó set thẳng
+   * `state.zen`, không gọi lại onZenChange.
+   */
+  function setZen(zen: boolean): void {
+    if (state.zen === zen) {
       return;
     }
-    state.palette = palette;
-    apply();
+    state.zen = zen;
+    deps.onZenChange?.(zen);
+  }
+
+  /**
+   * Bug 0716 #2: MỌI thay đổi enabled/preset/palette khởi phát TỪ TAB NÀY
+   * (toggle/setStyle/disable) phải gọi hàm này để báo host broadcast sang các
+   * tab .md khác (đảo ngược per-tab cũ, giờ global giống Zen). Nhận `prev`
+   * (snapshot chụp TRƯỚC khi hàm gọi mutate state) để so sánh — cùng tinh
+   * thần guard "không đổi thì thôi" của setZen(): bấm lại đúng hàng dropdown
+   * đang active (setStyle cùng id) hoặc bấm "Follow VS Code" khi đã tắt sẵn
+   * (disable gọi trực tiếp từ dropdown, không qua toggle()'s guard) không nên
+   * phát broadcast thừa tới mọi tab khác. KHÔNG dùng cho applyReadingModeFromHost
+   * (nhận broadcast từ tab khác) — hàm đó set thẳng state, không gọi lại
+   * onReadingModeChange (tránh vòng lặp).
+   */
+  function notifyReadingModeChange(prev: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void {
+    if (prev.enabled === state.enabled && prev.preset === state.preset && prev.palette === state.palette) {
+      return;
+    }
+    deps.onReadingModeChange?.({ enabled: state.enabled, preset: state.preset, palette: state.palette });
+  }
+
+  /**
+   * Preview hover: đổi NGAY toàn bộ (màu + typography/measure/font, US-19.18)
+   * — KHÔNG đụng state đã commit, KHÔNG gọi syncButtons (dấu ✓ trong dropdown
+   * không được nhảy theo hover). An toàn với self-reflow vì toolbar.ts đã đóng
+   * băng cỡ chữ của popover khi mở (xem comment ở render()).
+   */
+  function previewStyle(id: string | 'off'): void {
+    if (id === 'off') {
+      render(state.preset, state.palette, false);
+      return;
+    }
+    const style = READING_STYLES.find((s) => s.id === id);
+    if (!style) {
+      return;
+    }
+    render(style.preset, style.palette, true);
+  }
+
+  /** Huỷ preview — render lại đúng bộ đã commit (rời hàng/đóng dropdown mà không chọn). */
+  function cancelPreview(): void {
+    render(state.preset, state.palette, stylingActive());
   }
 
   function toggleZen(): void {
-    state.zen = !state.zen;
+    setZen(!state.zen);
     // Vào Zen hay ra Zen đều reset "arm": mới bấm Focus thì con trỏ còn ở dải
     // trên, chưa được coi là chủ động rê lên để gọi toolbar.
     resetZenReveal();
@@ -309,8 +476,70 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     if (!state.zen) {
       return;
     }
-    state.zen = false;
+    setZen(false);
     resetZenReveal();
+    apply();
+  }
+
+  /**
+   * Runs `fn` (an apply() call) with `#toolbar`'s transition suppressed via
+   * the `reading-no-anim` class, then lifts the suppression after the
+   * browser has painted the new state (double rAF). Shared by
+   * applyFromHost() (cold-init seed) and applyZenFromHost()'s init-race
+   * branch (bug 0715 #14) — both need the same "seed must not animate"
+   * guarantee.
+   */
+  function runNoAnimGuarded(fn: () => void, after?: () => void): void {
+    document.body.classList.add('reading-no-anim');
+    fn();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.body.classList.remove('reading-no-anim');
+        after?.();
+      });
+    });
+  }
+
+  /**
+   * US-19.19: Zen mới do TAB KHÁC đổi, host broadcast lại — set thẳng
+   * `state.zen` (KHÔNG qua setZen()/onZenChange, tab này không phải nguồn
+   * gốc thay đổi, báo ngược host sẽ tạo vòng lặp broadcast vô hạn).
+   */
+  function applyZenFromHost(zen: boolean): void {
+    if (state.zen === zen) {
+      return;
+    }
+    state.zen = zen;
+    resetZenReveal();
+    if (initApplyDone) {
+      // Steady-state cross-tab broadcast (another tab's user toggled Zen
+      // live) — let #toolbar's transition play normally.
+      apply();
+      return;
+    }
+    // Bug 0715 #14: this broadcast landed before applyFromHost()'s own
+    // reading-no-anim guard finished (init-handshake race) — without the
+    // same guard here, #toolbar's transition fires uncontested on first
+    // paint.
+    runNoAnimGuarded(apply);
+  }
+
+  /**
+   * Bug 0716 #2: enabled/preset/palette mới do TAB KHÁC đổi, host broadcast
+   * lại — set thẳng state (KHÔNG qua toggle()/setStyle()/disable()/
+   * notifyReadingModeChange, tab này không phải nguồn gốc thay đổi, báo ngược
+   * host sẽ tạo vòng lặp broadcast vô hạn). Không cần no-anim guard kiểu Zen
+   * — không có CSS transition nào gắn với các class reading-mode/
+   * reading-preset/reading-palette (đã grep xác nhận), nên không có rủi ro
+   * flash tương tự bug 0716 #1.
+   */
+  function applyReadingModeFromHost(next: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void {
+    if (state.enabled === next.enabled && state.preset === next.preset && state.palette === next.palette) {
+      return;
+    }
+    state.enabled = next.enabled;
+    state.preset = next.preset;
+    state.palette = next.palette;
     apply();
   }
 
@@ -318,7 +547,6 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     state.enabled = cfg.enabled;
     state.preset = cfg.preset;
     state.palette = cfg.palette;
-    state.linkUnderline = cfg.linkUnderline;
     state.fontFamily = cfg.fontFamily;
     state.zen = cfg.zen;
     // Seed lúc mở tab (bug 0715, US-19.9): trạng thái ban đầu phải áp TỨC THỜI
@@ -327,12 +555,13 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     // cũng không được chạy animation trượt toolbar; animation chỉ dành cho user
     // bấm nút Focus. Chặn transition trong lúc áp, mở lại sau khi trình duyệt
     // đã paint xong trạng thái mới (double rAF).
-    document.body.classList.add('reading-no-anim');
-    apply();
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document.body.classList.remove('reading-no-anim');
-      });
+    runNoAnimGuarded(apply, () => {
+      initApplyDone = true;
+      // Bug 0716 #1: apply() vừa xác nhận class CSS (reading-zen) đã khớp
+      // đúng state.zen — từ giờ CSS class là chủ sở hữu duy nhất, gỡ luôn
+      // inline style seed của getHtml() (nếu có) kẻo nó đè vĩnh viễn lên mọi
+      // toggle sau này (inline style luôn thắng rule CSS class).
+      toolbar.removeAttribute('style');
     });
   }
 
@@ -340,16 +569,18 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     isEnabled: () => state.enabled,
     isZen: () => state.zen,
     getPreset: () => state.preset,
-    presets: () => PRESETS,
     getPalette: () => state.palette,
-    palettes: () => PALETTES,
+    getStyleId,
     toggle,
-    setPreset,
-    setPalette,
-    applyPaletteFromHost,
+    setStyle,
+    disable,
+    previewStyle,
+    cancelPreview,
     toggleZen,
     exitZen,
     applyFromHost,
+    applyZenFromHost,
+    applyReadingModeFromHost,
     refreshContentLanguage,
   };
 }

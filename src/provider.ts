@@ -12,7 +12,14 @@ import type {
   ReadingPreset,
   WebviewToHost,
 } from './shared/messages';
-import { classifyLink, computeMinimalEdit, imageNamePrefix, normalizeForSearch, relativePath } from './text-utils';
+import {
+  classifyLink,
+  computeMinimalEdit,
+  imageNamePrefix,
+  normalizeForSearch,
+  relativePath,
+  sanitizeDroppedFileName,
+} from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 
@@ -34,6 +41,50 @@ const CLAUDE_OPEN_DELAY_MS = 700;
 const CLAUDE_TEMP_EDITOR_DELAY_MS = 150;
 /** Chờ chat panel reveal xong trước khi đóng text editor tạm. */
 const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
+
+/** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
+const UNDO_SETTLE_MS = 200;
+
+/**
+ * Promise resolve khi `document` đổi lần kế tiếp, hoặc sau `timeoutMs` nếu không
+ * có (trường hợp không còn gì để undo/redo). executeCommand('undo') có thể resolve
+ * TRƯỚC khi edit áp vào document, nên phải chờ sự kiện thật thay vì đọc getText()
+ * ngay sau await.
+ */
+function waitForDocChange(document: vscode.TextDocument, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    function done(): void {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      sub.dispose();
+      resolve();
+    }
+    const sub = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.document.uri.toString() === document.uri.toString()) {
+        done();
+      }
+    });
+    const timer = setTimeout(done, timeoutMs);
+  });
+}
+
+/** Vị trí nguồn (dòng 1-based, cột 0-based) của offset ký tự `offset` trong `text`. */
+function sourceLineCol(text: string, offset: number): { line: number; col: number } {
+  let line = 1;
+  let lineStart = 0;
+  const end = Math.min(offset, text.length);
+  for (let i = 0; i < end; i++) {
+    if (text.charCodeAt(i) === 10) {
+      line++;
+      lineStart = i + 1;
+    }
+  }
+  return { line, col: end - lineStart };
+}
 
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
@@ -73,6 +124,28 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
 
   /**
+   * US-19.19: Zen/Focus mode giờ là trạng thái GLOBAL (khác enabled/preset/
+   * palette — vẫn per-tab, US-19.18) — bật/tắt ở 1 tab lan sang MỌI tab .md
+   * đang mở. `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
+   * theo `orcaEditor.readability.zen` như cũ. Chỉ sống trong bộ nhớ process
+   * (KHÔNG ghi persist Settings — Zen là "phiên tập trung" tạm thời, không
+   * nên tự động bật lại mỗi khi mở lại VS Code); tắt/mở lại VS Code thì về
+   * đúng default trong settings.json.
+   */
+  private globalZen: boolean | undefined;
+
+  /**
+   * Bug 0716 #2 (reversal 2026-07-16): cùng mô hình `globalZen` ở trên nhưng
+   * cho bundle enabled/preset/palette — trước đó (bug 0715 mục 4, US-19.17–
+   * 19.20) 3 field này cố tình per-tab, session-only; user giờ đổi ý muốn
+   * global giống hệt Zen. `undefined` = chưa tab nào đổi trong phiên này →
+   * seed tab mới theo `orcaEditor.readability.*` như cũ. `fontFamily` KHÔNG
+   * nằm trong bundle này — không có UI toggle runtime nên vẫn seed theo
+   * setting mỗi tab, không đổi.
+   */
+  private globalReadingMode: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette } | undefined;
+
+  /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
    * (panel .md CHƯA tồn tại), đọc + xoá đúng 1 lần khi resolveCustomTextEditor
    * gửi message 'init' cho document đó. Dùng một lần: nếu không xoá ngay, mở
@@ -80,6 +153,50 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * cũ.
    */
   private pendingReveal = new Map<string, { line: number; character: number; length: number; matchText?: string }>();
+
+  /**
+   * US-19.19: đọc ReadabilityConfig từ settings.json rồi ghi đè `zen` bằng
+   * `globalZen` (nếu đã có tab nào đổi trong phiên này) — dùng ở CẢ bake HTML
+   * lúc first paint LẪN message 'init', để tab mới mở luôn khớp trạng thái
+   * Zen hiện tại của mọi tab khác thay vì lúc nào cũng đọc lại default tĩnh.
+   */
+  private resolveReadability(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
+    const readability = readReadabilityConfig(cfg);
+    return {
+      ...readability,
+      ...(this.globalZen === undefined ? {} : { zen: this.globalZen }),
+      ...(this.globalReadingMode ?? {}),
+    };
+  }
+
+  /**
+   * US-19.19: gửi Zen mới cho MỌI panel .md đang mở (mọi uri), trừ panel vừa
+   * tự đổi (đã apply cục bộ rồi, gửi lại sẽ là round-trip thừa vô hại nhưng
+   * không cần thiết).
+   */
+  private broadcastZen(zen: boolean, exclude: vscode.WebviewPanel): void {
+    for (const panels of this.panelsByUri.values()) {
+      for (const panel of panels) {
+        if (panel !== exclude) {
+          void panel.webview.postMessage({ type: 'zenChanged', zen } satisfies HostToWebview);
+        }
+      }
+    }
+  }
+
+  /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho bundle enabled/preset/palette. */
+  private broadcastReadingMode(
+    state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette },
+    exclude: vscode.WebviewPanel
+  ): void {
+    for (const panels of this.panelsByUri.values()) {
+      for (const panel of panels) {
+        if (panel !== exclude) {
+          void panel.webview.postMessage({ type: 'readingModeChanged', ...state } satisfies HostToWebview);
+        }
+      }
+    }
+  }
 
   /** Kênh log dùng chung — tạo một lần, dùng cho các lỗi bị nuốt ở catch rộng. */
   private static outputChannel: vscode.OutputChannel | undefined;
@@ -104,12 +221,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
-    let panelsForUri = this.panelsByUri.get(docUriStr);
-    if (!panelsForUri) {
-      panelsForUri = new Set();
-      this.panelsByUri.set(docUriStr, panelsForUri);
-    }
-    panelsForUri.add(webviewPanel);
+    // Bug 0716 #1: lookup-or-create + add() đều dời vào case 'ready' bên dưới
+    // (không làm ở đây) — panel lúc này chưa có webview.html, chưa có message
+    // listener sống, 1 broadcast 'zenChanged' rơi vào khoảng này sẽ bị rớt.
+    // Gộp cả lookup-or-create vào lúc 'ready' luôn (không tách làm 2 nơi) để
+    // tránh giữ 1 tham chiếu Set có thể đã bị 1 panel anh em (cùng uri) dispose
+    // xong xoá khỏi panelsByUri trong lúc panel này vẫn đang chờ 'ready'.
 
     /** Gửi message tới webview theo đúng hợp đồng HostToWebview (C3). */
     const postToWebview = (msg: HostToWebview): Thenable<boolean> => webview.postMessage(msg);
@@ -129,8 +246,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     webview.options = { enableScripts: true, localResourceRoots };
     // Bug 0715 (US-19.9): bake sẵn trạng thái đọc vào HTML để first paint đã
     // đúng — mở tab khi Zen bật thì toolbar phải ẩn NGAY từ đầu, không hiện ra
-    // rồi trượt lên (animation trượt chỉ dành cho user bấm nút Focus).
-    const initialReadability = readReadabilityConfig(
+    // rồi trượt lên (animation trượt chỉ dành cho user bấm nút Focus). Zen
+    // dùng resolveReadability (US-19.19: global) để tab mới mở khớp Zen hiện
+    // tại của các tab khác, không chỉ default tĩnh trong settings.json.
+    const initialReadability = this.resolveReadability(
       vscode.workspace.getConfiguration('orcaEditor', document.uri)
     );
     webview.html = this.getHtml(webview, documentDir, initialReadability);
@@ -142,6 +261,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
     const UPDATE_DEBOUNCE_MS = 120;
     let updateTimer: ReturnType<typeof setTimeout> | undefined;
+    // Bật trong lúc xử lý undo/redo do webview yêu cầu: changeSubscription bỏ qua
+    // đường 'update' debounce cho các thay đổi này, để case 'undo'/'redo' tự gửi
+    // MỘT update cuối cùng (không debounce) → undo↔redo render đối xứng.
+    let undoRedoInProgress = false;
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) {
@@ -156,6 +279,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // restoreUndoneImageDeletions), nên e.document.getText() === lastTextFromWebview
       // và sẽ bị early-return nếu đặt sau.
       void this.restoreUndoneImageDeletions(e.document, text);
+      // Undo/redo tự lo gửi update cuối cùng (case bên dưới) — không đi debounce.
+      if (undoRedoInProgress) {
+        return;
+      }
       if (text === lastTextFromWebview) {
         // Thay đổi này do chính webview tạo ra — webview đã ở đúng trạng thái.
         return;
@@ -187,21 +314,34 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
-      // KHÔNG gửi enabled/preset/zen qua configUpdate: trạng thái đọc per-tab,
-      // session-only (bug 0715 mục 4) — chỉ seed 1 lần lúc 'init'. NGOẠI LỆ:
-      // palette là theme GLOBAL (US-19.11, bug 0715 mục 3) → bơm palette hiện tại
-      // cho mọi tab để đồng bộ màu; webview chỉ áp palette, không đụng state khác.
+      // KHÔNG gửi enabled/preset/palette/zen qua configUpdate: dù cả 2 bundle
+      // giờ đều global-in-memory (zen: US-19.19; enabled/preset/palette: bug
+      // 0716 #2, đảo ngược per-tab cũ của bug 0715 mục 4), mỗi bundle đã có
+      // kênh broadcast runtime riêng của chính nó (xem case 'zenChanged' /
+      // case 'readingModeChanged'). Kênh configUpdate này CHỈ phát khi user
+      // đổi orcaEditor.* trong Settings — chỉ seed 1 lần lúc 'init', không
+      // liên quan 2 kênh runtime kia.
       void postToWebview({
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
         showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
-        palette: wysiwygCfg.get<ReadingPalette>('readability.palette', 'sepia'),
       });
     });
 
     const messageSubscription = webview.onDidReceiveMessage(async (msg: WebviewToHost) => {
       switch (msg.type) {
         case 'ready': {
+          // Bug 0716 #1: panel chỉ được đăng ký vào panelsByUri (và do đó lộ
+          // diện cho broadcastZen/openCrossFileSearchResult) từ đây. Lookup-or-
+          // create lại tại chỗ thay vì tái dùng biến bắt ở đầu hàm — Set cũ có
+          // thể đã bị 1 panel anh em (cùng uri) dispose xong xoá khỏi
+          // panelsByUri trong lúc panel này còn đang tải/chờ 'ready'.
+          let panelsForUri = this.panelsByUri.get(docUriStr);
+          if (!panelsForUri) {
+            panelsForUri = new Set();
+            this.panelsByUri.set(docUriStr, panelsForUri);
+          }
+          panelsForUri.add(webviewPanel);
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
           const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
@@ -229,7 +369,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
-              readability: readReadabilityConfig(wysiwygCfg),
+              readability: this.resolveReadability(wysiwygCfg),
             },
           });
           break;
@@ -241,6 +381,48 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           if (!ok) {
             lastTextFromWebview = undefined;
           }
+          break;
+        }
+        case 'undo':
+        case 'redo': {
+          // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
+          // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
+          if (msg.pendingText !== undefined) {
+            lastTextFromWebview = msg.pendingText;
+            await this.applyMinimalEdit(document, msg.pendingText);
+          }
+          const before = document.getText();
+          // executeCommand('undo') có thể resolve TRƯỚC khi edit thực sự áp vào
+          // document → CHỜ đúng sự kiện đổi rồi mới đọc trạng thái cuối (không
+          // đọc getText() ngay sau await, sẽ ra "before" và tưởng là no-op).
+          // undoRedoInProgress = true suốt lúc chờ để changeSubscription bỏ qua
+          // đường debounce; case này tự gửi MỘT update cuối (bỏ debounce).
+          undoRedoInProgress = true;
+          try {
+            const changed = waitForDocChange(document, UNDO_SETTLE_MS);
+            await vscode.commands.executeCommand(msg.type);
+            await changed;
+            // Nhường 1 nhịp cho các sự kiện đổi con (nếu undo áp nhiều sub-edit) settle.
+            await new Promise<void>((r) => setTimeout(r, 0));
+          } finally {
+            undoRedoInProgress = false;
+          }
+          const after = document.getText();
+          if (after === before) {
+            break; // không còn gì để undo/redo
+          }
+          // Gửi THẲNG trạng thái cuối, bỏ debounce updateTimer: mỗi Ctrl+Z/Y =
+          // đúng một lần render nên undo và redo đối xứng (không còn redo "hiện
+          // lần lượt từng chữ" do debounce nuốt bước trung gian). Kèm caret
+          // (cuối đoạn vừa đổi) để webview đặt lại caret sau khi render.
+          if (updateTimer !== undefined) {
+            clearTimeout(updateTimer);
+            updateTimer = undefined;
+          }
+          lastTextFromWebview = undefined;
+          const diff = computeMinimalEdit(before, after);
+          const caret = diff ? sourceLineCol(after, diff.start + diff.newText.length) : undefined;
+          void postToWebview({ type: 'update', text: after, caretLine: caret?.line, caretCol: caret?.col });
           break;
         }
         case 'openLink': {
@@ -281,13 +463,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({ type: 'pasteImageResult', requestId: msg.requestId, ...result });
           break;
         }
-        case 'setReadingPalette': {
-          // US-19.11 (bug 0715 mục 3): palette là theme GLOBAL cho mọi tab .md.
-          // Ghi Global → onDidChangeConfiguration ở MỌI panel bắn configUpdate
-          // (kèm palette) xuống webview tương ứng → tất cả tab đồng bộ.
-          await vscode.workspace
-            .getConfiguration('orcaEditor', document.uri)
-            .update('readability.palette', msg.palette, vscode.ConfigurationTarget.Global);
+        case 'dropFile': {
+          const result = await this.saveDroppedFile(document, msg.name, msg.dataBase64);
+          void postToWebview({ type: 'dropFileResult', requestId: msg.requestId, ...result });
+          break;
+        }
+        case 'zenChanged': {
+          // US-19.19: Zen giờ global — nhớ trong bộ nhớ process (seed tab mới
+          // mở sau đó) rồi phát cho mọi panel .md khác đang mở.
+          this.globalZen = msg.zen;
+          this.broadcastZen(msg.zen, webviewPanel);
+          break;
+        }
+        case 'readingModeChanged': {
+          // Bug 0716 #2: enabled/preset/palette giờ global (đảo ngược per-tab
+          // cũ, cùng mô hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi
+          // phát cho mọi panel .md khác đang mở.
+          this.globalReadingMode = { enabled: msg.enabled, preset: msg.preset, palette: msg.palette };
+          this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
         }
       }
@@ -891,16 +1084,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private static readonly PASTE_IMAGE_MARKER = 'pasted-image-';
 
   /**
-   * Thư mục lưu ảnh dán, theo setting `orcaEditor.pasteImage.location`:
-   *  - siblingImagesFolder (mặc định): thư mục con `images/` cạnh file .md.
+   * Thư mục lưu ảnh dán / ảnh-file kéo thả, theo setting `orcaEditor.assetsPaste.location`
+   * (US-17.6, M4 — đổi từ `orcaEditor.pasteImage.*` + mặc định `images/` → `assets/`;
+   * KHÔNG migrate ảnh cũ, chỉ đổi đích cho ảnh/file MỚI — quyết định 2026-07-15):
+   *  - siblingAssetsFolder (mặc định): thư mục con `assets/` cạnh file .md.
    *  - customFolder: thư mục ở `customFolderPath` (tuyệt đối, hoặc tương đối
    *    so với workspace folder chứa document).
-   * Dùng chung bởi savePastedImage (ghi file) và cleanupOrphanImages (quét).
+   * Dùng chung bởi savePastedImage/saveDroppedFile (ghi file) và cleanupOrphanImages (quét).
    */
-  private resolveImagesDir(document: vscode.TextDocument): vscode.Uri {
+  private resolveAssetsDir(document: vscode.TextDocument): vscode.Uri {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage', document.uri);
-    const location = cfg.get<'siblingImagesFolder' | 'customFolder'>('location', 'siblingImagesFolder');
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
+    const location = cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder');
     const customFolderPath = cfg.get<string>('customFolderPath', '').trim();
 
     if (location === 'customFolder' && customFolderPath) {
@@ -910,7 +1105,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         ? vscode.Uri.file(customFolderPath)
         : vscode.Uri.joinPath(base, customFolderPath);
     }
-    return vscode.Uri.joinPath(documentDir, 'images');
+    return vscode.Uri.joinPath(documentDir, 'assets');
   }
 
   /**
@@ -944,7 +1139,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveImagesDir(document);
+    const targetDir = this.resolveAssetsDir(document);
 
     if (!(await this.isInsideAllowedRoots(document, targetDir))) {
       return { error: 'Configured paste-image folder is outside the allowed workspace.' };
@@ -963,6 +1158,55 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     return { relativePath: relativePath(documentDir.path, targetUri.path) };
+  }
+
+  /**
+   * Save a non-image file dropped from outside the editor (US-17.6, M4) into
+   * the same `assets/` folder as pasted images (resolveAssetsDir) — unlike
+   * pasted images, which get a generated + prefixed name for orphan-cleanup
+   * bookkeeping, dropped files keep their ORIGINAL name (so a linked
+   * `report.pdf` reads as `report.pdf`, not a hash) with a numeric suffix
+   * added only if that name is already taken. Not covered by
+   * cleanupOrphanImages — deleting an unused dropped file is manual for now
+   * (scope cut: extending orphan detection to arbitrary `[text](path)` links,
+   * not just `<img>`, is a larger change deferred to a later pass).
+   */
+  private async saveDroppedFile(
+    document: vscode.TextDocument,
+    name: string,
+    dataBase64: string
+  ): Promise<{ relativePath?: string; error?: string }> {
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const targetDir = this.resolveAssetsDir(document);
+
+    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+      return { error: 'Configured assets folder is outside the allowed workspace.' };
+    }
+
+    try {
+      await vscode.workspace.fs.createDirectory(targetDir);
+      const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
+      await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+      return { relativePath: relativePath(documentDir.path, targetUri.path) };
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
+      return { error: 'Failed to save dropped file.' };
+    }
+  }
+
+  /** First non-colliding "name.ext" / "name (2).ext" / "name (3).ext"... under `dir`. */
+  private async uniqueAssetUri(dir: vscode.Uri, fileName: string): Promise<vscode.Uri> {
+    const ext = path.extname(fileName);
+    const stem = fileName.slice(0, fileName.length - ext.length);
+    for (let n = 1; ; n++) {
+      const candidate = n === 1 ? fileName : `${stem} (${n})${ext}`;
+      const uri = vscode.Uri.joinPath(dir, candidate);
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch {
+        return uri; // stat threw → doesn't exist yet
+      }
+    }
   }
 
   /**
@@ -1010,12 +1254,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * được phát hiện. Mọi lỗi ở đây chỉ log, không làm fail thao tác save.
    */
   private async cleanupOrphanImages(document: vscode.TextDocument): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('orcaEditor.pasteImage.orphanCleanup', document.uri);
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste.orphanCleanup', document.uri);
     if (!cfg.get<boolean>('enabled', true)) {
       return;
     }
 
-    const imagesDir = this.resolveImagesDir(document);
+    const imagesDir = this.resolveAssetsDir(document);
     if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
       return;
     }
@@ -1100,7 +1344,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
-    const imagesDir = this.resolveImagesDir(document);
+    const imagesDir = this.resolveAssetsDir(document);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
       if (!text.includes(fileName)) {
         continue;
@@ -1195,10 +1439,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),
-      ...(readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
-      ...(stylingActive && readability.linkUnderline ? ['reading-link-underline'] : []),
+      // US-19.18: palette giờ gate theo stylingActive giống preset (không còn
+      // là lớp GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
+      ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
     ].join(' ');
     const contentClasses = stylingActive ? `reading-preset-${readability.preset}` : '';
+    // Bug 0716 #1: class `reading-zen` ở trên chỉ ẨN toolbar khi editor.css
+    // (external stylesheet) đã load/parse xong. Nếu file CSS này apply SAU
+    // khi toolbar đã kịp paint ở trạng thái mặc định (không transform), trình
+    // duyệt coi đó là 1 thay đổi giá trị thật và chạy transition của chính
+    // rule đó — toolbar hiện ra rồi trượt lên, đúng triệu chứng report. Bake
+    // thẳng style ẩn (khớp 1:1 với `body.reading-zen #toolbar`, editor.css)
+    // vào inline attribute để first paint không phụ thuộc thời điểm CSS load.
+    // JS (readability.ts) vẫn là chủ sở hữu class/transition sau init — style
+    // inline chỉ là seed cho khung hình đầu tiên.
+    const toolbarStyle = readability.zen
+      ? ' style="position:fixed;top:0;left:0;right:0;margin:0;z-index:200;transform:translateY(-100%);pointer-events:none;"'
+      : '';
 
     return /* html */ `<!DOCTYPE html>
 <html lang="vi">
@@ -1213,7 +1470,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   <title>Markdown WYSIWYG Preview</title>
 </head>
 <body class="${bodyClasses}">
-  <div id="toolbar" role="toolbar" aria-label="Formatting toolbar"></div>
+  <div id="toolbar" role="toolbar" aria-label="Formatting toolbar"${toolbarStyle}></div>
   <div id="line-gutter" aria-hidden="true"></div>
   <div id="content" class="${contentClasses}" role="main" aria-label="Document content" contenteditable="true" spellcheck="false"></div>
   <script nonce="${nonce}" src="${distUri('webview', 'main.js')}"></script>
@@ -1235,12 +1492,11 @@ const READING_PALETTES: readonly ReadingPalette[] = ['followTheme', 'light', 'da
 /** Đọc trạng thái Reading Mode (US-19.x) từ config `orcaEditor.readability.*`. */
 function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
   const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
-  const palette = cfg.get<ReadingPalette>('readability.palette', 'sepia');
+  const palette = cfg.get<ReadingPalette>('readability.palette', 'followTheme');
   return {
     enabled: cfg.get<boolean>('readability.enabled', true),
     preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
-    palette: READING_PALETTES.includes(palette) ? palette : 'sepia',
-    linkUnderline: cfg.get<boolean>('readability.linkUnderline', false),
+    palette: READING_PALETTES.includes(palette) ? palette : 'followTheme',
     fontFamily: cfg.get<string>('readability.fontFamily', ''),
     zen: cfg.get<boolean>('readability.zen', false),
   };

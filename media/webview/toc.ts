@@ -12,6 +12,7 @@
 
 import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
+import { showTooltip, hideTooltip } from './tooltip';
 import type { VsCodeApi } from './vscode-api';
 
 export interface TocController {
@@ -34,7 +35,10 @@ const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
 const TOC_MIN_WIDTH = 200;
 const TOC_MAX_WIDTH = 600;
 
-export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController {
+/** US-10.6: heading-level filter — số heading tối đa (level <= 2) trước khi mặc định thu về H1-only. */
+const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
+
+export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): TocController {
   // --- Panel bên phải ---
   const panel = document.createElement('aside');
   panel.id = 'toc-panel';
@@ -53,11 +57,55 @@ export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController
   title.textContent = 'Table of Contents';
   header.appendChild(title);
 
+  // --- US-10.6: heading-level filter (1=H1 only, 2=H1–H2, 3=H1–H2–H3) ---
+  // maxLevel mặc định = 2; maxLevelInitialized đánh dấu heuristic >20 heading
+  // (xem build()) đã chạy — chỉ chạy 1 lần cho mỗi tab, không re-run ở rebuild sau.
+  let maxLevel: 1 | 2 | 3 = 2;
+  let maxLevelInitialized = false;
+  const savedMaxLevel = vscode?.getState()?.tocMaxLevel;
+  if (savedMaxLevel === 1 || savedMaxLevel === 2 || savedMaxLevel === 3) {
+    maxLevel = savedMaxLevel;
+    maxLevelInitialized = true;
+  }
+
+  // Thanh lọc riêng (không nhét chung hàng với title trong #toc-header) — full
+  // width, nằm dưới #toc-header nên không bị #toolbar (overlap band) che mất.
+  const filterBar = document.createElement('div');
+  filterBar.id = 'toc-filter-bar';
+
+  const filterSlider = document.createElement('input');
+  filterSlider.id = 'toc-filter-slider';
+  filterSlider.type = 'range';
+  filterSlider.min = '1';
+  filterSlider.max = '3';
+  filterSlider.step = '1';
+  filterSlider.value = String(maxLevel);
+  filterSlider.setAttribute('aria-label', 'Filter heading levels shown in Table of Contents');
+  filterSlider.addEventListener('input', () => {
+    const level = Number(filterSlider.value);
+    maxLevel = level === 1 || level === 3 ? level : 2;
+    maxLevelInitialized = true;
+    // merge: giữ tocWidth do resizer ghi.
+    vscode?.setState({ ...vscode.getState(), tocMaxLevel: maxLevel });
+    build();
+  });
+  filterBar.appendChild(filterSlider);
+
+  // Thang chia mốc H1/H2/H3 để user thấy vị trí đang kéo tương ứng level nào.
+  const filterScale = document.createElement('div');
+  filterScale.className = 'toc-filter-scale';
+  for (const label of ['H1', 'H2', 'H3']) {
+    const tick = document.createElement('span');
+    tick.textContent = label;
+    filterScale.appendChild(tick);
+  }
+  filterBar.appendChild(filterScale);
+
   const list = document.createElement('nav');
   list.id = 'toc-list';
   list.setAttribute('aria-label', 'Table of Contents');
 
-  panel.append(resizer, header, list);
+  panel.append(resizer, header, filterBar, list);
   document.body.appendChild(panel);
 
   // --- Bề rộng: khôi phục width đã lưu, cho kéo đổi rộng ---
@@ -103,9 +151,17 @@ export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController
   // --- Trạng thái ---
   let open = false;
   let entries: TocEntry[] = [];
+  // US-10.6: TOÀN BỘ heading (không lọc theo maxLevel) — updateActive() cần
+  // danh sách đầy đủ để tìm heading gần nhất rồi truy ngược tới tổ tiên còn
+  // hiển thị khi heading gần nhất bị filter ẩn (xem updateActive()).
+  let allHeadings: HTMLElement[] = [];
   let activeIndex = -1;
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollScheduled = false;
+
+  function headingLevel(heading: HTMLElement): number {
+    return Number(heading.nodeName.charAt(1)) || 1;
+  }
 
   // -------------------------------------------------------------------------
   // Cuộn tới heading (chừa chỗ cho toolbar sticky)
@@ -125,25 +181,51 @@ export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController
   // -------------------------------------------------------------------------
 
   function build(): void {
-    const headings = Array.from(content.querySelectorAll(HEADING_SEL)) as HTMLElement[];
+    allHeadings = Array.from(content.querySelectorAll(HEADING_SEL)) as HTMLElement[];
+    // US-10.6: smart default — only on the FIRST build of a tab with no saved
+    // tocMaxLevel (maxLevelInitialized false at that point). Counts against the
+    // full unfiltered heading list, not the already-filtered one below, and must
+    // never re-run on later rebuilds (content edits) so the slider never jumps
+    // out from under a value the user set (or implicitly kept).
+    if (!maxLevelInitialized) {
+      const level12Count = allHeadings.filter((h) => headingLevel(h) <= 2).length;
+      if (level12Count > TOC_FILTER_DEFAULT_MAX_COUNT) {
+        maxLevel = 1;
+        filterSlider.value = String(maxLevel);
+      }
+      maxLevelInitialized = true;
+    }
+    const headings = allHeadings.filter((h) => headingLevel(h) <= maxLevel);
     list.textContent = '';
     entries = [];
     activeIndex = -1;
     if (headings.length === 0) {
       const empty = document.createElement('div');
       empty.id = 'toc-empty';
-      empty.textContent = 'No headings yet';
+      empty.textContent = allHeadings.length > 0 ? 'No headings match the current filter' : 'No headings yet';
       list.appendChild(empty);
       return;
     }
     for (const heading of headings) {
-      const level = Number(heading.nodeName.charAt(1)) || 1;
+      const level = headingLevel(heading);
       const link = document.createElement('a');
       link.className = `toc-item toc-level-${level}`;
       const text = (heading.textContent ?? '').trim() || '(empty)';
       link.textContent = text;
-      link.title = text;
       link.href = '#';
+      // Chặn native HTML5 link-drag ghost (bug 0716 #7 root cause a) — không có
+      // custom drag nào thay thế nữa nên chỉ cần tắt hẳn drag mặc định của <a>.
+      link.draggable = false;
+      // Chỉ hiện tooltip (tự vẽ, xem tooltip.ts) khi heading thực sự bị cắt
+      // bởi ellipsis — không phiền người dùng với heading đã hiện đủ chữ.
+      link.addEventListener('mouseenter', () => {
+        if (link.scrollWidth > link.clientWidth) showTooltip(link, text);
+      });
+      link.addEventListener('mouseleave', hideTooltip);
+      link.addEventListener('focus', () => {
+        if (link.scrollWidth > link.clientWidth) showTooltip(link, text);
+      });
+      link.addEventListener('blur', hideTooltip);
       // preventDefault + stopPropagation: preload của VS Code webview có listener
       // click ở document sẽ phân giải href qua <base> (https://file+.vscode-resource…)
       // rồi mở ra BROWSER nếu sự kiện lọt tới nó — kể cả khi đã preventDefault.
@@ -168,17 +250,36 @@ export function initToc(content: HTMLElement, vscode?: VsCodeApi): TocController
       return;
     }
     const threshold = toolbarHeight() + 12;
+    // US-10.6: quét trên TOÀN BỘ heading (allHeadings), không chỉ entries[]
+    // đã lọc — heading gần nhất theo scroll có thể là 1 heading bị filter ẩn
+    // (vd. H3 khi maxLevel=2), nên phải biết nó rồi mới truy ngược tổ tiên.
     let found = -1;
-    for (let i = 0; i < entries.length; i++) {
+    for (let i = 0; i < allHeadings.length; i++) {
       // +1 để tránh sai số làm tưởng heading vừa chạm mép vẫn nằm dưới
-      if (entries[i].heading.getBoundingClientRect().top - threshold <= 1) {
+      if (allHeadings[i].getBoundingClientRect().top - threshold <= 1) {
         found = i;
       } else {
         break;
       }
     }
-    // Chưa cuộn tới heading đầu tiên → vẫn coi mục đầu là đang đọc.
-    setActive(found >= 0 ? found : 0);
+    if (found < 0) {
+      // Chưa cuộn tới heading đầu tiên → vẫn coi mục đầu là đang đọc.
+      setActive(0);
+      return;
+    }
+    // Heading gần nhất bị filter ẩn (level > maxLevel) → truy ngược tới
+    // tổ tiên gần nhất còn hiển thị (level <= maxLevel).
+    let candidateIdx = found;
+    while (candidateIdx >= 0 && headingLevel(allHeadings[candidateIdx]) > maxLevel) {
+      candidateIdx--;
+    }
+    if (candidateIdx < 0) {
+      // Không có tổ tiên nào còn hiển thị (vd. H3 trước mọi H1/H2) → không tô sáng gì cả.
+      setActive(-1);
+      return;
+    }
+    const entryIdx = entries.findIndex((e) => e.heading === allHeadings[candidateIdx]);
+    setActive(entryIdx >= 0 ? entryIdx : 0);
   }
 
   function setActive(idx: number): void {

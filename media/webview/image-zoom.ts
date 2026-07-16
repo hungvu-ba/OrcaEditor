@@ -17,7 +17,15 @@ const ZOOM_ICON =
   '<path d="M7 5.25v3.5M5.25 7h3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
   '</svg>';
 
-export function initImageZoom(content: HTMLElement): void {
+// Gap below the sticky toolbar's bottom edge so the zoom button never lands
+// inside its band, including the drop-shadow the toolbar gains in Zen mode's
+// revealed state (bug 0715 #6). Same clamp shape as table.ts's
+// positionTableToolbar, but no `window.scrollY` term: #img-zoom-btn is
+// `position: fixed` and #toolbar is `position: sticky`, so both rects are
+// already viewport-relative (unlike table.ts's absolutely-positioned toolbar).
+const TOOLBAR_GAP_PX = 10;
+
+export function initImageZoom(content: HTMLElement, toolbarEl: HTMLElement): void {
   let hoverBtn: HTMLButtonElement | undefined;
   let currentImg: HTMLImageElement | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -61,9 +69,12 @@ export function initImageZoom(content: HTMLElement): void {
       hideBtn();
       return;
     }
+    // Read before the display write below so both rect reads land before any
+    // style write forces a layout — avoids an extra forced reflow.
+    const toolbarBottom = toolbarEl.getBoundingClientRect().bottom;
     currentImg = img;
     btn.style.display = 'flex';
-    btn.style.top = `${rect.top + 6}px`;
+    btn.style.top = `${Math.max(rect.top + 6, toolbarBottom + TOOLBAR_GAP_PX)}px`;
     btn.style.left = `${rect.right - btn.offsetWidth - 6}px`;
   }
 

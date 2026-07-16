@@ -19,6 +19,14 @@ export interface PasteImageController {
   tryPasteImageFromClipboardApi(): Promise<boolean>;
   /** Gọi từ message handler của main.ts khi nhận 'pasteImageResult' từ host. */
   notifyResult(requestId: number, relativePath?: string, error?: string): void;
+  /**
+   * US-17.6 (M4): ảnh kéo-thả từ ngoài vào — tái dùng nguyên luồng save+insert
+   * của paste, chỉ khác ở NGUỒN gọi và vị trí chèn (range tại điểm thả, không
+   * phải selection hiện tại lúc paste). `fillCell` = true khi điểm thả nằm
+   * trong 1 ô bảng (US-17.4) → chèn `style="width:100%"` thay vì width đo
+   * được, để ảnh khít theo cột thay vì theo kích thước gốc.
+   */
+  saveDroppedImage(blob: Blob, mime: string, range: Range | undefined, fillCell: boolean): void;
 }
 
 export function initPasteImage(
@@ -26,73 +34,112 @@ export function initPasteImage(
   ctx: { scheduleSync: () => void; dom: DomHelpers }
 ): PasteImageController {
   let seq = 0;
-  /** Mỗi request đang chờ host lưu file: caret lúc dán + độ rộng hiển thị đo được (px, đã chia devicePixelRatio). */
-  const pending = new Map<number, { range: Range | undefined; width?: number }>();
-  /** Dấu thời gian requestSave gần nhất — chặn trùng khi cả keydown fallback lẫn 'paste' event thật cùng tìm thấy ảnh cho cùng 1 lượt dán (xem PASTE_IMAGE_DEDUPE_MS). */
+  /** Mỗi request đang chờ host lưu file: caret lúc dán + độ rộng hiển thị đo được (px, đã chia devicePixelRatio) + có chèn vào ô bảng (US-17.4, width:100%) hay không. */
+  const pending = new Map<number, { range: Range | undefined; width?: number; fillCell?: boolean }>();
+  /** Dấu thời gian requestSave gần nhất — chặn trùng khi cả keydown fallback lẫn 'paste' event thật cùng tìm thấy ảnh cho cùng 1 lượt dán (xem PASTE_IMAGE_DEDUPE_MS). Chỉ áp cho paste (2 đường có thể race); drop (M4) luôn có đúng 1 nguồn nên bỏ qua chặn này. */
   let lastRequestAt = 0;
 
-  function insertImageAt(range: Range | undefined, relPath: string, width?: number): void {
+  function insertImageAt(range: Range | undefined, relPath: string, width?: number, fillCell?: boolean): void {
     ctx.dom.restoreSelection(range);
     // Có width đo được → chèn kèm attribute để ảnh giữ kích thước gốc (theo CSS
     // px, đã chia devicePixelRatio cho screenshot retina) thay vì bị max-width:100%
     // kéo giãn full bề ngang cửa sổ. Ảnh to hơn cửa sổ vẫn được max-width:100%
     // thu nhỏ lại cho vừa. img có attribute ngoài src/alt/title → turndown giữ
-    // nguyên HTML thô (rule htmlImgWithAttrs) nên width được lưu vào .md.
-    const widthAttr = width ? ` width="${width}"` : '';
+    // nguyên HTML thô (rule htmlImgWithAttrs) nên width/style được lưu vào .md.
+    // fillCell (US-17.4, thả ảnh vào ô bảng) ưu tiên hơn width đo được — ảnh
+    // khít theo cột (co giãn theo cột) chứ không giữ kích thước gốc cố định.
+    const sizeAttr = fillCell ? ' style="width:100%"' : width ? ` width="${width}"` : '';
     document.execCommand(
       'insertHTML',
       false,
-      `<img src="${escapeAttr(encodeLinkPath(relPath))}" alt=""${widthAttr}>`
+      `<img src="${escapeAttr(encodeLinkPath(relPath))}" alt=""${sizeAttr}>`
     );
     ctx.scheduleSync();
   }
 
   /**
-   * Đo kích thước tự nhiên của blob ảnh rồi ghi độ rộng hiển thị mong muốn vào
-   * entry pending tương ứng. Chia cho devicePixelRatio: screenshot chụp trên màn
-   * retina có số pixel vật lý gấp đôi kích thước "nhìn thấy", nếu để nguyên sẽ
-   * tràn cửa sổ và bị max-width:100% kéo về đúng bề ngang cửa sổ (chính là hành
-   * vi cần bỏ). Round-trip lưu file qua host là async nên phép đo này (cũng async)
-   * gần như luôn xong trước khi notifyResult chèn ảnh; nếu chưa kịp → chèn không
-   * width, ảnh vẫn hiện đúng (chỉ mất lần đầu, mở lại file vẫn không có size).
+   * Reads a blob as a `data:` URL. Used instead of `URL.createObjectURL`
+   * (which produces a `blob:` URL) because the webview's CSP `img-src` only
+   * allows `${webview.cspSource}` and `data:` — no `blob:` — so any `<img>`
+   * pointed at a blob: URL silently fails to load (see provider.ts `getHtml`
+   * CSP). That was the actual bug behind "pasted images always render at
+   * full physical-pixel size, never get a `width` attribute": `measureWidth`
+   * used to build a blob: URL, `probe.decode()` always rejected against CSP,
+   * and the catch silently fell back to "no width" — every single paste, not
+   * just an occasional race.
    */
-  function measureWidth(requestId: number, blob: Blob): void {
-    const url = URL.createObjectURL(blob);
-    const probe = new Image();
-    probe.onload = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const w = Math.round(probe.naturalWidth / dpr);
-      const entry = pending.get(requestId);
-      if (entry && w > 0) {
-        entry.width = w;
-      }
-      URL.revokeObjectURL(url);
-    };
-    probe.onerror = () => URL.revokeObjectURL(url);
-    probe.src = url;
+  function readAsDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(blob);
+    });
   }
 
-  function requestSave(blob: Blob, mime: string): void {
+  /**
+   * Đo kích thước tự nhiên của ảnh (qua data: URL, xem readAsDataUrl ở trên),
+   * trả về độ rộng hiển thị mong muốn (đã chia devicePixelRatio: screenshot
+   * chụp trên màn retina có số pixel vật lý gấp đôi kích thước "nhìn thấy",
+   * nếu để nguyên sẽ hiện to gấp đôi kích thước lúc chụp). `await`-able bằng
+   * `decode()` để requestSave chờ xong phép đo NÀY trước khi gửi lên host —
+   * measure xong trước rồi mới lưu (thay vì chạy song song) nên notifyResult
+   * luôn thấy width đã sẵn sàng, không còn race giữa đo và lưu. Lỗi decode
+   * (ảnh hỏng...) → trả về undefined, chèn ảnh không kèm width (fallback hợp
+   * lệ, không phải bug).
+   */
+  async function measureWidth(dataUrl: string): Promise<number | undefined> {
+    const probe = new Image();
+    probe.src = dataUrl;
+    try {
+      await probe.decode();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(probe.naturalWidth / dpr);
+      return w > 0 ? w : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * `explicit` (US-17.6, M4 — drop): range đã biết (điểm thả) + có nằm trong
+   * ô bảng hay không, bỏ qua dedupe (drop chỉ có đúng 1 nguồn gọi, không có
+   * race kiểu keydown-fallback/paste event như clipboard paste ở dưới).
+   *
+   * saveSelection() phải chạy đồng bộ NGAY khi gọi (trước bất kỳ await nào) vì
+   * caret có thể đổi chỗ trong lúc chờ; sau đó đọc blob thành data: URL rồi
+   * `await measureWidth` xong mới gửi lên host — cố ý tuần tự (không chạy song
+   * song) để entry.width luôn có giá trị (hoặc undefined nếu decode lỗi) trước
+   * khi notifyResult có thể chạy tới, loại bỏ hoàn toàn race đã có trước đây.
+   */
+  async function requestSave(
+    blob: Blob,
+    mime: string,
+    explicit?: { range: Range | undefined; fillCell: boolean }
+  ): Promise<void> {
     const now = Date.now();
-    if (now - lastRequestAt < PASTE_IMAGE_DEDUPE_MS) {
+    if (!explicit && now - lastRequestAt < PASTE_IMAGE_DEDUPE_MS) {
       return; // Đã được đường paste kia (keydown fallback / 'paste' event thật) xử lý cho cùng lượt dán này.
     }
     lastRequestAt = now;
     const requestId = ++seq;
-    pending.set(requestId, { range: saveSelection() });
-    measureWidth(requestId, blob);
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      if (!base64) {
-        pending.delete(requestId);
-        return;
-      }
-      vscode.postMessage({ type: 'pasteImage', requestId, mime, dataBase64: base64 });
-    };
-    reader.onerror = () => pending.delete(requestId);
-    reader.readAsDataURL(blob);
+    pending.set(requestId, { range: explicit ? explicit.range : saveSelection(), fillCell: explicit?.fillCell });
+    const dataUrl = await readAsDataUrl(blob);
+    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    if (!base64) {
+      pending.delete(requestId);
+      return;
+    }
+    const entry = pending.get(requestId);
+    if (!entry) {
+      return; // notifyResult đã chạy tới trước đó (không nên xảy ra, nhưng an toàn).
+    }
+    entry.width = await measureWidth(dataUrl);
+    vscode.postMessage({ type: 'pasteImage', requestId, mime, dataBase64: base64 });
+  }
+
+  function saveDroppedImage(blob: Blob, mime: string, range: Range | undefined, fillCell: boolean): void {
+    void requestSave(blob, mime, { range, fillCell });
   }
 
   function findImageItem(items: DataTransferItemList | undefined): DataTransferItem | undefined {
@@ -108,7 +155,7 @@ export function initPasteImage(
     if (!item || !blob) {
       return false;
     }
-    requestSave(blob, item.type);
+    void requestSave(blob, item.type);
     return true;
   }
 
@@ -118,7 +165,7 @@ export function initPasteImage(
       for (const item of items) {
         const imageType = item.types.find((t) => t.startsWith('image/'));
         if (imageType) {
-          requestSave(await item.getType(imageType), imageType);
+          void requestSave(await item.getType(imageType), imageType);
           return true;
         }
       }
@@ -132,11 +179,11 @@ export function initPasteImage(
     const entry = pending.get(requestId);
     pending.delete(requestId);
     if (relPath) {
-      insertImageAt(entry?.range, relPath, entry?.width);
+      insertImageAt(entry?.range, relPath, entry?.width, entry?.fillCell);
     } else if (error) {
       showToast(error);
     }
   }
 
-  return { handlePasteEvent, tryPasteImageFromClipboardApi, notifyResult };
+  return { handlePasteEvent, tryPasteImageFromClipboardApi, notifyResult, saveDroppedImage };
 }

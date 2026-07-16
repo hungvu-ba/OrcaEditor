@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A WYSIWYG editor built for .md files — effortless everyday editing, plus comfortable reading and cross-file search for looking things up.",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -112,7 +112,10 @@
         },
         "orcaEditor.crossFileSearch.scope": {
           "type": "string",
-          "enum": ["markdown", "allFiles"],
+          "enum": [
+            "markdown",
+            "allFiles"
+          ],
           "enumDescriptions": [
             "Only search .md/.markdown files in the workspace.",
             "Search all text files in the workspace (respecting .gitignore and default excludes like node_modules, dist, images, binaries)."
@@ -120,25 +123,28 @@
           "default": "markdown",
           "description": "Default scope for the cross-file search triggered from a text selection in the preview. Can be overridden per-search via the dropdown in the results popover."
         },
-        "orcaEditor.pasteImage.location": {
+        "orcaEditor.assetsPaste.location": {
           "type": "string",
-          "enum": ["siblingImagesFolder", "customFolder"],
-          "enumDescriptions": [
-            "Save into an `images/` subfolder next to the Markdown file being edited.",
-            "Save into the folder specified by orcaEditor.pasteImage.customFolderPath."
+          "enum": [
+            "siblingAssetsFolder",
+            "customFolder"
           ],
-          "default": "siblingImagesFolder",
-          "description": "Where to save images pasted from the clipboard into the editor."
+          "enumDescriptions": [
+            "Save into an `assets/` subfolder next to the Markdown file being edited.",
+            "Save into the folder specified by orcaEditor.assetsPaste.customFolderPath."
+          ],
+          "default": "siblingAssetsFolder",
+          "description": "Where to save images pasted from the clipboard or dropped into the editor, and files dropped from outside the editor. Renamed from orcaEditor.pasteImage.* (default folder changed from images/ to assets/) when drag-and-drop support was added — existing images already saved under images/ are not moved."
         },
-        "orcaEditor.pasteImage.customFolderPath": {
+        "orcaEditor.assetsPaste.customFolderPath": {
           "type": "string",
           "default": "",
-          "description": "Folder to save pasted images into when orcaEditor.pasteImage.location is \"customFolder\". Relative paths resolve against the workspace folder containing the Markdown file; absolute paths are used as-is."
+          "description": "Folder to save pasted/dropped images and dropped files into when orcaEditor.assetsPaste.location is \"customFolder\". Relative paths resolve against the workspace folder containing the Markdown file; absolute paths are used as-is."
         },
-        "orcaEditor.pasteImage.orphanCleanup.enabled": {
+        "orcaEditor.assetsPaste.orphanCleanup.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "On save, permanently delete pasted images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically."
+          "description": "On save, permanently delete pasted/dropped images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically. Does not apply to non-image files dropped into the editor — those are never auto-deleted."
         },
         "orcaEditor.readability.enabled": {
           "type": "boolean",
@@ -147,7 +153,13 @@
         },
         "orcaEditor.readability.preset": {
           "type": "string",
-          "enum": ["comfortable", "default", "compact", "dyslexia", "academic"],
+          "enum": [
+            "comfortable",
+            "default",
+            "compact",
+            "dyslexia",
+            "academic"
+          ],
           "enumDescriptions": [
             "Comfortable Reading: ~70ch measure, roomy line-height, serif reading font.",
             "Default: current behavior — full width, follow VS Code theme/font.",
@@ -160,7 +172,14 @@
         },
         "orcaEditor.readability.palette": {
           "type": "string",
-          "enum": ["followTheme", "light", "dark", "sepia", "highContrast", "paper"],
+          "enum": [
+            "followTheme",
+            "light",
+            "dark",
+            "sepia",
+            "highContrast",
+            "paper"
+          ],
           "enumDescriptions": [
             "Follow the VS Code theme colors (current behavior).",
             "Warm ivory background with near-black text (reduced glare/halation).",
@@ -169,13 +188,8 @@
             "Maximum-contrast palette for accessibility.",
             "Paper: bright warm-white (#fffff8) background with near-black text — a printed-page look (ai-2027.com style). Best paired with the Academic Paper preset."
           ],
-          "default": "sepia",
+          "default": "followTheme",
           "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
-        },
-        "orcaEditor.readability.linkUnderline": {
-          "type": "boolean",
-          "default": false,
-          "description": "Always underline links in Reading Mode (not only on hover) so links are distinguishable without relying on color (WCAG, color-blindness)."
         },
         "orcaEditor.readability.fontFamily": {
           "type": "string",
@@ -205,14 +219,18 @@
     "test:roundtrip:math-edit": "node esbuild.js --test && node dist/test/roundtrip/math-edit.js",
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
     "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
+    "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
+    "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
-    "test": "npm run test:roundtrip && npm run test:unit",
+    "test:webview": "node esbuild.js && playwright test",
+    "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
     "@types/turndown": "^5.0.5",

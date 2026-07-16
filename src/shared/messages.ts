@@ -32,16 +32,19 @@ export type ReadingPreset = 'comfortable' | 'default' | 'compact' | 'dyslexia' |
 export type ReadingPalette = 'followTheme' | 'light' | 'dark' | 'sepia' | 'highContrast' | 'paper';
 
 /**
- * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host CHỈ dùng để gửi giá trị
- * seed ban đầu (đọc từ `orcaEditor.readability.*`) trong 'init'; sau đó trạng
- * thái là per-tab, session-only ở webview (bug 0715 mục 4) — không persist ngược
- * về config. Webview áp bằng CSS var/class, KHÔNG đụng nội dung `.md`.
+ * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host dùng để gửi giá trị
+ * seed ban đầu (đọc từ `orcaEditor.readability.*` + global override nếu có,
+ * xem `resolveReadability`) trong 'init'. `enabled`/`preset`/`palette` giờ
+ * global-in-memory ở host (bug 0716 #2, đảo ngược per-tab cũ của bug 0715 mục
+ * 4) — đổi ở 1 tab lan sang mọi tab .md đang mở qua message
+ * `readingModeChanged`, cùng mô hình `zen` (US-19.19, kênh `zenChanged`)
+ * nhưng độc lập. `fontFamily` KHÔNG nằm trong 2 bundle global này — vẫn chỉ
+ * seed 1 lần từ config, không persist ngược. Không đụng nội dung `.md`.
  */
 export interface ReadabilityConfig {
   enabled: boolean;
   preset: ReadingPreset;
   palette: ReadingPalette;
-  linkUnderline: boolean;
   fontFamily: string;
   zen: boolean;
 }
@@ -102,6 +105,16 @@ export interface InitConfig {
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'edit'; text: string }
+  /**
+   * Uỷ quyền undo/redo cho TextDocument (một undo stack duy nhất, đúng mô hình
+   * CustomTextEditor): webview chặn Ctrl/Cmd+Z·Y rồi gửi message này, host gọi
+   * `executeCommand('undo'|'redo')` → thay đổi document quay lại webview qua
+   * 'update'. `pendingText`: nếu còn thay đổi đang chờ debounce lúc bấm phím,
+   * webview serialize NGAY và gắn kèm để host commit nó thành 1 undo-unit TRƯỚC
+   * khi undo (atomic trong một handler — tránh đua thứ tự với edit debounce).
+   */
+  | { type: 'undo'; pendingText?: string }
+  | { type: 'redo'; pendingText?: string }
   | { type: 'openLink'; href: string }
   | { type: 'searchFiles'; query: string; requestId: number }
   | { type: 'addToClaudeContext' }
@@ -113,12 +126,28 @@ export type WebviewToHost =
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
   | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string }
   /**
-   * US-19.11 (bug 0715 mục 3): user đổi reading palette trên toolbar. Palette là
-   * lớp theme GLOBAL cho mọi tab .md — host ghi `orcaEditor.readability.palette`
-   * ở scope Global, rồi onDidChangeConfiguration bơm palette mới xuống mọi
-   * webview qua `configUpdate.palette`. Khác Reading Mode/Zen (per-tab, không
-   * gửi lên host). */
-  | { type: 'setReadingPalette'; palette: ReadingPalette };
+   * US-17.6 (M4): file kéo thả từ ngoài (Explorer/Finder) không phải ảnh —
+   * host copy vào folder assets (resolveAssetsDir) rồi trả đường dẫn tương
+   * đối; webview chèn `[name](path)` tại vị trí thả. Ảnh kéo thả dùng lại
+   * message `pasteImage` sẵn có (external-drop.ts gọi thẳng vào luồng
+   * paste-image.ts), KHÔNG qua message này.
+   */
+  | { type: 'dropFile'; requestId: number; name: string; dataBase64: string }
+  /**
+   * US-19.19: Zen/Focus mode vừa đổi ở TAB NÀY — host giữ lại làm state
+   * global-in-memory (KHÔNG persist Settings) rồi phát cho MỌI panel .md
+   * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Khác
+   * preset/palette/enabled (vẫn per-tab, session-only — US-19.18).
+   */
+  | { type: 'zenChanged'; zen: boolean }
+  /**
+   * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
+   * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
+   * cùng mô hình như zenChanged) rồi phát cho MỌI panel .md khác đang mở.
+   * fontFamily KHÔNG nằm trong bundle này — không có UI toggle runtime, vẫn
+   * chỉ seed 1 lần từ setting `orcaEditor.readability.fontFamily`.
+   */
+  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -136,15 +165,17 @@ export type HostToWebview =
        */
       reveal?: { line: number; character: number; length: number; matchText?: string };
     }
-  | { type: 'update'; text: string }
-  | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
   /**
-   * `palette` (US-19.11): reading palette hiện tại đọc từ config Global — bơm cho
-   * MỌI tab .md để đồng bộ theme (bug 0715 mục 3). Đây là NGOẠI LỆ có chủ đích so
-   * với "không broadcast readability qua configUpdate": chỉ riêng palette đi
-   * global, còn enabled/preset/zen vẫn per-tab (không nằm trong message này).
+   * `caretLine`/`caretCol` (1-based dòng, 0-based cột, tuỳ chọn): chỉ gửi khi
+   * update phát sinh từ undo/redo — webview đặt lại caret về đúng vị trí vừa đổi
+   * sau khi render lại (renderDocument dựng lại toàn bộ DOM nên caret mất). Với
+   * block đơn dòng (đoạn văn/heading) caret về đúng cột; block đa dòng lùi về đầu
+   * block. Update từ external edit (git/formatter/tab khác) không kèm field này →
+   * giữ nguyên hành vi cũ (không đụng caret).
    */
-  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean; palette: ReadingPalette }
+  | { type: 'update'; text: string; caretLine?: number; caretCol?: number }
+  | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
+  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean }
   /**
    * C4: `usedFallback` = true khi host đã âm thầm hạ một truy vấn Whole Word 0
    * kết quả xuống substring cho chính response này — webview hiện thông báo +
@@ -154,4 +185,10 @@ export type HostToWebview =
   /** C6b: file .md đã mở sẵn ở tab khác — gửi thẳng tới panel đó thay vì qua 'init'. Cùng ý nghĩa `length` như `reveal` ở trên. */
   | { type: 'scrollToPosition'; line: number; character: number; length: number; matchText?: string }
   /** Kết quả lưu ảnh dán từ clipboard — relativePath thiếu khi lưu thất bại (kèm error để hiện toast). */
-  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string };
+  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string }
+  /** Kết quả lưu file kéo thả (US-17.6, M4) — cùng hình dạng với pasteImageResult. */
+  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string }
+  /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | { type: 'zenChanged'; zen: boolean }
+  /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };

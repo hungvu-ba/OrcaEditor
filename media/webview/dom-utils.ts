@@ -55,7 +55,29 @@ export function scrollBehavior(): ScrollBehavior {
     : 'smooth';
 }
 
+/**
+ * Existing task-checkbox child of `li`, covering both DOM shapes this
+ * codebase renders: "tight" (checkbox is a direct `<li>` child) and "loose"
+ * (checkbox is nested in the `<li>`'s child `<p>` — see the `taskCheckbox`
+ * rule in turndown.ts, which documents/relies on the same distinction).
+ * Returns null if `li` has no checkbox in either shape. Shared by
+ * `addCheckbox` and toolbar.ts's `toggleTaskItem`/`stripCheckboxFrom` so
+ * "does this `<li>` already have a checkbox" is answered consistently
+ * everywhere — a narrower tight-only check lets a loose item's checkbox go
+ * undetected and get double-added (bug 0716 #10 follow-up).
+ */
+export function findTaskCheckbox(li: Element): HTMLInputElement | null {
+  return (
+    (li.querySelector(':scope > input[type="checkbox"]') as HTMLInputElement | null) ??
+    (li.querySelector(':scope > p > input[type="checkbox"]') as HTMLInputElement | null)
+  );
+}
+
 export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
+  if (findTaskCheckbox(li)) {
+    // Already a task item (tight or loose shape) — no-op (idempotency guard against duplicate/stacked checkboxes).
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.className = 'task-list-item-checkbox';
@@ -173,6 +195,8 @@ export interface DomHelpers {
   restoreSelection(range: Range | undefined): void;
   placeCaretIn(el: Element | null | undefined, selectContents?: boolean): void;
   placeCaretAfter(el: Element): void;
+  /** Đặt caret/selection theo offset ký tự (Range.toString()) tính từ đầu `el`. Collapsed khi start === end. */
+  placeCaretAtOffsets(el: Element, start: number, end: number): void;
   replaceBlockTag(block: HTMLElement, tag: string): HTMLElement;
 }
 
@@ -360,5 +384,5 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     return el;
   }
 
-  return { restoreSelection, placeCaretIn, placeCaretAfter, replaceBlockTag };
+  return { restoreSelection, placeCaretIn, placeCaretAfter, placeCaretAtOffsets, replaceBlockTag };
 }

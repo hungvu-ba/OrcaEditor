@@ -81,6 +81,16 @@ export const CROSS_FILE_POPOVER_MAX_HEIGHT_CAP_PX = 560;
 /** [US-15.9] Tỉ lệ chiều cao viewport dùng làm trần chiều cao popover — phải khớp phần `70vh` trong `max-height: min(70vh, …)` của `.cross-file-search-popover` (editor.css). */
 export const CROSS_FILE_POPOVER_MAX_HEIGHT_VH_RATIO = 0.7;
 
+/**
+ * Trễ trước khi hover-preview 1 hàng trong dropdown Reading Mode thực sự áp
+ * theme lên trang (toolbar.ts, US-19.18 follow-up). Không debounce thì rê
+ * chuột lướt qua nhiều hàng liên tục làm cả trang đổi màu/typography tức thì
+ * theo từng hàng — gây cảm giác nháy/choáng (bug report). Chỉ hàng con trỏ
+ * DỪNG LẠI đủ lâu mới preview; lướt qua thì bỏ qua hẳn (không preview) thay vì
+ * xếp hàng — mouseleave luôn huỷ timer + revert ngay lập tức, không debounce.
+ */
+export const READING_PREVIEW_DEBOUNCE_MS = 120;
+
 // --- Chống trùng lặp xử lý sự kiện ---
 
 /**

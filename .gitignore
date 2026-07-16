@@ -2,13 +2,17 @@ node_modules/
 dist/
 out/
 *.vsix
+test-results/
+playwright-report/
 .DS_Store
 Plan/
 sample/
 test/2026-*/
 test/images/
-test/bug.md
+test/local test/
+test/assets/
 Claude Code Monitor - Spec.md
 WIP/
 _bmad/
+_bmad-output/
 .claude/

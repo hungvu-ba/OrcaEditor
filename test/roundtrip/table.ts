@@ -130,6 +130,43 @@ const domCases: DomCase[] = [
     expect: (md) =>
       md.trimStart().startsWith('<table') && md.includes('một') && md.includes('hai'),
   },
+  {
+    // US-17.4 (M2): row drag reorder swaps two <tr> outerHTML positions in tbody — DOM outcome, not the drag itself.
+    name: 'row drag reorder (US-17.4) — row 2 moved above row 1, cell content travels with it',
+    html:
+      '<table><thead><tr><th>Name</th><th>Score</th></tr></thead>' +
+      '<tbody><tr><td>Bravo</td><td>2</td></tr><tr><td>Alpha</td><td>1</td></tr></tbody></table>',
+    expect: (md) => {
+      const bravo = md.indexOf('Bravo');
+      const alpha = md.indexOf('Alpha');
+      return bravo >= 0 && alpha >= 0 && bravo < alpha;
+    },
+  },
+  {
+    // US-17.4 (M2): column drag reorder — whole table rebuilt with reordered cells in EVERY row (header included).
+    name: 'column drag reorder (US-17.4) — Score column moved before Name, every row keeps full column count',
+    html:
+      '<table><thead><tr><th>Score</th><th>Name</th></tr></thead>' +
+      '<tbody><tr><td>1</td><td>Alpha</td></tr><tr><td>2</td><td>Bravo</td></tr></tbody></table>',
+    expect: (md) => {
+      const rows = md.trim().split('\n').filter((l) => l.startsWith('|'));
+      return (
+        rows.length === 4 &&
+        rows.every((r) => (r.match(/\|/g) ?? []).length === 3) &&
+        /\|\s*Score\s*\|\s*Name\s*\|/.test(rows[0]) &&
+        /\|\s*1\s*\|\s*Alpha\s*\|/.test(rows[2])
+      );
+    },
+  },
+  {
+    // US-17.4 (M2): image dropped into a cell gets style="width:100%" — htmlImgWithAttrs already keeps ANY
+    // non-src/alt/title attribute as raw HTML (verified here, no turndown rule change was needed for this).
+    name: 'image dropped into a table cell (US-17.4) — style="width:100%" preserved as raw HTML',
+    html:
+      '<table><thead><tr><th>Preview</th></tr></thead>' +
+      '<tbody><tr><td><img src="assets/shot.png" alt="" style="width:100%"></td></tr></tbody></table>',
+    expect: (md) => md.includes('<img') && md.includes('style="width:100%"') && md.includes('assets/shot.png'),
+  },
 ];
 
 for (const c of domCases) {
