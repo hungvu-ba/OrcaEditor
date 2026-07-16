@@ -62,17 +62,18 @@ test('hovering a nested <li> shows only the li handle, never the block handle', 
   await expect(page.locator(BLOCK_HANDLE_SELECTOR)).toHaveCSS('display', 'none');
 
   // Marker clearance for a NESTED item: the handle sits snug just left of the child's OWN
-  // marker (right edge ~LI_HANDLE_MARKER_GAP_PX left of the child's content edge), and is still
-  // inside the inner list's gutter (right of the inner <ul>'s left edge) — NOT pushed out to
-  // the inner list's left edge (which put it in the parent's marker column, far from the
-  // child's own bullet). 26 = LI_HANDLE_MARKER_GAP_PX (drag-drop.ts).
+  // marker (right edge ~LI_HANDLE_MARKER_GAP_PX − LI_HANDLE_SHIFT_RIGHT_PX left of the child's
+  // content edge), and is still inside the inner list's gutter (right of the inner <ul>'s left
+  // edge) — NOT pushed out to the inner list's left edge (which put it in the parent's marker
+  // column, far from the child's own bullet). 18 = 26 (LI_HANDLE_MARKER_GAP_PX) − 8
+  // (LI_HANDLE_SHIFT_RIGHT_PX), both in drag-drop.ts.
   const handleBox = await liHandle.boundingBox();
   const nestedBox = await page.locator('li', { hasText: 'Nested item' }).last().boundingBox();
   const innerListBox = await page.locator('ul ul').boundingBox();
   if (!handleBox || !nestedBox || !innerListBox) {
     throw new Error('missing bounding box');
   }
-  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(nestedBox.x - 26));
+  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(nestedBox.x - 18));
   expect(handleBox.x + handleBox.width).toBeGreaterThan(innerListBox.x);
 });
 
@@ -99,12 +100,12 @@ test('the li handle sits snug just left of the marker, not out at the list edge'
   if (!handleBox || !itemBox || !listBox) {
     throw new Error('missing bounding box');
   }
-  // Snug: right edge ~LI_HANDLE_MARKER_GAP_PX (26) left of the item's OWN content edge — just
-  // left of the right-aligned number, never on top of it (anchoring at `li.left` did that).
-  // And strictly inside the marker gutter (right of the <ol>'s own left edge) — NOT pushed out
-  // to the list edge (which put a nested item's handle in the parent's column). 26 =
-  // LI_HANDLE_MARKER_GAP_PX (drag-drop.ts).
-  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(itemBox.x - 26));
+  // Snug: right edge ~LI_HANDLE_MARKER_GAP_PX − LI_HANDLE_SHIFT_RIGHT_PX left of the item's OWN
+  // content edge — just left of the right-aligned number, never on top of it (anchoring at
+  // `li.left` did that). And strictly inside the marker gutter (right of the <ol>'s own left
+  // edge) — NOT pushed out to the list edge (which put a nested item's handle in the parent's
+  // column). 18 = 26 (LI_HANDLE_MARKER_GAP_PX) − 8 (LI_HANDLE_SHIFT_RIGHT_PX), both in drag-drop.ts.
+  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(itemBox.x - 18));
   expect(handleBox.x + handleBox.width).toBeGreaterThan(listBox.x);
 });
 
