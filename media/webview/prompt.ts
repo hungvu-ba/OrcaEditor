@@ -7,7 +7,7 @@
  * (debounce). Chọn gợi ý (click hoặc ↑↓ + Enter) → trả về đường dẫn tương
  * đối đã mã hóa, kèm tên file làm displayText khi không có selection.
  */
-import { encodeLinkPath, saveSelection, type DomHelpers } from './dom-utils';
+import { encodeLinkPath, makeDraggable, saveSelection, type DomHelpers } from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
 import { FILE_SEARCH_DEBOUNCE_MS } from './constants';
 
@@ -41,6 +41,11 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     overlay.className = 'prompt-overlay';
     const box = document.createElement('div');
     box.className = 'prompt-box';
+    // Kéo box đi chỗ khác để lộ nội dung phía sau nó đang bị che (vd 1 URL
+    // nằm ngay dưới popup) — bug report 2026-07-14 (mục 6): trước đó chỉ kéo
+    // được từ 1 thanh handle mỏng ở mép trên, nay bấm được ở bất kỳ đâu trên
+    // box (trừ input/nút — `DRAG_IGNORE_SELECTOR` trong dom-utils.ts).
+    makeDraggable(box);
     const lbl = document.createElement('label');
     lbl.textContent = label;
     const input = document.createElement('input');
@@ -65,6 +70,10 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     const list = document.createElement('div');
     list.className = 'prompt-suggestions';
     list.style.display = 'none';
+    // Cả khu vực gợi ý file (không chỉ mỗi item) là vùng "không kéo" — box giờ
+    // kéo được từ bất kỳ đâu (xem makeDraggable ở trên), nhưng bấm vào đây
+    // phải chọn gợi ý, không được bắt đầu kéo box.
+    list.setAttribute('data-no-drag', 'true');
 
     const renderSuggestions = (): void => {
       list.textContent = '';

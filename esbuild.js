@@ -32,11 +32,20 @@ const webviewConfig = {
   minify: production,
 };
 
+/**
+ * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
+ * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
+ * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
+ */
+const roundtripFeatureFiles = fs
+  .readdirSync('test/roundtrip')
+  .filter((f) => f.endsWith('.ts') && !f.startsWith('_'));
+
 /** @type {import('esbuild').BuildOptions} */
 const testConfig = {
-  entryPoints: ['test/roundtrip.ts'],
+  entryPoints: roundtripFeatureFiles.map((f) => `test/roundtrip/${f}`),
   bundle: true,
-  outfile: 'dist/test/roundtrip.js',
+  outdir: 'dist/test/roundtrip',
   format: 'cjs',
   platform: 'node',
   target: 'node18',
@@ -59,6 +68,28 @@ function copyAssets() {
   fs.mkdirSync('dist/webview', { recursive: true });
   for (const f of ['markdown.css', 'editor.css']) {
     fs.copyFileSync(path.join('media', f), path.join('dist/webview', f));
+  }
+  // Bundled fonts (Literata cho reading preset "academic" — @font-face trong
+  // markdown.css trỏ url('fonts/literata/*.woff2'). Copy .woff2 + OFL.txt: media/**
+  // bị .vscodeignore loại khỏi .vsix nên license phải đi kèm trong dist để tuân
+  // OFL 1.1 (license phải phân phối cùng font).
+  // (font, keepName) → copy .woff2/.woff + file license đi kèm vào dist. media/**
+  // bị .vscodeignore loại khỏi .vsix nên license phải nằm trong dist mới ship theo
+  // font (OFL 1.1 của Literata / MIT của ET Book đều yêu cầu kèm license).
+  const fontFamilies = [
+    { dir: 'literata', license: 'OFL.txt' }, // Literata (reading academic — tiếng Việt)
+    { dir: 'et-book', license: 'LICENSE' }, // ET Book (reading academic — tiếng Anh, look ai-2027)
+  ];
+  for (const { dir, license } of fontFamilies) {
+    const src = path.join('media', 'fonts', dir);
+    if (!fs.existsSync(src)) continue;
+    const dest = path.join('dist/webview/fonts', dir);
+    fs.mkdirSync(dest, { recursive: true });
+    for (const file of fs.readdirSync(src)) {
+      if (file.endsWith('.woff2') || file.endsWith('.woff') || file === license) {
+        fs.copyFileSync(path.join(src, file), path.join(dest, file));
+      }
+    }
   }
   // KaTeX css + fonts
   const katexDist = path.join('node_modules', 'katex', 'dist');

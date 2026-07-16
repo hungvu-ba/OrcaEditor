@@ -2,18 +2,36 @@
  * Toolbar định dạng chính: format text (bold/italic/heading/list/quote...),
  * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file cho Claude.
  */
-import { addCheckbox, closestElement, escapeAttr, escapeHtml, svgIcon, type DomHelpers } from './dom-utils';
+import hljs from 'highlight.js/lib/common';
+import {
+  addCheckbox,
+  closestElement,
+  encodeLinkPath,
+  escapeAttr,
+  escapeHtml,
+  findTaskCheckbox,
+  isAbsoluteUrl,
+  svgIcon,
+  type DomHelpers,
+} from './dom-utils';
 import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
+import { READING_STYLES, type ReadabilityController } from './readability';
+import { attachTooltip, hideTooltip } from './tooltip';
+import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
   scheduleSync: () => void;
   dom: DomHelpers;
   toc: TocController;
+  /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
+  readability: ReadabilityController;
   promptInput: PromptController['promptInput'];
+  /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
+  insertMarkdown: (text: string) => void;
 }
 
 let content: HTMLElement;
@@ -28,6 +46,18 @@ const TOC_ICON = svgIcon(
   `<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.75" ${FMT_STROKE}/>` +
     `<path d="M9.75 2.75v10.5" ${FMT_STROKE}/>` +
     '<path d="M3.75 6.25h3.5M3.75 8.75h3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.55"/>'
+);
+
+/** Icon Reading Mode (US-19.1): quyển sách mở — gợi chế độ đọc. */
+const READING_ICON = svgIcon(
+  `<path d="M8 4.3C6.4 3.3 4.1 3.1 2.5 3.5v8.1C4.1 11.2 6.4 11.4 8 12.4" ${FMT_STROKE}/>` +
+    `<path d="M8 4.3C9.6 3.3 11.9 3.1 13.5 3.5v8.1C11.9 11.2 9.6 11.4 8 12.4" ${FMT_STROKE}/>` +
+    `<path d="M8 4.3v8.1" ${FMT_STROKE}/>`
+);
+
+/** Icon Zen / Focus (US-19.9): 4 góc khung — gợi tập trung vào cột chữ giữa. */
+const ZEN_ICON = svgIcon(
+  `<path d="M2.75 5.5v-2.75h2.75M13.25 5.5v-2.75h-2.75M2.75 10.5v2.75h2.75M13.25 10.5v2.75h-2.75" ${FMT_STROKE}/>`
 );
 
 /** Icon clipboard có ký tự @ — copy @file cho chat Claude Code. */
@@ -102,6 +132,18 @@ const FMT_ICONS = {
     `<path d="M10.25 6.5H6a3.5 3.5 0 1 0 0 7h3.5" ${FMT_STROKE}/>` +
       `<path d="M8.25 4.25l2.5 2.5-2.5 2.5" ${FMT_STROKE}/>`
   ),
+  /** Icon Mermaid (US-4.12): 2 khối nối bằng đường gấp khúc, gợi sơ đồ flowchart. */
+  mermaid: svgIcon(
+    `<rect x="1.5" y="2.5" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
+      `<rect x="8.5" y="10" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
+      `<path d="M4.5 6v2.5a1.5 1.5 0 0 0 1.5 1.5h5.5" ${FMT_STROKE}/>`
+  ),
+  /** Icon eraser (US-4.13): khối tẩy nghiêng + gạch chân "mặt bàn". */
+  eraser: svgIcon(
+    `<path d="M10.6 2.9L13.1 5.4a1.5 1.5 0 0 1 0 2.1l-5.6 5.6H4.2L2.2 11.1a1.5 1.5 0 0 1 0-2.1l6.3-6.1a1.5 1.5 0 0 1 2.1 0z" ${FMT_STROKE}/>` +
+      `<path d="M8.5 5L11 7.5" ${FMT_STROKE}/>` +
+      '<path d="M4.2 13.1h9.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>'
+  ),
 };
 
 /** Icon "..." cho nút mở menu tràn (các nút không đủ chỗ khi toolbar hẹp). */
@@ -110,6 +152,48 @@ const MORE_ICON = svgIcon(
     '<circle cx="8" cy="8" r="1.3" fill="currentColor"/>' +
     '<circle cx="12" cy="8" r="1.3" fill="currentColor"/>'
 );
+
+/**
+ * Icon "⋮" (kebab DỌC, 3 chấm xếp trên-dưới) cho nút "more options" (US-4.14)
+ * — CỐ Ý khác hình với MORE_ICON ("..." NGANG, menu tràn US-4.7) để 2 trigger
+ * đọc được là 2 control khác nhau khi cùng hiện trên toolbar hẹp. Thắng 2
+ * phương án khác được so sánh trong prototype: gear (⚙, ngụ ý "cấu hình" chứ
+ * không phải "hành động") và "..." + label chữ (tốn ~40-50px đúng chỗ đang
+ * thiếu chỗ nhất).
+ */
+const MORE_OPTIONS_ICON = svgIcon(
+  '<circle cx="8" cy="3.6" r="1.3" fill="currentColor"/>' +
+    '<circle cx="8" cy="8" r="1.3" fill="currentColor"/>' +
+    '<circle cx="8" cy="12.4" r="1.3" fill="currentColor"/>'
+);
+
+/** Chevron nhỏ cho caret của split-button (Heading/Code block/Math — US-4.9–4.11). */
+const CARET_DOWN_ICON = svgIcon(`<path d="M4.5 6.25L8 9.75l3.5-3.5" ${FMT_STROKE}/>`);
+
+/** Một dòng trong dropdown của split-button (vd. các cấp Heading, ngôn ngữ code). */
+interface ToolbarDropdownEntry {
+  label: string;
+  icon?: string;
+  /** Nhãn nhỏ đánh dấu lựa chọn phổ biến/mặc định (vd. "Phổ biến"). */
+  badge?: string; // EN only (bug report 2026-07-14, mục 7) — vd "Common"
+  action: () => void;
+  /**
+   * Giá trị định danh hàng (vd. id bundle reading style) — gán vào
+   * `data-dropdown-value` để đồng bộ dấu chọn "đang áp" (xem syncReadingButtons).
+   * Không có → hàng không mang trạng thái chọn (đa số dropdown hành-động-1-lần).
+   */
+  value?: string;
+  /**
+   * US-19.18: hover 1 hàng trong dropdown → preview theme lên file hiện tại mà
+   * KHÔNG commit; rời hàng (hoặc đóng popover không chọn) → `onHoverCancel` trả
+   * lại theme gốc. Chỉ dropdown Reading Mode dùng cặp này; các dropdown khác
+   * (Heading, Math...) để trống, addPopoverRow không gắn listener khi thiếu.
+   */
+  onHoverPreview?: () => void;
+  onHoverCancel?: () => void;
+  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi 10 bundle bên dưới). */
+  separatorBefore?: boolean;
+}
 
 interface ToolbarItem {
   label: string;
@@ -129,6 +213,22 @@ interface ToolbarItem {
    * nhập trong lúc selection đang rỗng, khiến caret nhảy về đầu file.
    */
   opensAsyncPrompt?: boolean;
+  /**
+   * Có mặt → render thành split-button (mặt chính + caret) thay vì nút đơn
+   * (US-4.9/4.10/4.11). `action` vẫn là hành vi mặt chính (mặc định); caret mở
+   * popover liệt kê các lựa chọn này. Khi bị ẩn vào menu tràn (US-4.7), chỉ
+   * `action` mặc định được liệt kê — dropdown không truy cập được từ đó
+   * (accepted simplification, xem Open Questions US-4.9/4.10).
+   */
+  dropdown?: ToolbarDropdownEntry[];
+  /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
+  dropdownTitle?: string;
+  /**
+   * true → mặt chính của split-button MỞ dropdown thay vì chạy `action` (nút
+   * kiểu "menu chọn 1 trong N" không có hành vi mặc định rõ ràng, vd chọn
+   * palette đọc US-19.10). Mặc định (false) giữ hành vi cũ: mặt chính = action.
+   */
+  mainOpensDropdown?: boolean;
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -141,32 +241,205 @@ export function syncTocButton(): void {
   updateTocButton();
 }
 
+/**
+ * Đồng bộ trạng thái "đang bật" của nút Reading Mode + Zen (US-19.1/19.9/19.18)
+ * — gọi từ readability controller mỗi khi state đổi (id nằm trên split-main
+ * của Reading Mode, trên chính <button> của Zen). Chỉ gọi sau initToolbar (từ
+ * readability controller) nên ctx luôn đã gán.
+ */
+export function syncReadingButtons(): void {
+  const enabled = ctx.readability.isEnabled();
+  document.getElementById('reading-toggle')?.classList.toggle('active', enabled);
+  document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
+  // Dấu ✓ hàng bundle đang áp (US-19.18) — 'off' khi tắt hẳn, hoặc không hàng
+  // nào nếu state hiện tại (vd seed tay qua settings.json) không khớp bundle nào.
+  const current = enabled ? (ctx.readability.getStyleId() ?? '') : 'off';
+  syncDropdownSelection('reading-toggle', current);
+}
+
+/**
+ * Đánh dấu `.selected` (dấu ✓) cho hàng đang áp trong dropdown split-button neo
+ * theo `triggerId` — hàng có `data-dropdown-value === current`.
+ */
+function syncDropdownSelection(triggerId: string, current: string): void {
+  const popover = document.querySelector(`.toolbar-popover[data-for-id="${triggerId}"]`);
+  popover?.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.dropdownValue === current);
+  });
+}
+
+/** Cấp heading mặc định khi caret không nằm trong heading nào (US-4.9/US-4.16). */
+const DEFAULT_HEADING = 'h2';
+
+/**
+ * Dropdown của Heading split-button (US-4.9) — Paragraph, H1–H6, H2 đánh dấu
+ * "Phổ biến" (mặc định của mặt chính). Mọi lựa chọn đều gọi `formatHeading`
+ * (đã hỗ trợ sẵn h1–h6/p, xem `closest('h1, h2, h3, h4, h5, h6, p')`) nên
+ * giữ nguyên hành vi toggle-về-`<p>` của US-4.1 cho cả 7 lựa chọn.
+ */
+const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Paragraph', action: () => formatHeading('p') },
+  { label: 'Heading 1', action: () => formatHeading('h1') },
+  { label: 'Heading 2', badge: 'Common', action: () => formatHeading(DEFAULT_HEADING) },
+  { label: 'Heading 3', action: () => formatHeading('h3') },
+  { label: 'Heading 4', action: () => formatHeading('h4') },
+  { label: 'Heading 5', action: () => formatHeading('h5') },
+  { label: 'Heading 6', action: () => formatHeading('h6') },
+];
+
+/**
+ * Dropdown của Code block split-button (US-4.10) — 9 ngôn ngữ, JavaScript
+ * đánh dấu "Phổ biến" (mặc định của mặt chính). "Markdown" bị bỏ khỏi danh
+ * sách (bug report 2026-07-13): người dùng đã ở trong Markdown editor nên
+ * cần tô sáng cho code lồng trong bên trong, không có nhu cầu gắn
+ * `language-markdown` cho chính khối Markdown lồng nhau. Mọi lựa chọn dùng
+ * chung `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo
+ * vùng chọn (US-4.4) giữ nguyên cho cả 9 ngôn ngữ, chỉ khác class `language-*`.
+ */
+const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
+  { label: 'JavaScript', badge: 'Common', action: () => insertCodeBlock('javascript') },
+  { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
+  { label: 'Python', action: () => insertCodeBlock('python') },
+  { label: 'Bash', action: () => insertCodeBlock('bash') },
+  { label: 'JSON', action: () => insertCodeBlock('json') },
+  { label: 'HTML', action: () => insertCodeBlock('html') },
+  { label: 'CSS', action: () => insertCodeBlock('css') },
+  { label: 'SQL', action: () => insertCodeBlock('sql') },
+];
+
+/**
+ * Dropdown của Math split-button (US-4.11) — Inline (mặc định của mặt chính)
+ * / Block. Cả hai gọi `ctx.insertMarkdown` (GĐ2) — render qua chính
+ * `renderer.render()` rồi post-process KaTeX trên fragment tách biệt, không
+ * tự dựng HTML tay — @vscode/markdown-it-katex đã ship (section 2), không
+ * cần đổi renderer.
+ */
+const MATH_FORMULA = 'x^2+y^2=z^2';
+const insertInlineMath = () => ctx.insertMarkdown(`$${MATH_FORMULA}$`);
+const MATH_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Inline math', badge: 'Common', action: insertInlineMath },
+  { label: 'Block math', action: () => ctx.insertMarkdown(`$$${MATH_FORMULA}$$`) },
+];
+
+/**
+ * Templates Mermaid (US-4.12, mở rộng ở US-4.19/bug report 2026-07-14 mục
+ * 10) — trước đó chỉ có 1 flowchart mẫu cố định (Open Question bị defer ở
+ * US-4.12), giờ thêm dropdown 4 loại phổ biến, cùng pattern split-button với
+ * Heading/Code block/Math. Chèn qua `ctx.insertMarkdown` như cũ —
+ * mermaidView.renderAll() (gọi trong insertMarkdownAtCaret, main.ts) tự dựng
+ * SVG cho khối vừa chèn, không cần đổi mermaid.ts (mermaid.js tự nhận diện
+ * loại diagram từ nội dung nguồn).
+ */
+const MERMAID_FLOWCHART_TEMPLATE = '```mermaid\ngraph TD; A[Start] --> B{Decision} --> C[End]\n```';
+const MERMAID_SEQUENCE_TEMPLATE =
+  '```mermaid\nsequenceDiagram\n  Alice->>Bob: Hello Bob, how are you?\n  Bob-->>Alice: I am good, thanks!\n```';
+const MERMAID_CLASS_TEMPLATE =
+  '```mermaid\nclassDiagram\n  Animal <|-- Dog\n  Animal : +String name\n  Animal : +makeSound()\n```';
+const MERMAID_STATE_TEMPLATE =
+  '```mermaid\nstateDiagram-v2\n  [*] --> Idle\n  Idle --> Running : start\n  Running --> Idle : stop\n  Running --> [*]\n```';
+const insertMermaidFlowchart = () => ctx.insertMarkdown(MERMAID_FLOWCHART_TEMPLATE);
+const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Flowchart', badge: 'Common', action: insertMermaidFlowchart },
+  { label: 'Sequence diagram', action: () => ctx.insertMarkdown(MERMAID_SEQUENCE_TEMPLATE) },
+  { label: 'Class diagram', action: () => ctx.insertMarkdown(MERMAID_CLASS_TEMPLATE) },
+  { label: 'State diagram', action: () => ctx.insertMarkdown(MERMAID_STATE_TEMPLATE) },
+];
+
+/**
+ * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
+ * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 10 bundle
+ * preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp,
+ * xem `READING_STYLES` trong readability.ts và Requirement - 19
+ * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
+ * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
+ * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
+ * addPopoverRow). Chọn hàng qua `setStyle`/`disable` — kéo theo bật/tắt Reading
+ * Mode. ctx được gán trong initToolbar trước khi mọi action chạy nên tham
+ * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
+ *
+ * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
+ * reset" duy nhất, khác loại với 10 bundle bên dưới (đều là biến thể "bật");
+ * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
+ * phải cuộn qua hết 10 hàng mới thấy, và tách riêng bằng 1 vạch chia
+ * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
+ * chọn "style" thứ 11.
+ */
+const READING_DROPDOWN: ToolbarDropdownEntry[] = [
+  {
+    label: 'Follow VS Code (no reading style)',
+    value: 'off',
+    action: () => ctx.readability.disable(),
+    onHoverPreview: () => ctx.readability.previewStyle('off'),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+  },
+  ...READING_STYLES.map((style, i) => ({
+    label: style.label,
+    badge: style.id === 'comfortable-sepia' ? 'Default' : undefined,
+    value: style.id,
+    action: () => ctx.readability.setStyle(style.id),
+    onHoverPreview: () => ctx.readability.previewStyle(style.id),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+    separatorBefore: i === 0,
+  })),
+];
+
+// Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
+// Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
+// code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
+// chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
+// chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold') },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic') },
-  { label: 'S', title: 'Strikethrough (⌘⇧X)', action: () => document.execCommand('strikeThrough') },
-  { label: '</>', title: 'Inline code (⌘E)', action: toggleInlineCode },
-  { label: 'H1', title: 'Heading 1', action: () => formatHeading('h1'), separatorBefore: true },
-  { label: 'H2', title: 'Heading 2', action: () => formatHeading('h2') },
-  { label: 'H3', title: 'Heading 3', action: () => formatHeading('h3') },
-  { label: '¶', title: 'Normal paragraph', action: () => formatHeading('p') },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold' },
+  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
+  {
+    label: 'S',
+    title: 'Strikethrough (⌘⇧X)',
+    action: () => document.execCommand('strikeThrough'),
+    id: 'fmt-strike',
+  },
+  {
+    label: DEFAULT_HEADING.toUpperCase(),
+    title: 'Heading (click again on the same level to revert to paragraph)',
+    action: () => formatHeading(currentHeadingTag()),
+    dropdown: HEADING_DROPDOWN,
+    dropdownTitle: 'Choose heading level',
+    separatorBefore: true,
+    id: 'fmt-heading',
+  },
+  {
+    label: '⌫',
+    icon: FMT_ICONS.eraser,
+    title: 'Clear formatting',
+    action: () => document.execCommand('removeFormat'),
+    separatorBefore: true,
+  },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo') },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
     label: '•',
     icon: FMT_ICONS.ul,
     title: 'Bulleted list',
     action: setBulletList,
     separatorBefore: true,
+    id: 'fmt-bullet',
   },
-  { label: '1.', icon: FMT_ICONS.ol, title: 'Numbered list', action: setNumberedList },
-  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem },
+  {
+    label: '1.',
+    icon: FMT_ICONS.ol,
+    title: 'Numbered list',
+    action: setNumberedList,
+    id: 'fmt-numbered',
+  },
+  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task' },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
     title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
     separatorBefore: true,
+    id: 'fmt-blockquote',
   },
-  { label: '{ }', icon: FMT_ICONS.codeBlock, title: 'Code block', action: insertCodeBlock },
   { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
   {
     label: '—',
@@ -189,20 +462,54 @@ const toolbarItems: ToolbarItem[] = [
     action: insertImage,
     opensAsyncPrompt: true,
   },
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo'), separatorBefore: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
-    label: '@',
-    icon: CLAUDE_COPY_ICON,
-    title: 'Copy "@file" to clipboard for Claude Code chat — auto-opens/focuses the chat input, you just paste (⌘V)',
-    action: () => ctx.vscode.postMessage({ type: 'addToClaudeContext' }),
+    label: '</>',
+    title: 'Inline code (⌘E)',
+    action: toggleInlineCode,
+    separatorBefore: true,
+    id: 'fmt-inline-code',
+  },
+  {
+    label: '{ }',
+    icon: FMT_ICONS.codeBlock,
+    title: 'Code block (default: JavaScript)',
+    action: () => insertCodeBlock('javascript'),
+    dropdown: CODE_BLOCK_DROPDOWN,
+    dropdownTitle: 'Choose code language',
+  },
+  {
+    label: '∑',
+    title: 'Math (default: inline, KaTeX)',
+    action: insertInlineMath,
+    dropdown: MATH_DROPDOWN,
+    dropdownTitle: 'Choose math type',
+  },
+  {
+    label: '⎇',
+    icon: FMT_ICONS.mermaid,
+    title: 'Mermaid diagram (default: flowchart)',
+    action: insertMermaidFlowchart,
+    dropdown: MERMAID_DROPDOWN,
+    dropdownTitle: 'Choose diagram type',
+  },
+  {
+    label: 'Read',
+    icon: READING_ICON,
+    title: 'Reading Mode (comfortable reading layout)',
+    action: () => ctx.readability.toggle(),
+    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành 10 bundle đã
+    // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
+    dropdown: READING_DROPDOWN,
+    dropdownTitle: 'Choose reading style (hover to preview)',
+    id: 'reading-toggle',
     alignRight: true,
   },
   {
-    label: '⟨/⟩',
-    icon: RAW_SOURCE_ICON,
-    title: 'View raw Markdown source (opens a text editor to the side)',
-    action: () => ctx.vscode.postMessage({ type: 'viewSource' }),
+    label: 'Focus',
+    icon: ZEN_ICON,
+    title: 'Focus Mode (hide chrome, center text — Esc to exit)',
+    action: () => ctx.readability.toggleZen(),
+    id: 'zen-toggle',
   },
   {
     label: '☰',
@@ -216,42 +523,232 @@ const toolbarItems: ToolbarItem[] = [
   },
 ];
 
-let tooltipEl: HTMLDivElement | undefined;
 
 /**
- * Tooltip tự vẽ bằng JS thay vì dựa vào title attribute gốc của trình duyệt —
- * title attribute im lặng không hiện được ở một số nút toolbar tuỳ vị trí
- * (nghi do tương tác giữa layout flex-wrap của #toolbar với việc trình duyệt
- * xác định "phần tử đang hover" cho riêng cơ chế tooltip, khác với hit-test
- * click bình thường), nên không thể tin cậy hoàn toàn vào title. Tự quản lý
- * show/hide qua mouseenter/focus và mouseleave/blur đảm bảo hiện thị nhất
- * quán bất kể vị trí nút.
+ * Chạy 1 action bất kỳ: action + (focus lại #content trừ khi tự mở prompt bất
+ * đồng bộ) + scheduleSync — logic dùng chung cho nút đơn, mặt chính của
+ * split-button, hàng dropdown của split-button, VÀ hàng trong menu tràn
+ * (US-4.7) khi đại diện split-button bị ẩn (chỉ action mặc định được liệt kê,
+ * xem ToolbarItem.dropdown doc).
  */
-function showTooltip(target: HTMLElement, text: string): void {
-  if (!tooltipEl) {
-    tooltipEl = document.createElement('div');
-    tooltipEl.id = 'toolbar-tooltip';
-    document.body.appendChild(tooltipEl);
+function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
+  hideTooltip();
+  action();
+  if (!opensAsyncPrompt) {
+    content.focus();
   }
-  tooltipEl.textContent = text;
-  tooltipEl.style.display = 'block';
-  const rect = target.getBoundingClientRect();
-  const tipRect = tooltipEl.getBoundingClientRect();
-  const left = Math.max(4, Math.min(rect.left + rect.width / 2 - tipRect.width / 2, window.innerWidth - tipRect.width - 4));
-  tooltipEl.style.left = `${left}px`;
-  tooltipEl.style.top = `${rect.bottom + 6}px`;
+  ctx.scheduleSync();
 }
 
-function hideTooltip(): void {
-  if (tooltipEl) {
-    tooltipEl.style.display = 'none';
+function invokeItem(item: ToolbarItem): void {
+  invokeAction(item.action, item.opensAsyncPrompt);
+}
+
+// ---------------------------------------------------------------------------
+// Popover dùng chung (GĐ2 hạ tầng) — nền cho menu tràn (US-4.7) và mọi
+// dropdown mới (Heading/Code block/Math split-button, "more options" US-4.14).
+// Chỉ MỘT popover được mở tại một thời điểm; đóng khi click ra ngoài/Escape.
+// ---------------------------------------------------------------------------
+
+let openPopoverEl: HTMLElement | undefined;
+let openPopoverTrigger: HTMLElement | undefined;
+let popoverGlobalListenersInstalled = false;
+
+function installPopoverGlobalListeners(): void {
+  if (popoverGlobalListenersInstalled) {
+    return;
   }
+  popoverGlobalListenersInstalled = true;
+  document.addEventListener('mousedown', (e) => {
+    if (!openPopoverEl) {
+      return;
+    }
+    const target = e.target as Node;
+    if (openPopoverEl.contains(target) || target === openPopoverTrigger) {
+      return;
+    }
+    closePopover();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closePopover();
+    }
+  });
+}
+
+/** Tạo 1 popover ẩn sẵn, gắn vào <body> — style dùng chung `.toolbar-popover`. */
+function buildPopover(extraClassName?: string): HTMLDivElement {
+  installPopoverGlobalListeners();
+  const el = document.createElement('div');
+  el.className = extraClassName ? `toolbar-popover ${extraClassName}` : 'toolbar-popover';
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  // US-19.18 follow-up ("thực hiện transition từ state đang chọn sang state
+  // mới, thay vì revert về state gốc rồi mới chuyển"): revert-to-committed chỉ
+  // gắn ở CHÍNH popoverEl, không ở từng hàng. `mouseleave` không bubble và chỉ
+  // bắn khi con trỏ rời khỏi TOÀN BỘ popoverEl (kể cả mọi hàng con) — di chuyển
+  // giữa 2 hàng liền kề (không có khe hở) không bao giờ kích hoạt event này, vì
+  // con trỏ chưa từng thật sự thoát khỏi popoverEl. Nhờ vậy preview của hàng A
+  // vẫn còn nguyên trên trang cho tới khi debounce của hàng B chạy xong rồi đè
+  // trực tiếp lên — CSS transition tự chuyển thẳng A→B. Chỉ khi rời hẳn cả
+  // popover thì mới thật sự revert về state đã commit.
+  el.addEventListener('mouseleave', () => {
+    activeHoverCancel?.();
+    activeHoverCancel = undefined;
+  });
+  return el;
+}
+
+/**
+ * Hàng đang preview (nếu có) — cho closePopover() huỷ preview khi popover đóng
+ * mà user KHÔNG chọn (Escape/click ra ngoài), tránh kẹt theme preview (US-19.18).
+ */
+let activeHoverCancel: (() => void) | undefined;
+
+/** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
+function addPopoverRow(
+  popoverEl: HTMLElement,
+  icon: string | undefined,
+  label: string,
+  badge: string | undefined,
+  onClick: () => void,
+  value?: string,
+  onHoverPreview?: () => void,
+  onHoverCancel?: () => void
+): void {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'toolbar-popover-item';
+  if (value !== undefined) {
+    row.dataset.dropdownValue = value;
+  }
+  if (icon) {
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'toolbar-popover-icon';
+    iconSpan.innerHTML = icon;
+    row.appendChild(iconSpan);
+  }
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'toolbar-popover-label';
+  labelSpan.textContent = label;
+  row.appendChild(labelSpan);
+  if (badge) {
+    const badgeSpan = document.createElement('span');
+    badgeSpan.className = 'toolbar-popover-badge';
+    badgeSpan.textContent = badge;
+    row.appendChild(badgeSpan);
+  }
+  row.addEventListener('mousedown', (e) => e.preventDefault());
+  row.addEventListener('click', onClick);
+  if (onHoverPreview && onHoverCancel) {
+    // US-19.18 follow-up (bug report "theme apply quá nhanh gây choáng"): trễ
+    // READING_PREVIEW_DEBOUNCE_MS trước khi THẬT SỰ áp preview — rê chuột lướt
+    // qua nhiều hàng liên tục (không dừng ở hàng nào) sẽ không kích hoạt lần
+    // preview nào cả, chỉ hàng con trỏ dừng đủ lâu mới đổi theme. mouseleave
+    // luôn huỷ timer + revert ngay lập tức (không debounce chiều huỷ) nên rời
+    // hàng luôn phản hồi tức thì dù preview đã kịp áp hay chưa.
+    let previewTimer: ReturnType<typeof setTimeout> | undefined;
+    row.addEventListener('mouseenter', () => {
+      activeHoverCancel = onHoverCancel;
+      previewTimer = setTimeout(() => {
+        previewTimer = undefined;
+        onHoverPreview();
+      }, READING_PREVIEW_DEBOUNCE_MS);
+    });
+    row.addEventListener('mouseleave', () => {
+      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce
+      // của CHÍNH hàng này nếu nó chưa kịp bắn, để rời hàng trước khi preview
+      // áp thì không áp preview đó nữa (giữ nguyên preview trước đó, nếu có).
+      if (previewTimer !== undefined) {
+        clearTimeout(previewTimer);
+        previewTimer = undefined;
+      }
+    });
+  }
+  popoverEl.appendChild(row);
+}
+
+/** Mở popoverEl neo theo triggerBtn (căn phải mép dưới nút) — đóng popover khác đang mở trước. */
+/**
+ * US-19.18: khoá cứng font-size của mọi `.toolbar-popover-item` trong popover
+ * bằng inline style tại thời điểm mở — bắt buộc phải là INLINE trên CHÍNH
+ * từng hàng (không phải custom property đặt trên popoverEl) vì rule cỡ chữ
+ * (editor.css US-19.6) gate theo SỰ CÓ MẶT của class `body.reading-mode`:
+ * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-font-
+ * size, 12px); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi
+ * body → rule này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên
+ * chỉ đóng băng custom property không đủ — phải khoá thẳng `font-size` trên
+ * từng hàng, thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự
+ * đổi cỡ chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể
+ * không bao giờ nhận được click — bắt bằng Playwright).
+ */
+function freezePopoverRowSize(popoverEl: HTMLElement): void {
+  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-font-size').trim() || '12px';
+  popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
+    row.style.fontSize = uiFontSize;
+  });
+}
+
+function unfreezePopoverRowSize(popoverEl: HTMLElement): void {
+  popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
+    row.style.removeProperty('font-size');
+  });
+}
+
+function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
+  if (openPopoverEl && openPopoverEl !== popoverEl) {
+    closePopover();
+  }
+  freezePopoverRowSize(popoverEl);
+  popoverEl.style.display = 'flex';
+  const rect = triggerBtn.getBoundingClientRect();
+  const menuRect = popoverEl.getBoundingClientRect();
+  const left = Math.max(4, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 4));
+  popoverEl.style.left = `${left}px`;
+  popoverEl.style.top = `${rect.bottom + 4}px`;
+  openPopoverEl = popoverEl;
+  openPopoverTrigger = triggerBtn;
+}
+
+function closePopover(): void {
+  if (openPopoverEl) {
+    openPopoverEl.style.display = 'none';
+    unfreezePopoverRowSize(openPopoverEl);
+  }
+  openPopoverEl = undefined;
+  openPopoverTrigger = undefined;
+  // US-19.18: đóng popover khi đang preview (Escape/click ra ngoài, hoặc ngay
+  // trước khi chạy action của hàng vừa click — action tự apply() lại ngay sau
+  // nên không bị "revert rồi mất" gì cả, chỉ là 1 nhịp render thừa vô hại) →
+  // luôn huỷ preview để không kẹt theme tạm trên trang.
+  activeHoverCancel?.();
+  activeHoverCancel = undefined;
+}
+
+function togglePopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
+  if (openPopoverEl === popoverEl) {
+    closePopover();
+  } else {
+    openPopover(triggerBtn, popoverEl);
+  }
+}
+
+/**
+ * Đang có popover nào mở không (dropdown split-button, menu tràn, more options).
+ * Zen reveal (readability.ts) dựa vào đây để KHÔNG ẩn toolbar khi user đang
+ * chọn trong dropdown — chuột rê xuống menu (y > 48) mà toolbar trượt đi thì
+ * popover mất neo giữa chừng. Wire qua deps ở main.ts, không import ngược
+ * (toolbar.ts đã import từ readability.ts, tránh vòng phụ thuộc).
+ */
+export function isPopoverOpen(): boolean {
+  return openPopoverEl !== undefined;
 }
 
 /** Một nút định dạng có thể bị ẩn vào menu tràn (".toolbar-more") khi hẹp chỗ. */
 interface CollapsibleEntry {
   item: ToolbarItem;
-  btn: HTMLButtonElement;
+  /** Phần tử hiện/ẩn — <button> cho nút đơn, <span class="split-btn"> cho split-button. */
+  btn: HTMLElement;
   /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
   sep: HTMLSpanElement | null;
 }
@@ -261,6 +758,118 @@ let moreBtn: HTMLButtonElement | undefined;
 let overflowMenu: HTMLDivElement | undefined;
 let collapsibleEntries: CollapsibleEntry[] = [];
 let overflowResizeObserver: ResizeObserver | undefined;
+
+/** Dựng nút đơn (label/icon text, không dropdown) — trường hợp đa số các ToolbarItem. */
+function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  if (item.id) {
+    btn.id = item.id;
+  }
+  if (item.alignRight) {
+    btn.classList.add('toolbar-push-right');
+  }
+  if (item.icon) {
+    btn.innerHTML = item.icon;
+  } else {
+    btn.textContent = item.label;
+  }
+  btn.setAttribute('aria-label', item.title);
+  attachTooltip(btn, item.title);
+  // mousedown + preventDefault để không mất selection trong #content
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', () => invokeItem(item));
+  return btn;
+}
+
+/**
+ * Dựng split-button (mặt chính + vạch chia + caret nhỏ) — US-4.9/4.10/4.11.
+ * Mặt chính chạy `item.action` (hành vi mặc định); caret mở popover liệt kê
+ * `item.dropdown`. Port cấu trúc từ prototype HTML đã duyệt, chỉ đổi biến CSS
+ * `--vs-*` sang biến VS Code thật (xem `.split-*` trong editor.css).
+ */
+function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
+  const wrap = document.createElement('span');
+  wrap.className = 'split-btn';
+  if (item.alignRight) {
+    wrap.classList.add('toolbar-push-right');
+  }
+
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'split-main';
+  // id đi trên MẶT CHÍNH (không phải wrap) — khớp với contract của
+  // buildPlainButtonEl (id trên chính <button> hiển thị), để mọi lookup
+  // getElementById (vd. updateTocButton, hoặc active-state sync US-4.15 nếu
+  // sau này mở rộng sang split-button) tìm đúng phần tử thật sự đổi trạng thái.
+  if (item.id) {
+    main.id = item.id;
+  }
+  if (item.icon) {
+    main.innerHTML = item.icon;
+  } else {
+    main.textContent = item.label;
+  }
+  main.setAttribute('aria-label', item.title);
+  attachTooltip(main, item.title);
+  main.addEventListener('mousedown', (e) => e.preventDefault());
+
+  const divider = document.createElement('span');
+  divider.className = 'split-divider';
+
+  const caret = document.createElement('button');
+  caret.type = 'button';
+  caret.className = 'split-caret';
+  caret.innerHTML = CARET_DOWN_ICON;
+  const dropdownTitle = item.dropdownTitle ?? `${item.title} — more options`;
+  caret.setAttribute('aria-label', dropdownTitle);
+  attachTooltip(caret, dropdownTitle);
+  caret.addEventListener('mousedown', (e) => e.preventDefault());
+
+  const popover = buildPopover('toolbar-split-popover');
+  if (item.id) {
+    // Neo popover theo id để đồng bộ dấu chọn ngoài buildSplitButtonEl (US-19.10).
+    popover.dataset.forId = item.id;
+  }
+  for (const entry of item.dropdown ?? []) {
+    if (entry.separatorBefore) {
+      const sep = document.createElement('div');
+      sep.className = 'toolbar-popover-sep';
+      popover.appendChild(sep);
+    }
+    addPopoverRow(
+      popover,
+      entry.icon,
+      entry.label,
+      entry.badge,
+      () => {
+        closePopover();
+        invokeAction(entry.action, item.opensAsyncPrompt);
+      },
+      entry.value,
+      entry.onHoverPreview,
+      entry.onHoverCancel
+    );
+  }
+  // Menu-only (vd palette US-19.10): mặt chính mở dropdown thay vì chạy action.
+  main.addEventListener('click', () => {
+    if (item.mainOpensDropdown) {
+      hideTooltip();
+      togglePopover(caret, popover);
+    } else {
+      invokeItem(item);
+    }
+  });
+  caret.addEventListener('click', () => {
+    hideTooltip();
+    togglePopover(caret, popover);
+  });
+
+  wrap.appendChild(main);
+  wrap.appendChild(divider);
+  wrap.appendChild(caret);
+  return wrap;
+}
 
 export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, context: ToolbarContext): void {
   content = contentEl;
@@ -292,41 +901,11 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
       sep.className = 'toolbar-sep';
       toolbarEl.appendChild(sep);
     }
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    if (item.id) {
-      btn.id = item.id;
-    }
-    if (item.alignRight) {
-      btn.classList.add('toolbar-push-right');
-    }
-    if (item.icon) {
-      btn.innerHTML = item.icon;
-    } else {
-      btn.textContent = item.label;
-    }
-    btn.setAttribute('aria-label', item.title);
-    btn.addEventListener('mouseenter', () => showTooltip(btn, item.title));
-    btn.addEventListener('mouseleave', hideTooltip);
-    btn.addEventListener('focus', () => showTooltip(btn, item.title));
-    btn.addEventListener('blur', hideTooltip);
-    // mousedown + preventDefault để không mất selection trong #content
-    btn.addEventListener('mousedown', (e) => e.preventDefault());
-    btn.addEventListener('click', () => {
-      hideTooltip();
-      item.action();
-      // Action mở popup bất đồng bộ (chèn liên kết/ảnh) tự lo focus + restore
-      // selection khi đóng — focus lại content ngay ở đây sẽ cướp focus khỏi
-      // ô nhập của popup và làm caret nhảy về đầu file.
-      if (!item.opensAsyncPrompt) {
-        content.focus();
-      }
-      ctx.scheduleSync();
-    });
-    toolbarEl.appendChild(btn);
+    const el = item.dropdown ? buildSplitButtonEl(item) : buildPlainButtonEl(item);
+    toolbarEl.appendChild(el);
 
     if (!inPinnedGroup) {
-      collapsibleEntries.push({ item, btn, sep });
+      collapsibleEntries.push({ item, btn: el, sep });
     }
   }
 
@@ -335,7 +914,15 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     toolbarEl.appendChild(moreBtn);
   }
 
+  // Kebab "more options" (US-4.14) luôn ở CUỐI cùng, ngoài phạm vi
+  // collapsibleEntries/toolbarItems — điều kiện "unconditional" khác hẳn
+  // width-based overflow của US-4.7 (không bao giờ tự ẩn dù toolbar rộng hay
+  // hẹp). Đứng ngay sau nút TOC (item cuối cùng có alignRight), cùng nhóm bị
+  // đẩy phải nhờ margin-left: auto của TOC.
+  toolbarEl.appendChild(createMoreOptionsButton());
+
   setupOverflowMenu();
+  setupActiveFormattingSync();
 }
 
 /** Nút "..." — mở menu chứa các nút định dạng đang không đủ chỗ hiển thị. */
@@ -346,10 +933,7 @@ function createMoreButton(): HTMLButtonElement {
   btn.innerHTML = MORE_ICON;
   btn.style.display = 'none';
   btn.setAttribute('aria-label', 'More tools');
-  btn.addEventListener('mouseenter', () => showTooltip(btn, 'More tools'));
-  btn.addEventListener('mouseleave', hideTooltip);
-  btn.addEventListener('focus', () => showTooltip(btn, 'More tools'));
-  btn.addEventListener('blur', hideTooltip);
+  attachTooltip(btn, 'More tools');
   btn.addEventListener('mousedown', (e) => e.preventDefault());
   btn.addEventListener('click', () => {
     hideTooltip();
@@ -359,33 +943,50 @@ function createMoreButton(): HTMLButtonElement {
 }
 
 /**
- * Dựng menu tràn (dropdown) + theo dõi bề rộng toolbar bằng ResizeObserver.
- * Toolbar chuyển sang flex-wrap: nowrap (xem editor.css) — khi không đủ chỗ,
- * các nút định dạng cuối dãy được ẩn dần và liệt kê lại trong menu này thay vì
- * bị đẩy lệch xuống dòng 2.
+ * Nút "⋮" (kebab dọc) — gộp Copy "@file" cho Claude / View raw Markdown
+ * source vào 1 popover, thay cho 2 nút luôn-hiện trước đây (US-4.6/US-4.14).
+ * Cùng action/message gốc (`addToClaudeContext`/`viewSource`), chỉ đổi UI.
+ */
+function createMoreOptionsButton(): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.innerHTML = MORE_OPTIONS_ICON;
+  btn.setAttribute('aria-label', 'More options');
+  attachTooltip(btn, 'More options');
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+
+  // invokeAction (không phải postMessage trần) để khôi phục focus về #content
+  // sau khi chọn — quan trọng nhất khi kích hoạt bằng bàn phím (Tab + Enter):
+  // lúc đó mousedown/preventDefault (chặn trình duyệt cướp focus khi bấm
+  // chuột) không hề chạy, focus đã nằm sẵn trên hàng popover từ trước khi
+  // click, nên PHẢI có content.focus() tường minh — không thì focus kẹt lại
+  // trên hàng vừa ẩn (display:none) thay vì quay về editor.
+  const popover = buildPopover('toolbar-more-options-menu');
+  addPopoverRow(popover, CLAUDE_COPY_ICON, 'Copy "@file" for Claude Code chat', undefined, () => {
+    closePopover();
+    invokeAction(() => ctx.vscode.postMessage({ type: 'addToClaudeContext' }));
+  });
+  addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
+    closePopover();
+    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }));
+  });
+
+  btn.addEventListener('click', () => {
+    hideTooltip();
+    togglePopover(btn, popover);
+  });
+  return btn;
+}
+
+/**
+ * Dựng menu tràn (dropdown, dùng hạ tầng popover chung ở trên) + theo dõi bề
+ * rộng toolbar bằng ResizeObserver. Toolbar chuyển sang flex-wrap: nowrap (xem
+ * editor.css) — khi không đủ chỗ, các nút định dạng cuối dãy được ẩn dần và
+ * gom lại trong menu này thay vì bị đẩy lệch xuống dòng 2.
  */
 function setupOverflowMenu(): void {
   if (!overflowMenu) {
-    overflowMenu = document.createElement('div');
-    overflowMenu.className = 'toolbar-overflow-menu';
-    overflowMenu.style.display = 'none';
-    document.body.appendChild(overflowMenu);
-
-    document.addEventListener('mousedown', (e) => {
-      if (!overflowMenu || overflowMenu.style.display === 'none') {
-        return;
-      }
-      const target = e.target as Node;
-      if (overflowMenu.contains(target) || target === moreBtn) {
-        return;
-      }
-      closeOverflowMenu();
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        closeOverflowMenu();
-      }
-    });
+    overflowMenu = buildPopover('toolbar-overflow-menu');
   }
 
   overflowResizeObserver?.disconnect();
@@ -397,38 +998,21 @@ function setupOverflowMenu(): void {
 }
 
 function toggleOverflowMenu(): void {
-  if (!overflowMenu) {
-    return;
-  }
-  if (overflowMenu.style.display === 'none') {
-    openOverflowMenu();
-  } else {
-    closeOverflowMenu();
-  }
-}
-
-function openOverflowMenu(): void {
   if (!overflowMenu || !moreBtn) {
     return;
   }
-  overflowMenu.style.display = 'flex';
-  const rect = moreBtn.getBoundingClientRect();
-  const menuRect = overflowMenu.getBoundingClientRect();
-  const left = Math.max(4, Math.min(rect.right - menuRect.width, window.innerWidth - menuRect.width - 4));
-  overflowMenu.style.left = `${left}px`;
-  overflowMenu.style.top = `${rect.bottom + 4}px`;
-}
-
-function closeOverflowMenu(): void {
-  if (overflowMenu) {
-    overflowMenu.style.display = 'none';
-  }
+  togglePopover(moreBtn, overflowMenu);
 }
 
 /**
  * Đo lại bề rộng: hiện tất cả nút định dạng trước, nếu tràn thì ẩn dần từ nút
  * cuối dãy (giữ nguyên nhóm tiện ích đẩy phải luôn hiện) cho tới khi vừa,
  * rồi dựng lại menu tràn từ danh sách vừa ẩn.
+ *
+ * Đóng bất kỳ popover nào đang mở (không chỉ menu tràn) trước khi tính lại —
+ * một dropdown split-button (Heading/Code block/Math) đang mở có thể chính là
+ * cái trigger sắp bị ẩn (display:none) ở vòng lặp bên dưới; nếu chỉ đóng
+ * riêng menu tràn, popover đó sẽ trôi nổi ở toạ độ cũ, mất neo với trigger.
  */
 function recalcOverflow(): void {
   if (!toolbarElRef || !moreBtn) {
@@ -443,7 +1027,7 @@ function recalcOverflow(): void {
     }
   }
   moreBtn.style.display = 'none';
-  closeOverflowMenu();
+  closePopover();
 
   if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
     rebuildOverflowMenu([]);
@@ -466,33 +1050,47 @@ function recalcOverflow(): void {
   rebuildOverflowMenu(hidden);
 }
 
+/**
+ * Dựng lại menu tràn từ danh sách nút đang bị ẩn. Với split-button (US-4.9/
+ * 4.10/4.11), chỉ liệt kê `item.action` mặc định — dropdown riêng của nó
+ * không truy cập được từ menu tràn (accepted simplification, xem
+ * ToolbarItem.dropdown doc) — nên dùng thẳng `invokeItem` thay vì `.click()`
+ * delegation cũ (vốn giả định `entry.btn` luôn là 1 <button> đơn, không đúng
+ * nữa với split-button là <span> bọc 2 nút con).
+ */
 function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
   if (!overflowMenu) {
     return;
   }
   overflowMenu.innerHTML = '';
   for (const entry of hidden) {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'toolbar-overflow-item';
-    if (entry.item.icon) {
-      const iconSpan = document.createElement('span');
-      iconSpan.className = 'toolbar-overflow-icon';
-      iconSpan.innerHTML = entry.item.icon;
-      row.appendChild(iconSpan);
-    }
-    const label = document.createElement('span');
-    label.className = 'toolbar-overflow-label';
-    label.textContent = entry.item.title;
-    row.appendChild(label);
-    row.addEventListener('mousedown', (e) => e.preventDefault());
-    row.addEventListener('click', () => {
-      // Nút gốc đang display:none nhưng .click() vẫn kích hoạt handler bình
-      // thường (action + focus + scheduleSync) — không cần lặp lại logic.
-      closeOverflowMenu();
-      entry.btn.click();
+    addPopoverRow(overflowMenu, entry.item.icon, entry.item.title, undefined, () => {
+      closePopover();
+      invokeItem(entry.item);
     });
-    overflowMenu.appendChild(row);
+  }
+}
+
+/**
+ * Cấp heading (h1–h6) chứa caret hiện tại, hoặc DEFAULT_HEADING nếu caret
+ * không nằm trong heading nào (US-4.16 — nhãn mặt chính của split-button
+ * live-sync theo caret, đảo lại quyết định "static label" ban đầu của US-4.9).
+ * Dùng chung cho action mặt chính (currentHeadingTag() làm tham số cho
+ * formatHeading) VÀ updateHeadingLabel() bên dưới — đảm bảo nút luôn hiển thị
+ * đúng cấp mà click vào nó sẽ áp dụng/toggle.
+ */
+function currentHeadingTag(): string {
+  const sel = window.getSelection();
+  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  return heading && content.contains(heading) ? heading.tagName.toLowerCase() : DEFAULT_HEADING;
+}
+
+/** Cập nhật nhãn (text) của mặt chính Heading split-button theo `currentHeadingTag()`. */
+function updateHeadingLabel(): void {
+  const btn = document.getElementById('fmt-heading');
+  if (btn) {
+    btn.textContent = currentHeadingTag().toUpperCase();
   }
 }
 
@@ -679,13 +1277,18 @@ function replaceListItems(items: HTMLLIElement[], mutate: (clone: HTMLLIElement)
 }
 
 function stripCheckboxFrom(li: HTMLLIElement): void {
-  li.querySelector(':scope > input[type="checkbox"]')?.remove();
+  const checkbox = findTaskCheckbox(li);
+  // Checkbox's own parent: `li` itself for a tight item, the child <p> for a
+  // loose one — the stray-space cleanup below must trim THAT parent's first
+  // child, not always li.firstChild (which would miss a loose item's <p>).
+  const container = checkbox?.parentElement ?? li;
+  checkbox?.remove();
   li.classList.remove('task-list-item');
   // markdown-it-task-lists chỉ cắt "[ ]" (3 ký tự) khỏi text khi render, GIỮ
   // LẠI dấu cách đứng sau — text node trong <li> task luôn bắt đầu bằng " ".
   // Đứng sau checkbox thì vô hình, nhưng bỏ checkbox rồi thì lộ ra thành
   // khoảng trắng thừa đầu dòng → cắt luôn khi gỡ checkbox.
-  const first = li.firstChild;
+  const first = container.firstChild;
   if (first?.nodeType === Node.TEXT_NODE && first.textContent) {
     first.textContent = first.textContent.replace(/^\s+/, '');
     if (first.textContent === '') {
@@ -758,59 +1361,31 @@ function topLevelChildContaining(node: Node): Element | null {
   return el;
 }
 
-/**
- * Mọi <li> nằm giữa 2 mép ngoài `before`/`after` (chốt lại TRƯỚC khi mutate DOM — cùng kỹ thuật
- * findListItemsBetween ở trên), quét qua BẤT KỲ <ul>/<ol> con trực tiếp nào của #content trong
- * khoảng đó — không chỉ một list duy nhất.
- *
- * Lý do cần: execCommand('insertUnorderedList') trên vùng chọn trải nhiều đoạn văn RỜI (có dòng
- * trống thật giữa các đoạn — không liền mạch) có thể TÁCH thành NHIỀU <ul> độc lập thay vì gộp
- * chung một list (hành vi thật của Chrome, đã quan sát qua repro thủ công — xem C4 bug report #5:
- * "tạo todo từ nhiều dòng text bị thừa 1 dấu chấm ở dòng đầu"). getListSelection() chỉ dò được MỘT
- * <ul> (qua range.startContainer) nên khi Chrome tách nhiều <ul>, các <li> ở <ul> còn lại không
- * được gắn class contains-task-list — CSS ẩn marker mặc định (`list-style-type: none`) không áp
- * dụng, bullet "•" của trình duyệt lộ ra cạnh checkbox.
- */
-function findAllListItemsBetween(before: Element | null, after: Element | null): HTMLLIElement[] {
-  const items: HTMLLIElement[] = [];
-  for (
-    let node: Element | null = before ? before.nextElementSibling : content.firstElementChild;
-    node && node !== after;
-    node = node.nextElementSibling
-  ) {
-    if (node.tagName === 'LI') {
-      items.push(node as HTMLLIElement);
-    } else if (node.tagName === 'UL' || node.tagName === 'OL') {
-      node.querySelectorAll(':scope > li').forEach((li) => items.push(li as HTMLLIElement));
-    }
-  }
-  return items;
-}
-
 function toggleTaskItem(): void {
   const current = getListSelection();
 
   if (!current) {
-    // Chưa ở trong list → tạo list cho cả vùng chọn trước. Chốt mép ngoài
-    // TRƯỚC khi mutate DOM (xem findAllListItemsBetween) — SAU đó không thể tin
-    // getListSelection() dò lại đủ mọi <li> vừa tạo.
+    // Not inside a list yet → build a list for the whole selection first.
     const sel = window.getSelection();
     const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
     const startTop = range ? topLevelChildContaining(range.startContainer) : null;
     const endTop = range ? topLevelChildContaining(range.endContainer) : null;
     const before = startTop?.previousElementSibling ?? null;
-    const after = endTop?.nextElementSibling ?? null;
+
+    let freshItems: HTMLLIElement[] = [];
 
     if (startTop && endTop) {
-      // Đường chính (bug #3): TỰ dựng MỘT <ul> "tight" (nội dung nằm thẳng trong
-      // <li>, không bọc <p>) từ mọi block top-level trong vùng chọn rồi chèn một
-      // lần bằng insertHTML — KHÔNG dùng execCommand('insertUnorderedList') vì
-      // Chrome hay tách vùng chọn nhiều đoạn văn rời thành NHIỀU <ul> và/hoặc
-      // giữ <p> con làm list "loose". Hệ quả (đã quan sát ở bug report #3): item
-      // đầu bị tách ra <ul> riêng → lộ bullet "•" thừa cạnh checkbox, và turndown
-      // serialize item loose kèm một dòng trắng thừa. Một <ul> tight duy nhất
-      // triệt tiêu cả hai. insertHTML (thay vì thao tác DOM trần) để Ctrl/Cmd+Z
-      // hoàn tác gọn một bước (cùng lý do convertBlockToListItem/input-rules.ts).
+      // Main path (bug #3): build ONE "tight" <ul> (content sits directly in
+      // <li>, no wrapping <p>) from every top-level block in the selection and
+      // insert it in a single shot via insertHTML — NOT
+      // execCommand('insertUnorderedList'), because Chrome tends to split a
+      // selection spanning several separate paragraphs into MULTIPLE <ul>s
+      // and/or keep child <p>s as a "loose" list. Observed fallout (bug report
+      // #3): the first item got split into its own <ul> → a stray bullet "•"
+      // showed up next to the checkbox, and turndown serialized the loose item
+      // with an extra blank line. A single tight <ul> eliminates both. insertHTML
+      // (instead of raw DOM ops) so Ctrl/Cmd+Z undoes it in one step (same
+      // reasoning as convertBlockToListItem/input-rules.ts).
       const itemsHtml: string[] = [];
       for (let el: Element | null = startTop; el; el = el.nextElementSibling) {
         if (el.tagName === 'UL' || el.tagName === 'OL') {
@@ -832,20 +1407,33 @@ function toggleTaskItem(): void {
         sel?.removeAllRanges();
         sel?.addRange(replaceRange);
         document.execCommand('insertHTML', false, html);
+
+        // The just-inserted <ul> is deterministically at this position — read
+        // its own children directly instead of sweeping an unbounded sibling
+        // range (bug #10: a stale/unresolved end boundary must never leak into
+        // which <li>s get a checkbox).
+        const insertedList = before ? before.nextElementSibling : content.firstElementChild;
+        if (insertedList) {
+          freshItems = Array.from(insertedList.querySelectorAll(':scope > li')) as HTMLLIElement[];
+        }
       }
     } else {
-      // Không xác định được ranh giới block (hiếm — vd không có selection) →
-      // lùi về hành vi execCommand cũ.
+      // Rare fallback — block boundary couldn't be resolved (e.g. no
+      // selection) → fall back to the old execCommand behavior, then re-resolve
+      // the list it just created via getListSelection() instead of sweeping.
       document.execCommand('insertUnorderedList');
+      const created = getListSelection();
+      if (created) {
+        freshItems = created.items;
+      }
     }
 
-    const freshItems = findAllListItemsBetween(before, after);
     if (!freshItems.length) {
       return;
     }
-    // <li> mới tạo chắc chắn chưa có checkbox → luôn "add" cho TOÀN BỘ. Gọi
-    // addCheckbox trực tiếp trên node THẬT nên li.parentElement luôn đúng —
-    // contains-task-list được gắn cho đúng <ul> chứa từng <li>.
+    // Newly-created <li>s never already have a checkbox → always "add" for all
+    // of them. Calling addCheckbox directly on the real node keeps
+    // li.parentElement correct — contains-task-list lands on the right <ul>.
     freshItems.forEach((li) => addCheckbox(li));
     return;
   }
@@ -853,7 +1441,7 @@ function toggleTaskItem(): void {
   const { list, items: targets } = current;
 
   if (targets.length === 1) {
-    const existing = targets[0].querySelector(':scope > input[type="checkbox"]');
+    const existing = findTaskCheckbox(targets[0]);
     if (existing) {
       stripCheckboxFrom(targets[0]);
       list.classList.remove('contains-task-list');
@@ -898,30 +1486,53 @@ function rangeToHtml(range: Range): string {
 }
 
 /**
- * Chèn code block. Nếu đang chọn một đoạn text ở giữa câu (trong cùng một
- * đoạn văn/heading), tách phần trước/sau vùng chọn ra thành block riêng rồi
- * mới chèn <pre> xen giữa — nếu không tách trước, insertHTML một block-level
- * element (<pre>) giữa nội dung inline sẽ phó mặc cho trình duyệt tự tách
- * đoạn, thứ tự trước/sau không được đảm bảo.
+ * Chèn code block, gắn `language-{lang}` (US-4.10 — trước đây luôn cố định
+ * `language-plaintext`, xem US-4.4). Nếu đang chọn một đoạn text ở giữa câu
+ * (trong cùng một đoạn văn/heading), tách phần trước/sau vùng chọn ra thành
+ * block riêng rồi mới chèn <pre> xen giữa — nếu không tách trước, insertHTML
+ * một block-level element (<pre>) giữa nội dung inline sẽ phó mặc cho trình
+ * duyệt tự tách đoạn, thứ tự trước/sau không được đảm bảo.
+ *
+ * Khi vùng chọn trải dài qua NHIỀU block (vd. chọn từ giữa đoạn này sang giữa
+ * đoạn kế tiếp, kể cả khi có đoạn trắng xen giữa) — bug 2026-07-14: trước đây
+ * chỉ lấy `block` từ `range.startContainer` rồi `selectNode(block)` khi thay
+ * thế, nên các block khác nằm trong vùng chọn (kể cả đoạn trắng ở giữa) không
+ * hề bị xoá, trong khi `codeContent` (lấy từ `sel.toString()`) đã chứa toàn bộ
+ * text của các block đó → nội dung bị nhân đôi. Fix: tìm thêm `endBlock` từ
+ * `range.endContainer`, dùng nó làm điểm kết cho afterRange/afterBlock, và khi
+ * thay thế phải chọn từ trước `block` đến sau `endBlock` để xoá hết mọi block
+ * nằm giữa (không chỉ riêng `block`).
  */
-function insertCodeBlock(): void {
+function insertCodeBlock(lang: string): void {
   const sel = window.getSelection();
   const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
   const selectedText = sel?.toString() ?? '';
   const codeContent = escapeHtml(selectedText || 'code');
+  const langClass = escapeAttr(lang);
 
   const anchor = range ? closestElement(range.startContainer) : null;
   const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  const endAnchor = range ? closestElement(range.endContainer) : null;
+  const endBlock = endAnchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
 
-  if (!range || !selectedText || !block || !content.contains(block) || block === content) {
+  if (
+    !range ||
+    !selectedText ||
+    !block ||
+    !endBlock ||
+    !content.contains(block) ||
+    !content.contains(endBlock) ||
+    block === content
+  ) {
     // Không có vùng chọn hợp lệ trong một đoạn văn/heading (vd. caret rỗng,
     // hoặc đang ở trong list/bảng) — giữ hành vi cũ: chèn code block mẫu
     // ngay tại vị trí caret, không cần tách trước/sau.
     document.execCommand(
       'insertHTML',
       false,
-      `<pre><code class="language-plaintext">${codeContent}</code></pre><p><br></p>`
+      `<pre><code class="language-${langClass}">${codeContent}</code></pre><p><br></p>`
     );
+    highlightNewCodeBlocks();
     return;
   }
 
@@ -932,22 +1543,38 @@ function insertCodeBlock(): void {
 
   const afterRange = document.createRange();
   afterRange.setStart(range.endContainer, range.endOffset);
-  afterRange.setEnd(block, block.childNodes.length);
+  afterRange.setEnd(endBlock, endBlock.childNodes.length);
   const afterHtml = rangeToHtml(afterRange);
 
   const tag = block.tagName.toLowerCase();
+  const endTag = endBlock.tagName.toLowerCase();
   const beforeBlock = beforeHtml.trim() ? `<${tag}>${beforeHtml}</${tag}>` : '';
-  const afterBlock = `<${tag}>${afterHtml.trim() ? afterHtml : '<br>'}</${tag}>`;
+  const afterBlock = `<${endTag}>${afterHtml.trim() ? afterHtml : '<br>'}</${endTag}>`;
 
   const blockRange = document.createRange();
-  blockRange.selectNode(block);
+  blockRange.setStartBefore(block);
+  blockRange.setEndAfter(endBlock);
   sel?.removeAllRanges();
   sel?.addRange(blockRange);
   document.execCommand(
     'insertHTML',
     false,
-    `${beforeBlock}<pre><code class="language-plaintext">${codeContent}</code></pre>${afterBlock}`
+    `${beforeBlock}<pre><code class="language-${langClass}">${codeContent}</code></pre>${afterBlock}`
   );
+  highlightNewCodeBlocks();
+}
+
+/**
+ * Bug 2026-07-14: code block mới chèn qua toolbar không có highlight cú pháp
+ * (chỉ text trơn) — chỉ sau khi save/đóng/mở lại (đi qua lại pipeline
+ * markdown-it + hljs ở render.ts) mới có màu. Áp `hljs.highlightElement`
+ * ngay tại chỗ cho các <code class="language-*"> vừa chèn (chưa có class
+ * "hljs" đánh dấu đã highlight) để khớp ngay với kết quả render từ nguồn.
+ */
+function highlightNewCodeBlocks(): void {
+  content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
+    hljs.highlightElement(el as HTMLElement);
+  });
 }
 
 function insertLink(): void {
@@ -963,10 +1590,16 @@ function insertLink(): void {
       if (sel && !sel.isCollapsed) {
         document.execCommand('createLink', false, url);
       } else {
+        // encodeLinkPath CHỈ áp cho path tương đối (không có scheme) — URL
+        // tuyệt đối giữ nguyên, encode sẽ phá "://" và query string "?a=1&b=2"
+        // (bug đã xác nhận qua test/roundtrip/toolbar-insert.ts: path tương
+        // đối có dấu cách không encode làm markdown đổi hình dạng ở lần
+        // render→serialize thứ 2, xem insertImage() bên dưới).
+        const href = isAbsoluteUrl(url) ? url : encodeLinkPath(url);
         document.execCommand(
           'insertHTML',
           false,
-          `<a href="${escapeAttr(url)}">${escapeHtml(displayText ?? url)}</a>`
+          `<a href="${escapeAttr(href)}">${escapeHtml(displayText ?? url)}</a>`
         );
       }
       ctx.scheduleSync();
@@ -980,7 +1613,12 @@ function insertImage(): void {
     if (!src) {
       return;
     }
-    document.execCommand('insertHTML', false, `<img src="${escapeAttr(src)}" alt="">`);
+    // Cùng lý do với insertLink() ở trên: chỉ encode path tương đối, giữ
+    // nguyên URL tuyệt đối — trước đây KHÔNG encode gì cả (khác paste-image.ts
+    // insertImageAt, vốn luôn encode vì relPath luôn là path tương đối), khiến
+    // path có dấu cách không ổn định qua lần render→serialize thứ 2.
+    const href = isAbsoluteUrl(src) ? src : encodeLinkPath(src);
+    document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
     ctx.scheduleSync();
   });
 }
@@ -1016,4 +1654,98 @@ export function toggleInlineCode(): void {
     range.insertNode(code);
   }
   sel.removeAllRanges();
+}
+
+// ---------------------------------------------------------------------------
+// Active-state sync theo caret (US-4.15) — Bold/Italic/Strikethrough/Inline
+// code/Blockquote/Bullet/Numbered/Task đồng bộ class `.active` (đã ship, xem
+// updateTocButton) theo vị trí caret. Code block/Math (US-4.10/4.11) CỐ Ý bị
+// loại — split-button của các nút đó luôn hiện nhãn mặc định tĩnh, không
+// live-sync theo caret, đây là quyết định riêng, không phải thiếu sót. Heading
+// (US-4.9) từng cũng bị loại tương tự, nhưng US-4.16 (2026-07-13) đảo lại
+// quyết định đó cho riêng PHẦN NHÃN (xem updateHeadingLabel) — Heading vẫn
+// KHÔNG có `.active` background (giữ nguyên phần đó của US-4.9/4.15), chỉ
+// text hiển thị (H1..H6) đổi theo caret, một concern tách biệt hoàn toàn với
+// vòng lặp ACTIVE_SYNC_IDS bên dưới.
+// ---------------------------------------------------------------------------
+
+const ACTIVE_SYNC_IDS = [
+  'fmt-bold',
+  'fmt-italic',
+  'fmt-strike',
+  'fmt-inline-code',
+  'fmt-blockquote',
+  'fmt-bullet',
+  'fmt-numbered',
+  'fmt-task',
+];
+
+function setActive(id: string, active: boolean): void {
+  document.getElementById(id)?.classList.toggle('active', active);
+}
+
+/**
+ * Tính lại + gán `.active` cho 8 nút ở trên. Bullet/Numbered dựa theo
+ * `getListSelection()` (US-4.2) — CHỈ theo tag `<ul>`/`<ol>`, không loại trừ
+ * item có checkbox: ví dụ cụ thể trong AC US-4.15 xác nhận 1 item đã check
+ * nằm trong `<ol>` phải sáng ĐỒNG THỜI cả Numbered lẫn Task (giống Bold+Italic
+ * cùng sáng một lúc) — task/list-type là 2 trục độc lập, không loại trừ nhau.
+ * Task dùng riêng `<li>` chứa anchor (không phải cả `getListSelection().items`)
+ * theo đúng câu chữ AC ("active when the caret's `<li>` has a checkbox").
+ */
+function recomputeActiveFormatting(): void {
+  const sel = window.getSelection();
+  const anchor = sel?.anchorNode;
+  const focus = sel?.focusNode;
+  if (!sel || !anchor || !focus || !content.contains(anchor) || !content.contains(focus)) {
+    for (const id of ACTIVE_SYNC_IDS) {
+      setActive(id, false);
+    }
+    return;
+  }
+
+  setActive('fmt-bold', document.queryCommandState('bold'));
+  setActive('fmt-italic', document.queryCommandState('italic'));
+  setActive('fmt-strike', document.queryCommandState('strikeThrough'));
+
+  const anchorEl = closestElement(anchor);
+  const inlineCode = anchorEl?.closest('code') ?? null;
+  setActive('fmt-inline-code', !!inlineCode && !inlineCode.closest('pre'));
+
+  const bq = anchorEl?.closest('blockquote') ?? null;
+  setActive('fmt-blockquote', !!bq && content.contains(bq));
+
+  // Dò trực tiếp <li>/<ul>/<ol> gần nhất qua closest() thay vì gọi
+  // getListSelection() (US-4.2) — hàm đó tự dò lại toàn bộ Range + duyệt hết
+  // các <li> con của list bằng range.intersectsNode để trả về CẢ danh sách
+  // item đang chọn, tốn hơn hẳn mức cần cho việc này (chỉ cần biết li/list
+  // của một điểm caret). recomputeActiveFormatting chạy trên mọi
+  // selectionchange (mỗi lần di caret) nên tránh phần dò thừa đó.
+  const li = anchorEl?.closest('li') ?? null;
+  const liInContent = !!li && content.contains(li);
+  setActive('fmt-task', liInContent && !!li.querySelector(':scope > input[type="checkbox"]'));
+
+  const list = liInContent ? li.parentElement : null;
+  setActive('fmt-bullet', list?.tagName === 'UL');
+  setActive('fmt-numbered', list?.tagName === 'OL');
+}
+
+let activeSyncRafId: number | undefined;
+
+/**
+ * `selectionchange` bắn rất dày (mỗi lần caret di chuyển) — coalesce về một
+ * lần tính/khung hình bằng requestAnimationFrame, cùng kỹ thuật đã dùng ở
+ * select-highlight.ts, thay vì tính lại trên từng sự kiện thô.
+ */
+function setupActiveFormattingSync(): void {
+  document.addEventListener('selectionchange', () => {
+    if (activeSyncRafId !== undefined) {
+      return;
+    }
+    activeSyncRafId = requestAnimationFrame(() => {
+      activeSyncRafId = undefined;
+      recomputeActiveFormatting();
+      updateHeadingLabel();
+    });
+  });
 }

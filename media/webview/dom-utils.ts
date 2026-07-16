@@ -27,12 +27,57 @@ export function encodeLinkPath(p: string): string {
     .join('/');
 }
 
+/**
+ * true nếu chuỗi có dạng URL tuyệt đối (có scheme, vd "https://", "mailto:") —
+ * dùng để KHÔNG áp encodeLinkPath lên URL (sẽ phá "://" và query string
+ * "?a=1&b=2"): chỉ path tương đối trong workspace mới cần/được encode.
+ */
+export function isAbsoluteUrl(s: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s);
+}
+
 export function saveSelection(): Range | undefined {
   const sel = window.getSelection();
   return sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : undefined;
 }
 
+/**
+ * US-19.7: người dùng bật "reduce motion" ở OS → mọi cuộn bằng JS phải nhảy
+ * thẳng thay vì animate mượt (bổ trợ cho khối CSS `prefers-reduced-motion`,
+ * vốn chỉ tắt được transition/animation/`scroll-behavior` khai báo trong CSS,
+ * không chạm tới scrollIntoView/scrollTo có behavior:'smooth' đặt trong JS).
+ */
+export function scrollBehavior(): ScrollBehavior {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ? 'auto'
+    : 'smooth';
+}
+
+/**
+ * Existing task-checkbox child of `li`, covering both DOM shapes this
+ * codebase renders: "tight" (checkbox is a direct `<li>` child) and "loose"
+ * (checkbox is nested in the `<li>`'s child `<p>` — see the `taskCheckbox`
+ * rule in turndown.ts, which documents/relies on the same distinction).
+ * Returns null if `li` has no checkbox in either shape. Shared by
+ * `addCheckbox` and toolbar.ts's `toggleTaskItem`/`stripCheckboxFrom` so
+ * "does this `<li>` already have a checkbox" is answered consistently
+ * everywhere — a narrower tight-only check lets a loose item's checkbox go
+ * undetected and get double-added (bug 0716 #10 follow-up).
+ */
+export function findTaskCheckbox(li: Element): HTMLInputElement | null {
+  return (
+    (li.querySelector(':scope > input[type="checkbox"]') as HTMLInputElement | null) ??
+    (li.querySelector(':scope > p > input[type="checkbox"]') as HTMLInputElement | null)
+  );
+}
+
 export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
+  if (findTaskCheckbox(li)) {
+    // Already a task item (tight or loose shape) — no-op (idempotency guard against duplicate/stacked checkboxes).
+    return;
+  }
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.className = 'task-list-item-checkbox';
@@ -44,6 +89,88 @@ export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
 /** Icon SVG 16px, màu theo theme qua currentColor. */
 export function svgIcon(inner: string): string {
   return `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${inner}</svg>`;
+}
+
+/**
+ * Phần tử nào trong `target` KHÔNG bắt đầu kéo khi mousedown lên nó — input/
+ * button/link cần giữ hành vi click/gõ bình thường, `[data-no-drag]` là cửa
+ * thoát chung cho các vùng tương tác khác (vd danh sách gợi ý file trong
+ * `.prompt-box`) mà dom-utils.ts không biết tên class cụ thể của caller.
+ */
+const DRAG_IGNORE_SELECTOR = 'input, textarea, select, button, a, [contenteditable="true"], [data-no-drag]';
+
+/**
+ * Cho phép kéo (drag) `target` bằng mousedown ở BẤT KỲ đâu trong `target`,
+ * trừ các phần tử tương tác (`DRAG_IGNORE_SELECTOR`) — bug report 2026-07-14
+ * (test/2026-07-13/bug.md, mục 6): trước đó chỉ kéo được từ 1 thanh handle
+ * mỏng (`.prompt-drag-handle`, US-17.2), nay mở rộng ra cả viền/thân box.
+ * `target` chuyển từ vị trí do layout quyết định (vd flexbox căn giữa) sang
+ * `position: fixed` với toạ độ tự do ngay ở lần kéo đầu tiên, giữ nguyên vị
+ * trí hiện tại lúc đó (không giật chỗ). Vị trí luôn bị clamp trong viewport,
+ * tính lại kích thước `target` ở MỖI lần di chuyển (không chỉ lúc bắt đầu) vì
+ * nội dung bên trong có thể đổi cao/rộng giữa chừng (vd danh sách gợi ý file
+ * hiện/ẩn). Hàm thuần, không phụ thuộc gì riêng của `.prompt-box` — dùng
+ * chung được cho mọi popup/popover kéo-thả khác (US-17.1).
+ *
+ * Không cần cờ chặn riêng cho "click ra ngoài đóng popup" trong lúc kéo: thao
+ * tác kéo luôn bắt đầu bằng mousedown TRÊN target (không phải overlay bao
+ * ngoài), nên target event của sự kiện đó không bao giờ là chính overlay —
+ * listener đóng popup ở nơi gọi (kiểm tra `e.target === overlay`) tự nhiên
+ * không khớp.
+ */
+export function makeDraggable(target: HTMLElement): void {
+  target.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) {
+      return;
+    }
+    if ((e.target as HTMLElement).closest(DRAG_IGNORE_SELECTOR)) {
+      return;
+    }
+    e.preventDefault();
+    const rect = target.getBoundingClientRect();
+    target.style.position = 'fixed';
+    target.style.margin = '0';
+    target.style.left = `${rect.left}px`;
+    target.style.top = `${rect.top}px`;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startLeft = rect.left;
+    const startTop = rect.top;
+    target.classList.add('dragging');
+
+    const onMove = (ev: MouseEvent): void => {
+      const size = target.getBoundingClientRect();
+      const maxLeft = Math.max(0, window.innerWidth - size.width);
+      const maxTop = Math.max(0, window.innerHeight - size.height);
+      target.style.left = `${Math.min(Math.max(0, startLeft + (ev.clientX - startX)), maxLeft)}px`;
+      target.style.top = `${Math.min(Math.max(0, startTop + (ev.clientY - startY)), maxTop)}px`;
+    };
+    const onUp = (): void => {
+      target.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+/**
+ * Định vị `el` (đã `position: fixed`, thường vừa append vào `document.body`)
+ * gần `anchorRect` mà KHÔNG đè lên nó — ưu tiên bên dưới anchor, lật lên trên
+ * nếu không đủ chỗ; clamp ngang/dọc trong viewport. Cùng pattern anchor-popup
+ * đã dùng ở `cross-file-search.ts` (`positionPopover`/`positionBubble`) nhưng
+ * viết generic để tái dùng cho popup khác (vd `.md-math-edit-popover`) mà
+ * không phải chép lại logic clamp.
+ */
+export function positionNear(el: HTMLElement, anchorRect: DOMRect, gap = 8): void {
+  const elRect = el.getBoundingClientRect();
+  const hasRoomBelow = anchorRect.bottom + gap + elRect.height <= window.innerHeight;
+  const top = hasRoomBelow ? anchorRect.bottom + gap : anchorRect.top - gap - elRect.height;
+  const left = Math.min(Math.max(4, anchorRect.left), window.innerWidth - elRect.width - 4);
+  el.style.position = 'fixed';
+  el.style.top = `${Math.max(4, Math.min(top, window.innerHeight - elRect.height - 4))}px`;
+  el.style.left = `${left}px`;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -68,6 +195,8 @@ export interface DomHelpers {
   restoreSelection(range: Range | undefined): void;
   placeCaretIn(el: Element | null | undefined, selectContents?: boolean): void;
   placeCaretAfter(el: Element): void;
+  /** Đặt caret/selection theo offset ký tự (Range.toString()) tính từ đầu `el`. Collapsed khi start === end. */
+  placeCaretAtOffsets(el: Element, start: number, end: number): void;
   replaceBlockTag(block: HTMLElement, tag: string): HTMLElement;
 }
 
@@ -255,5 +384,5 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     return el;
   }
 
-  return { restoreSelection, placeCaretIn, placeCaretAfter, replaceBlockTag };
+  return { restoreSelection, placeCaretIn, placeCaretAfter, placeCaretAtOffsets, replaceBlockTag };
 }

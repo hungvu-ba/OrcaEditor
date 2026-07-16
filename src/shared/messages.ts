@@ -18,6 +18,37 @@ export interface FileSuggestion {
 /** Phạm vi tìm xuyên file (setting `orcaEditor.crossFileSearch.scope`). */
 export type CrossFileSearchScope = 'markdown' | 'allFiles';
 
+/**
+ * Preset đọc (US-19.1) — mỗi preset gói measure + line-height + font.
+ * `academic` (US-19.15) = look bài luận serif kiểu ai-2027.com (cột hẹp, serif
+ * cổ điển, giãn dòng rộng); ghép đẹp nhất với palette `paper`.
+ */
+export type ReadingPreset = 'comfortable' | 'default' | 'compact' | 'dyslexia' | 'academic';
+
+/**
+ * Bảng màu đọc (US-19.5) — `followTheme` = kế thừa theme VS Code (mặc định).
+ * `paper` (US-19.15) = nền kem trắng ấm #fffff8 + chữ gần-đen kiểu ai-2027.com.
+ */
+export type ReadingPalette = 'followTheme' | 'light' | 'dark' | 'sepia' | 'highContrast' | 'paper';
+
+/**
+ * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host dùng để gửi giá trị
+ * seed ban đầu (đọc từ `orcaEditor.readability.*` + global override nếu có,
+ * xem `resolveReadability`) trong 'init'. `enabled`/`preset`/`palette` giờ
+ * global-in-memory ở host (bug 0716 #2, đảo ngược per-tab cũ của bug 0715 mục
+ * 4) — đổi ở 1 tab lan sang mọi tab .md đang mở qua message
+ * `readingModeChanged`, cùng mô hình `zen` (US-19.19, kênh `zenChanged`)
+ * nhưng độc lập. `fontFamily` KHÔNG nằm trong 2 bundle global này — vẫn chỉ
+ * seed 1 lần từ config, không persist ngược. Không đụng nội dung `.md`.
+ */
+export interface ReadabilityConfig {
+  enabled: boolean;
+  preset: ReadingPreset;
+  palette: ReadingPalette;
+  fontFamily: string;
+  zen: boolean;
+}
+
 /** Một match tìm thấy trong 1 file, kèm snippet ngữ cảnh ~1 dòng trước/sau. */
 export interface CrossFileMatch {
   /** Dòng chứa match (0-based), dùng để mở file đúng vị trí. */
@@ -32,6 +63,8 @@ export interface CrossFileMatch {
   lineText: string;
   /** Dòng liền sau, đã trim (rỗng nếu là dòng cuối file). */
   contextAfter: string;
+  /** Offset ký tự XẤP XỈ của match trong toàn bộ nội dung file gốc (0-based) — dùng cho positionBoost khi xếp hạng (US-15.7), không dùng để mở file (đã có line/character). */
+  charOffset: number;
 }
 
 /** Kết quả nhóm theo file cho tìm xuyên file. */
@@ -42,6 +75,10 @@ export interface CrossFileMatchGroup {
   fileName: string;
   /** Đường dẫn tương đối so với workspace, hiển thị dưới tên file. */
   relativePath: string;
+  /** Tổng số match THẬT tìm được trong file (trước khi cắt còn tối đa 10 để gửi đi) — dùng cho badge + dòng "+N match khác". */
+  totalInFile: number;
+  /** Độ dài nội dung file gốc (số ký tự) — mẫu số cho positionBoost khi xếp hạng (US-15.7). */
+  fileLength: number;
   matches: CrossFileMatch[];
 }
 
@@ -60,21 +97,57 @@ export interface InitConfig {
   showLineNumbers: boolean;
   /** Giá trị mặc định ban đầu của dropdown scope trong popover tìm xuyên file. */
   crossFileSearchScope: CrossFileSearchScope;
+  /** Trạng thái Reading Mode ban đầu (US-19.x). */
+  readability: ReadabilityConfig;
 }
 
 /** Message webview → host (discriminated theo `type`). */
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'edit'; text: string }
+  /**
+   * Uỷ quyền undo/redo cho TextDocument (một undo stack duy nhất, đúng mô hình
+   * CustomTextEditor): webview chặn Ctrl/Cmd+Z·Y rồi gửi message này, host gọi
+   * `executeCommand('undo'|'redo')` → thay đổi document quay lại webview qua
+   * 'update'. `pendingText`: nếu còn thay đổi đang chờ debounce lúc bấm phím,
+   * webview serialize NGAY và gắn kèm để host commit nó thành 1 undo-unit TRƯỚC
+   * khi undo (atomic trong một handler — tránh đua thứ tự với edit debounce).
+   */
+  | { type: 'undo'; pendingText?: string }
+  | { type: 'redo'; pendingText?: string }
   | { type: 'openLink'; href: string }
   | { type: 'searchFiles'; query: string; requestId: number }
   | { type: 'addToClaudeContext' }
   | { type: 'viewSource' }
   | { type: 'crossFileSearch:request'; requestId: number; query: string; scope: CrossFileSearchScope; matchCase: boolean; wholeWord: boolean }
   | { type: 'crossFileSearch:openResult'; uri: string; line: number; character: number; length: number; matchText: string }
-  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope }
+  /** relativePath: có khi bấm "+N match khác trong file này" (GĐ4) — Search panel chỉ hiện kết quả đúng file đó thay vì toàn scope. */
+  | { type: 'crossFileSearch:openInSearchPanel'; query: string; scope: CrossFileSearchScope; relativePath?: string }
   /** Ảnh dán từ clipboard (paste event hoặc fallback Clipboard API) — host lưu file thật rồi trả lại đường dẫn tương đối. */
-  | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string };
+  | { type: 'pasteImage'; requestId: number; mime: string; dataBase64: string }
+  /**
+   * US-17.6 (M4): file kéo thả từ ngoài (Explorer/Finder) không phải ảnh —
+   * host copy vào folder assets (resolveAssetsDir) rồi trả đường dẫn tương
+   * đối; webview chèn `[name](path)` tại vị trí thả. Ảnh kéo thả dùng lại
+   * message `pasteImage` sẵn có (external-drop.ts gọi thẳng vào luồng
+   * paste-image.ts), KHÔNG qua message này.
+   */
+  | { type: 'dropFile'; requestId: number; name: string; dataBase64: string }
+  /**
+   * US-19.19: Zen/Focus mode vừa đổi ở TAB NÀY — host giữ lại làm state
+   * global-in-memory (KHÔNG persist Settings) rồi phát cho MỌI panel .md
+   * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Khác
+   * preset/palette/enabled (vẫn per-tab, session-only — US-19.18).
+   */
+  | { type: 'zenChanged'; zen: boolean }
+  /**
+   * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
+   * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
+   * cùng mô hình như zenChanged) rồi phát cho MỌI panel .md khác đang mở.
+   * fontFamily KHÔNG nằm trong bundle này — không có UI toggle runtime, vẫn
+   * chỉ seed 1 lần từ setting `orcaEditor.readability.fontFamily`.
+   */
+  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -92,7 +165,15 @@ export type HostToWebview =
        */
       reveal?: { line: number; character: number; length: number; matchText?: string };
     }
-  | { type: 'update'; text: string }
+  /**
+   * `caretLine`/`caretCol` (1-based dòng, 0-based cột, tuỳ chọn): chỉ gửi khi
+   * update phát sinh từ undo/redo — webview đặt lại caret về đúng vị trí vừa đổi
+   * sau khi render lại (renderDocument dựng lại toàn bộ DOM nên caret mất). Với
+   * block đơn dòng (đoạn văn/heading) caret về đúng cột; block đa dòng lùi về đầu
+   * block. Update từ external edit (git/formatter/tab khác) không kèm field này →
+   * giữ nguyên hành vi cũ (không đụng caret).
+   */
+  | { type: 'update'; text: string; caretLine?: number; caretCol?: number }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
   | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean }
   /**
@@ -104,4 +185,10 @@ export type HostToWebview =
   /** C6b: file .md đã mở sẵn ở tab khác — gửi thẳng tới panel đó thay vì qua 'init'. Cùng ý nghĩa `length` như `reveal` ở trên. */
   | { type: 'scrollToPosition'; line: number; character: number; length: number; matchText?: string }
   /** Kết quả lưu ảnh dán từ clipboard — relativePath thiếu khi lưu thất bại (kèm error để hiện toast). */
-  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string };
+  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string }
+  /** Kết quả lưu file kéo thả (US-17.6, M4) — cùng hình dạng với pasteImageResult. */
+  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string }
+  /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | { type: 'zenChanged'; zen: boolean }
+  /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };

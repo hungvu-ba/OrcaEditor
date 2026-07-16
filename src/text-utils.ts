@@ -93,6 +93,19 @@ export function imageNamePrefix(baseName: string): string {
   return normalizeForSearch(baseName).slice(0, 40);
 }
 
+/**
+ * Basename-only, safe to join under the assets folder (US-17.6, M4 — file
+ * dropped from outside the editor). `name` is client-controlled (the
+ * browser File object's `.name`, forwarded from the webview) so it must not
+ * be trusted as a path: strips every `/`/`\` (no directory traversal
+ * survives) and leading dots (no hidden file / relative-`..` trick), falling
+ * back to a generic name if nothing safe is left.
+ */
+export function sanitizeDroppedFileName(name: string): string {
+  const safe = name.replace(/[\\/]/g, '_').replace(/^\.+/, '').trim();
+  return safe || 'file';
+}
+
 /** Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file). */
 export function relativePath(fromDir: string, toFile: string): string {
   const from = fromDir.split('/').filter(Boolean);

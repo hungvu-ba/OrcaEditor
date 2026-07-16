@@ -18,10 +18,15 @@
  * Trong lúc gõ, DOM không được render lại (tránh mất caret/undo — xem
  * main.ts:renderDocument), nên data-line trên DOM cũ dần lệch so với nội dung
  * mới gõ. refreshFromMarkdown() được gọi cùng nhịp debounce với việc lưu file
- * (SYNC_DEBOUNCE_MS): parse lại markdown vừa gõ (không render HTML) để lấy
- * range dòng mới, rồi khớp theo THỨ TỰ với các con hiện có của #content. Nếu
- * số lượng lệch nhau (hiếm — cấu trúc DOM vừa đổi khác số block parse được),
- * bỏ qua đợt cập nhật đó, giữ số cũ tới lần renderDocument() đầy đủ kế tiếp.
+ * (SYNC_DEBOUNCE_MS): parse lại markdown vừa gõ (không render HTML, xem
+ * MarkdownRenderer.computeTopLevelBlockRanges) để lấy range của từng block cấp
+ * cao nhất, rồi khớp theo THỨ TỰ + "hình dạng" (list hay không, số item) từ
+ * hai đầu tài liệu vào giữa (collectDomBlockGroups/shapeMatches bên dưới).
+ * Vùng khớp được ghi số dòng mới bình thường; CHỈ vùng không khớp ở giữa (nơi
+ * vừa gõ thêm/xoá bullet, hoặc tách/gộp block — hiếm) giữ số cũ tới lần
+ * renderDocument() đầy đủ kế tiếp — bail-out thu hẹp ở mức "khối lệch", không
+ * còn bỏ cả tài liệu như trước (HLR mục 18, US-18.1, GĐ1 Block-Indexed
+ * Architecture — refreshFromMarkdown giờ là consumer đầu tiên hưởng lợi).
  */
 import {
   LINE_NUMBER_ATTR,
@@ -30,8 +35,11 @@ import {
   MATH_BLOCK_CLASS,
   type LineRange,
   type MarkdownRenderer,
+  type TopLevelBlockRange,
 } from './pipeline';
 import { collectHaystack, rangeAt } from './match-utils';
+import { ownOrNestedAttr } from './block-info';
+import { scrollBehavior } from './dom-utils';
 
 export interface LineGutter {
   /** Dựng lại toàn bộ (số + vị trí) từ chính data-line có sẵn trên DOM — gọi sau renderDocument(). */
@@ -70,10 +78,6 @@ function isDualBoundaryBlock(el: Element): boolean {
     return el.getAttribute('data-mermaid-view') !== 'code';
   }
   return false;
-}
-
-function ownOrNestedAttr(el: Element, attr: string): string | null {
-  return el.getAttribute(attr) ?? el.querySelector(`[${attr}]`)?.getAttribute(attr) ?? null;
 }
 
 interface BlockLineInfo {
@@ -133,41 +137,99 @@ export function initLineGutter(
     );
   }
 
+  /** Một block cấp cao nhất hiện có trên DOM — `lis` khác null nếu là <ul>/<ol>. */
+  interface DomBlockGroup {
+    el: HTMLElement;
+    lis: HTMLElement[] | null;
+  }
+
+  /** Con trực tiếp của #content CÓ data-line — bỏ qua <p> caret-trap tự chèn (main.ts), không phải block markdown thật. */
+  function collectDomBlockGroups(): DomBlockGroup[] {
+    const groups: DomBlockGroup[] = [];
+    for (const child of Array.from(content.children) as HTMLElement[]) {
+      if (!ownOrNestedAttr(child, LINE_NUMBER_ATTR)) {
+        continue;
+      }
+      const isList = child.tagName === 'UL' || child.tagName === 'OL';
+      groups.push({ el: child, lis: isList ? (Array.from(child.querySelectorAll('li')) as HTMLElement[]) : null });
+    }
+    return groups;
+  }
+
+  /** "Hình dạng" (list hay không, số lượng item) khớp — đủ tin cậy để ghi lại số dòng mới cho block này. */
+  function shapeMatches(dom: DomBlockGroup, group: TopLevelBlockRange): boolean {
+    const domIsList = dom.lis !== null;
+    const groupIsList = group.itemRanges !== undefined;
+    if (domIsList !== groupIsList) {
+      return false;
+    }
+    return !domIsList || dom.lis!.length === group.itemRanges!.length;
+  }
+
+  function writeRange(el: HTMLElement, range: LineRange): void {
+    // Ghi số dòng mới TRỞ LẠI DOM: các <li> gõ thêm trong lúc soạn (Enter tạo
+    // mục mới) KHÔNG có data-line — chỉ markdown-it lúc render mới gắn. Nếu
+    // không ghi lại, refreshFromDom (ResizeObserver bắn mỗi lần layout đổi khi
+    // gõ) đọc data-line rỗng của các mục mới và bỏ số của chúng, ghi đè lên kết
+    // quả parse đúng ở đây → list gõ thêm chỉ hiện số của các mục cũ.
+    el.setAttribute(LINE_NUMBER_ATTR, String(range.start));
+    el.setAttribute(LINE_NUMBER_END_ATTR, String(range.end));
+  }
+
+  function applyGroupRanges(doms: DomBlockGroup[], groups: TopLevelBlockRange[]): void {
+    doms.forEach((dom, i) => {
+      const group = groups[i];
+      if (!group) {
+        return;
+      }
+      if (dom.lis) {
+        dom.lis.forEach((li, k) => {
+          const item = group.itemRanges?.[k];
+          if (item) {
+            writeRange(li, item);
+          }
+        });
+      } else {
+        writeRange(dom.el, group.range);
+      }
+    });
+  }
+
   function refreshFromMarkdown(markdown: string): void {
     const renderer = getRenderer();
     if (!renderer) {
       return;
     }
-    const ranges = renderer.computeTopLevelLineRanges(markdown);
-    const els = enumerateNumberedElements();
-    if (ranges.length !== els.length) {
-      return;
+    const groups = renderer.computeTopLevelBlockRanges(markdown);
+    const doms = collectDomBlockGroups();
+    // Khớp theo THỨ TỰ + "hình dạng" (list hay không, số item) từ hai đầu tài
+    // liệu vào giữa. Vùng khớp được (đầu/cuối) ghi số dòng mới bình thường;
+    // vùng KHÔNG khớp ở giữa (nơi vừa gõ thêm/xoá bullet, hoặc tách/gộp block)
+    // giữ số cũ tới lần renderDocument() đầy đủ kế tiếp — thu hẹp bail-out từ
+    // "cả tài liệu" (cơ chế cũ) xuống "chỉ vùng lệch".
+    let i = 0;
+    let j = 0;
+    while (i < doms.length && j < groups.length && shapeMatches(doms[i], groups[j])) {
+      i++;
+      j++;
     }
-    const infos = els.map((el, i) => {
-      const range: LineRange = ranges[i];
-      const start = String(range.start);
-      const end = String(range.end);
-      // Ghi số dòng mới TRỞ LẠI DOM: các <li> gõ thêm trong lúc soạn (Enter tạo
-      // mục mới) KHÔNG có data-line — chỉ markdown-it lúc render mới gắn. Nếu
-      // không ghi lại, refreshFromDom (ResizeObserver bắn mỗi lần layout đổi khi
-      // gõ) đọc data-line rỗng của các mục mới và bỏ số của chúng, ghi đè lên kết
-      // quả parse đúng ở đây → list gõ thêm chỉ hiện số của các mục cũ.
-      el.setAttribute(LINE_NUMBER_ATTR, start);
-      el.setAttribute(LINE_NUMBER_END_ATTR, end);
-      return {
-        start,
-        end,
-        dual: isDualBoundaryBlock(el),
-      };
-    });
-    rebuildDom(els, infos);
+    let ie = doms.length - 1;
+    let je = groups.length - 1;
+    while (ie >= i && je >= j && shapeMatches(doms[ie], groups[je])) {
+      ie--;
+      je--;
+    }
+    applyGroupRanges(doms.slice(0, i), groups.slice(0, j));
+    applyGroupRanges(doms.slice(ie + 1), groups.slice(je + 1));
+    refreshFromDom();
   }
 
   // Danh sách phần tử được đánh số, theo thứ tự tài liệu. Mỗi block cấp cao
   // nhất là MỘT phần tử, RIÊNG danh sách (<ul>/<ol>) được tách thành từng <li>
-  // (mọi độ sâu) để mỗi dòng bullet có số riêng — phải khớp đúng thứ tự với
-  // computeTopLevelLineRanges (renderer). Mỗi <li> đã được gắn data-line lúc
-  // render nên readBlockInfo đọc được số dòng của chính nó.
+  // (mọi độ sâu) để mỗi dòng bullet có số riêng — dùng bởi refreshFromDom (đọc
+  // thẳng data-line hiện có trên DOM, không parse markdown) và scrollToSourceLine.
+  // Mỗi <li> đã được gắn data-line lúc render nên readBlockInfo đọc được số
+  // dòng của chính nó.
   function enumerateNumberedElements(): HTMLElement[] {
     const els: HTMLElement[] = [];
     for (const child of Array.from(content.children) as HTMLElement[]) {
@@ -248,7 +310,12 @@ export function initLineGutter(
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
-    content.focus();
+    // preventScroll: focus/selection không được tự ý cuộn — scrollIntoView
+    // smooth ở scrollToSourceLine (chạy SAU, xem lý do thứ tự ở đó) mới là
+    // nguồn cuộn duy nhất, tránh bug "nhảy về vị trí caret cũ" khi kết quả
+    // search nằm ngoài viewport (focus() mặc định tự cuộn ngay lập tức và
+    // cắt ngang animation smooth đang chạy dở).
+    content.focus({ preventScroll: true });
   }
 
   function scrollToSourceLine(line: number, character?: number, length?: number, matchText?: string): boolean {
@@ -285,11 +352,14 @@ export function initLineGutter(
     if (!target) {
       return false;
     }
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     // Chỉ select khi block khớp CHÍNH XÁC dòng nguồn (không phải fallback "gần nhất").
     // Có `matchText` → tìm theo mỏ neo text nên select được cả block đa dòng (start !== end);
     // không có matchText thì vẫn giới hạn ở block đơn dòng như cũ (offset thô chỉ đáng tin khi
     // block trải đúng MỘT dòng nguồn — xem selectWithinBlock).
+    // Set selection TRƯỚC rồi mới scrollIntoView SAU CÙNG: nếu scroll trước,
+    // focus()/addRange() theo sau có thể tự cuộn (kể cả có preventScroll ở
+    // Safari cũ) và cắt ngang animation smooth, khiến view "nhảy về" vị trí
+    // caret cũ thay vì dừng đúng ở kết quả search mới.
     if (
       exactMatch &&
       exactMatchInfo &&
@@ -300,6 +370,7 @@ export function initLineGutter(
     ) {
       selectWithinBlock(target, character, length, matchText);
     }
+    target.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
     return true;
   }
 

@@ -2,6 +2,31 @@
  * Style riêng cho phần chỉnh sửa WYSIWYG (toolbar, popup, atom, front-matter)
  *--------------------------------------------------------------------------*/
 
+/* Toolbar sticky (top:0) che mất phần trên khung nhìn → chừa đúng chiều cao nó
+ * khi cuộn-tới-phần-tử (scrollIntoView block:'start' của nhảy heading/anchor/
+ * reveal source line). `--toolbar-height` do main.ts đo & cập nhật theo
+ * ResizeObserver; +8px thở cho khớp margin dưới toolbar. Thiếu dòng này thì
+ * heading đầu file bị toolbar che, không cuộn lên xem được (đã chạm đỉnh trang). */
+html,
+body {
+  scroll-padding-top: calc(var(--toolbar-height, 48px) + 8px);
+}
+
+/* US-17.3: reserve a left margin for the drag handle at all times, even when
+ * the line-numbers gutter (below) is off — the handle is `position: fixed`
+ * (viewport rects, not offsetTop) so it doesn't need body to be a positioned
+ * ancestor, just the empty space to sit in. #toolbar compensates with a
+ * matching negative margin so it stays full-width. body.md-line-numbers below
+ * overrides this with its own (larger) padding-left when both are active. */
+body {
+  padding-left: 20px;
+}
+
+#toolbar {
+  margin-left: -20px;
+  padding-left: 20px;
+}
+
 /* --- Vùng soạn thảo --- */
 #content {
   outline: none;
@@ -48,6 +73,249 @@ body.md-line-numbers #toolbar {
   white-space: nowrap;
 }
 
+/* --- Drag & drop block reorder (HLR section 17, US-17.3) --- */
+
+/* Single hover-tracking handle (not one marker per block like the line
+ * gutter) — follows the block under the cursor, positioned via
+ * getBoundingClientRect() so it doesn't depend on the numbered-gutter's
+ * offsetTop coordinate system being active. */
+.dd-handle {
+  position: fixed;
+  width: 22px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--vscode-focusBorder, #007acc);
+  border-radius: 3px;
+  z-index: 20;
+}
+
+.dd-handle:hover {
+  color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+body.dd-dragging {
+  cursor: grabbing;
+}
+
+body.dd-dragging .dd-handle {
+  cursor: grabbing;
+}
+
+/* Dragged block(s) stay in place (mutated only once, on drop) but read as "picked up". */
+.dd-source-muted {
+  opacity: 0.4;
+}
+
+/* The dragged block always keeps its .dd-hover-outline class (armDrag adds it
+ * before the drag threshold; startDragging never removes it from the source,
+ * only from the ghost clone) — but .dd-source-muted's opacity:0.4 dilutes its
+ * background tint to near-invisible. Swap to editor selectionBackground
+ * (already used for .dd-drop-target-cell below), which is saturated enough
+ * that diluting it by the same 0.4 still reads as a clear tint. */
+.dd-source-muted.dd-hover-outline {
+  background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
+}
+
+/* --- Handle menu (HLR section 17, US-17.7, M5; merged into the handle click
+ * by bug 0716 #5) — a click (not a drag) on the block handle opens "Move up /
+ * Move down / Move to <heading>…", a mouse-only shortcut for long-distance
+ * moves (F11: no keyboard nav in MVP). --- */
+.dd-menu-popup {
+  position: fixed;
+  z-index: 40;
+  min-width: 160px;
+  max-width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 6px;
+  background: var(--vscode-menu-background, var(--vscode-editor-background, #fff));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.3)));
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.dd-menu-item {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.dd-menu-item:hover:not(:disabled) {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15)));
+}
+
+.dd-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dd-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+}
+
+.dd-menu-label {
+  padding: 2px 8px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.dd-ghost {
+  position: fixed;
+  z-index: 30;
+  box-sizing: border-box;
+  /* Width is pinned in JS to the dragged element's real size (startDragging/
+   * tdStartDragging) so the ghost matches the editor exactly — this is only a
+   * true last-resort safety net against literally overflowing the viewport. */
+  max-width: 96vw;
+  max-height: 160px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.85;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--vscode-editor-background, #fff);
+  border: 1px solid var(--vscode-focusBorder, #007acc);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+/* Row/column drag ghosts mirror the real table row/column edge-to-edge — the
+ * base .dd-ghost padding is for floating text previews (block/li) and would
+ * otherwise inset the cloned row content, making it visibly narrower than
+ * the box it's supposed to match. Same reasoning for max-height: the base
+ * cap exists to clip long text-preview ghosts, but both the row ghost's and
+ * column ghost's height are already pinned in JS to the real row/table
+ * height (bug 0716 round 2 #4 follow-up) — inheriting the 160px cap
+ * truncated the column ghost for any table taller than that instead of
+ * mirroring the real column. Raised (not removed) so an unusually tall
+ * table/row still can't grow the ghost past the viewport, mirroring
+ * .dd-ghost's own max-width safety net above. */
+.dd-ghost-table {
+  padding: 0;
+  max-height: 90vh;
+}
+
+.dd-ghost-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--vscode-badge-background, #007acc);
+}
+
+.dd-drop-line {
+  position: fixed;
+  height: 2px;
+  z-index: 25;
+  pointer-events: none;
+  background: var(--vscode-focusBorder, #007acc);
+  border-radius: 1px;
+}
+
+/* --- Table row/column drag & drop (HLR section 17, US-17.4, M2) ---
+ * Row/column handles reuse .dd-handle's look (same class list); .dd-row-handle
+ * sits just left of the table (same offset as the block handle's own left
+ * margin), .dd-col-handle sits just above the header row it belongs to. */
+.dd-row-handle,
+.dd-col-handle {
+  cursor: grab;
+}
+
+/* .dd-col-handle's hit area is wide/short (spans the column's own width) instead of
+ * tall/narrow like every other handle — the glyph itself is naturally a tall 2x4 dot
+ * grid, so it reads better rotated 90° to match the handle's own horizontal shape
+ * (bug 0716 round 2). Hide the raw text node (font-size: 0) and render the rotated
+ * glyph via ::before instead of rotating the whole element, so the actual hit-box
+ * geometry (set inline by positionColHandle) is untouched. */
+.dd-col-handle {
+  font-size: 0;
+}
+
+.dd-col-handle::before {
+  content: '⠿';
+  display: inline-block;
+  font-size: 18px;
+  transform: rotate(90deg);
+}
+
+/* Table-level handle (bug 0716 round 2, #1) — drags the whole <table> as one block.
+ * Reuses .dd-handle's look and default (tall/narrow) glyph orientation, positioned via
+ * right/bottom at the table's own top-left corner (positionTableHandle), the one spot not
+ * already claimed by .dd-row-handle's own column or .dd-col-handle's own row. */
+.dd-table-handle {
+  cursor: grab;
+}
+
+/* Image dropped into a table cell (US-17.4) gets width:100% (fill the cell) —
+ * cap the height so a tall/portrait image doesn't blow out the row. */
+#content td img,
+#content th img {
+  max-height: 240px;
+  object-fit: contain;
+}
+
+/* --- External file drop (HLR section 17, US-17.6, M4) ---
+ * Destination cell highlight while dragging an external image over a table
+ * cell (F8) — signals "drop here" before the file is actually released. */
+.dd-drop-target-cell {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -2px;
+  background: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.15));
+}
+
+/* --- List item drag & drop + indent/outdent (HLR section 17, US-17.5, M3) ---
+ * .dd-li-handle reuses .dd-handle's look; positioned relative to the hovered
+ * <li>'s own (indented) left edge, not a fixed gutter offset like the block
+ * handle, so it naturally sits further right for nested items. */
+.dd-li-handle {
+  cursor: grab;
+}
+
+/* --- Hover-highlight outline (bug 0715 #12) ---
+ * Toggled alongside the hover handles (block/li/row/column) so it always
+ * tracks exactly what would move on drag. outline (never border) so it never
+ * shifts layout. .dd-hover-outline-cell is applied per-cell for column
+ * highlighting, with a negative offset so adjacent cell outlines sit inside
+ * the table's own borders instead of doubling up outside them. */
+.dd-hover-outline {
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: 1px;
+  border-radius: 2px;
+  /* Low-alpha tint of the same hue as the outline (not a fixed color) so it
+   * stays legible against text in both light and dark themes instead of
+   * washing them out. */
+  background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
+}
+
+.dd-hover-outline-cell {
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -1px;
+  background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
+}
+
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
  * (biểu đồ Mermaid, công thức KaTeX): số ở mép trên là dòng bắt đầu, số này ở
  * mép dưới là dòng kết thúc. Dịch nhẹ lên trên để số không tràn ra ngoài block,
@@ -61,16 +329,26 @@ body.md-line-numbers #toolbar {
  * flex-wrap: nowrap + overflow: hidden — thay vì để tràn xuống dòng 2 khi
  * cửa sổ hẹp (gây xô lệch layout), các nút cuối dãy được toolbar.ts ẩn dần
  * và gom vào menu "..." (.toolbar-more / .toolbar-overflow-menu). */
+/* Scale-up ratio 1.25x (bug report: toolbar felt too small) — chosen so every
+ * base value (16/24/26/2/4px) lands on a clean integer at ×1.25, keeping
+ * buttons/icons/separators proportional instead of some pieces growing more
+ * than others. */
 #toolbar {
   position: sticky;
   top: 0;
-  z-index: 100;
+  /* 160, không phải 100: phải LỚN HƠN #toc-panel (150) để toolbar (full-width,
+   * xem `body.toc-open #toolbar` dưới) đè lên đúng dải trên cùng của TOC khi
+   * TOC mở — TOC nhờ vậy giữ `top: 0` (nền sideBar chạy hết lên đỉnh màn hình,
+   * không hở), toolbar chỉ đơn giản "nằm trên" TOC ở phần chồng lấn, giống
+   * title bar nằm trên sidebar — vẫn thấp hơn table-toolbar/img-zoom (200+)
+   * nên không đụng các overlay nổi trong #content. */
+  z-index: 160;
   display: flex;
   flex-wrap: nowrap;
   overflow: hidden;
   align-items: center;
-  gap: 2px;
-  padding: 4px 0;
+  gap: 3px;
+  padding: 5px 0;
   margin: 0 -26px 8px;
   padding-left: 26px;
   padding-right: 26px;
@@ -84,11 +362,11 @@ body.md-line-numbers #toolbar {
   align-items: center;
   justify-content: center;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
-  min-width: 26px;
-  height: 24px;
-  padding: 0 6px;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
@@ -96,8 +374,27 @@ body.md-line-numbers #toolbar {
   cursor: pointer;
 }
 
+/* B/I/S label glyphs read as their own formatting, matching convention. */
+#toolbar button#fmt-bold {
+  font-weight: bold;
+}
+
+#toolbar button#fmt-italic {
+  font-style: italic;
+}
+
+#toolbar button#fmt-strike {
+  text-decoration: line-through;
+}
+
+/* Icon markup is hand-drawn at a fixed 16×16 viewBox (see svgIcon() in
+ * dom-utils.ts) — overriding the display size here (vector, so it stays
+ * crisp) keeps every icon in sync with the button scale-up without having to
+ * edit each icon definition individually. */
 #toolbar button svg {
   display: block;
+  width: 20px;
+  height: 20px;
   pointer-events: none;
 }
 
@@ -114,12 +411,12 @@ body.md-line-numbers #toolbar {
 #toolbar .toolbar-sep {
   flex-shrink: 0;
   width: 1px;
-  height: 16px;
-  margin: 0 4px;
+  height: 20px;
+  margin: 0 5px;
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-/* Tooltip tự vẽ cho nút toolbar — xem showTooltip() trong toolbar.ts. */
+/* Tooltip tự vẽ dùng chung (nút toolbar, mục TOC bị cắt...) — xem showTooltip() trong tooltip.ts. */
 #toolbar-tooltip {
   position: fixed;
   display: none;
@@ -147,12 +444,16 @@ body.md-line-numbers #toolbar {
   flex-shrink: 0;
 }
 
-.toolbar-overflow-menu {
+/* --- Popover dùng chung: menu tràn (US-4.7), dropdown split-button
+ * (Heading/Code block/Math — US-4.9–4.11), "more options" (US-4.14). Xem
+ * buildPopover()/openPopover()/closePopover() trong toolbar.ts — chỉ MỘT
+ * popover mở tại một thời điểm, đóng khi click ra ngoài/Escape. --- */
+.toolbar-popover {
   position: fixed;
   z-index: 300;
   display: none;
   flex-direction: column;
-  min-width: 200px;
+  min-width: 180px;
   max-width: 320px;
   max-height: 60vh;
   overflow-y: auto;
@@ -163,7 +464,16 @@ body.md-line-numbers #toolbar {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
-.toolbar-overflow-item {
+/* Vạch chia giữa các nhóm hàng trong dropdown (vd Reading Mode: "Follow VS
+ * Code" tách khỏi 10 bundle bên dưới, xem ToolbarDropdownEntry.separatorBefore
+ * trong toolbar.ts) — cùng kiểu với `.dd-menu-sep`. */
+.toolbar-popover-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+}
+
+.toolbar-popover-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -178,19 +488,112 @@ body.md-line-numbers #toolbar {
   cursor: pointer;
 }
 
-.toolbar-overflow-item:hover {
+.toolbar-popover-item:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
 }
 
-.toolbar-overflow-icon {
+.toolbar-popover-icon {
   display: inline-flex;
   flex-shrink: 0;
 }
 
-.toolbar-overflow-label {
+.toolbar-popover-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Nhãn nhỏ "Phổ biến" cạnh lựa chọn mặc định trong dropdown split-button. */
+.toolbar-popover-badge {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+
+/* Hàng "đang áp" trong dropdown mang trạng thái chọn (vd palette đọc US-19.10):
+ * đậm nhẹ + dấu ✓ ở mép phải. Chỉ dropdown có `value` mới bật (đa số dropdown
+ * hành-động-1-lần không dùng). */
+.toolbar-popover-item.selected {
+  font-weight: 600;
+}
+.toolbar-popover-item.selected::after {
+  content: '✓';
+  margin-left: auto;
+  padding-left: 8px;
+  opacity: 0.85;
+}
+/* Nếu hàng vừa selected vừa có badge (vd Follow VS Code = Default) thì badge đã
+ * chiếm margin-left:auto → ✓ chỉ cần cách badge một khoảng, không đẩy phải nữa. */
+.toolbar-popover-item.selected:has(.toolbar-popover-badge)::after {
+  margin-left: 8px;
+}
+
+/* --- Split-button (mặt chính + caret): Heading/Code block/Math (US-4.9–4.11).
+ * Port cấu trúc từ prototype HTML đã duyệt — 2 nút con trong 1 khung viền
+ * chung, vạch chia ở giữa. --- */
+#toolbar .split-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+#toolbar .split-btn:hover {
+  border-color: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+#toolbar .split-main,
+#toolbar .split-caret {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+
+#toolbar .split-main {
+  min-width: 25px;
+  padding: 0 8px;
+}
+
+#toolbar .split-caret {
+  min-width: 20px;
+  padding: 0 4px;
+}
+
+#toolbar .split-main svg,
+#toolbar .split-caret svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+}
+
+#toolbar .split-main:hover,
+#toolbar .split-caret:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+#toolbar .split-divider {
+  flex-shrink: 0;
+  width: 1px;
+  margin: 5px 0;
+  background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
 /* --- Toolbar nổi cho bảng --- */
@@ -253,6 +656,10 @@ body.md-line-numbers #toolbar {
   background: rgba(0, 0, 0, 0.25);
 }
 
+/* Kéo được từ bất kỳ đâu trên box (bug report 2026-07-14, mục 6) — trừ input/
+ * nút/danh sách gợi ý (xem DRAG_IGNORE_SELECTOR, dom-utils.ts), nên chỉ cần
+ * cursor:grab trên chính box; các phần tử tương tác bên trong tự override lại
+ * cursor của chúng (input → text, button → pointer). */
 .prompt-box {
   display: flex;
   flex-direction: column;
@@ -265,9 +672,19 @@ body.md-line-numbers #toolbar {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   color: var(--vscode-foreground);
   font-size: 13px;
+  cursor: grab;
+}
+
+.prompt-box.dragging {
+  cursor: grabbing;
+}
+
+.prompt-box label {
+  cursor: inherit;
 }
 
 .prompt-box input {
+  cursor: text;
   font-family: inherit;
   font-size: 13px;
   padding: 4px 6px;
@@ -364,7 +781,10 @@ body.md-line-numbers #toolbar {
   font-size: 0.85em;
 }
 
-/* --- Math atom (KaTeX): không chỉnh sửa trực tiếp --- */
+/* --- Math atom (KaTeX): công thức đã dựng, có nút "Edit" mở popup sửa TeX
+ * (US-4.19, bug report 2026-07-14 — thay toggle inline render⇄source của
+ * US-4.18). BLOCK có toolbar riêng (đủ chỗ cho 1 hàng); INLINE không có chỗ
+ * nên nút "Edit" nằm ngay trong dòng, ngay sau công thức. --- */
 .md-math-inline,
 .md-math-block {
   cursor: default;
@@ -380,6 +800,141 @@ body.md-line-numbers #toolbar {
   outline: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.5));
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+.md-math-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.md-math-toggle {
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.md-math-toggle:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.md-math-toggle::after {
+  content: 'Edit';
+}
+
+.md-math-inline .md-math-toggle {
+  font-size: 9px;
+  padding: 0 4px;
+  margin-left: 2px;
+  vertical-align: super;
+}
+
+/* --- Popup sửa TeX (US-4.19): textarea + gợi ý cú pháp KaTeX, định vị bằng
+ * positionNear (dom-utils.ts) nên không đè lên công thức đang sửa. --- */
+.md-math-edit-popover {
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 320px;
+  max-width: calc(100vw - 24px);
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  color: var(--vscode-foreground);
+  font-size: 13px;
+  cursor: grab;
+}
+
+.md-math-edit-popover.dragging {
+  cursor: grabbing;
+}
+
+.md-math-edit-input {
+  box-sizing: border-box;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  resize: both;
+  width: 100%;
+  min-width: 200px;
+  min-height: 48px;
+  max-width: calc(100vw - 48px);
+  padding: 6px 8px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+.md-math-edit-cheatsheet {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.md-math-cheat-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  font-family: inherit;
+  padding: 3px 7px;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  text-align: left;
+}
+
+.md-math-cheat-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.md-math-cheat-label {
+  font-size: 11px;
+}
+
+.md-math-cheat-snippet {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.md-math-edit-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.md-math-edit-buttons button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.md-math-edit-buttons button:last-child {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
 }
 
 /* --- Mermaid: khối ```mermaid``` hiển thị biểu đồ, có nút chuyển sang xem mã
@@ -418,11 +973,11 @@ body.md-line-numbers #toolbar {
 }
 
 .md-mermaid-toggle::after {
-  content: 'Xem mã nguồn';
+  content: 'View source';
 }
 
 .md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after {
-  content: 'Xem biểu đồ';
+  content: 'View chart';
 }
 
 .md-mermaid-chart {
@@ -756,12 +1311,24 @@ body.toc-open #select-viewport-band {
  *--------------------------------------------------------------------------*/
 
 :root {
-  --toc-width: 260px;
+  --toc-width: 300px;
 }
 
-/* Chừa chỗ cho panel: nội dung không bị che sau mục lục. Toolbar (margin -26px)
- * nhờ đó kết thúc đúng ở mép trái panel. */
+/* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục. */
 body.toc-open {
+  padding-right: calc(26px + var(--toc-width));
+}
+
+/* Toolbar bù lại margin/padding phải để LUÔN tràn hết viewport bất kể TOC mở
+ * hay đóng — full-width (thay vì co hẹp dừng trước panel như bản cũ) để
+ * z-index 160 (> #toc-panel 150, xem #toolbar) thật sự có chỗ đè lên dải trên
+ * cùng của TOC; nếu toolbar vẫn co hẹp thì không có phần chồng lấn nào để
+ * z-index phân xử. Trước đây chỉ normal mode co hẹp theo --toc-width, Zen
+ * mode (#toolbar position:fixed, bỏ qua padding của body) KHÔNG co — 2 mode
+ * dài toolbar khác nhau khi mở TOC, gây confuse; bỏ hẳn việc co hẹp để cả 2
+ * mode nhất quán full-width. */
+body.toc-open #toolbar {
+  margin-right: calc(-26px - var(--toc-width));
   padding-right: calc(26px + var(--toc-width));
 }
 
@@ -778,6 +1345,14 @@ body.toc-open #select-overview {
   right: var(--toc-width);
 }
 
+/* top: 0 (không phải var(--toolbar-height)) — bản trước từng đẩy panel xuống
+ * dưới toolbar để tránh chồng lấn, nhưng khiến nền sideBar hở hẳn 1 dải trống
+ * phía trên (không tới đỉnh màn hình), trông như hộp nổi lơ lửng thay vì
+ * sidebar liền mạch (bug report kèm ảnh chụp). Quay lại top:0 — nền sideBar
+ * chạy hết lên đỉnh; z-index 150 < #toolbar (160) nên đoạn chồng lấn (dải
+ * trên cùng, cao = toolbarHeight) bị toolbar (full-width, opaque) đè lên,
+ * giống title bar nằm trên sidebar — không hở, không cần né chồng lấn theo
+ * cách "ai đứng dưới ai" nữa vì giờ LUÔN toolbar thắng ở cả 2 mode. */
 #toc-panel {
   position: fixed;
   top: 0;
@@ -787,7 +1362,12 @@ body.toc-open #select-overview {
   z-index: 150;
   display: flex;
   flex-direction: column;
-  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  /* Same token/fallback order as #toolbar (bug 0716 #8's root cause: the two
+   * previously used opposite fallback order, so most themes rendered them in
+   * two different shades — any tiny coverage gap in the toolbar's stretch-
+   * over-TOC trick then showed as a visible color seam). Unified so there is
+   * no possible mismatch regardless of gap/theme. */
+  background: var(--vscode-editor-background, var(--vscode-sideBar-background));
   border-left: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
@@ -795,20 +1375,76 @@ body.toc-open #select-overview {
   display: none;
 }
 
+/* Handle kéo đổi rộng panel — nằm sát mép trái, phủ lên border-left. */
+#toc-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: ew-resize;
+  z-index: 1;
+  background: transparent;
+}
+
+#toc-resize:hover,
+body.toc-resizing #toc-resize {
+  background: var(--vscode-textLink-foreground, #3794ff);
+  opacity: 0.4;
+}
+
+/* Trong lúc kéo: chặn select text + giữ con trỏ ew-resize toàn trang. */
+body.toc-resizing {
+  cursor: ew-resize;
+  user-select: none;
+}
+
 #toc-header {
   flex: none;
   display: flex;
   align-items: center;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  gap: 8px;
+  /* padding-top chừa dải toolbar (position:sticky, full-width, z-index cao
+   * hơn #toc-panel — xem #toolbar) đè lên đỉnh panel, tránh title bị che. */
+  padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
 }
 
 #toc-title {
-  font-size: 11px;
+  /* H2 level (markdown.css: h2 { font-size: 1.5em }) — `em` (not a fixed px)
+   * nên vẫn tỉ lệ đúng theo --markdown-font-size nếu user đổi cỡ chữ preview. */
+  font-size: 1.5em;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   opacity: 0.8;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
+ * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ. */
+#toc-filter-bar {
+  flex: none;
+  padding: 0 14px 8px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+#toc-filter-slider {
+  width: 100%;
+  accent-color: var(--vscode-textLink-foreground, #3794ff);
+  cursor: pointer;
+  outline: none;
+}
+
+.toc-filter-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 2px;
 }
 
 #toc-list {
@@ -941,9 +1577,13 @@ body.toc-open #select-overview {
   z-index: 490;
   display: flex;
   flex-direction: column;
-  width: 320px;
+  /* [US-15.9] Baseline tăng từ 320×360 lên 400×min(70vh,560) — phải khớp
+   * CROSS_FILE_POPOVER_WIDTH_PX / _MAX_HEIGHT_CAP_PX / _MAX_HEIGHT_VH_RATIO
+   * (constants.ts), dùng trong positionPopover() để clamp vị trí đúng theo
+   * kích thước mới. */
+  width: 400px;
   max-width: calc(100vw - 32px);
-  max-height: 360px;
+  max-height: min(70vh, 560px);
   overflow: hidden;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
@@ -951,6 +1591,14 @@ body.toc-open #select-overview {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   color: var(--vscode-foreground);
   font-size: 12px;
+  /* Kéo được từ bất kỳ đâu trên popover trừ vùng tương tác (US-17.1, dùng
+   * chung makeDraggable() — xem DRAG_IGNORE_SELECTOR, dom-utils.ts), cùng
+   * pattern .prompt-box/.md-math-edit-popover. */
+  cursor: grab;
+}
+
+.cross-file-search-popover.dragging {
+  cursor: grabbing;
 }
 
 .cross-file-search-popover[hidden] {
@@ -1008,11 +1656,78 @@ body.toc-open #select-overview {
 }
 
 .cross-file-search-group + .cross-file-search-group {
-  margin-top: 6px;
+  margin-top: 2px;
+}
+
+/* Header 1 nhóm file (hàng khi collapsed) — bấm để toggle expand/collapse,
+ * KHÔNG mở file (tránh lẫn target click với .cross-file-search-match). */
+.cross-file-search-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cross-file-search-group-header:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* Chevron ▸ khi collapsed, xoay 90° thành ▾ khi expanded (đồng bộ aria-expanded do JS set). */
+.cross-file-search-chevron {
+  flex: none;
+  width: 10px;
+  height: 12px;
+  transition: transform 0.1s ease;
+}
+
+.cross-file-search-chevron::before {
+  content: '';
+  display: block;
+  width: 0;
+  height: 0;
+  margin: 2px 0 0 1px;
+  border-style: solid;
+  border-width: 4px 0 4px 5px;
+  border-color: transparent transparent transparent currentColor;
+  opacity: 0.75;
+}
+
+.cross-file-search-group-header[aria-expanded='true'] .cross-file-search-chevron {
+  transform: rotate(90deg);
+}
+
+/* [US-15.6, đổi 2026-07-14] Dòng file khi chỉ có 1 match: <div> tĩnh (không
+ * phải <button>) vì không có gì để toggle — bỏ affordance click (cursor,
+ * hover) nhưng vẫn dùng chung layout/padding với .cross-file-search-group-header. */
+.cross-file-search-group-header-static {
+  cursor: default;
+}
+
+.cross-file-search-group-header-static:hover {
+  background: transparent;
+}
+
+/* Chevron "giả" chỉ để canh lề tên file/badge thẳng hàng với các dòng ≥2
+ * match (có chevron thật) trong cùng danh sách — không hiện visual gì. */
+.cross-file-search-chevron-hidden {
+  visibility: hidden;
+}
+
+.cross-file-search-group-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .cross-file-search-file {
-  padding: 4px 10px 0;
   font-size: 12px;
   font-weight: 600;
   overflow: hidden;
@@ -1021,12 +1736,53 @@ body.toc-open #select-overview {
 }
 
 .cross-file-search-path {
-  padding: 0 10px 2px;
   font-size: 11px;
   opacity: 0.65;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Badge số lượng match THẬT trong file (totalInFile) — pill nhỏ, dùng token
+ * --vscode-badge-* để tự đủ tương phản ở cả theme sáng/tối. */
+.cross-file-search-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.6));
+}
+
+/* Danh sách match con — chỉ hiển thị khi group đang expanded (toggle [hidden] qua JS).
+ * padding-left cộng thêm để thụt lề rõ so với header, không cần đổi lại
+ * .cross-file-search-match (giữ nguyên style đã Shipped ở C5). */
+.cross-file-search-group-matches {
+  padding-left: 10px;
+}
+
+.cross-file-search-group-matches[hidden] {
+  display: none;
+}
+
+/* Dòng "+N match khác trong file này" — style nhẹ hơn .cross-file-search-more
+ * (không có border-top, vì đây là overflow CỦA 1 GROUP, không phải toàn popover). */
+.cross-file-search-overflow {
+  display: block;
+  width: 100%;
+  padding: 4px 10px 4px 18px;
+  border: none;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  font-family: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cross-file-search-overflow:hover {
+  text-decoration: underline;
 }
 
 .cross-file-search-match {
@@ -1083,4 +1839,399 @@ body.toc-open #select-overview {
 
 .cross-file-search-more:hover {
   text-decoration: underline;
+}
+
+/* ===========================================================================
+ * Reading Mode chrome (HLR mục 19) — Zen (US-19.9), image zoom (US-19.4),
+ * focus-visible cho keyboard nav (US-19.7). Styling nội dung ở markdown.css.
+ * ==========================================================================*/
+
+/* --- US-19.9 Zen / Focus mode ---
+ * Ẩn toolbar + gutter số dòng, để measure của US-19.2 (markdown.css) căn cột
+ * chữ giữa. Rê chuột sát mép trên → hé lộ lại toolbar (readability.ts thêm
+ * .reading-zen-reveal). Thoát bằng Esc (readability.ts). */
+/* Cách 3: đưa toolbar RA KHỎI flow (position: fixed overlay) rồi mới trượt lên.
+ * Sticky + transform trên cùng element khiến `translateY(-100%)` chỉ ẩn được một
+ * phần (còn sót "nửa thanh" nhìn như lỗi). Fixed pin theo viewport → trượt lên
+ * ẩn dứt khoát 100%; rê chuột sát mép trên (.reading-zen-reveal) → thanh nổi
+ * trượt xuống lại. margin: 0 để bỏ negative-margin bleed của bản sticky. */
+body.reading-zen #toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  margin: 0;
+  z-index: 200;
+  transform: translateY(-100%);
+  transition: transform 0.2s ease;
+  pointer-events: none;
+}
+body.reading-zen.reading-zen-reveal #toolbar {
+  transform: translateY(0);
+  pointer-events: auto;
+  /* Lớp phủ tạm nổi trên nội dung — shadow để đọc ra là chủ đích, không phải vỡ layout. */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+/* Toolbar overlay không chiếm chỗ trong flow (position: fixed) → nếu #content
+ * không tự chừa trước khoảng đó, mỗi lần reveal/hide sẽ phải đổi padding-top
+ * kèm animation, gây giật layout (bug: padding "nhảy" theo lúc hé lộ). Chừa
+ * SẴN khoảng trắng bằng chiều cao toolbar NGAY KHI vào Zen — hằng định suốt
+ * lúc Zen bật, không phụ thuộc trạng thái reveal — để toolbar chỉ overlay đè
+ * lên vùng đã chừa (transform riêng của nó), không đụng tới padding-top nữa. */
+body.reading-zen #content {
+  padding-top: calc(var(--toolbar-height, 48px) + 8px);
+}
+/* Bug 0715: lúc mở tab, state seed từ host (readability.applyFromHost) phải áp
+ * TỨC THỜI — không chạy animation trượt toolbar/đẩy padding; animation chỉ dành
+ * cho user bấm nút Focus/rê chuột. Class thêm trước apply(), gỡ sau khi paint. */
+body.reading-no-anim,
+body.reading-no-anim #toolbar,
+body.reading-no-anim #content,
+body.reading-no-anim #content a,
+body.reading-no-anim #content pre,
+body.reading-no-anim #content :not(pre) > code,
+body.reading-no-anim #content blockquote,
+body.reading-no-anim #content th,
+body.reading-no-anim #content td {
+  transition: none !important;
+}
+body.reading-zen #line-gutter {
+  display: none;
+}
+/* Zen bỏ chỗ chừa RIÊNG cho gutter số dòng (nếu đang bật) để cột chữ căn giữa
+ * đúng theo measure, không lệch trái — nhưng vẫn phải giữ khoảng chừa CHUNG cho
+ * drag handle (như base `body` ở đầu file), nếu không handle bị cắt sát mép
+ * trái viewport khi Zen ẩn toolbar/gutter (bug 0716 round 2). */
+body.reading-zen.md-line-numbers {
+  padding-left: 26px;
+}
+body.reading-zen.md-line-numbers #toolbar {
+  margin-left: 0;
+  padding-left: 26px;
+}
+
+/* --- US-19.6: chrome (TOC + pop-up) phóng cỡ chữ theo preset ---
+ * Đọc biến --reading-ui-font-size (định nghĩa per-preset ở markdown.css). Fallback
+ * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
+ * tắt đều giữ nguyên. Chỉ áp khi Reading Mode/Zen bật (body.reading-mode). Đây là
+ * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
+body.reading-mode .toc-item {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+/* Bug fix: TOC font-family didn't follow the reading preset/free-text font
+ * override — #toc-panel is a sibling of #content (appended to document.body,
+ * see toc.ts), so --reading-font-override set inline on #content never
+ * reached it. readability.ts now also hoists --reading-font-override onto
+ * <body>; --reading-ui-font-family (markdown.css) covers the per-preset stack. */
+body.reading-mode #toc-panel,
+body.reading-mode .toc-item {
+  font-family: var(--reading-font-override, var(--reading-ui-font-family, inherit));
+}
+body.reading-mode .toolbar-popover-item {
+  font-size: var(--reading-ui-font-size, 12px);
+}
+body.reading-mode .prompt-box input,
+body.reading-mode .prompt-suggestion {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+body.reading-mode #search-input {
+  font-size: var(--reading-ui-font-size, 13px);
+}
+
+/* --- US-19.11 (bug 0715 mục 1): chrome (toolbar/popover/table-toolbar) đi theo
+ * reading palette ---
+ * Palette (US-19.5) chỉ tô màu `#content`; toolbar vẫn dùng --vscode-* (nền tối)
+ * nên "lệch" với vùng chữ sepia/ivory. Khi có palette (body.reading-palette-*),
+ * chrome kế thừa --rp-* để đồng bộ một hệ màu. followTheme = không có class này
+ * → chrome giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout. */
+body[class*='reading-palette-'] #toolbar,
+body[class*='reading-palette-'] #table-toolbar {
+  background: var(--rp-bg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] #toolbar button,
+body[class*='reading-palette-'] #table-toolbar button,
+body[class*='reading-palette-'] #toolbar .split-main,
+body[class*='reading-palette-'] #toolbar .split-caret {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #toolbar .toolbar-sep,
+body[class*='reading-palette-'] #toolbar .split-divider,
+body[class*='reading-palette-'] #table-toolbar .toolbar-sep {
+  background: var(--rp-border);
+}
+body[class*='reading-palette-'] #toolbar button:hover,
+body[class*='reading-palette-'] #table-toolbar button:hover,
+body[class*='reading-palette-'] #toolbar .split-btn:hover,
+body[class*='reading-palette-'] #toolbar .split-main:hover,
+body[class*='reading-palette-'] #toolbar .split-caret:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] #toolbar button.active {
+  background: var(--rp-chrome-active);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+/* Popover (dropdown preset/palette, menu tràn) cũng theo palette. */
+body[class*='reading-palette-'] .toolbar-popover {
+  background: var(--rp-bg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .toolbar-popover-item {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .toolbar-popover-item:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .toolbar-popover-item.selected {
+  background: var(--rp-chrome-active);
+}
+
+/* --- US-19.11 (mở rộng): mọi chrome nổi còn lại đi theo reading palette ---
+ * Trước đây palette chỉ phủ #content + toolbar/popover, khiến TOC, hộp tìm,
+ * các popup (chèn link/ảnh, sửa TeX, tìm chéo file), toast vẫn giữ --vscode-*
+ * (tông theme tối) → lệch hẳn khỏi vùng đọc sáng ivory/sepia. Nhóm rule dưới
+ * đây remap chúng sang --rp-* để đồng bộ một hệ màu; followTheme không có class
+ * này nên giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout.
+ * --rp-elev-bg = bề mặt nổi (widget/input) hơi đậm hơn nền để tách lớp. */
+
+/* Table of Contents (panel phải) */
+body[class*='reading-palette-'] #toc-panel {
+  background: var(--rp-bg);
+  border-left-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #toc-header {
+  border-bottom-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .toc-item {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .toc-item:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .toc-item.active {
+  color: var(--rp-link);
+  border-left-color: var(--rp-link);
+  background: var(--rp-chrome-active);
+}
+
+/* Hộp tìm trong file (Ctrl+F) + input + nút */
+body[class*='reading-palette-'] #search-box {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #search-input {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] #search-box button,
+body[class*='reading-palette-'] .match-option-btn {
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #search-box button:hover:not(:disabled),
+body[class*='reading-palette-'] .match-option-btn:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .match-option-btn.active {
+  background: var(--rp-chrome-active);
+  border-color: var(--rp-border);
+}
+
+/* Popup chèn link/ảnh (.prompt-*), popup sửa TeX (.md-math-edit-popover) */
+body[class*='reading-palette-'] .prompt-box,
+body[class*='reading-palette-'] .md-math-edit-popover {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .prompt-box input,
+body[class*='reading-palette-'] .md-math-edit-input {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .prompt-suggestions {
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .prompt-suggestion:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .prompt-suggestion.active {
+  background: var(--rp-chrome-active);
+  color: var(--rp-fg);
+}
+
+/* Tìm chéo file: icon nổi + popover kết quả */
+body[class*='reading-palette-'] .cross-file-search-icon,
+body[class*='reading-palette-'] .cross-file-search-popover {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .cross-file-search-header {
+  border-bottom-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .cross-file-search-scope {
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .cross-file-search-group-header:hover {
+  background: var(--rp-chrome-hover);
+}
+
+/* Toast góc phải (cảnh báo lưu HTML...) + tooltip hover (toolbar/TOC) */
+body[class*='reading-palette-'] #wysiwyg-toast,
+body[class*='reading-palette-'] #toolbar-tooltip {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+
+/* --- Embedded blocks (math dựng KaTeX, mermaid, front-matter) như "card" rõ
+ * ràng dưới palette ---
+ * Vấn đề: các khối này vốn trong suốt (math) hoặc dùng viền/nền --vscode-* (tông
+ * theme tối) nên trên nền ivory/sepia "chìm" — viền mờ, nền không khác nền trang
+ * (bug report ảnh 2026-07-15). followTheme giữ nguyên như cũ. Dùng --rp-elev-bg
+ * (bề mặt nổi) + --rp-embed-border (viền đậm hơn --rp-border) để tách khối. */
+
+/* Math block: cho hẳn nền + viền card (mặc định math block trong suốt). */
+body[class*='reading-palette-'] .md-math-block {
+  background: var(--rp-elev-bg);
+  border: 1px solid var(--rp-embed-border);
+  border-radius: 6px;
+  padding: 8px 14px;
+}
+/* Hover outline (math inline/block) theo viền embed thay vì --vscode-* mờ. */
+body[class*='reading-palette-'] .md-math-inline:hover,
+body[class*='reading-palette-'] .md-math-block:hover {
+  outline-color: var(--rp-embed-border);
+}
+/* Nút "Edit" của math + toggle "View source" của mermaid → màu palette. */
+body[class*='reading-palette-'] .md-math-toggle {
+  background: var(--rp-bg);
+  border-color: var(--rp-embed-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .md-math-toggle:hover,
+body[class*='reading-palette-'] .md-mermaid-toggle:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .md-mermaid-toggle {
+  color: var(--rp-fg);
+}
+
+/* Mermaid card: viền ngoài + dải toolbar tách nền với vùng biểu đồ. */
+body[class*='reading-palette-'] .md-mermaid {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-embed-border);
+}
+body[class*='reading-palette-'] .md-mermaid-toolbar {
+  background: var(--rp-bg);
+  border-bottom-color: var(--rp-embed-border);
+}
+
+/* Front matter (khối YAML gấp gọn, viền dashed). */
+body[class*='reading-palette-'] .md-front-matter {
+  border-color: var(--rp-embed-border);
+}
+
+/* Drag-and-drop hover outline/ghost: --vscode-focusBorder is always a VS Code
+ * accent blue, which clashes with sepia's deliberately low-blue palette and
+ * defeats highContrast's pure black/white intent. Route through the same
+ * --rp-* set as the toolbar's "active" state / embedded-block cards instead. */
+body[class*='reading-palette-'] .dd-hover-outline,
+body[class*='reading-palette-'] .dd-hover-outline-cell {
+  outline-color: var(--rp-border);
+  background-color: var(--rp-chrome-active);
+}
+/* Dragging: --rp-selection-bg is already tuned stronger than --rp-chrome-active
+ * (it has to stand out as a selection color), so diluted by .dd-source-muted's
+ * opacity:0.4 it lands back around the same visual strength as the rule above. */
+body[class*='reading-palette-'] .dd-source-muted.dd-hover-outline {
+  background-color: var(--rp-selection-bg);
+}
+body[class*='reading-palette-'] .dd-ghost {
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-embed-border);
+}
+
+/* Highlight tìm kiếm & vùng chọn tìm chéo (CSS Custom Highlight API): màu vàng/
+ * cam cố định vốn chọn cross-theme, nhưng trên nền palette rất sáng (ivory/HC)
+ * chữ nằm dưới cam đặc kém tương phản → ép màu chữ match hiện tại theo palette
+ * để luôn đọc rõ. Nền giữ nguyên tông vàng/cam (đã bán trong suốt, hợp mọi nền). */
+body[class*='reading-palette-'] ::highlight(search-current) {
+  color: var(--rp-selection-fg);
+}
+
+/* --- US-19.7 Keyboard nav: focus indicator rõ ràng --- */
+#toolbar button:focus-visible,
+.toolbar-popover-item:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -1px;
+}
+#content a:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* --- US-19.4 Image click-to-zoom ---
+ * Nút 🔍 nổi khi hover ảnh (gắn vào <body>, không đụng #content → roundtrip-safe). */
+#img-zoom-btn {
+  position: fixed;
+  z-index: 250;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+#img-zoom-btn:hover {
+  background: rgba(0, 0, 0, 0.78);
+}
+#img-zoom-btn svg {
+  display: block;
+  pointer-events: none;
+}
+
+/* Lightbox overlay: xem full-size, scroll để zoom, kéo để pan, Esc/click nền đóng. */
+#img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+  overflow: hidden;
+}
+#img-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+#img-lightbox-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+  pointer-events: none;
 }

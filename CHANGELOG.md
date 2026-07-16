@@ -4,6 +4,38 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.7.0\] - 2026-07-16
+
+### Added
+
+-   Reading Mode: toolbar toggle with a curated dropdown of 10 preset+palette bundles (Comfortable, Academic Paper, Compact, Dyslexia-friendly, Default, ...) plus "Follow VS Code", with live hover preview of typography and colors.
+-   Reading Mode: Focus/Zen distraction-free view (hides the toolbar, hover-reveals it), now global across all open tabs.
+-   Reading Mode: adaptive column width and typography per preset, sticky table header on scroll, image zoom, full chrome theming (TOC, popups, search, toast) matching the active palette.
+-   Toolbar: Heading, Code block, and Math split-buttons (default action + dropdown of levels/languages/inline-block), quick-insert Mermaid diagram (4 types), a Clear formatting button, and a "more options" (⋮) popover for Copy @file / View raw source.
+-   Toolbar: buttons now highlight based on the caret's current formatting; Math formulas are editable in place via a floating popup.
+-   Drag & drop: reorder top-level blocks, table rows/columns/whole tables, and list items (including moving to a different nesting depth) via hover handles; drag external files/images from Explorer/Finder into the document (saved to `assets/`).
+-   Drag & drop: hover-highlight outline around the block/list-item/row/column under the cursor, synced with the active handle; heading moves also support a handle menu (Move up/down/to a heading).
+-   Table: click a row's handle to promote it to the table's header row.
+-   Table of Contents: heading-level filter slider (H1 / H1–H2 / H1–H2–H3, persisted per tab), replacing the earlier TOC drag & drop.
+-   Editing: Ctrl/Cmd+Z / Y now delegate undo/redo to the underlying VS Code document history (single history, correct caret restore) instead of the browser's contentEditable history.
+-   Cross-file search: results grouped by file as an accordion (single-match files show the snippet directly), ranked by relevance (heading/definition/position/filename/keyword rarity); popover enlarged and made draggable.
+-   Tooling: added a Playwright-based webview interaction test track (real Chromium, `test/webview/`) for bugs that unit/roundtrip tests can't reproduce (click handlers, `execCommand`, Selection API, drag & drop).
+
+### Changed
+
+-   Toolbar scaled up 1.25x (buttons/icons/separators) for easier click targeting.
+
+### Fixed
+
+-   Cross-file search: clicking a result outside the viewport no longer snaps back to the old caret position, both after `Ctrl+F` Next and after following a match.
+-   Pasted images now keep their original size — a CSP restriction was silently blocking the `blob:` URL used to measure them; now measured via an already-allowed `data:` URL.
+-   `insertLink()` / `insertImage()` no longer leave relative paths with spaces un-encoded, which was reshaping the saved Markdown on next open.
+-   Jumping to a heading via anchor/TOC/reveal-source-line no longer gets covered by the sticky toolbar.
+
+### Breaking
+
+-   Renamed the paste-image config namespace `orcaEditor.pasteImage.*` → `orcaEditor.assetsPaste.*`; the default save folder changed from `images/` to `assets/` (existing images are not auto-migrated — update paths manually or keep the old folder name in settings).
+
 ## \[0.6.9\] - 2026-07-12
 
 ### Changed
@@ -12,7 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
--   Packaging: excluded the `WIP/`, `Requirement/`, and `Plan/` folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.
+-   Packaging: excluded internal working folders from the published `.vsix` — they had been bundled by mistake in 0.6.8. No functional changes to the editor.
 
 ## \[0.6.8\] - 2026-07-12
 

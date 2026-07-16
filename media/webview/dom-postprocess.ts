@@ -9,6 +9,9 @@ import {
   LineRange,
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
+  MATH_TOOLBAR_CLASS,
+  MATH_TOGGLE_CLASS,
+  MATH_RENDER_CLASS,
   MERMAID_CLASS,
   MERMAID_TOOLBAR_CLASS,
   MERMAID_TOGGLE_CLASS,
@@ -40,7 +43,6 @@ export function postProcessMathDom(
     const tex = extractTex(el);
     const wrapper = doc.createElement('div');
     wrapper.className = MATH_BLOCK_CLASS;
-    wrapper.setAttribute('contenteditable', 'false');
     wrapper.setAttribute('data-tex', tex);
     const range = ranges[i];
     if (range) {
@@ -54,7 +56,7 @@ export function postProcessMathDom(
     } else if (parent) {
       parent.replaceChild(wrapper, el);
     }
-    wrapper.appendChild(el);
+    buildMathEditStructure(doc, wrapper, el, { toolbar: true });
   });
   const inlines = Array.from(root.querySelectorAll('.katex')).filter(
     (el) =>
@@ -62,16 +64,63 @@ export function postProcessMathDom(
       !(el.classList?.contains('katex-display') ?? false)
   );
   for (const el of inlines) {
-    if (el.parentElement?.classList.contains(MATH_INLINE_CLASS)) {
+    if (hasAncestor(el, (a) => a.classList?.contains(MATH_INLINE_CLASS) ?? false)) {
       continue;
     }
     const tex = extractTex(el);
     const wrapper = doc.createElement('span');
     wrapper.className = MATH_INLINE_CLASS;
-    wrapper.setAttribute('contenteditable', 'false');
     wrapper.setAttribute('data-tex', tex);
     el.parentNode?.replaceChild(wrapper, el);
-    wrapper.appendChild(el);
+    buildMathEditStructure(doc, wrapper, el, { toolbar: false });
+  }
+}
+
+/**
+ * Dựng cấu trúc render + nút "Edit" bên trong `wrapper` (US-4.19, bug report
+ * 2026-07-14 — thay cho toggle inline render⇄source của US-4.18: bug report
+ * đó yêu cầu popup sửa TeX không đè lên công thức đang sửa + hướng dẫn ký tự,
+ * nên không còn state "source" hiện tại chỗ cũ nữa — `.md-math-render`
+ * (contenteditable=false, chứa `el` đã dựng KaTeX) luôn hiển thị, click nút
+ * `.md-math-toggle` mở popup riêng (`media/webview/math-edit.ts`) thay vì lật
+ * view tại chỗ. Mermaid (`postProcessMermaidDom` bên dưới) không đổi — vẫn
+ * giữ nguyên toggle render⇄source tại chỗ vì có đủ chỗ hiển thị mã nguồn.
+ *
+ * Math BLOCK có toolbar riêng (đủ chỗ cho 1 hàng, giống Mermaid); Math INLINE
+ * không có chỗ cho toolbar nên nút "Edit" nằm ngay trong dòng, ngay sau công
+ * thức đã dựng (`toolbar: false`).
+ */
+function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl: Element, opts: { toolbar: boolean }): void {
+  const isBlock = opts.toolbar;
+  const toggle = doc.createElement('button');
+  toggle.setAttribute('type', 'button');
+  toggle.className = MATH_TOGGLE_CLASS;
+  toggle.setAttribute('title', 'Edit formula');
+  // contenteditable=false trên chính nút, không chỉ trên toolbar bao ngoài
+  // (block): math INLINE gắn toggle thẳng vào wrapper (không có toolbar div
+  // bọc ngoài, xem nhánh !isBlock bên dưới) nên nếu thiếu dòng này, text
+  // "Edit" của nút kế thừa contenteditable=true từ #content — caret/Enter
+  // vẫn lọt vào giữa chữ "Edit" được (bug report mục 11, tái hiện dù đã có
+  // popup sửa TeX ở US-4.19, vì đây là caret của TÀI LIỆU chính, không phải
+  // caret bên trong ô sửa công thức).
+  toggle.setAttribute('contenteditable', 'false');
+
+  if (isBlock) {
+    const toolbar = doc.createElement('div');
+    toolbar.className = MATH_TOOLBAR_CLASS;
+    toolbar.setAttribute('contenteditable', 'false');
+    toolbar.appendChild(toggle);
+    wrapper.appendChild(toolbar);
+  }
+
+  const renderWrap = doc.createElement(isBlock ? 'div' : 'span');
+  renderWrap.className = MATH_RENDER_CLASS;
+  renderWrap.setAttribute('contenteditable', 'false');
+  renderWrap.appendChild(renderedEl);
+
+  wrapper.appendChild(renderWrap);
+  if (!isBlock) {
+    wrapper.appendChild(toggle);
   }
 }
 
