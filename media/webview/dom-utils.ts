@@ -191,6 +191,29 @@ export function showToast(message: string): void {
   toastTimer = setTimeout(() => toast?.classList.remove('show'), TOAST_DURATION_MS);
 }
 
+/**
+ * Offset ký tự (tính bằng Range.toString()) từ đầu `root` tới (node,
+ * nodeOffset) — null nếu node đó không nằm trong root. Dùng để "chụp" vị
+ * trí caret trước khi block bị tạo lại từ chuỗi HTML (không thể giữ
+ * nguyên tham chiếu node cũ), rồi suy ngược lại vị trí tương ứng ở block
+ * mới bằng offset ký tự (nội dung text không đổi, chỉ đổi tag bao ngoài).
+ * Top-level (không thuộc createDomHelpers's closure) — không phụ thuộc gì
+ * riêng của #content, nên list-ops.ts tái dùng được không cần duplicate.
+ */
+export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): number | null {
+  if (!root.contains(node)) {
+    return null;
+  }
+  const probe = document.createRange();
+  probe.selectNodeContents(root);
+  try {
+    probe.setEnd(node, nodeOffset);
+  } catch {
+    return null;
+  }
+  return probe.toString().length;
+}
+
 export interface DomHelpers {
   restoreSelection(range: Range | undefined): void;
   placeCaretIn(el: Element | null | undefined, selectContents?: boolean): void;
@@ -245,27 +268,6 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     sel?.removeAllRanges();
     sel?.addRange(range);
     content.focus();
-  }
-
-  /**
-   * Offset ký tự (tính bằng Range.toString()) từ đầu `root` tới (node,
-   * nodeOffset) — null nếu node đó không nằm trong root. Dùng để "chụp" vị
-   * trí caret trước khi block bị tạo lại từ chuỗi HTML (không thể giữ
-   * nguyên tham chiếu node cũ), rồi suy ngược lại vị trí tương ứng ở block
-   * mới bằng offset ký tự (nội dung text không đổi, chỉ đổi tag bao ngoài).
-   */
-  function getOffsetWithin(root: Element, node: Node, nodeOffset: number): number | null {
-    if (!root.contains(node)) {
-      return null;
-    }
-    const probe = document.createRange();
-    probe.selectNodeContents(root);
-    try {
-      probe.setEnd(node, nodeOffset);
-    } catch {
-      return null;
-    }
-    return probe.toString().length;
   }
 
   /** Tìm (text node, offset trong node đó) ứng với offset ký tự tính từ đầu `root`. */

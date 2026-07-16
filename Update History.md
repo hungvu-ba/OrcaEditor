@@ -222,3 +222,4 @@
 | 0.7.0 | 2026-07-16 | Fix (packaging): excluded .claude/, _bmad*/, test-results/, playwright-report/ from the published .vsix — bundled by mistake (same class of bug as 0.6.9's fix). |
 | 0.7.0 | 2026-07-16 | Refactor: "Copy @file for Claude" toolbar button generalized to a plain clipboard copy, removing Claude Code-specific tab detection and auto-insert. |
 | 0.7.0 | 2026-07-16 | Test: added Phase 0 safety net (HLR 22, execCommand verb replacement) — characterization + RED clean-DOM-target + delete/cut hardening + roundtrip tests; no production code changed yet. |
+| 0.7.0 | 2026-07-16 | Refactor: added shared list-ops primitive (computeIndent/computeOutdent/computeToList/commitListOp, HLR 22 Phase 1) plus its tests; not wired to any call site yet. |
