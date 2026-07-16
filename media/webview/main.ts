@@ -61,8 +61,7 @@ const search = initSearch(content);
 // truyền accessor isOpen() của search thay vì cả controller để giữ phụ thuộc tối thiểu.
 const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
-// US-17.7: TOC-drag reorders a section — needs scheduleSync (declared below; safe to reference here, function declarations hoist).
-const toc = initToc(content, vscode, { scheduleSync });
+const toc = initToc(content, vscode);
 const mermaidView = initMermaid(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
@@ -80,16 +79,18 @@ const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
 // Reading Mode (US-19.x) — controller lái CSS class/var. enabled/preset/palette
-// per-tab, session-only (bug 0715 mục 4): sống trong webview instance này,
-// KHÔNG persist về host. zen là ngoại lệ global (US-19.19, xem onZenChange).
+// global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
+// hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
 const readability = initReadability({
   content,
+  toolbar: toolbarEl,
   syncButtons: syncReadingButtons,
   // Zen reveal không được ẩn toolbar khi đang mở dropdown (xem ReadabilityDeps).
   isPopoverOpen,
   onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
+  onReadingModeChange: (state) => postToHost({ type: 'readingModeChanged', ...state }),
 });
-initImageZoom(content);
+initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
   scheduleSync,
@@ -198,6 +199,12 @@ window.addEventListener('message', (event) => {
         break;
       }
       renderDocument(msg.text ?? '');
+      // Chỉ update từ undo/redo mới kèm caretLine — đặt lại caret về đúng vị trí
+      // vừa đổi (renderDocument dựng lại DOM nên caret bị mất). External edit
+      // không kèm field này → không đụng caret (giữ hành vi cũ).
+      if (msg.caretLine !== undefined) {
+        restoreCaretAtSource(msg.caretLine, msg.caretCol ?? 0);
+      }
       break;
     }
     case 'fileSearchResult': {
@@ -223,10 +230,9 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'configUpdate': {
-      // Reading Mode/preset/palette KHÔNG áp qua configUpdate: state per-tab,
-      // session-only (bug 0715 mục 4; US-19.18 đưa palette vào cùng vòng đời
-      // này). Zen cũng không áp qua đây dù giờ global (US-19.19) — nó có kênh
-      // broadcast riêng ('zenChanged'), configUpdate chỉ phát khi user đổi
+      // Reading Mode/preset/palette KHÔNG áp qua configUpdate dù giờ global
+      // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
+      // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
@@ -246,6 +252,13 @@ window.addEventListener('message', (event) => {
       // US-19.19: Zen vừa đổi ở TAB KHÁC, host broadcast lại — chỉ apply cục
       // bộ (applyZenFromHost không gọi lại onZenChange, tránh vòng lặp).
       readability.applyZenFromHost(msg.zen);
+      break;
+    }
+    case 'readingModeChanged': {
+      // Bug 0716 #2: enabled/preset/palette vừa đổi ở TAB KHÁC, host broadcast
+      // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
+      // onReadingModeChange, tránh vòng lặp).
+      readability.applyReadingModeFromHost(msg);
       break;
     }
   }
@@ -328,6 +341,61 @@ function renderDocument(markdown: string): void {
 }
 
 /**
+ * Sau khi render lại vì undo/redo, đặt caret về vị trí nguồn (`line` 1-based,
+ * `col` 0-based) vừa đổi — KHÔNG cuộn (renderDocument đã giữ scrollTop). blockMap
+ * luôn được dựng trong renderDocument (không phụ thuộc bật/tắt line numbers), nên
+ * caret khôi phục được ở mọi chế độ.
+ *
+ * Với block ĐƠN DÒNG nguồn (đoạn văn/heading thường), cột nguồn = offset ký tự
+ * trong text hiển thị của block, nên đặt đúng cột được (placeCaretAtOffsets tự
+ * kẹp về cuối nếu vượt — vd. bỏ qua prefix "## " của heading). Block ĐA DÒNG
+ * (list/bảng/blockquote/code) không map cột→DOM đơn giản → lùi về đầu block
+ * (đủ để gõ tiếp đúng chỗ, đã tốt hơn hẳn mất caret).
+ */
+/**
+ * Độ dài phần cú pháp markdown ở ĐẦU dòng nguồn của một block đơn dòng — heading
+ * `#{1,6} `, blockquote `> `, bullet `-·*·+ `, ordered `1.·1) `, kèm ô task
+ * `[ ]·[x] `. Render bỏ các ký hiệu này nên phải trừ ra khi suy cột nguồn →
+ * offset trong text đã render. Không xử lý markup INLINE giữa dòng (`**đậm**`...)
+ * — hiếm khi caret undo rơi vào đó, chấp nhận xấp xỉ.
+ */
+function sourcePrefixLen(mdSlice: string): number {
+  // Anchored ^, nhánh rời nhau, không có quantifier lồng → không backtrack thảm
+  // hoạ (safe-regex báo nhầm vì đếm số '+' liền nhau).
+  // eslint-disable-next-line security/detect-unsafe-regex
+  const m = /^(?:#{1,6} +|> ?|(?:[-*+]|\d+[.)]) +(?:\[[ xX]\] +)?)/.exec(mdSlice);
+  return m ? m[0].length : 0;
+}
+
+function restoreCaretAtSource(line: number, col: number): void {
+  if (blockMap.length === 0) {
+    return;
+  }
+  const exact = blockMap.find((b) => line >= b.srcRange.start && line <= b.srcRange.end);
+  if (exact && exact.srcRange.start === exact.srcRange.end) {
+    // Cột nguồn tính cả cú pháp markdown ở đầu block (heading "##### ", bullet
+    // "- ", ordered "1. ", task "[ ] ", blockquote "> ") mà text render đã bỏ —
+    // trừ độ dài prefix đó để không vượt quá và bị kẹp về cuối block.
+    const renderedCol = Math.max(0, col - sourcePrefixLen(exact.mdSlice));
+    dom.placeCaretAtOffsets(exact.el, renderedCol, renderedCol);
+    return;
+  }
+  if (exact) {
+    dom.placeCaretIn(exact.el);
+    return;
+  }
+  // Dòng không rơi đúng block nào (vd. nội dung ở đó vừa bị undo xoá) → block
+  // gần nhất bắt đầu từ trên dòng đó, hoặc block đầu tiên nếu không có.
+  let fallback = blockMap[0];
+  for (const b of blockMap) {
+    if (b.srcRange.start <= line) {
+      fallback = b;
+    }
+  }
+  dom.placeCaretIn(fallback.el);
+}
+
+/**
  * contentEditable cần ít nhất một block để đặt caret. Ngoài ra, nếu phần tử
  * CUỐI là khối "atom"/"bẫy caret" — Mermaid, công thức, front matter, code
  * block, bảng, <hr> — thì không có chỗ đặt con trỏ ngay phía sau nó nên không
@@ -407,6 +475,30 @@ function syncNow(): void {
   postToHost({ type: 'edit', text: markdown });
 }
 
+/**
+ * Nếu còn thay đổi đang chờ debounce, serialize NGAY và trả về markdown (đồng
+ * thời cập nhật currentText + gutter như syncNow, nhưng KHÔNG postToHost). Dùng
+ * cho undo/redo: gắn kèm markdown này vào message để host commit lần gõ mới nhất
+ * thành 1 undo-unit rồi mới undo — atomic trong một handler ở host. Trả undefined
+ * khi không có gì đang chờ (nội dung đã đồng bộ).
+ */
+function takePendingSync(): string | undefined {
+  if (syncTimer === undefined) {
+    return undefined;
+  }
+  clearTimeout(syncTimer);
+  syncTimer = undefined;
+  const markdown = serialize();
+  if (markdown === currentText) {
+    return undefined;
+  }
+  if (lineNumbersEnabled) {
+    lineGutter.refreshFromMarkdown(markdown);
+  }
+  currentText = markdown;
+  return markdown;
+}
+
 function serialize(): string {
   const clone = content.cloneNode(true) as HTMLElement;
   // cloneNode không copy property 'checked' — đồng bộ từ DOM thật sang attribute.
@@ -454,6 +546,18 @@ content.addEventListener('input', (e) => {
     fixOrphanNestedListItems();
   }
   scheduleSync();
+  // Commit một undo-checkpoint ở ranh giới TỪ (space/Enter): mỗi từ thành 1 edit
+  // = 1 bước undo (giống mọi editor), thay vì cả cụm gõ liên tục dồn thành một
+  // undo-unit. Nếu không, granularity undo phụ thuộc nhịp gõ so với debounce
+  // 250ms (gõ nhanh không nghỉ → debounce không fire → 1 undo xoá sạch).
+  const data = (e as InputEvent).data;
+  if (
+    inputType === 'insertParagraph' ||
+    inputType === 'insertLineBreak' ||
+    (inputType === 'insertText' && data !== null && /^\s$/.test(data))
+  ) {
+    flushPendingSync();
+  }
   search.refresh();
   toc.refresh();
   // Gõ trong ô bảng có thể đổi bề rộng cột (auto-layout co/giãn theo nội dung) —
@@ -832,6 +936,18 @@ content.addEventListener('keydown', (e) => {
         // Flush thay đổi đang chờ debounce trước khi VS Code lưu file
         flushPendingSync();
         return; // không preventDefault — để VS Code xử lý save
+      // Uỷ quyền undo/redo cho TextDocument (một undo stack duy nhất) thay vì
+      // history của contentEditable. preventDefault để browser KHÔNG chạy undo
+      // native. Gắn kèm pendingText (nếu còn thay đổi chờ debounce) để host
+      // commit lần gõ mới nhất thành undo-unit TRƯỚC khi undo.
+      case 'z':
+        e.preventDefault();
+        postToHost({ type: 'undo', pendingText: takePendingSync() });
+        return;
+      case 'y':
+        e.preventDefault();
+        postToHost({ type: 'redo', pendingText: takePendingSync() });
+        return;
       case 'b':
         e.preventDefault();
         document.execCommand('bold');
@@ -864,6 +980,12 @@ content.addEventListener('keydown', (e) => {
     e.preventDefault();
     document.execCommand('strikeThrough');
     scheduleSync();
+    return;
+  }
+  // Ctrl/Cmd+Shift+Z = redo (quy ước Mac, song song với Ctrl+Y ở trên).
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    postToHost({ type: 'redo', pendingText: takePendingSync() });
     return;
   }
   // Lưới an toàn giữa phiên: nếu block cuối là khối "bẫy caret" (Mermaid/code/

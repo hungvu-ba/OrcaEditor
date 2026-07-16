@@ -103,3 +103,37 @@ export function applySiblingMove(parent: Element, result: SiblingMoveResult): HT
   }
   return el as HTMLElement | null;
 }
+
+/**
+ * Same signature/return shape as `applySiblingMove`, but replaces the
+ * Range-select-then-`execCommand('insertHTML')` body with
+ * `Range.deleteContents()` + `Range.insertNode()` on a `<template>`-parsed
+ * fragment. WebKit's `ReplaceSelectionCommand` (which backs
+ * `execCommand('insertHTML')`) applies a "smart merge" heuristic whenever the
+ * replaced range's end boundary lands next to an untouched sibling, silently
+ * folding that sibling's content into the inserted HTML and dropping
+ * `data-block-id`s (bug 0716 round 3) — reproduced even for the simplest case
+ * (swapping two adjacent paragraphs). `deleteContents`/`insertNode` never go
+ * through `ReplaceSelectionCommand`, so the heuristic never fires.
+ *
+ * Trade-off (accepted, same as `finishRowMove` in table.ts:611-629): the move
+ * no longer lands on the native undo stack as its own step. Do not "fix" this
+ * back to `execCommand('insertHTML')` — that's the corruption this function
+ * exists to avoid.
+ */
+export function applyBlockMove(parent: Element, result: SiblingMoveResult): HTMLElement | null {
+  const range = document.createRange();
+  range.setStartBefore(result.low);
+  range.setEndAfter(result.high);
+  range.deleteContents();
+
+  const template = document.createElement('template');
+  template.innerHTML = result.html;
+  range.insertNode(template.content);
+
+  let el: Element | null = result.beforeEl ? result.beforeEl.nextElementSibling : parent.firstElementChild;
+  for (let i = 0; i < result.movedHopCount && el; i++) {
+    el = el.nextElementSibling;
+  }
+  return el as HTMLElement | null;
+}

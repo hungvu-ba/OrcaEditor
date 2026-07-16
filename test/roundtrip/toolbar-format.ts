@@ -140,6 +140,46 @@ const domCases: DomCase[] = [
       '</ol>',
     expect: (md) => /^1\.\s+\[x\]\s+việc 1$/m.test(md),
   },
+  {
+    // Defense-in-depth for bug #10 (checkbox stacking): if an <li> already has
+    // two stacked checkboxes from prior corruption, turndown's taskCheckbox
+    // rule (turndown.ts) must still emit exactly one [ ]/[x] token — not two.
+    name: 'stacked duplicate checkboxes on one <li> (pre-existing corruption) → emits exactly ONE [ ] token, not two (bug #10 defense-in-depth)',
+    html:
+      '<ul class="contains-task-list">' +
+      '<li class="task-list-item">' +
+      '<input type="checkbox" class="task-list-item-checkbox">' +
+      '<input type="checkbox" class="task-list-item-checkbox">' +
+      ' duplicated task</li>' +
+      '</ul>',
+    expect: (md) => {
+      const tokenCount = (md.match(/\[ \]/g) ?? []).length;
+      return tokenCount === 1 && /^-\s+\[ \]\s+duplicated task$/m.test(md);
+    },
+  },
+  {
+    // Follow-up to the above: bug #10's dedup guard only compared checkbox
+    // SIBLINGS under the same immediate parentNode, so it missed a "loose"
+    // list item (checkbox nested in the <li>'s child <p> — see comment atop
+    // the taskCheckbox rule in turndown.ts) that ALSO carries a duplicate
+    // checkbox as a direct <li> child: different parentNode (<p> vs <li>) →
+    // old guard treated them as unrelated and let both serialize. turndown.ts
+    // now walks the <li>'s children in document order (`firstQualifyingCheckbox`)
+    // so a tight-child + loose-nested-in-<p> pair on the SAME <li> dedupes
+    // to one token regardless of which parentNode each sits under.
+    name: 'loose-list checkbox (nested in child <p>) + duplicate direct-child checkbox on same <li> → still emits exactly ONE token (bug #10 follow-up)',
+    html:
+      '<ul class="contains-task-list">' +
+      '<li class="task-list-item">' +
+      '<p><input type="checkbox" class="task-list-item-checkbox" checked> loose task</p>' +
+      '<input type="checkbox" class="task-list-item-checkbox">' +
+      '</li>' +
+      '</ul>',
+    expect: (md) => {
+      const tokenCount = (md.match(/\[x\]|\[ \]/g) ?? []).length;
+      return tokenCount === 1 && /^-\s+\[x\]\s+loose task$/m.test(md);
+    },
+  },
 ];
 
 for (const c of domCases) {

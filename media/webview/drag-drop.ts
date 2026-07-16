@@ -23,7 +23,7 @@
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
-import { isValidSiblingGap, computeSiblingMove, applySiblingMove } from './sibling-move';
+import { isValidSiblingGap, computeSiblingMove, applySiblingMove, applyBlockMove } from './sibling-move';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -46,6 +46,35 @@ type IndentDir = 'in' | 'out' | null;
 const HEADING_RE = /^H([1-6])$/;
 const DRAG_THRESHOLD_PX = 4;
 const LIST_INDENT_THRESHOLD_PX = 32;
+/** Must match `.dd-handle`'s CSS `width` (editor.css) — `climbLiFrom` reserves this much
+ * space left of a `<li>`'s own handle position as "still hovering this item" before climbing
+ * to an ancestor, or past the outermost item to the whole-list block handle. */
+const HANDLE_WIDTH_PX = 22;
+/** Manual tuning knob: shifts the block handle this many px to the right of its default
+ * anchor (flush against the block's own left edge). Adjust by hand to taste. */
+const BLOCK_HANDLE_SHIFT_RIGHT_PX = 12;
+/** Gap between the li handle's right edge and the `<li>`'s OWN content-left edge, so the handle
+ * sits snug just left of that item's own right-aligned marker (bullet/number) with a balanced
+ * gap — not out at the enclosing list's left edge (which pushed a nested item's handle into its
+ * PARENT's marker column, far from the child's own number). Tuned by on-screen verification:
+ * the marker renders at the sequential position (single-digit for lists under ~10 items),
+ * right-aligned toward `li.left`; ~26px lands the handle just left of it with a ~6px gap.
+ * Each nesting level uses the same rule, so parent/child handles are one indent step apart. */
+const LI_HANDLE_MARKER_GAP_PX = 26;
+/** Floor for the li handle's own-content height (positionLiHandle) — a parent `<li>` whose only
+ * child is its nested list has ~0 own content, so clamp to keep a grabbable handle. */
+const LI_HANDLE_MIN_HEIGHT_PX = 20;
+/** Manual tuning knob: shifts the li handle (and its hitzone, via `liHandleAnchorLeft`) this many
+ * px to the right of its default anchor. Adjust by hand to taste. */
+const LI_HANDLE_SHIFT_RIGHT_PX = 24;
+/** Size of the table-level handle's own corner hit zone (bug 0716 round 2, #1) — matches
+ * `.dd-handle`'s base 22×24 footprint (editor.css). */
+const TABLE_HANDLE_WIDTH_PX = 22;
+const TABLE_HANDLE_HEIGHT_PX = 24;
+/** How far the corner hit zone extends PAST the table's own top-left corner, into the same
+ * pixels row-0/col-0's own handles claim — a genuine overlap band, not a knife-edge, so
+ * "shows together with row/column handles" is actually reachable (see findTableBlockAt). */
+const TABLE_HANDLE_CORNER_OVERLAP_PX = 4;
 const AUTOSCROLL_EDGE_PX = 56;
 const AUTOSCROLL_SPEED_PX = 16;
 const AUTOSCROLL_INTERVAL_MS = 16;
@@ -106,7 +135,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     return blocks.length;
   }
 
-  /** Performs the move (one execCommand call, via sibling-move.ts) and returns the moved block's new live element, for caret placement. */
+  /** Performs the move (Range deleteContents/insertNode, via sibling-move.ts — see applyBlockMove for why not execCommand) and returns the moved block's new live element, for caret placement. */
   function performMove(span: HTMLElement[], blocks: HTMLElement[], gap: number): HTMLElement | null {
     const spanStartIdx = blocks.indexOf(span[0]);
     const spanEndIdx = spanStartIdx + span.length - 1;
@@ -117,7 +146,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       gap,
       (prev, cur) => isAtomBlock(prev) && isAtomBlock(cur)
     );
-    return applySiblingMove(content, result);
+    return applyBlockMove(content, result);
   }
 
   // ---------------------------------------------------------------------
@@ -132,8 +161,9 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   let hoveredBlock: HTMLElement | null = null;
 
+  /** Excludes <table> so hovering a cell only shows table.ts's own row/col handles, never the whole-block handle on top of them (bug 0715 #11). draggableBlocks() itself stays unfiltered — section-move/menu-move (computeHeadingSectionSpan, moveBlockToGap) still need tables in the list so a table inside a dragged heading section is carried along. */
   function findBlockAt(clientY: number): HTMLElement | null {
-    const blocks = draggableBlocks();
+    const blocks = draggableBlocks().filter((b) => b.tagName !== 'TABLE');
     for (const b of blocks) {
       const r = b.getBoundingClientRect();
       if (clientY >= r.top && clientY <= r.bottom) {
@@ -143,38 +173,99 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     return null;
   }
 
+  /** Hit column spans the block's own full height and sits flush (zero gap) against the
+   * block's own left edge — `right` (not `left`) anchoring guarantees the flush fit
+   * regardless of the icon's CSS width, and removes the dead zone a moving cursor used
+   * to cross before reaching the old fixed tiny-icon offset (bug 0716 #4). */
   function positionHandle(block: HTMLElement | null): void {
     if (!block) {
       handleEl.style.display = 'none';
-      menuBtnEl.style.display = 'none';
       return;
     }
-    const contentRect = content.getBoundingClientRect();
     const blockRect = block.getBoundingClientRect();
     handleEl.style.display = 'flex';
     handleEl.style.top = `${blockRect.top}px`;
-    handleEl.style.left = `${contentRect.left - 20}px`;
-    menuBtnEl.style.display = 'flex';
-    menuBtnEl.style.top = `${blockRect.top + 20}px`;
-    menuBtnEl.style.left = `${contentRect.left - 20}px`;
+    handleEl.style.height = `${blockRect.height}px`;
+    handleEl.style.right = `${window.innerWidth - blockRect.left - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
   }
 
   // ---------------------------------------------------------------------
-  // Handle menu (US-17.7, M5): click the ⋮ button (not a drag) → "Move up /
-  // Move down / Move to <heading>…" — a mouse-only shortcut for long blocks
-  // that would otherwise need a long drag (F11: no keyboard nav in MVP).
-  // Reuses the exact same computeHeadingSectionSpan/sibling-move.ts primitives
-  // as an actual drag — a menu move IS a drag, just with the gap picked from
-  // a list instead of a drop-line position.
+  // Table-level handle (bug 0716 round 2, #1): drag a whole <table> as one
+  // block. Tracked fully independently of hoveredBlock/hoveredLi (never
+  // forced null by either, and vice versa) so it can show at the same time
+  // as table.ts's own row/column handles — only the small corner zone below
+  // is claimed, leaving their own hit zones untouched (bug 0715 #11 stays
+  // intact). Reuses armDrag/performMove/computeHeadingSectionSpan as-is; no
+  // new move logic (Option B, see deferred-work.md).
   // ---------------------------------------------------------------------
 
-  const menuBtnEl = document.createElement('div');
-  menuBtnEl.className = 'dd-menu-btn';
-  menuBtnEl.textContent = '⋮';
-  menuBtnEl.style.display = 'none';
-  menuBtnEl.setAttribute('role', 'button');
-  menuBtnEl.setAttribute('aria-label', 'Block actions');
-  document.body.appendChild(menuBtnEl);
+  const tableHandleEl = document.createElement('div');
+  tableHandleEl.className = 'dd-handle dd-table-handle';
+  tableHandleEl.textContent = HANDLE_GLYPH;
+  tableHandleEl.style.display = 'none';
+  document.body.appendChild(tableHandleEl);
+
+  let hoveredTableBlock: HTMLElement | null = null;
+
+  /** Pure rect math, no `elementFromPoint` (unlike findLiAt) — safe to call from a
+   * `mouseleave` exit point outside #content's own box, no climb-style refactor needed.
+   * Fires in the band flush above-left of a table's own corner, the one spot not otherwise
+   * claimed by the row handle's own column or the column handle's own row — extended a few
+   * px PAST the table's own top-left corner (not stopping exactly at it) so the zone
+   * genuinely overlaps table.ts's own row-0/col-0 hit zones instead of only meeting them at
+   * a knife-edge boundary pixel (which floating-point rect math from two different elements
+   * can't reliably agree on, and which a real mouse can't reliably land on either) — the
+   * "table handle can show together with row/column handles" acceptance criterion needs an
+   * actually reachable overlap, not just a technically-non-conflicting one. */
+  function findTableBlockAt(clientX: number, clientY: number): HTMLElement | null {
+    for (const b of draggableBlocks()) {
+      if (b.tagName !== 'TABLE') {
+        continue;
+      }
+      const r = b.getBoundingClientRect();
+      if (
+        clientX >= r.left - TABLE_HANDLE_WIDTH_PX &&
+        clientX <= r.left + TABLE_HANDLE_CORNER_OVERLAP_PX &&
+        clientY >= r.top - TABLE_HANDLE_HEIGHT_PX &&
+        clientY <= r.top + TABLE_HANDLE_CORNER_OVERLAP_PX
+      ) {
+        return b;
+      }
+    }
+    return null;
+  }
+
+  /** Same as `setHighlightedBlock`, for the table-level hover handle. */
+  function setHighlightedTableBlock(block: HTMLElement | null): void {
+    if (block === hoveredTableBlock) {
+      return;
+    }
+    hoveredTableBlock?.classList.remove('dd-hover-outline');
+    hoveredTableBlock = block;
+  }
+
+  /** Flush against the table's own top-left corner — `right`/`bottom` anchoring mirrors
+   * `positionRowHandle`/`positionColHandle`'s technique in table.ts. */
+  function positionTableHandle(block: HTMLElement | null): void {
+    if (!block) {
+      tableHandleEl.style.display = 'none';
+      return;
+    }
+    const r = block.getBoundingClientRect();
+    tableHandleEl.style.display = 'flex';
+    tableHandleEl.style.right = `${window.innerWidth - r.left}px`;
+    tableHandleEl.style.bottom = `${window.innerHeight - r.top}px`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Handle menu (US-17.7, M5; merged into the handle click by bug 0716 #5):
+  // a click (not a drag) on the block handle → "Move up / Move down / Move to
+  // <heading>…" — a mouse-only shortcut for long blocks that would otherwise
+  // need a long drag (F11: no keyboard nav in MVP). Reuses the exact same
+  // computeHeadingSectionSpan/sibling-move.ts primitives as an actual drag —
+  // a menu move IS a drag, just with the gap picked from a list instead of a
+  // drop-line position.
+  // ---------------------------------------------------------------------
 
   const menuPopupEl = document.createElement('div');
   menuPopupEl.className = 'dd-menu-popup';
@@ -188,6 +279,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   function closeMenu(): void {
     menuPopupEl.style.display = 'none';
     menuPopupEl.replaceChildren();
+    // The block stays highlighted for as long as its menu is open (bug 0716 #6 extended
+    // to the click-to-menu path) — clear it here, when the menu actually goes away,
+    // instead of `resetState()` clearing it the instant the menu opens.
+    if (menuTargetBlock) {
+      menuTargetBlock.classList.remove('dd-hover-outline');
+      menuTargetBlock = null;
+    }
   }
 
   function moveBlockToGap(block: HTMLElement, gap: number): void {
@@ -203,7 +301,31 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     const result = computeSiblingMove(blocks, idx, spanEndIdx, clampedGap, (prev, cur) => isAtomBlock(prev) && isAtomBlock(cur));
-    applySiblingMove(content, result);
+    // Same leak as the drag path (bug 0715 #12 loopback): clear the highlight
+    // before applyBlockMove captures outerHTML, otherwise it bakes
+    // .dd-hover-outline into the newly-created node at the destination. Also clears
+    // hoveredTableBlock (bug 0716 round 2, #1 follow-up) — a table's own "Move up/Move
+    // down/Move to…" menu item calls this same generic function.
+    if (block === hoveredBlock) {
+      setHighlightedBlock(null);
+    }
+    if (block === hoveredTableBlock) {
+      setHighlightedTableBlock(null);
+    }
+    const movedEl = applyBlockMove(content, result);
+    // Unlike the old execCommand('insertHTML') path, applyBlockMove's Range APIs never
+    // leave a selection behind — restore the caret explicitly (bug 0716 round 3), same
+    // pattern as finishBlockMove's drag path, or the menu-triggered move drops focus
+    // out of #content entirely (closeMenu already removed the clicked button from the DOM).
+    if (movedEl) {
+      const r = document.createRange();
+      r.selectNodeContents(movedEl);
+      r.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+      content.focus();
+    }
     deps.lineGutter.refreshFromDom();
     deps.scheduleSync();
   }
@@ -252,26 +374,26 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
     }
 
-    const rect = menuBtnEl.getBoundingClientRect();
+    // Anchor to the icon's own vertical center, not the hit column's bottom edge — the
+    // hit column now spans the whole block's height (bug 0716 #4), so for a tall block
+    // `rect.bottom` would place the menu far below where the (vertically centered) icon
+    // and the user's click actually were. A table's own menu is opened via tableHandleEl
+    // (armDrag(hoveredTableBlock, ...) always originates there, never handleEl, which stays
+    // hidden the whole time), so anchor to whichever handle actually triggered this menu —
+    // otherwise the popup renders at handleEl's stale zero-rect position (bug 0716 round 2,
+    // #1 follow-up: confirmed live, popup appeared at the viewport's top-left corner).
+    const anchorEl = block.tagName === 'TABLE' ? tableHandleEl : handleEl;
+    const rect = anchorEl.getBoundingClientRect();
     menuPopupEl.style.display = 'block';
-    menuPopupEl.style.top = `${rect.bottom + 4}px`;
-    menuPopupEl.style.left = `${rect.left}px`;
+    menuPopupEl.style.top = `${rect.top + rect.height / 2}px`;
+    menuPopupEl.style.left = `${rect.right + 4}px`;
+
+    menuTargetBlock = block;
+    block.classList.add('dd-hover-outline');
   }
 
-  menuBtnEl.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!hoveredBlock) {
-      return;
-    }
-    if (isMenuOpen()) {
-      closeMenu();
-    } else {
-      openMenu(hoveredBlock);
-    }
-  });
-
   document.addEventListener('mousedown', (e) => {
-    if (isMenuOpen() && e.target !== menuBtnEl && !menuPopupEl.contains(e.target as Node)) {
+    if (isMenuOpen() && !menuPopupEl.contains(e.target as Node)) {
       closeMenu();
     }
   });
@@ -282,14 +404,14 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   });
 
   // ---------------------------------------------------------------------
-  // List-item hover handle (US-17.5, M3) — independent of the block handle
-  // above: hovering inside a list matches BOTH (the <ul>/<ol> is itself a
-  // top-level block, AND the specific <li> under the cursor), so both
-  // handles can show at once. They don't collide visually — the block
-  // handle sits at a fixed offset from #content's own left edge (the
-  // reserved gutter margin), while the li handle sits relative to that
-  // specific <li>'s own (indented) left edge, which is further right for
-  // any nested item and only close to the block handle for a depth-0 item.
+  // List-item hover handle (US-17.5, M3) — mutually exclusive with the block
+  // handle above (onContentHover: `block = li ? null : findBlockAt(...)`), so
+  // they never show at once inside a list. The li handle sits a small fixed gap
+  // (LI_HANDLE_MARKER_GAP_PX) left of the hovered <li>'s OWN content-left edge —
+  // snug just left of that item's own marker — so a deeper item's handle is
+  // further RIGHT (nearer its own, more-indented number), and moving the cursor
+  // LEFT off it enters the parent item's hover zone (climbLiFrom), the parent's
+  // handle sitting snug to the parent's own marker one indent step further left.
   // ---------------------------------------------------------------------
 
   const liHandleEl = document.createElement('div');
@@ -300,38 +422,247 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   let hoveredLi: HTMLLIElement | null = null;
 
-  /** elementFromPoint (not a rect scan like findBlockAt) so nested lists resolve to the INNERMOST <li> under the cursor, not an ancestor. */
-  function findLiAt(clientX: number, clientY: number): HTMLLIElement | null {
-    const el = document.elementFromPoint(clientX, clientY);
-    const li = (el as HTMLElement | null)?.closest?.('li');
-    return li && content.contains(li) ? (li as HTMLLIElement) : null;
+  /** Tracks whichever block is currently hovered and removes `.dd-hover-outline` when it
+   * stops being hovered (bug 0715 #12 clear-path) — `hoveredBlock` itself is the tracked
+   * "currently highlighted" element, so every assignment site funnels through here instead
+   * of a separate shadow variable. Adding the class is NOT this function's job (bug 0716
+   * #6): only `armDrag` (mousedown on the handle) adds it, so plain hover never shows it. */
+  function setHighlightedBlock(block: HTMLElement | null): void {
+    if (block === hoveredBlock) {
+      return;
+    }
+    hoveredBlock?.classList.remove('dd-hover-outline');
+    hoveredBlock = block;
   }
 
+  /** Same as `setHighlightedBlock`, for the list-item hover handle. */
+  function setHighlightedLi(li: HTMLLIElement | null): void {
+    if (li === hoveredLi) {
+      return;
+    }
+    hoveredLi?.classList.remove('dd-hover-outline');
+    hoveredLi = li;
+  }
+
+  /** Climbs `li`'s own `<li>` ancestors (skipping the intermediate `<ul>`/`<ol>` via
+   * `.closest('li')` on the parent) and prefers an ancestor as long as `clientX` is still
+   * left of the current candidate's OWN handle left edge (`li.left − GAP − HANDLE_WIDTH`) —
+   * i.e. the cursor sits in that ancestor's own (less-indented) zone, not over the inner
+   * item's own content or its own handle. Returns `null` when the cursor is left of the
+   * OUTERMOST item's band with no ancestor `<li>` left to climb to — the caller treats that as
+   * "show the whole-list block handle". Pure rect math, no `elementFromPoint` — callable from a
+   * known starting `<li>` even at points that don't hit any element at all, e.g. once the
+   * cursor has left `#content`'s own rendered box (the `mouseleave` handler needs this same
+   * climb, but has no fresh hit-test to start from). */
+  function climbLiFrom(li: HTMLLIElement, clientX: number): HTMLLIElement | null {
+    let current = li;
+    for (;;) {
+      // Band left edge = this item's own handle's left edge (`liHandleAnchorLeft` minus the
+      // handle width) — still hovering `current` as long as the cursor is at/right of that. So
+      // moving the cursor left just past the child handle's own left edge immediately enters
+      // the parent's hover zone (no dead band). Uses the SAME clamped anchor as positionLiHandle
+      // so the band tracks where the handle is actually drawn, even for narrow-gutter lists.
+      const bandLeft = liHandleAnchorLeft(current) - HANDLE_WIDTH_PX;
+      if (clientX >= bandLeft) {
+        break;
+      }
+      const parentLi = current.parentElement?.closest('li') as HTMLLIElement | null;
+      if (!parentLi || !content.contains(parentLi)) {
+        // Cursor is left of the outermost `<li>`'s own band with no ancestor `<li>` to climb
+        // to — signal "past the whole list" (null) so the caller surfaces the block handle for
+        // the top-level block spanning this row (the `<ul>`/`<ol>` itself when the list is a
+        // top-level block) instead of freezing on this item.
+        return null;
+      }
+      // Don't climb past a <table> boundary — a table cell's own nested list
+      // is hit-tested independently of any <li> that merely wraps the table;
+      // row/column handles own that territory (bug 0715 #11).
+      const enclosingTable = current.closest('table');
+      if (enclosingTable && parentLi.contains(enclosingTable)) {
+        break;
+      }
+      current = parentLi;
+    }
+    return current;
+  }
+
+  /**
+   * elementFromPoint (not a rect scan like findBlockAt) finds the INNERMOST
+   * <li> under the cursor first — a nested <li> containing its own sub-list
+   * spans the same rect as its nested items, so it would otherwise never
+   * surface its own handle (bug 0715 #8). But a point left of an <li>'s own
+   * content — including its own reserved handle band and the browser's
+   * default marker-glyph gutter — belongs to the enclosing <ul>/<ol>'s own
+   * padding box, not to any <li>. There, `elementFromPoint` returns the list
+   * element itself (or the marker), and a plain `.closest('li')` on it skips
+   * straight past the item whose row this point is actually in, straight to
+   * whichever ancestor <li> wraps the whole list (bug 0716 round 2, #2). So
+   * when the hit lands on a <ul>/<ol>, prefer whichever of ITS OWN <li>
+   * children's row (by clientY) contains the point — that item's own handle
+   * band is what this pixel visually belongs to — before falling back to
+   * `.closest('li')`.
+   *
+   * Once the starting <li> is found, `climbLiFrom` decides whether an ancestor's
+   * gutter claims the cursor instead.
+   *
+   * A "loose" list (blank line between items, each <li> wraps its own <p>)
+   * has real vertical gaps between sibling rows (the <p>'s own margin), so a
+   * point can fall between two children's rects with no exact row match —
+   * fall back to whichever child's row is vertically NEAREST, rather than
+   * silently keeping whatever ancestor `.closest('li')` found, or the same
+   * ancestor-misresolution this function exists to fix reappears in that gap.
+   */
+  function findLiAt(clientX: number, clientY: number): HTMLLIElement | null {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    let li = el?.closest?.('li') as HTMLLIElement | null;
+    const listEl = el?.closest?.('ul, ol');
+    if (listEl && content.contains(listEl)) {
+      let nearest: HTMLLIElement | null = null;
+      let nearestDist = Infinity;
+      for (const child of Array.from(listEl.children)) {
+        if (child.tagName !== 'LI') {
+          continue;
+        }
+        const r = (child as HTMLElement).getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) {
+          nearest = child as HTMLLIElement;
+          break;
+        }
+        const dist = clientY < r.top ? r.top - clientY : clientY - r.bottom;
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearest = child as HTMLLIElement;
+        }
+      }
+      if (nearest) {
+        li = nearest;
+      }
+    }
+    if (!li || !content.contains(li)) {
+      return null;
+    }
+    return climbLiFrom(li, clientX);
+  }
+
+  /** X of the li handle's right edge: `LI_HANDLE_MARKER_GAP_PX` left of the item's OWN
+   * content-left edge (snug just left of that item's own marker), but clamped to never go left
+   * of the enclosing `<ul>`/`<ol>`'s own left edge — so a narrow-gutter list (e.g. a task list,
+   * `padding: 1.2em`) or a very shallow item can't fling the handle off the left of the viewport;
+   * it then just sits at the list edge (as it did before this change). */
+  function liHandleAnchorLeft(li: HTMLElement): number {
+    const listLeft = (li.parentElement ?? li).getBoundingClientRect().left;
+    return (
+      Math.max(listLeft, li.getBoundingClientRect().left - LI_HANDLE_MARKER_GAP_PX) +
+      LI_HANDLE_SHIFT_RIGHT_PX
+    );
+  }
+
+  /** Covers only the li's OWN content rows (top of the li → top of its first nested list, or the
+   * full li height for a leaf), NOT the whole nested subtree, and sits `LI_HANDLE_MARKER_GAP_PX`
+   * left of the li's OWN content-left edge — snug just left of that item's own marker (clamped,
+   * see `liHandleAnchorLeft`). Sizing to the subtree made a parent handle's (vertically centered)
+   * glyph float down in the MIDDLE of its children; own-content height keeps every level's handle
+   * a uniform size next to its own marker. Same `right`-anchored technique as `positionHandle`. */
   function positionLiHandle(li: HTMLLIElement | null): void {
     if (!li) {
       liHandleEl.style.display = 'none';
       return;
     }
     const r = li.getBoundingClientRect();
+    // Vertical extent = the item's OWN content only: down to the top of its first nested
+    // `<ul>`/`<ol>` (its own line(s)), or the full height for a leaf. A parent whose only child
+    // is its nested list has ~0 own content, so clamp to a grabbable minimum.
+    const nestedList = li.querySelector(':scope > ul, :scope > ol');
+    const ownHeight = nestedList
+      ? Math.max(LI_HANDLE_MIN_HEIGHT_PX, nestedList.getBoundingClientRect().top - r.top)
+      : r.height;
+    // Right edge sits a small fixed gap left of the `<li>`'s OWN content-left edge, landing
+    // just left of that item's own right-aligned marker (bullet/number). Anchoring at `r.left`
+    // itself put the handle on top of the marker; anchoring at the enclosing list's left edge
+    // pushed a nested item's handle all the way into its PARENT's marker column, far from the
+    // child's own number — this keeps it snug to the item's own marker, one indent step per
+    // nesting level (see LI_HANDLE_MARKER_GAP_PX / liHandleAnchorLeft).
+    const anchorLeft = liHandleAnchorLeft(li);
     liHandleEl.style.display = 'flex';
     liHandleEl.style.top = `${r.top}px`;
-    liHandleEl.style.left = `${r.left - 20}px`;
+    liHandleEl.style.height = `${ownHeight}px`;
+    liHandleEl.style.right = `${window.innerWidth - anchorLeft}px`;
   }
 
+  /** Innermost level under the cursor wins (bug 0716 #3): resolve the `<li>` first, and
+   * whenever one is under the cursor (any depth, including a depth-0 item) the block handle
+   * is forced off — a `<ul>`/`<ol>` is itself a top-level block, so without this both handles
+   * used to show at once inside a list. */
   function onContentHover(e: MouseEvent): void {
     if (state !== 'idle') {
       return;
     }
-    const block = findBlockAt(e.clientY);
+    const li = findLiAt(e.clientX, e.clientY);
+    const block = li ? null : findBlockAt(e.clientY);
     if (block !== hoveredBlock) {
-      hoveredBlock = block;
+      setHighlightedBlock(block);
       positionHandle(block);
     }
-    const li = findLiAt(e.clientX, e.clientY);
     if (li !== hoveredLi) {
-      hoveredLi = li;
+      setHighlightedLi(li);
       positionLiHandle(li);
     }
+    // Independent of block/li above (bug 0716 round 2, #1) — must be able to show at the
+    // same time as a row/column handle, so it never reads or writes hoveredBlock/hoveredLi.
+    const tableBlock = findTableBlockAt(e.clientX, e.clientY);
+    if (tableBlock !== hoveredTableBlock) {
+      setHighlightedTableBlock(tableBlock);
+      positionTableHandle(tableBlock);
+    }
+  }
+
+  /** True when `(x, y)` is still in the gutter band a hovered block/li's own handle lives
+   * in — left of the target's own edge, vertically within its rows. A real mouse move can
+   * skip clean over the (still fairly narrow) handle column in one sampled step without
+   * ever landing on `handleEl`/`liHandleEl` itself, so `mouseleave`'s `relatedTarget` check
+   * alone isn't enough (bug 0716 #4 follow-up). No lower bound on `x` — `findBlockAt` itself
+   * never checks `x`, so "still hovering" shouldn't stop mattering just because the handle's
+   * own rect was overshot. */
+  function isInHandleGutter(target: HTMLElement | null, x: number, y: number): boolean {
+    if (!target) {
+      return false;
+    }
+    const r = target.getBoundingClientRect();
+    return x < r.left && y >= r.top && y <= r.bottom;
+  }
+
+  /** Re-resolve the hovered li — or, once the climb runs past the outermost item, the
+   * whole-list block handle — from a leftward exit point. Shared by #content's `mouseleave`
+   * and the li handle's OWN `mouseleave`: once the cursor sits on the li handle (which lives in
+   * / left of #content's own left gutter), moving further left OFF the handle no longer fires
+   * #content's `mouseleave` — it already fired when the cursor first moved ONTO the handle — so
+   * without the handle's own `mouseleave` a depth-0 item's whole-list block handle would never
+   * surface (user report: "moving left off the handle shows nothing"). Returns true when the
+   * exit point is still within the hovered li's own gutter (i.e. this consumed the exit). */
+  function climbLiFromExit(clientX: number, clientY: number): boolean {
+    if (!isInHandleGutter(hoveredLi, clientX, clientY)) {
+      return false;
+    }
+    // `hoveredLi` can go stale if the DOM was mutated without a `refresh()` call — mirror
+    // findLiAt's own `content.contains` guard rather than handing climbLiFrom a detached node.
+    if (!content.contains(hoveredLi)) {
+      setHighlightedLi(null);
+      positionLiHandle(null);
+      return true;
+    }
+    const climbed = climbLiFrom(hoveredLi as HTMLLIElement, clientX);
+    if (climbed !== hoveredLi) {
+      setHighlightedLi(climbed);
+      positionLiHandle(climbed);
+      if (!climbed) {
+        // Past the outermost item's band — surface the block handle for the top-level block
+        // spanning this y (the `<ul>`/`<ol>` itself when the list is a top-level block).
+        const block = findBlockAt(clientY);
+        setHighlightedBlock(block);
+        positionHandle(block);
+      }
+    }
+    return true;
   }
 
   content.addEventListener('mousemove', onContentHover);
@@ -347,14 +678,34 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (
       related &&
       (handleEl.contains(related) ||
-        menuBtnEl.contains(related) ||
         menuPopupEl.contains(related) ||
-        liHandleEl.contains(related))
+        liHandleEl.contains(related) ||
+        tableHandleEl.contains(related))
     ) {
       return;
     }
-    hoveredBlock = null;
-    hoveredLi = null;
+    // Independent of block/li below (bug 0716 round 2, #1) — findTableBlockAt is pure rect
+    // math (no elementFromPoint), so it's safe to re-run directly at the exit point, unlike
+    // findLiAt's climb.
+    const tableBlock = findTableBlockAt(e.clientX, e.clientY);
+    if (tableBlock !== hoveredTableBlock) {
+      setHighlightedTableBlock(tableBlock);
+      positionTableHandle(tableBlock);
+    }
+    // `mousemove` (and its own ancestor-climb) never fires once the cursor has left
+    // #content's own rendered box — only `mouseleave` does, and `elementFromPoint` at a
+    // point outside that box doesn't hit any <li>/<ul> at all, so `findLiAt` can't be
+    // reused here. Climb from the already-known `hoveredLi` by rect math instead (bug 0716
+    // round 2, #2 follow-up), so exiting further into an ancestor's own gutter band shows
+    // that ancestor's handle instead of freezing on the child forever.
+    if (climbLiFromExit(e.clientX, e.clientY)) {
+      return;
+    }
+    if (isInHandleGutter(hoveredBlock, e.clientX, e.clientY)) {
+      return;
+    }
+    setHighlightedBlock(null);
+    setHighlightedLi(null);
     positionHandle(null);
     positionLiHandle(null);
   });
@@ -400,6 +751,15 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   let dragSpan: HTMLElement[] = [];
   let currentGap = 0;
   let currentGapValid = false;
+  /** Block armed via `armDrag` (mousedown on the block handle) — read back in `onDocMouseUp`'s
+   * non-dragging branch to open the handle menu when the click never crossed the drag
+   * threshold (bug 0716 #5: merges the removed kebab button into the handle click). */
+  let armedBlock: HTMLElement | null = null;
+  /** Block whose `.dd-hover-outline` is being kept alive by an open handle menu — set by
+   * `openMenu`, cleared by `closeMenu`. Lets `resetState()` (which runs synchronously right
+   * after `openMenu` in the click path) skip clearing this specific block's outline, so the
+   * menu doesn't visually open against a block with no highlight. */
+  let menuTargetBlock: HTMLElement | null = null;
 
   // M3 list-item drag state — reuses the same ghost/drop-line/threshold/Esc
   // machinery above, just a different target shape (one <li> among its own
@@ -549,11 +909,17 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   function startDragging(): void {
     state = 'dragging';
     handleEl.style.display = 'none';
-    menuBtnEl.style.display = 'none';
     closeMenu();
     liHandleEl.style.display = 'none';
+    tableHandleEl.style.display = 'none';
     if (kind === 'block') {
-      ghostEl.replaceChildren(dragSpan[0].cloneNode(true) as HTMLElement);
+      const rect = dragSpan[0].getBoundingClientRect();
+      const clone = dragSpan[0].cloneNode(true) as HTMLElement;
+      clone.classList.remove('dd-hover-outline');
+      ghostEl.replaceChildren(clone);
+      ghostEl.style.width = `${rect.width}px`;
+      // Height is left auto: the ghost's own padding needs extra room beyond
+      // the source's raw content height, or the bottom line renders clipped.
       if (dragSpan.length > 1) {
         const badge = document.createElement('div');
         badge.className = 'dd-ghost-badge';
@@ -562,7 +928,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
       dragSpan.forEach((el) => el.classList.add('dd-source-muted'));
     } else if (liDragged) {
-      ghostEl.replaceChildren(liDragged.cloneNode(true) as HTMLElement);
+      const rect = liDragged.getBoundingClientRect();
+      const clone = liDragged.cloneNode(true) as HTMLElement;
+      clone.classList.remove('dd-hover-outline');
+      ghostEl.replaceChildren(clone);
+      ghostEl.style.width = `${rect.width}px`;
       liDragged.classList.add('dd-source-muted');
     }
     ghostEl.style.display = 'block';
@@ -591,8 +961,19 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liSiblings = [];
     liIdx = -1;
     liIndentDir = null;
-    hoveredBlock = null;
-    hoveredLi = null;
+    armedBlock = null;
+    // Skip clearing the outline here when a handle menu is open for this exact block —
+    // openMenu() (called just before resetState() in the click path) has already claimed
+    // it via `menuTargetBlock`; closeMenu() clears it for real once the menu goes away.
+    // Applies to hoveredTableBlock too (bug 0716 round 2, #1 follow-up) — a table's menu
+    // is opened via the exact same armDrag/openMenu path, sharing menuTargetBlock.
+    if (hoveredBlock !== menuTargetBlock) {
+      setHighlightedBlock(null);
+    }
+    setHighlightedLi(null);
+    if (hoveredTableBlock !== menuTargetBlock) {
+      setHighlightedTableBlock(null);
+    }
     document.removeEventListener('mousemove', onDocMouseMove);
     document.removeEventListener('mouseup', onDocMouseUp);
     document.removeEventListener('keydown', onDocKeyDown);
@@ -671,6 +1052,20 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       const dragKind = kind;
       cleanupVisuals();
       if (shouldMove) {
+        // Clear the highlight before the move rebuilds the DOM (outerHTML/cloneNode +
+        // insertHTML, via sibling-move.ts) — otherwise resetState()'s own clear below
+        // only touches the stale, now-detached original element, leaving the
+        // newly-created node highlighted forever (bug 0715 #12). Applies to
+        // hoveredTableBlock too (bug 0716 round 2, #1 follow-up) — a table drag also goes
+        // through dragKind === 'block' (armDrag always sets kind='block'), and without
+        // this, the stale reference to the now-detached original table crashes the NEXT
+        // interaction: a later mousedown on the frozen tableHandleEl arms armDrag on a
+        // detached node, computeSiblingMove can't find it in draggableBlocks() (index -1),
+        // and applyBlockMove's range.setStartBefore(undefined) throws, leaving `state`
+        // stuck at 'dragging' and breaking all further drag-and-drop until reload.
+        setHighlightedBlock(null);
+        setHighlightedLi(null);
+        setHighlightedTableBlock(null);
         if (dragKind === 'block') {
           finishBlockMove();
         } else {
@@ -680,7 +1075,14 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
         deps.scheduleSync();
       }
     } else {
+      // Never crossed DRAG_THRESHOLD_PX — a click, not a drag. For the block handle
+      // (armedBlock set), that click opens the same menu the removed kebab button used
+      // to (bug 0716 #5). The li/row/col handles never set armedBlock, so they stay
+      // drag-only (spec: no new li/row/col menu).
       cleanupVisuals();
+      if (armedBlock) {
+        openMenu(armedBlock);
+      }
     }
     resetState();
   }
@@ -700,6 +1102,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     startY = clientY;
     dragBlocks = draggableBlocks();
     dragSpan = computeHeadingSectionSpan(block, dragBlocks);
+    armedBlock = block;
+    block.classList.add('dd-hover-outline');
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
     document.addEventListener('keydown', onDocKeyDown);
@@ -718,6 +1122,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liParent = parent;
     liSiblings = Array.from(parent.children).filter((c) => c.tagName === 'LI') as HTMLLIElement[];
     liIdx = liSiblings.indexOf(li);
+    li.classList.add('dd-hover-outline');
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
     document.addEventListener('keydown', onDocKeyDown);
@@ -739,16 +1144,75 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     armLiDrag(hoveredLi, e.clientX, e.clientY);
   });
 
+  // Tall invisible hit zone for the li handle. The handle glyph is drawn only own-content tall
+  // at the item's own marker row, but the item stays "hovered" across its whole subtree (the
+  // hover/climb bands use the full `<li>` rect) — so after climbing to a parent from a CHILD
+  // row, the drawn handle sits up at the parent's row and a mousedown down at the cursor would
+  // otherwise arm nothing. Arm the drag on a mousedown anywhere in the hovered li's left gutter
+  // band (its handle column, down through its full height), so grabbing the hovered item works
+  // wherever its handle is currently promised, not only on the short drawn glyph.
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || isComposing || state !== 'idle' || !hoveredLi) {
+      return;
+    }
+    // The handle's own mousedown already covers a hit on the drawn glyph; a detached hovered li
+    // (DOM edited without refresh) is skipped to avoid arming on a stale node.
+    if (liHandleEl.contains(e.target as Node) || !content.contains(hoveredLi)) {
+      return;
+    }
+    const r = hoveredLi.getBoundingClientRect();
+    const handleLeft = liHandleAnchorLeft(hoveredLi) - HANDLE_WIDTH_PX;
+    if (e.clientX >= handleLeft && e.clientX < r.left && e.clientY >= r.top && e.clientY <= r.bottom) {
+      e.preventDefault();
+      armLiDrag(hoveredLi, e.clientX, e.clientY);
+    }
+  });
+
+  // Moving the cursor left OFF the li handle: #content's own `mouseleave` already fired (with
+  // relatedTarget = this handle → early-returned) when the cursor first moved onto the handle,
+  // and won't fire again — so re-run the climb from here, or a depth-0 item's whole-list block
+  // handle never surfaces when the user slides off the handle's left edge (user report).
+  liHandleEl.addEventListener('mouseleave', (e) => {
+    if (state !== 'idle') {
+      return;
+    }
+    const related = e.relatedTarget as Node | null;
+    // Back into #content, or onto another handle/menu — those handlers own the state from here.
+    if (
+      related &&
+      (content.contains(related) ||
+        handleEl.contains(related) ||
+        menuPopupEl.contains(related) ||
+        tableHandleEl.contains(related))
+    ) {
+      return;
+    }
+    climbLiFromExit(e.clientX, e.clientY);
+  });
+
+  // Reuses armDrag as-is (bug 0716 round 2, #1) — a table is an ordinary top-level block to
+  // computeHeadingSectionSpan/performMove, so the same click-vs-drag/menu machinery applies
+  // with no table-specific branch needed.
+  tableHandleEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !hoveredTableBlock || isComposing) {
+      return;
+    }
+    e.preventDefault();
+    armDrag(hoveredTableBlock, e.clientX, e.clientY);
+  });
+
   function refresh(): void {
     if (state !== 'idle') {
       cleanupVisuals();
       resetState();
     }
     closeMenu();
-    hoveredBlock = null;
-    hoveredLi = null;
+    setHighlightedBlock(null);
+    setHighlightedLi(null);
+    setHighlightedTableBlock(null);
     positionHandle(null);
     positionLiHandle(null);
+    positionTableHandle(null);
   }
 
   return { refresh };

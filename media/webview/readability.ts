@@ -6,19 +6,23 @@
  * đụng nội dung `.md`. Giá trị đo/typography/palette được định nghĩa thuần CSS
  * (markdown.css/editor.css); module này chỉ bật/tắt class.
  *
- * SCOPE (bug report 2026-07-15 mục 4): `enabled`/`preset`/`palette`/
- * `fontFamily` là **per-tab, session-only** — sống trong CHÍNH webview
- * instance này (giữ nguyên khi tab ẩn nhờ retainContextWhenHidden), KHÔNG ghi
- * về config Global nên bật/tắt ở tab này không lan sang tab khác, và không
- * được nhớ sau khi đóng tab. Giá trị khởi tạo lấy từ `orcaEditor.readability.*`
- * (applyFromHost lúc init) chỉ như DEFAULT cho tab mới; mọi thao tác sau đó
- * chỉ đổi state cục bộ, không persist ngược lại.
+ * SCOPE (bug 0716 #2, reversal 2026-07-16 — supersedes bug 0715 mục 4's
+ * per-tab design): `enabled`/`preset`/`palette` đều **global-in-memory ở
+ * host** (không persist Settings), cùng mô hình `zen` bên dưới — 1 trong 10
+ * bundle `READING_STYLES` đã kiểm chứng (US-19.18) đổi ở 1 tab lan sang MỌI
+ * tab .md đang mở và tab mới mở sau đó trong cùng phiên VS Code.
+ * toggle/setStyle/disable báo host qua `onReadingModeChange`, host broadcast
+ * lại, applyReadingModeFromHost() áp cục bộ khi tab này nhận broadcast từ tab
+ * khác (không gọi lại onReadingModeChange, tránh vòng lặp) — kênh riêng, độc
+ * lập với kênh `zen`. `fontFamily` KHÔNG nằm trong bundle global này — không
+ * có UI toggle runtime, vẫn seed 1 lần từ `orcaEditor.readability.fontFamily`
+ * mỗi tab (applyFromHost lúc init), không persist ngược.
  *
- * `zen` là NGOẠI LỆ (US-19.19): global-in-memory ở host (không persist
- * Settings) — toggleZen/exitZen/disable báo host qua `onZenChange`, host
- * broadcast lại cho MỌI tab .md đang mở (kể cả tab mới mở sau đó trong cùng
- * phiên VS Code, seed qua 'init'), applyZenFromHost() áp cục bộ khi tab này
- * nhận broadcast từ tab khác (không gọi lại onZenChange, tránh vòng lặp).
+ * `zen` (US-19.19): global-in-memory ở host (không persist Settings) —
+ * toggleZen/exitZen/disable báo host qua `onZenChange`, host broadcast lại
+ * cho MỌI tab .md đang mở (kể cả tab mới mở sau đó trong cùng phiên VS Code,
+ * seed qua 'init'), applyZenFromHost() áp cục bộ khi tab này nhận broadcast
+ * từ tab khác (không gọi lại onZenChange, tránh vòng lặp).
  *
  * "Reading styling có hiệu lực" = Reading Mode bật HOẶC Zen bật — Zen tự kéo
  * theo styling đọc dù Reading Mode tắt (chốt US-19.9), nhưng vẫn là 2 toggle
@@ -26,9 +30,8 @@
  *
  * US-19.18 (bug 0715): palette KHÔNG còn là lớp GLOBAL độc lập của US-19.11 —
  * giờ đi kèm 1:1 với preset qua 1 trong 10 bundle `READING_STYLES` đã kiểm
- * chứng, cùng vòng đời per-tab/session-only như preset/enabled ở trên (hết
- * broadcast/persist Global khi đổi palette). Dropdown Reading Mode trên toolbar
- * chỉ còn liệt kê 10 bundle này + dòng "Follow VS Code" (tắt hẳn Reading Mode).
+ * chứng. Dropdown Reading Mode trên toolbar chỉ còn liệt kê 10 bundle này +
+ * dòng "Follow VS Code" (tắt hẳn Reading Mode).
  */
 import type {
   ReadabilityConfig,
@@ -38,6 +41,16 @@ import type {
 
 export interface ReadabilityDeps {
   content: HTMLElement;
+  /**
+   * Bug 0716 #1: provider.ts's getHtml() bakes an inline `style` directly onto
+   * #toolbar (first-paint seed, hides it before editor.css has a chance to
+   * load late and animate the transition — see getHtml()'s comment). That
+   * inline style always wins over the CSS class rule it mirrors, so once JS
+   * takes over (applyFromHost's first apply completes) it MUST be cleared, or
+   * the toolbar is permanently stuck hidden — CSS classes alone can never
+   * override it again (Esc/reveal/toggle all only flip classes).
+   */
+  toolbar: HTMLElement;
   /** Đồng bộ .active của nút Reading Mode/Zen trên toolbar theo state hiện tại. */
   syncButtons: () => void;
   /**
@@ -50,12 +63,23 @@ export interface ReadabilityDeps {
   isPopoverOpen?: () => boolean;
   /**
    * US-19.19: Zen/Focus mode vừa đổi Ở CHÍNH TAB NÀY (toggleZen/exitZen/
-   * disable) → báo host broadcast sang mọi tab .md khác (Zen giờ global,
-   * khác preset/palette/enabled vẫn per-tab). KHÔNG gọi khi state.zen đổi vì
-   * nhận broadcast từ tab khác (applyZenFromHost) — tránh vòng lặp. Bỏ trống
-   * ở môi trường test (không có host).
+   * disable) → báo host broadcast sang mọi tab .md khác (Zen global, kênh
+   * riêng — xem onReadingModeChange bên dưới cho bundle enabled/preset/
+   * palette, giờ cũng global nhưng là 1 kênh độc lập). KHÔNG gọi khi state.zen
+   * đổi vì nhận broadcast từ tab khác (applyZenFromHost) — tránh vòng lặp. Bỏ
+   * trống ở môi trường test (không có host).
    */
   onZenChange?: (zen: boolean) => void;
+  /**
+   * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
+   * TAB NÀY (toggle/setStyle/disable) → báo host broadcast sang mọi tab .md
+   * khác (đảo ngược per-tab cũ của bug 0715 mục 4, giờ global giống Zen — kênh
+   * riêng, không gộp vào onZenChange). KHÔNG gọi khi 3 field này đổi vì nhận
+   * broadcast từ tab khác (applyReadingModeFromHost) — tránh vòng lặp.
+   * fontFamily KHÔNG nằm trong bundle này (không có UI toggle runtime). Bỏ
+   * trống ở môi trường test (không có host).
+   */
+  onReadingModeChange?: (state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }) => void;
 }
 
 const PRESETS: ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
@@ -144,6 +168,12 @@ export interface ReadabilityController {
    */
   applyZenFromHost(zen: boolean): void;
   /**
+   * Bug 0716 #2: nhận enabled/preset/palette mới do TAB KHÁC vừa đổi (host
+   * broadcast) — chỉ apply cục bộ, KHÔNG gọi lại `onReadingModeChange` (tránh
+   * vòng lặp broadcast ngược host).
+   */
+  applyReadingModeFromHost(next: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void;
+  /**
    * US-19.15: dò nội dung tài liệu có phải tiếng Việt không → gắn/bỏ class
    * `content-lang-vi` để preset Academic Paper chọn font đúng (Việt→Literata,
    * còn lại→Iowan Old Style). Gọi lại mỗi khi #content được dựng lại (renderDocument).
@@ -161,14 +191,23 @@ export interface ReadabilityController {
 const VN_CHAR_RE = /[Ạ-ỹĂăĐđƠơƯư]/g;
 
 export function initReadability(deps: ReadabilityDeps): ReadabilityController {
-  const { content } = deps;
+  const { content, toolbar } = deps;
   const state: ReadabilityConfig = {
     enabled: true,
     preset: 'comfortable',
-    palette: 'sepia',
+    palette: 'followTheme',
     fontFamily: '',
     zen: false,
   };
+  /**
+   * Bug 0715 #14: flips true once applyFromHost()'s own reading-no-anim
+   * guard has been removed. Scopes applyZenFromHost()'s no-anim guard to
+   * ONLY the init-handshake race — a 'zenChanged' broadcast landing before
+   * this panel has finished its own init. After init, cross-tab Zen
+   * broadcasts must still animate normally (a live toggle from another tab
+   * is a real, visible state change, not a seed).
+   */
+  let initApplyDone = false;
 
   /** Reading styling đang có hiệu lực (Reading Mode HOẶC Zen). */
   function stylingActive(): boolean {
@@ -323,24 +362,28 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       disable();
       return;
     }
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
     state.enabled = true;
     apply();
+    notifyReadingModeChange(prev);
   }
 
   function getStyleId(): string | undefined {
     return READING_STYLES.find((s) => s.preset === state.preset && s.palette === state.palette)?.id;
   }
 
-  /** Áp 1 bundle đã kiểm chứng (US-19.18) — luôn bật Reading Mode, tab-local, không persist/broadcast. */
+  /** Áp 1 bundle đã kiểm chứng (US-19.18) — luôn bật Reading Mode, giờ global (bug 0716 #2, xem notifyReadingModeChange). */
   function setStyle(id: string): void {
     const style = READING_STYLES.find((s) => s.id === id);
     if (!style) {
       return;
     }
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
     state.preset = style.preset;
     state.palette = style.palette;
     state.enabled = true;
     apply();
+    notifyReadingModeChange(prev);
   }
 
   /**
@@ -354,19 +397,22 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
    * cơ chế "arm" của lần Zen tiếp theo phải bắt đầu lại từ đầu.
    */
   function disable(): void {
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
     state.enabled = false;
     setZen(false);
     resetZenReveal();
     apply();
+    notifyReadingModeChange(prev);
   }
 
   /**
    * US-19.19: MỌI thay đổi `state.zen` khởi phát TỪ TAB NÀY (toggleZen/
    * exitZen/disable) phải đi qua đây để báo host broadcast sang các tab .md
-   * khác (Zen giờ global, khác preset/palette/enabled vẫn per-tab). Guard
-   * "không đổi thì thôi" tránh broadcast thừa (vd disable() gọi setZen(false)
-   * dù Zen vốn đã tắt sẵn). KHÔNG dùng cho applyZenFromHost (nhận broadcast
-   * từ tab khác) — hàm đó set thẳng `state.zen`, không gọi lại onZenChange.
+   * khác (Zen global, kênh riêng — xem notifyReadingModeChange bên dưới cho
+   * bundle enabled/preset/palette). Guard "không đổi thì thôi" tránh broadcast
+   * thừa (vd disable() gọi setZen(false) dù Zen vốn đã tắt sẵn). KHÔNG dùng
+   * cho applyZenFromHost (nhận broadcast từ tab khác) — hàm đó set thẳng
+   * `state.zen`, không gọi lại onZenChange.
    */
   function setZen(zen: boolean): void {
     if (state.zen === zen) {
@@ -374,6 +420,25 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     }
     state.zen = zen;
     deps.onZenChange?.(zen);
+  }
+
+  /**
+   * Bug 0716 #2: MỌI thay đổi enabled/preset/palette khởi phát TỪ TAB NÀY
+   * (toggle/setStyle/disable) phải gọi hàm này để báo host broadcast sang các
+   * tab .md khác (đảo ngược per-tab cũ, giờ global giống Zen). Nhận `prev`
+   * (snapshot chụp TRƯỚC khi hàm gọi mutate state) để so sánh — cùng tinh
+   * thần guard "không đổi thì thôi" của setZen(): bấm lại đúng hàng dropdown
+   * đang active (setStyle cùng id) hoặc bấm "Follow VS Code" khi đã tắt sẵn
+   * (disable gọi trực tiếp từ dropdown, không qua toggle()'s guard) không nên
+   * phát broadcast thừa tới mọi tab khác. KHÔNG dùng cho applyReadingModeFromHost
+   * (nhận broadcast từ tab khác) — hàm đó set thẳng state, không gọi lại
+   * onReadingModeChange (tránh vòng lặp).
+   */
+  function notifyReadingModeChange(prev: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void {
+    if (prev.enabled === state.enabled && prev.preset === state.preset && prev.palette === state.palette) {
+      return;
+    }
+    deps.onReadingModeChange?.({ enabled: state.enabled, preset: state.preset, palette: state.palette });
   }
 
   /**
@@ -417,6 +482,25 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   }
 
   /**
+   * Runs `fn` (an apply() call) with `#toolbar`'s transition suppressed via
+   * the `reading-no-anim` class, then lifts the suppression after the
+   * browser has painted the new state (double rAF). Shared by
+   * applyFromHost() (cold-init seed) and applyZenFromHost()'s init-race
+   * branch (bug 0715 #14) — both need the same "seed must not animate"
+   * guarantee.
+   */
+  function runNoAnimGuarded(fn: () => void, after?: () => void): void {
+    document.body.classList.add('reading-no-anim');
+    fn();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.body.classList.remove('reading-no-anim');
+        after?.();
+      });
+    });
+  }
+
+  /**
    * US-19.19: Zen mới do TAB KHÁC đổi, host broadcast lại — set thẳng
    * `state.zen` (KHÔNG qua setZen()/onZenChange, tab này không phải nguồn
    * gốc thay đổi, báo ngược host sẽ tạo vòng lặp broadcast vô hạn).
@@ -427,6 +511,35 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     }
     state.zen = zen;
     resetZenReveal();
+    if (initApplyDone) {
+      // Steady-state cross-tab broadcast (another tab's user toggled Zen
+      // live) — let #toolbar's transition play normally.
+      apply();
+      return;
+    }
+    // Bug 0715 #14: this broadcast landed before applyFromHost()'s own
+    // reading-no-anim guard finished (init-handshake race) — without the
+    // same guard here, #toolbar's transition fires uncontested on first
+    // paint.
+    runNoAnimGuarded(apply);
+  }
+
+  /**
+   * Bug 0716 #2: enabled/preset/palette mới do TAB KHÁC đổi, host broadcast
+   * lại — set thẳng state (KHÔNG qua toggle()/setStyle()/disable()/
+   * notifyReadingModeChange, tab này không phải nguồn gốc thay đổi, báo ngược
+   * host sẽ tạo vòng lặp broadcast vô hạn). Không cần no-anim guard kiểu Zen
+   * — không có CSS transition nào gắn với các class reading-mode/
+   * reading-preset/reading-palette (đã grep xác nhận), nên không có rủi ro
+   * flash tương tự bug 0716 #1.
+   */
+  function applyReadingModeFromHost(next: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }): void {
+    if (state.enabled === next.enabled && state.preset === next.preset && state.palette === next.palette) {
+      return;
+    }
+    state.enabled = next.enabled;
+    state.preset = next.preset;
+    state.palette = next.palette;
     apply();
   }
 
@@ -442,12 +555,13 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     // cũng không được chạy animation trượt toolbar; animation chỉ dành cho user
     // bấm nút Focus. Chặn transition trong lúc áp, mở lại sau khi trình duyệt
     // đã paint xong trạng thái mới (double rAF).
-    document.body.classList.add('reading-no-anim');
-    apply();
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document.body.classList.remove('reading-no-anim');
-      });
+    runNoAnimGuarded(apply, () => {
+      initApplyDone = true;
+      // Bug 0716 #1: apply() vừa xác nhận class CSS (reading-zen) đã khớp
+      // đúng state.zen — từ giờ CSS class là chủ sở hữu duy nhất, gỡ luôn
+      // inline style seed của getHtml() (nếu có) kẻo nó đè vĩnh viễn lên mọi
+      // toggle sau này (inline style luôn thắng rule CSS class).
+      toolbar.removeAttribute('style');
     });
   }
 
@@ -466,6 +580,7 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     exitZen,
     applyFromHost,
     applyZenFromHost,
+    applyReadingModeFromHost,
     refreshContentLanguage,
   };
 }

@@ -81,14 +81,14 @@ body.md-line-numbers #toolbar {
  * offsetTop coordinate system being active. */
 .dd-handle {
   position: fixed;
-  width: 16px;
-  height: 20px;
+  width: 22px;
+  height: 24px;
   align-items: center;
   justify-content: center;
   cursor: grab;
-  font-size: 13px;
+  font-size: 18px;
   line-height: 1;
-  color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
+  color: var(--vscode-focusBorder, #007acc);
   border-radius: 3px;
   z-index: 20;
 }
@@ -111,29 +111,20 @@ body.dd-dragging .dd-handle {
   opacity: 0.4;
 }
 
-/* --- Handle menu (HLR section 17, US-17.7, M5) — click ⋮ (not a drag) for
- * "Move up / Move down / Move to <heading>…", a mouse-only shortcut for
- * long-distance moves (F11: no keyboard nav in MVP). --- */
-.dd-menu-btn {
-  position: fixed;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
-  border-radius: 3px;
-  z-index: 20;
+/* The dragged block always keeps its .dd-hover-outline class (armDrag adds it
+ * before the drag threshold; startDragging never removes it from the source,
+ * only from the ghost clone) — but .dd-source-muted's opacity:0.4 dilutes its
+ * background tint to near-invisible. Swap to editor selectionBackground
+ * (already used for .dd-drop-target-cell below), which is saturated enough
+ * that diluting it by the same 0.4 still reads as a clear tint. */
+.dd-source-muted.dd-hover-outline {
+  background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
 }
 
-.dd-menu-btn:hover {
-  color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
-}
-
+/* --- Handle menu (HLR section 17, US-17.7, M5; merged into the handle click
+ * by bug 0716 #5) — a click (not a drag) on the block handle opens "Move up /
+ * Move down / Move to <heading>…", a mouse-only shortcut for long-distance
+ * moves (F11: no keyboard nav in MVP). --- */
 .dd-menu-popup {
   position: fixed;
   z-index: 40;
@@ -189,7 +180,11 @@ body.dd-dragging .dd-handle {
 .dd-ghost {
   position: fixed;
   z-index: 30;
-  max-width: min(480px, 70vw);
+  box-sizing: border-box;
+  /* Width is pinned in JS to the dragged element's real size (startDragging/
+   * tdStartDragging) so the ghost matches the editor exactly — this is only a
+   * true last-resort safety net against literally overflowing the viewport. */
+  max-width: 96vw;
   max-height: 160px;
   overflow: hidden;
   pointer-events: none;
@@ -199,6 +194,22 @@ body.dd-dragging .dd-handle {
   background: var(--vscode-editor-background, #fff);
   border: 1px solid var(--vscode-focusBorder, #007acc);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+/* Row/column drag ghosts mirror the real table row/column edge-to-edge — the
+ * base .dd-ghost padding is for floating text previews (block/li) and would
+ * otherwise inset the cloned row content, making it visibly narrower than
+ * the box it's supposed to match. Same reasoning for max-height: the base
+ * cap exists to clip long text-preview ghosts, but both the row ghost's and
+ * column ghost's height are already pinned in JS to the real row/table
+ * height (bug 0716 round 2 #4 follow-up) — inheriting the 160px cap
+ * truncated the column ghost for any table taller than that instead of
+ * mirroring the real column. Raised (not removed) so an unusually tall
+ * table/row still can't grow the ghost past the viewport, mirroring
+ * .dd-ghost's own max-width safety net above. */
+.dd-ghost-table {
+  padding: 0;
+  max-height: 90vh;
 }
 
 .dd-ghost-badge {
@@ -233,6 +244,31 @@ body.dd-dragging .dd-handle {
   cursor: grab;
 }
 
+/* .dd-col-handle's hit area is wide/short (spans the column's own width) instead of
+ * tall/narrow like every other handle — the glyph itself is naturally a tall 2x4 dot
+ * grid, so it reads better rotated 90° to match the handle's own horizontal shape
+ * (bug 0716 round 2). Hide the raw text node (font-size: 0) and render the rotated
+ * glyph via ::before instead of rotating the whole element, so the actual hit-box
+ * geometry (set inline by positionColHandle) is untouched. */
+.dd-col-handle {
+  font-size: 0;
+}
+
+.dd-col-handle::before {
+  content: '⠿';
+  display: inline-block;
+  font-size: 18px;
+  transform: rotate(90deg);
+}
+
+/* Table-level handle (bug 0716 round 2, #1) — drags the whole <table> as one block.
+ * Reuses .dd-handle's look and default (tall/narrow) glyph orientation, positioned via
+ * right/bottom at the table's own top-left corner (positionTableHandle), the one spot not
+ * already claimed by .dd-row-handle's own column or .dd-col-handle's own row. */
+.dd-table-handle {
+  cursor: grab;
+}
+
 /* Image dropped into a table cell (US-17.4) gets width:100% (fill the cell) —
  * cap the height so a tall/portrait image doesn't blow out the row. */
 #content td img,
@@ -256,6 +292,28 @@ body.dd-dragging .dd-handle {
  * handle, so it naturally sits further right for nested items. */
 .dd-li-handle {
   cursor: grab;
+}
+
+/* --- Hover-highlight outline (bug 0715 #12) ---
+ * Toggled alongside the hover handles (block/li/row/column) so it always
+ * tracks exactly what would move on drag. outline (never border) so it never
+ * shifts layout. .dd-hover-outline-cell is applied per-cell for column
+ * highlighting, with a negative offset so adjacent cell outlines sit inside
+ * the table's own borders instead of doubling up outside them. */
+.dd-hover-outline {
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: 1px;
+  border-radius: 2px;
+  /* Low-alpha tint of the same hue as the outline (not a fixed color) so it
+   * stays legible against text in both light and dark themes instead of
+   * washing them out. */
+  background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
+}
+
+.dd-hover-outline-cell {
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -1px;
+  background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
 }
 
 /* Short horizontal-drag indicator shown instead of the full-width drop line
@@ -322,6 +380,19 @@ body.dd-dragging .dd-handle {
   background: transparent;
   color: var(--vscode-foreground);
   cursor: pointer;
+}
+
+/* B/I/S label glyphs read as their own formatting, matching convention. */
+#toolbar button#fmt-bold {
+  font-weight: bold;
+}
+
+#toolbar button#fmt-italic {
+  font-style: italic;
+}
+
+#toolbar button#fmt-strike {
+  text-decoration: line-through;
 }
 
 /* Icon markup is hand-drawn at a fixed 16×16 viewBox (see svgIcon() in
@@ -1299,7 +1370,12 @@ body.toc-open #select-overview {
   z-index: 150;
   display: flex;
   flex-direction: column;
-  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  /* Same token/fallback order as #toolbar (bug 0716 #8's root cause: the two
+   * previously used opposite fallback order, so most themes rendered them in
+   * two different shades — any tiny coverage gap in the toolbar's stretch-
+   * over-TOC trick then showed as a visible color seam). Unified so there is
+   * no possible mismatch regardless of gap/theme. */
+  background: var(--vscode-editor-background, var(--vscode-sideBar-background));
   border-left: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
@@ -1336,8 +1412,10 @@ body.toc-resizing {
   flex: none;
   display: flex;
   align-items: center;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  gap: 8px;
+  /* padding-top chừa dải toolbar (position:sticky, full-width, z-index cao
+   * hơn #toc-panel — xem #toolbar) đè lên đỉnh panel, tránh title bị che. */
+  padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
 }
 
 #toc-title {
@@ -1348,6 +1426,33 @@ body.toc-resizing {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   opacity: 0.8;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
+ * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ. */
+#toc-filter-bar {
+  flex: none;
+  padding: 0 14px 8px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+}
+
+#toc-filter-slider {
+  width: 100%;
+  accent-color: var(--vscode-textLink-foreground, #3794ff);
+  cursor: pointer;
+  outline: none;
+}
+
+.toc-filter-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  opacity: 0.6;
+  margin-top: 2px;
 }
 
 #toc-list {
@@ -1801,10 +1906,12 @@ body.reading-no-anim #content td {
 body.reading-zen #line-gutter {
   display: none;
 }
-/* Zen bỏ luôn chỗ chừa cho gutter số dòng (nếu đang bật) để cột chữ căn giữa
- * đúng theo measure, không lệch trái. */
+/* Zen bỏ chỗ chừa RIÊNG cho gutter số dòng (nếu đang bật) để cột chữ căn giữa
+ * đúng theo measure, không lệch trái — nhưng vẫn phải giữ khoảng chừa CHUNG cho
+ * drag handle (như base `body` ở đầu file), nếu không handle bị cắt sát mép
+ * trái viewport khi Zen ẩn toolbar/gutter (bug 0716 round 2). */
 body.reading-zen.md-line-numbers {
-  padding-left: 0;
+  padding-left: 26px;
 }
 body.reading-zen.md-line-numbers #toolbar {
   margin-left: 0;
@@ -2037,6 +2144,26 @@ body[class*='reading-palette-'] .md-mermaid-toolbar {
 
 /* Front matter (khối YAML gấp gọn, viền dashed). */
 body[class*='reading-palette-'] .md-front-matter {
+  border-color: var(--rp-embed-border);
+}
+
+/* Drag-and-drop hover outline/ghost: --vscode-focusBorder is always a VS Code
+ * accent blue, which clashes with sepia's deliberately low-blue palette and
+ * defeats highContrast's pure black/white intent. Route through the same
+ * --rp-* set as the toolbar's "active" state / embedded-block cards instead. */
+body[class*='reading-palette-'] .dd-hover-outline,
+body[class*='reading-palette-'] .dd-hover-outline-cell {
+  outline-color: var(--rp-border);
+  background-color: var(--rp-chrome-active);
+}
+/* Dragging: --rp-selection-bg is already tuned stronger than --rp-chrome-active
+ * (it has to stand out as a selection color), so diluted by .dd-source-muted's
+ * opacity:0.4 it lands back around the same visual strength as the rule above. */
+body[class*='reading-palette-'] .dd-source-muted.dd-hover-outline {
+  background-color: var(--rp-selection-bg);
+}
+body[class*='reading-palette-'] .dd-ghost {
+  background: var(--rp-elev-bg);
   border-color: var(--rp-embed-border);
 }
 

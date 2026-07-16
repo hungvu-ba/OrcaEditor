@@ -147,9 +147,12 @@ sup {
   line-height: 0;
 }
 
-/* --- Bảng: giống VS Code (chỉ kẻ ngang) --- */
+/* --- Bảng: giống VS Code (chỉ kẻ ngang) ---
+ * margin-top đủ rộng để chừa chỗ cho column drag-handle (24px, neo sát mép
+ * trên bảng, US-17.4/bug 0716 #4) mà không đè lên dòng nội dung phía trên. */
 table {
   border-collapse: collapse;
+  margin-top: 32px;
   margin-bottom: 0.7em;
 }
 
@@ -284,6 +287,17 @@ td[align='right'] {
   box-sizing: border-box;
 }
 
+/* US-17.7: breathing room between a block's own text and its edge, so the
+ * drag-and-drop hover outline (.dd-hover-outline, editor.css) — an `outline`
+ * drawn tight around the block's own box — doesn't sit flush against the
+ * text. Only blocks that don't already carry left padding of their own get
+ * this: blockquote/pre/table cells have their own, ul/ol reserve space via
+ * the marker gutter. */
+#content > :is(h1, h2, h3, h4, h5, h6, p, hr, dl),
+li {
+  padding-left: 8px;
+}
+
 /* --- Blockquote --- */
 blockquote {
   margin: 0;
@@ -302,12 +316,16 @@ code {
   line-height: 1.357em;
 }
 
-/* inline code */
+/* Inline code only — excludes fenced blocks because `code`'s direct parent isn't `pre`
+ * there. font-size trims the monospace glyph's wider advance vs surrounding proportional
+ * text (bug 0715 #13); padding ratios (relative to *this* 0.9em, not the ambient size) are
+ * kept below the pre-fix 3px/14px ~21% baseline so short tokens still shrink net width. */
 :not(pre) > code {
   color: var(--vscode-textPreformat-foreground, inherit);
   background-color: var(--vscode-textPreformat-background, rgba(220, 220, 220, 0.4));
-  padding: 1px 3px;
-  border-radius: 4px;
+  font-size: 0.9em;
+  padding: 0.05em 0.2em;
+  border-radius: 0.3em;
 }
 
 pre {

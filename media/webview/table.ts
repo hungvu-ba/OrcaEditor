@@ -6,7 +6,7 @@
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, showToast, svgIcon, type DomHelpers } from './dom-utils';
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
-import { computeSiblingMove, applySiblingMove, isValidSiblingGap } from './sibling-move';
+import { isValidSiblingGap } from './sibling-move';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -360,6 +360,23 @@ function insertColumn(cell: HTMLTableCellElement, where: 'left' | 'right'): void
   afterTableEdit(table);
 }
 
+/** Rebuilds `source` as a `<th>`/`<td>` (per `tag`), preserving its `align`/`style` and moving
+ * (not cloning) its children over — shared by `deleteRow`'s auto-promote-on-delete and
+ * `setAsHeaderRow`'s manual promote/demote swap (bug 0716 round 2). */
+function convertCell(source: HTMLTableCellElement, tag: 'th' | 'td'): HTMLTableCellElement {
+  const target = document.createElement(tag);
+  for (const attr of ['align', 'style']) {
+    const v = source.getAttribute(attr);
+    if (v) {
+      target.setAttribute(attr, v);
+    }
+  }
+  while (source.firstChild) {
+    target.appendChild(source.firstChild);
+  }
+  return target;
+}
+
 function deleteRow(cell: HTMLTableCellElement): void {
   const row = cell.closest('tr');
   const table = cellTable(cell);
@@ -375,17 +392,7 @@ function deleteRow(cell: HTMLTableCellElement): void {
     }
     const newHead = document.createElement('tr');
     for (const td of Array.from((firstBody as HTMLTableRowElement).cells)) {
-      const th = document.createElement('th');
-      for (const attr of ['align', 'style']) {
-        const v = td.getAttribute(attr);
-        if (v) {
-          th.setAttribute(attr, v);
-        }
-      }
-      while (td.firstChild) {
-        th.appendChild(td.firstChild);
-      }
-      newHead.appendChild(th);
+      newHead.appendChild(convertCell(td, 'th'));
     }
     firstBody.remove();
     row.replaceWith(newHead);
@@ -397,6 +404,30 @@ function deleteRow(cell: HTMLTableCellElement): void {
       ctx.dom.placeCaretIn(next.cells[Math.min(cell.cellIndex, next.cells.length - 1)]);
     }
   }
+  afterTableEdit(table);
+}
+
+/** Promotes `row` to become the table's header, swapping it with the current header row — the old
+ * header becomes a normal body row exactly where `row` used to be, every other row keeps its
+ * position. Manual complement to `deleteRow`'s automatic promote-on-delete (bug 0716 round 2,
+ * "Set as header row" on a row handle's click-to-menu). No-op if `row` already is the header. */
+function setAsHeaderRow(row: HTMLTableRowElement): void {
+  const table = row.closest('table') as HTMLTableElement | null;
+  const oldHeader = table?.tHead?.rows[0];
+  if (!table || !oldHeader || row === oldHeader) {
+    return;
+  }
+  const newHeader = document.createElement('tr');
+  for (const cell of Array.from(row.cells)) {
+    newHeader.appendChild(convertCell(cell, 'th'));
+  }
+  const oldAsBody = document.createElement('tr');
+  for (const cell of Array.from(oldHeader.cells)) {
+    oldAsBody.appendChild(convertCell(cell, 'td'));
+  }
+  row.replaceWith(oldAsBody);
+  oldHeader.replaceWith(newHeader);
+  ctx.dom.placeCaretIn(newHeader.cells[0]);
   afterTableEdit(table);
 }
 
@@ -580,9 +611,22 @@ export function insertTable(): void {
 // ---------------------------------------------------------------------------
 // Row/column drag & drop (HLR section 17, US-17.4, M2)
 //
-// Row reorder reuses sibling-move.ts as-is: tbody rows are plain element
-// siblings, exactly the case that primitive was generalized for (see
-// drag-drop.ts, US-17.3, for the full undo-mechanism rationale).
+// Row reorder used to reuse sibling-move.ts as-is (tbody rows are plain
+// element siblings, exactly the case that primitive was generalized for —
+// see drag-drop.ts, US-17.3, for the full undo-mechanism rationale), but bug
+// 0716 round 2 found `document.execCommand('insertHTML', ...)` doesn't parse
+// a bare `<tr>...</tr>` HTML string correctly when it's not wrapped in a
+// `<table>`/`<tbody>` — unlike `<p>`/`<li>`/heading tags (valid almost
+// anywhere), `<tr>` needs a table-row parsing context the command doesn't
+// reliably provide, and the browser silently drops the row/cell boundaries,
+// dumping every affected row's text into one cell. Moving more than one row
+// (which `computeSiblingMove`'s Range always ends up spanning unless the
+// dragged row lands at the very first/last gap) reproduced this on every
+// drag. `finishRowMove` below moves the live `<tr>` node directly instead —
+// no HTML serialize/reparse round-trip, so there's nothing for the browser
+// to misparse. Trade-off: unlike the column move below (still execCommand,
+// see its own comment), a row move no longer lands on the native undo stack
+// as its own step — accepted over the alternative of corrupting the table.
 //
 // Column reorder is a DIFFERENT shape — a "column" isn't a DOM sibling run,
 // it's one cell per row scattered across every <tr>. Rather than juggling N
@@ -620,19 +664,33 @@ let tdGhostEl: HTMLDivElement;
 let hoveredRow: HTMLTableRowElement | null = null;
 let hoveredCol: { table: HTMLTableElement; index: number } | null = null;
 
+/** Row armed via a row handle's mousedown — read back on mouseup to open the row menu when the
+ * click never turned into a drag (bug 0716 round 2, mirrors `armedBlock` in drag-drop.ts). Set for
+ * both header and body rows; only body rows also go through `armRowDrag`'s full drag machinery. */
+let armedRow: HTMLTableRowElement | null = null;
+/** Row whose `.dd-hover-outline` is being kept alive by an open row menu — mirrors
+ * `menuTargetBlock` in drag-drop.ts. */
+let rowMenuTargetRow: HTMLTableRowElement | null = null;
+let rowMenuPopupEl: HTMLDivElement;
+
 function tbodyRows(table: HTMLTableElement): HTMLTableRowElement[] {
   const tbody = table.querySelector('tbody');
   return tbody ? (Array.from(tbody.children).filter((el) => el.tagName === 'TR') as HTMLTableRowElement[]) : [];
 }
 
-/** Row under the cursor — trigger zone extends `rowHandleEl`'s width to the left of the table so hovering the handle's own column still counts. */
+/** Row under the cursor — trigger zone extends `rowHandleEl`'s width to the left of the table so
+ * hovering the handle's own column still counts. Includes the header row (bug 0716 round 2) so it
+ * gets a handle too, same as any other row — `armRowDrag` refuses to actually arm a drag for it
+ * (GFM always needs exactly one header row at the top), but its handle still supports the
+ * click-to-menu "Set as header row" path via `armedRow`. */
 function findRowAt(clientX: number, clientY: number): HTMLTableRowElement | null {
   for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
     const tRect = table.getBoundingClientRect();
     if (clientY < tRect.top || clientY > tRect.bottom || clientX < tRect.left - 24 || clientX > tRect.right) {
       continue;
     }
-    for (const row of tbodyRows(table)) {
+    const headerRow = table.tHead?.rows[0];
+    for (const row of headerRow ? [headerRow, ...tbodyRows(table)] : tbodyRows(table)) {
       const r = row.getBoundingClientRect();
       if (clientY >= r.top && clientY <= r.bottom) {
         return row;
@@ -642,15 +700,15 @@ function findRowAt(clientX: number, clientY: number): HTMLTableRowElement | null
   return null;
 }
 
-/** Header cell under the cursor — trigger zone extends `colHandleEl`'s height above the table. */
+/** Column under the cursor — x matched against header cell boundaries (columns align vertically down the table), y spans the whole table (plus `colHandleEl`'s height above the header) so the column handle tracks the hovered cell in ANY row, not just the header (bug 0715 #11: row and column must be able to show together). */
 function findHeaderCellAt(clientX: number, clientY: number): { table: HTMLTableElement; index: number } | null {
   for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
     const headerRow = table.tHead?.rows[0];
     if (!headerRow) {
       continue;
     }
-    const hRect = headerRow.getBoundingClientRect();
-    if (clientY < hRect.top - 24 || clientY > hRect.bottom || clientX < hRect.left || clientX > hRect.right) {
+    const tRect = table.getBoundingClientRect();
+    if (clientY < tRect.top - 24 || clientY > tRect.bottom || clientX < tRect.left || clientX > tRect.right) {
       continue;
     }
     for (let i = 0; i < headerRow.cells.length; i++) {
@@ -663,6 +721,10 @@ function findHeaderCellAt(clientX: number, clientY: number): { table: HTMLTableE
   return null;
 }
 
+/** Hit column spans the row's own full height and sits flush (zero gap) against the
+ * table's own left edge — `right` (not `left`) anchoring guarantees the flush fit
+ * regardless of the icon's CSS width, matching drag-drop.ts's `positionHandle` (bug 0716
+ * #4, table equivalent). */
 function positionRowHandle(row: HTMLTableRowElement | null): void {
   if (!row) {
     rowHandleEl.style.display = 'none';
@@ -673,9 +735,13 @@ function positionRowHandle(row: HTMLTableRowElement | null): void {
   const rRect = row.getBoundingClientRect();
   rowHandleEl.style.display = 'flex';
   rowHandleEl.style.top = `${rRect.top}px`;
-  rowHandleEl.style.left = `${tRect.left - 20}px`;
+  rowHandleEl.style.height = `${rRect.height}px`;
+  rowHandleEl.style.right = `${window.innerWidth - tRect.left}px`;
 }
 
+/** Hit column spans the header cell's own full width and sits flush (zero gap) against
+ * the table's own top edge — `bottom` anchoring guarantees the flush fit regardless of
+ * the icon's CSS height (bug 0716 #4, table equivalent). */
 function positionColHandle(col: { table: HTMLTableElement; index: number } | null): void {
   if (!col) {
     colHandleEl.style.display = 'none';
@@ -687,14 +753,44 @@ function positionColHandle(col: { table: HTMLTableElement; index: number } | nul
     colHandleEl.style.display = 'none';
     return;
   }
+  const tRect = col.table.getBoundingClientRect();
   const cRect = cell.getBoundingClientRect();
   colHandleEl.style.display = 'flex';
-  colHandleEl.style.left = `${cRect.left + cRect.width / 2 - 8}px`;
-  colHandleEl.style.top = `${cRect.top - 20}px`;
+  colHandleEl.style.left = `${cRect.left}px`;
+  colHandleEl.style.width = `${cRect.width}px`;
+  colHandleEl.style.bottom = `${window.innerHeight - tRect.top}px`;
 }
 
 function sameCol(a: { table: HTMLTableElement; index: number } | null, b: { table: HTMLTableElement; index: number } | null): boolean {
   return a === b || (!!a && !!b && a.table === b.table && a.index === b.index);
+}
+
+/** Tracks whichever row is currently hovered and removes `.dd-hover-outline` when it stops
+ * being hovered (bug 0715 #12 clear-path) — `hoveredRow` itself is the tracked "currently
+ * highlighted" element. Adding the class is NOT this function's job (bug 0716 #6): only
+ * `armRowDrag` (mousedown on the row handle) adds it, so plain hover never shows it. */
+function setHighlightedRow(row: HTMLTableRowElement | null): void {
+  if (row === hoveredRow) {
+    return;
+  }
+  hoveredRow?.classList.remove('dd-hover-outline');
+  hoveredRow = row;
+}
+
+/** Tracks whichever column is currently hovered and removes `.dd-hover-outline-cell` from
+ * every cell in it when it stops being hovered (mirrors `setHighlightedRow`). Adding the
+ * class is NOT this function's job (bug 0716 #6): only `armColDrag` (mousedown on the
+ * column handle) adds it. */
+function setColumnHighlight(col: { table: HTMLTableElement; index: number } | null): void {
+  if (sameCol(col, hoveredCol)) {
+    return;
+  }
+  if (hoveredCol) {
+    for (const row of Array.from(hoveredCol.table.rows)) {
+      row.cells[hoveredCol.index]?.classList.remove('dd-hover-outline-cell');
+    }
+  }
+  hoveredCol = col;
 }
 
 function rowGapAt(rows: HTMLTableRowElement[], clientY: number): number {
@@ -742,11 +838,64 @@ function tdResetState(): void {
   tdRowIdx = -1;
   tdColIndex = -1;
   tdCurrentGapValid = false;
-  hoveredRow = null;
-  hoveredCol = null;
+  armedRow = null;
+  // Skip clearing the outline here when a row menu is open for this exact row — openRowMenu()
+  // (called just before this in the click path) already claimed it via `rowMenuTargetRow`;
+  // closeRowMenu() clears it for real once the menu goes away (mirrors drag-drop.ts's
+  // menuTargetBlock/resetState split, bug 0716 #5/round 2).
+  if (hoveredRow !== rowMenuTargetRow) {
+    setHighlightedRow(null);
+  }
+  setColumnHighlight(null);
   document.removeEventListener('mousemove', onTdMouseMove);
   document.removeEventListener('mouseup', onTdMouseUp);
   document.removeEventListener('keydown', onTdKeyDown);
+}
+
+function isRowMenuOpen(): boolean {
+  return rowMenuPopupEl.style.display !== 'none';
+}
+
+function closeRowMenu(): void {
+  rowMenuPopupEl.style.display = 'none';
+  rowMenuPopupEl.replaceChildren();
+  if (rowMenuTargetRow) {
+    rowMenuTargetRow.classList.remove('dd-hover-outline');
+    rowMenuTargetRow = null;
+  }
+}
+
+/** Click (not drag) on a row handle opens this — currently a single action, "Set as header row",
+ * hidden when `row` already is the header (bug 0716 round 2). */
+function openRowMenu(row: HTMLTableRowElement): void {
+  closeRowMenu();
+  if (row.parentElement?.tagName === 'THEAD') {
+    return;
+  }
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'dd-menu-item';
+  item.textContent = 'Set as header row';
+  item.addEventListener('click', () => {
+    closeRowMenu();
+    setAsHeaderRow(row);
+  });
+  rowMenuPopupEl.appendChild(item);
+
+  const rect = rowHandleEl.getBoundingClientRect();
+  rowMenuPopupEl.style.display = 'block';
+  rowMenuPopupEl.style.top = `${rect.top + rect.height / 2}px`;
+  rowMenuPopupEl.style.left = `${rect.right + 4}px`;
+
+  rowMenuTargetRow = row;
+  row.classList.add('dd-hover-outline');
+}
+
+function onHeaderRowHandleMouseUp(): void {
+  if (armedRow) {
+    openRowMenu(armedRow);
+  }
+  armedRow = null;
 }
 
 function finishRowMove(): void {
@@ -757,9 +906,13 @@ function finishRowMove(): void {
   if (!tbody) {
     return;
   }
-  const result = computeSiblingMove(tdRows, tdRowIdx, tdRowIdx, tdCurrentGap);
-  const movedEl = applySiblingMove(tbody, result);
-  const firstCell = movedEl?.querySelector('td, th');
+  const row = tdRows[tdRowIdx];
+  // `tdCurrentGap` indexes into `tdRows`, captured once at drag-arm time — each entry is a
+  // live element reference, so it still points at the right node regardless of where `row`
+  // currently sits; `undefined` (gap === tdRows.length) means "insert at the end".
+  const refRow = tdRows[tdCurrentGap] ?? null;
+  tbody.insertBefore(row, refRow);
+  const firstCell = row.querySelector('td, th');
   if (firstCell) {
     ctx.dom.placeCaretIn(firstCell);
   }
@@ -878,13 +1031,40 @@ function tdStartDragging(): void {
   colHandleEl.style.display = 'none';
   if (tdKind === 'row' && tdTable) {
     const row = tdRows[tdRowIdx];
-    tdGhostEl.replaceChildren(row.cloneNode(true) as HTMLElement);
+    const rect = row.getBoundingClientRect();
+    const clone = row.cloneNode(true) as HTMLElement;
+    clone.classList.remove('dd-hover-outline');
+    tdGhostEl.replaceChildren(clone);
+    tdGhostEl.style.width = `${rect.width}px`;
+    tdGhostEl.style.height = `${rect.height}px`;
     row.classList.add('dd-source-muted');
   } else if (tdKind === 'col' && tdTable) {
     const headerRow = tdTable.tHead?.rows[0];
     const cell = headerRow?.cells[tdColIndex];
     if (cell) {
-      tdGhostEl.replaceChildren(cell.cloneNode(true) as HTMLElement);
+      // A column spans every row, so unlike the row ghost there's no single element to
+      // clone — stack a clone of each row's own cell instead, one per <tr> so they stay
+      // separate vertical rows (bare <td> siblings would otherwise anonymous-table-generate
+      // into one horizontal row). Real content instead of the old empty placeholder box
+      // (bug 0716 round 2 #4).
+      const cellRect = cell.getBoundingClientRect();
+      const tableRect = tdTable.getBoundingClientRect();
+      tdGhostEl.replaceChildren();
+      for (const row of Array.from(tdTable.rows)) {
+        const srcCell = row.cells[tdColIndex];
+        if (!srcCell) {
+          continue;
+        }
+        const cellClone = srcCell.cloneNode(true) as HTMLElement;
+        cellClone.classList.remove('dd-hover-outline', 'dd-hover-outline-cell', 'dd-source-muted');
+        cellClone.style.width = '100%';
+        cellClone.style.height = `${row.getBoundingClientRect().height}px`;
+        const rowWrap = document.createElement('tr');
+        rowWrap.appendChild(cellClone);
+        tdGhostEl.appendChild(rowWrap);
+      }
+      tdGhostEl.style.width = `${cellRect.width}px`;
+      tdGhostEl.style.height = `${tableRect.height}px`;
     }
     for (const row of Array.from(tdTable.rows)) {
       row.cells[tdColIndex]?.classList.add('dd-source-muted');
@@ -918,6 +1098,13 @@ function onTdMouseUp(): void {
     const kind = tdKind;
     tdCleanupVisuals();
     if (shouldMove) {
+      // Clear the highlight before the move rebuilds the DOM (row reorder replaces
+      // rows via Range + insertHTML; column reorder clones the whole table) —
+      // otherwise tdResetState()'s own clear below only touches the stale,
+      // now-detached original row/table, leaving the newly-created node
+      // highlighted forever (bug 0715 #12).
+      setHighlightedRow(null);
+      setColumnHighlight(null);
       if (kind === 'row') {
         finishRowMove();
       } else {
@@ -926,6 +1113,11 @@ function onTdMouseUp(): void {
     }
   } else {
     tdCleanupVisuals();
+    // Never crossed TD_DRAG_THRESHOLD_PX — a click, not a drag. Only row handles set `armedRow`
+    // (col handles don't have an equivalent menu), so this is a no-op for column clicks.
+    if (armedRow) {
+      openRowMenu(armedRow);
+    }
   }
   tdResetState();
 }
@@ -949,6 +1141,7 @@ function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number):
   tdTable = table;
   tdRows = tbodyRows(table);
   tdRowIdx = tdRows.indexOf(row);
+  row.classList.add('dd-hover-outline');
   document.addEventListener('mousemove', onTdMouseMove);
   document.addEventListener('mouseup', onTdMouseUp);
   document.addEventListener('keydown', onTdKeyDown);
@@ -961,6 +1154,9 @@ function armColDrag(table: HTMLTableElement, index: number, clientX: number, cli
   tdStartY = clientY;
   tdTable = table;
   tdColIndex = index;
+  for (const row of Array.from(table.rows)) {
+    row.cells[index]?.classList.add('dd-hover-outline-cell');
+  }
   document.addEventListener('mousemove', onTdMouseMove);
   document.addEventListener('mouseup', onTdMouseUp);
   document.addEventListener('keydown', onTdKeyDown);
@@ -980,7 +1176,7 @@ function initTableDragDrop(): void {
   document.body.appendChild(colHandleEl);
 
   tdGhostEl = document.createElement('div');
-  tdGhostEl.className = 'dd-ghost';
+  tdGhostEl.className = 'dd-ghost dd-ghost-table';
   tdGhostEl.style.display = 'none';
   document.body.appendChild(tdGhostEl);
 
@@ -989,35 +1185,71 @@ function initTableDragDrop(): void {
   tdDropLineEl.style.display = 'none';
   document.body.appendChild(tdDropLineEl);
 
+  rowMenuPopupEl = document.createElement('div');
+  rowMenuPopupEl.className = 'dd-menu-popup dd-row-menu-popup';
+  rowMenuPopupEl.style.display = 'none';
+  document.body.appendChild(rowMenuPopupEl);
+
+  document.addEventListener('mousedown', (e) => {
+    if (isRowMenuOpen() && !rowMenuPopupEl.contains(e.target as Node)) {
+      closeRowMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isRowMenuOpen()) {
+      closeRowMenu();
+    }
+  });
+
   content.addEventListener('mousemove', (e) => {
     if (tdState !== 'idle') {
       return;
     }
     const row = findRowAt(e.clientX, e.clientY);
     if (row !== hoveredRow) {
-      hoveredRow = row;
+      setHighlightedRow(row);
       positionRowHandle(row);
-    }
-    if (row) {
-      if (hoveredCol) {
-        hoveredCol = null;
-        positionColHandle(null);
-      }
-      return;
     }
     const col = findHeaderCellAt(e.clientX, e.clientY);
     if (!sameCol(col, hoveredCol)) {
-      hoveredCol = col;
+      setColumnHighlight(col);
       positionColHandle(col);
     }
   });
 
-  content.addEventListener('mouseleave', () => {
+  content.addEventListener('mouseleave', (e: MouseEvent) => {
     if (tdState !== 'idle') {
       return;
     }
-    hoveredRow = null;
-    hoveredCol = null;
+    // Handles live outside #content (appended to document.body), so moving the
+    // cursor onto them fires #content's mouseleave — don't clear hover state
+    // in that case, only when leaving toward something unrelated to the
+    // handles themselves (mirrors the same guard in drag-drop.ts, bug 0715 #9).
+    const related = e.relatedTarget as Node | null;
+    // A real mouse move can skip clean over the (still fairly narrow) handle column in one
+    // sampled step without landing on `rowHandleEl`/`colHandleEl` itself — fall back to a
+    // geometric check against the gutter band the currently hovered handle lives in
+    // (mirrors the same follow-up fix in drag-drop.ts, bug 0716 #4).
+    const rowGutter =
+      hoveredRow &&
+      (() => {
+        const tRect = hoveredRow.closest('table')?.getBoundingClientRect();
+        const rRect = hoveredRow.getBoundingClientRect();
+        return !!tRect && e.clientX < tRect.left && e.clientY >= rRect.top && e.clientY <= rRect.bottom;
+      })();
+    const colGutter =
+      hoveredCol &&
+      (() => {
+        const tRect = hoveredCol.table.getBoundingClientRect();
+        const cell = hoveredCol.table.tHead?.rows[0]?.cells[hoveredCol.index];
+        const cRect = cell?.getBoundingClientRect();
+        return !!cRect && e.clientY < tRect.top && e.clientX >= cRect.left && e.clientX <= cRect.right;
+      })();
+    if ((related && (rowHandleEl.contains(related) || colHandleEl.contains(related))) || rowGutter || colGutter) {
+      return;
+    }
+    setHighlightedRow(null);
+    setColumnHighlight(null);
     positionRowHandle(null);
     positionColHandle(null);
   });
@@ -1047,7 +1279,14 @@ function initTableDragDrop(): void {
       return;
     }
     e.preventDefault();
-    armRowDrag(hoveredRow, e.clientX, e.clientY);
+    armedRow = hoveredRow;
+    if (hoveredRow.parentElement?.tagName === 'THEAD') {
+      // The header row can't be dragged/reordered (GFM always needs exactly one, at the top) —
+      // only the click-to-menu path applies, so skip the drag state machine entirely.
+      document.addEventListener('mouseup', onHeaderRowHandleMouseUp, { once: true });
+    } else {
+      armRowDrag(hoveredRow, e.clientX, e.clientY);
+    }
   });
 
   colHandleEl.addEventListener('mousedown', (e) => {

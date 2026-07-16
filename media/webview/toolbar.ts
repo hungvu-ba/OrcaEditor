@@ -9,6 +9,7 @@ import {
   encodeLinkPath,
   escapeAttr,
   escapeHtml,
+  findTaskCheckbox,
   isAbsoluteUrl,
   svgIcon,
   type DomHelpers,
@@ -1276,13 +1277,18 @@ function replaceListItems(items: HTMLLIElement[], mutate: (clone: HTMLLIElement)
 }
 
 function stripCheckboxFrom(li: HTMLLIElement): void {
-  li.querySelector(':scope > input[type="checkbox"]')?.remove();
+  const checkbox = findTaskCheckbox(li);
+  // Checkbox's own parent: `li` itself for a tight item, the child <p> for a
+  // loose one — the stray-space cleanup below must trim THAT parent's first
+  // child, not always li.firstChild (which would miss a loose item's <p>).
+  const container = checkbox?.parentElement ?? li;
+  checkbox?.remove();
   li.classList.remove('task-list-item');
   // markdown-it-task-lists chỉ cắt "[ ]" (3 ký tự) khỏi text khi render, GIỮ
   // LẠI dấu cách đứng sau — text node trong <li> task luôn bắt đầu bằng " ".
   // Đứng sau checkbox thì vô hình, nhưng bỏ checkbox rồi thì lộ ra thành
   // khoảng trắng thừa đầu dòng → cắt luôn khi gỡ checkbox.
-  const first = li.firstChild;
+  const first = container.firstChild;
   if (first?.nodeType === Node.TEXT_NODE && first.textContent) {
     first.textContent = first.textContent.replace(/^\s+/, '');
     if (first.textContent === '') {
@@ -1355,59 +1361,31 @@ function topLevelChildContaining(node: Node): Element | null {
   return el;
 }
 
-/**
- * Mọi <li> nằm giữa 2 mép ngoài `before`/`after` (chốt lại TRƯỚC khi mutate DOM — cùng kỹ thuật
- * findListItemsBetween ở trên), quét qua BẤT KỲ <ul>/<ol> con trực tiếp nào của #content trong
- * khoảng đó — không chỉ một list duy nhất.
- *
- * Lý do cần: execCommand('insertUnorderedList') trên vùng chọn trải nhiều đoạn văn RỜI (có dòng
- * trống thật giữa các đoạn — không liền mạch) có thể TÁCH thành NHIỀU <ul> độc lập thay vì gộp
- * chung một list (hành vi thật của Chrome, đã quan sát qua repro thủ công — xem C4 bug report #5:
- * "tạo todo từ nhiều dòng text bị thừa 1 dấu chấm ở dòng đầu"). getListSelection() chỉ dò được MỘT
- * <ul> (qua range.startContainer) nên khi Chrome tách nhiều <ul>, các <li> ở <ul> còn lại không
- * được gắn class contains-task-list — CSS ẩn marker mặc định (`list-style-type: none`) không áp
- * dụng, bullet "•" của trình duyệt lộ ra cạnh checkbox.
- */
-function findAllListItemsBetween(before: Element | null, after: Element | null): HTMLLIElement[] {
-  const items: HTMLLIElement[] = [];
-  for (
-    let node: Element | null = before ? before.nextElementSibling : content.firstElementChild;
-    node && node !== after;
-    node = node.nextElementSibling
-  ) {
-    if (node.tagName === 'LI') {
-      items.push(node as HTMLLIElement);
-    } else if (node.tagName === 'UL' || node.tagName === 'OL') {
-      node.querySelectorAll(':scope > li').forEach((li) => items.push(li as HTMLLIElement));
-    }
-  }
-  return items;
-}
-
 function toggleTaskItem(): void {
   const current = getListSelection();
 
   if (!current) {
-    // Chưa ở trong list → tạo list cho cả vùng chọn trước. Chốt mép ngoài
-    // TRƯỚC khi mutate DOM (xem findAllListItemsBetween) — SAU đó không thể tin
-    // getListSelection() dò lại đủ mọi <li> vừa tạo.
+    // Not inside a list yet → build a list for the whole selection first.
     const sel = window.getSelection();
     const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
     const startTop = range ? topLevelChildContaining(range.startContainer) : null;
     const endTop = range ? topLevelChildContaining(range.endContainer) : null;
     const before = startTop?.previousElementSibling ?? null;
-    const after = endTop?.nextElementSibling ?? null;
+
+    let freshItems: HTMLLIElement[] = [];
 
     if (startTop && endTop) {
-      // Đường chính (bug #3): TỰ dựng MỘT <ul> "tight" (nội dung nằm thẳng trong
-      // <li>, không bọc <p>) từ mọi block top-level trong vùng chọn rồi chèn một
-      // lần bằng insertHTML — KHÔNG dùng execCommand('insertUnorderedList') vì
-      // Chrome hay tách vùng chọn nhiều đoạn văn rời thành NHIỀU <ul> và/hoặc
-      // giữ <p> con làm list "loose". Hệ quả (đã quan sát ở bug report #3): item
-      // đầu bị tách ra <ul> riêng → lộ bullet "•" thừa cạnh checkbox, và turndown
-      // serialize item loose kèm một dòng trắng thừa. Một <ul> tight duy nhất
-      // triệt tiêu cả hai. insertHTML (thay vì thao tác DOM trần) để Ctrl/Cmd+Z
-      // hoàn tác gọn một bước (cùng lý do convertBlockToListItem/input-rules.ts).
+      // Main path (bug #3): build ONE "tight" <ul> (content sits directly in
+      // <li>, no wrapping <p>) from every top-level block in the selection and
+      // insert it in a single shot via insertHTML — NOT
+      // execCommand('insertUnorderedList'), because Chrome tends to split a
+      // selection spanning several separate paragraphs into MULTIPLE <ul>s
+      // and/or keep child <p>s as a "loose" list. Observed fallout (bug report
+      // #3): the first item got split into its own <ul> → a stray bullet "•"
+      // showed up next to the checkbox, and turndown serialized the loose item
+      // with an extra blank line. A single tight <ul> eliminates both. insertHTML
+      // (instead of raw DOM ops) so Ctrl/Cmd+Z undoes it in one step (same
+      // reasoning as convertBlockToListItem/input-rules.ts).
       const itemsHtml: string[] = [];
       for (let el: Element | null = startTop; el; el = el.nextElementSibling) {
         if (el.tagName === 'UL' || el.tagName === 'OL') {
@@ -1429,20 +1407,33 @@ function toggleTaskItem(): void {
         sel?.removeAllRanges();
         sel?.addRange(replaceRange);
         document.execCommand('insertHTML', false, html);
+
+        // The just-inserted <ul> is deterministically at this position — read
+        // its own children directly instead of sweeping an unbounded sibling
+        // range (bug #10: a stale/unresolved end boundary must never leak into
+        // which <li>s get a checkbox).
+        const insertedList = before ? before.nextElementSibling : content.firstElementChild;
+        if (insertedList) {
+          freshItems = Array.from(insertedList.querySelectorAll(':scope > li')) as HTMLLIElement[];
+        }
       }
     } else {
-      // Không xác định được ranh giới block (hiếm — vd không có selection) →
-      // lùi về hành vi execCommand cũ.
+      // Rare fallback — block boundary couldn't be resolved (e.g. no
+      // selection) → fall back to the old execCommand behavior, then re-resolve
+      // the list it just created via getListSelection() instead of sweeping.
       document.execCommand('insertUnorderedList');
+      const created = getListSelection();
+      if (created) {
+        freshItems = created.items;
+      }
     }
 
-    const freshItems = findAllListItemsBetween(before, after);
     if (!freshItems.length) {
       return;
     }
-    // <li> mới tạo chắc chắn chưa có checkbox → luôn "add" cho TOÀN BỘ. Gọi
-    // addCheckbox trực tiếp trên node THẬT nên li.parentElement luôn đúng —
-    // contains-task-list được gắn cho đúng <ul> chứa từng <li>.
+    // Newly-created <li>s never already have a checkbox → always "add" for all
+    // of them. Calling addCheckbox directly on the real node keeps
+    // li.parentElement correct — contains-task-list lands on the right <ul>.
     freshItems.forEach((li) => addCheckbox(li));
     return;
   }
@@ -1450,7 +1441,7 @@ function toggleTaskItem(): void {
   const { list, items: targets } = current;
 
   if (targets.length === 1) {
-    const existing = targets[0].querySelector(':scope > input[type="checkbox"]');
+    const existing = findTaskCheckbox(targets[0]);
     if (existing) {
       stripCheckboxFrom(targets[0]);
       list.classList.remove('contains-task-list');

@@ -112,7 +112,10 @@
         },
         "orcaEditor.crossFileSearch.scope": {
           "type": "string",
-          "enum": ["markdown", "allFiles"],
+          "enum": [
+            "markdown",
+            "allFiles"
+          ],
           "enumDescriptions": [
             "Only search .md/.markdown files in the workspace.",
             "Search all text files in the workspace (respecting .gitignore and default excludes like node_modules, dist, images, binaries)."
@@ -122,7 +125,10 @@
         },
         "orcaEditor.assetsPaste.location": {
           "type": "string",
-          "enum": ["siblingAssetsFolder", "customFolder"],
+          "enum": [
+            "siblingAssetsFolder",
+            "customFolder"
+          ],
           "enumDescriptions": [
             "Save into an `assets/` subfolder next to the Markdown file being edited.",
             "Save into the folder specified by orcaEditor.assetsPaste.customFolderPath."
@@ -147,7 +153,13 @@
         },
         "orcaEditor.readability.preset": {
           "type": "string",
-          "enum": ["comfortable", "default", "compact", "dyslexia", "academic"],
+          "enum": [
+            "comfortable",
+            "default",
+            "compact",
+            "dyslexia",
+            "academic"
+          ],
           "enumDescriptions": [
             "Comfortable Reading: ~70ch measure, roomy line-height, serif reading font.",
             "Default: current behavior — full width, follow VS Code theme/font.",
@@ -160,7 +172,14 @@
         },
         "orcaEditor.readability.palette": {
           "type": "string",
-          "enum": ["followTheme", "light", "dark", "sepia", "highContrast", "paper"],
+          "enum": [
+            "followTheme",
+            "light",
+            "dark",
+            "sepia",
+            "highContrast",
+            "paper"
+          ],
           "enumDescriptions": [
             "Follow the VS Code theme colors (current behavior).",
             "Warm ivory background with near-black text (reduced glare/halation).",
@@ -169,7 +188,7 @@
             "Maximum-contrast palette for accessibility.",
             "Paper: bright warm-white (#fffff8) background with near-black text — a printed-page look (ai-2027.com style). Best paired with the Academic Paper preset."
           ],
-          "default": "sepia",
+          "default": "followTheme",
           "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
         },
         "orcaEditor.readability.fontFamily": {
@@ -203,13 +222,15 @@
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
-    "test": "npm run test:roundtrip && npm run test:unit",
+    "test:webview": "node esbuild.js && playwright test",
+    "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
     "@types/turndown": "^5.0.5",

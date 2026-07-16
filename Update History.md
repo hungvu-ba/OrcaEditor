@@ -176,3 +176,44 @@
 | 0.6.10 | 2026-07-15 | Feature (US-19.19): "TABLE OF CONTENTS" panel title font-size bumped to H2 scale (11px → 1.5em, matches h2 in markdown.css and scales with the user's configured font size). |
 | 0.6.10 | 2026-07-15 | Feature: truncated TOC headings now show a custom-drawn tooltip on hover/focus (reusing the toolbar's tooltip module), consistent with icon buttons. |
 | 0.6.10 | 2026-07-15 | Feature: TOC no longer auto-opens on file open when the document has only 1 heading (was: only suppressed for 0 headings) — a single-entry TOC adds no navigation value. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #6): image zoom button now clamps below the sticky toolbar instead of overlapping it for images near the top of the document. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #5): reading palette default was "sepia" instead of "followTheme" for newly opened tabs; corrected in package.json/provider.ts/readability.ts. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #13): inline code font-size trimmed to 0.9em with em-based padding, so formatted spans no longer visually outsize surrounding text across every reading mode. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #14): cross-tab Zen broadcast landing during a panel's init handshake no longer animates the toolbar slide; steady-state broadcasts still animate normally. |
+| 0.6.10 | 2026-07-15 | Feature (bug 0715 #12): hover-highlight outline around the block/list-item/row/column under the cursor, synced with the existing drag handles. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #7/#8/#9): list-item handle clears wide markers, nested list ancestors get a reachable handle, table row/col handles no longer hide before click. |
+| 0.6.10 | 2026-07-15 | Tooling: added a Playwright-based webview interaction test track (test/webview/, real Chromium execCommand/Selection API) to cover interactive bugs domino/unit tests can't reproduce; wired into `npm run test`. |
+| 0.6.10 | 2026-07-16 | Feature: added TOC heading-level filter slider (H1/H1-H2/H1-H2-H3, per-tab persisted); removed TOC drag & drop entirely (bug 0716 #7/#9). |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #1): Zen toolbar no longer flashes visible then slides away on cold-open — hidden state now baked as inline style instead of depending on external CSS load timing. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #3-#6): exclusive nested-list handle, larger flush hit-area (block/li/row/col), kebab merged into handle click, hover outline now shows only while a handle is held. |
+| 0.6.10 | 2026-07-16 | Fix: TOC heading-filter slider moved into its own full-width bar with H1/H2/H3 labels, no longer hidden under the toolbar; also fixes bug 0716 #8's toolbar/TOC color mismatch. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #4 follow-up): drag handle (block/li/row/col) no longer disappears when the mouse overshoots past its now-narrower hit area in one fast move. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2): column handle glyph rotated 90° to match its wide/short shape; table margin-top increased so the handle no longer overlaps the line above. |
+| 0.6.10 | 2026-07-16 | Fix: dragging a table row could merge its content into a neighboring row and wipe the other cells — row move now relocates the real DOM node instead of replacing it via HTML string. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #8, root cause): TOC panel background now uses the same theme-token order as the toolbar, removing the color seam a padding-only fix had left in some themes. |
+| 0.6.10 | 2026-07-16 | Fix: toolbar's B/I/S buttons now render bold/italic/strikethrough respectively, matching the formatting they apply instead of plain text labels. |
+| 0.6.10 | 2026-07-16 | Feature (bug 0716 #2, US-19.21): Reading Mode (enabled/preset/palette) reversed from per-tab to global across all open tabs, matching Zen mode's existing scope. |
+| 0.6.10 | 2026-07-16 | Fix: a table's header row had no drag handle at all (row-hover only scanned tbody rows). |
+| 0.6.10 | 2026-07-16 | Feature: click a row handle to promote that row to become the table's header ("Set as header row"), swapping it with the old header in place. |
+| 0.6.10 | 2026-07-16 | Fix: Zen mode + line-number gutter combo zeroed out the left margin, clipping the drag handle at the viewport edge. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #10): Task List button no longer stacks duplicate checkboxes onto unrelated list items on repeated clicks; added idempotency + turndown guards. |
+| 0.6.10 | 2026-07-16 | Fix: drag ghost preview no longer shows a double blue outline and now matches the dragged block/li/row/column's real on-screen size instead of an unrelated auto-sized box. |
+| 0.6.10 | 2026-07-16 | Fix: row-drag ghost content was inset by the ghost box's own padding, making it visibly narrower than the real row; column-drag ghost now shows a full-height column placeholder instead of just the tiny header cell. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #10 follow-up): checkbox-stacking guards now also recognize a loose-list item's checkbox nested in its child `<p>`, not just a direct `<li>` child. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #4): table column drag ghost now clones the real column content (header + every cell) instead of an empty placeholder box. |
+| 0.6.10 | 2026-07-16 | Fix: drag ghost's own 480px max-width was clamping every normal-width block/heading, re-wrapping its text narrower than the real editor content; ghost now matches the real block width. |
+| 0.6.10 | 2026-07-16 | Fix: block/list-item drag ghost's bottom padding clipped the last line of wrapped text — height now grows to fit the content instead of being pinned to the source's raw height. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #4 follow-up): table column drag ghost was clipped to 160px tall on tables with more than a few rows, no longer matching the real column height. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 3): top-level block moves now use Range deleteContents/insertNode instead of execCommand(insertHTML), fixing WebKit's smart-merge silently corrupting/duplicating neighboring blocks. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #2): nested list item's own drag handle is now reachable on a cold mouse arrival, not just an already-hovered item; also fixes the same misresolution in loose lists' inter-item gaps. |
+| 0.6.10 | 2026-07-16 | Fix: leaving the editor's content area leftward while hovering a nested list item's handle now shows the parent item's handle instead of freezing on the child. |
+| 0.6.10 | 2026-07-16 | Feature (bug 0716 round 2 #1): tables now get their own drag handle at the top-left corner to reorder the whole table, alongside the existing row/column handles. |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handle now sits left of the marker (no longer covers the bullet/number); moving left climbs to the parent item, then to a whole-list drag handle. |
+| 0.6.10 | 2026-07-16 | Feature: Ctrl/Cmd+Z·Y now delegate undo/redo to the underlying TextDocument (single history) instead of contentEditable, restoring caret to the changed block after re-render. |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handle now sits snug just left of each item's own number/bullet, so a nested item's handle no longer shares its parent's column. |
+| 0.6.10 | 2026-07-16 | Fix: sliding the cursor left off a list item's handle now reveals the parent/whole-list handle even on a gradual move (previously only a single fast jump surfaced it). |
+| 0.6.10 | 2026-07-16 | Fix: block-level elements (headings, paragraphs, list items, blockquote, hr, dl) had no left padding, so the drag hover outline sat flush against the text; added breathing room. |
+| 0.6.10 | 2026-07-16 | Feature: drag hover-highlight outline now has a low-alpha tint of its own border color instead of no background, staying legible against text in any theme. |
+| 0.6.10 | 2026-07-16 | Fix: dragged block's hover-outline background nearly vanished under its own 0.4 muted-opacity; also made drag outline/ghost colors follow Reading Mode's palette (was always VS Code blue, clashing with sepia/high-contrast). |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handles are now a uniform height aligned to each item's own marker row, instead of a parent handle spanning its whole nested subtree. |
+| 0.6.10 | 2026-07-16 | Feature: a list item's drag handle is now grabbable anywhere in its left gutter (tall invisible hit zone), not only on the small glyph — easier to grab a climbed parent. |

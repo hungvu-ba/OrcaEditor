@@ -274,7 +274,38 @@ export function createTurndown(): TurndownService {
 
   // --- checkbox task list: đọc thuộc tính checked đã được đồng bộ ---
   // Nằm trực tiếp trong <li> (tight list) hoặc trong <p> đầu của <li> (loose list).
+  //
+  // firstQualifyingCheckbox walks `li`'s children in document order (NOT a
+  // `:scope`-based querySelector — domino, the DOM turndown runs on for
+  // round-trip tests, silently returns no match for `:scope` selectors) and
+  // returns the first checkbox that matches the same tight/loose shapes
+  // `filter` below accepts. Used by `replacement` to dedupe a corrupted <li>
+  // with more than one checkbox (bug #10 follow-up: a tight-child checkbox
+  // and a loose-nested-in-<p> checkbox have different parentNode values, so
+  // a same-parent-only sibling scan would miss that they belong to the same
+  // <li> and let both serialize).
+  const firstQualifyingCheckbox = (li: Node): Node | null => {
+    for (let child = li.firstChild; child; child = child.nextSibling) {
+      if (child.nodeName === 'INPUT' && (child as HTMLInputElement).getAttribute('type') === 'checkbox') {
+        return child;
+      }
+      if (child.nodeName === 'P') {
+        for (let grandchild = child.firstChild; grandchild; grandchild = grandchild.nextSibling) {
+          if (grandchild.nodeName === 'INPUT' && (grandchild as HTMLInputElement).getAttribute('type') === 'checkbox') {
+            return grandchild;
+          }
+        }
+      }
+    }
+    return null;
+  };
+
   td.addRule('taskCheckbox', {
+    // NOTE: filter must claim EVERY qualifying checkbox (not just the first),
+    // otherwise a skipped node falls through to turndown-plugin-gfm's own
+    // taskListItems rule (td.use(taskListItems) above), which has no
+    // duplicate-checkbox guard and would re-emit a second token anyway. The
+    // "only one token per <li>" guard therefore lives in `replacement` below.
     filter: (node) => {
       if (node.nodeName !== 'INPUT' || (node as HTMLInputElement).getAttribute('type') !== 'checkbox') {
         return false;
@@ -290,6 +321,15 @@ export function createTurndown(): TurndownService {
     },
     replacement: (_content, node) => {
       const el = node as HTMLElement;
+      const parent = el.parentNode;
+      // Defense-in-depth against pre-existing corruption (bug #10, widened for
+      // the tight/loose follow-up): a stray stacked checkbox on the same <li>
+      // must not emit a second token — only the FIRST qualifying checkbox
+      // found in that <li> counts.
+      const li = parent && (parent.nodeName === 'LI' ? parent : parent.parentNode);
+      if (li && firstQualifyingCheckbox(li) !== node) {
+        return '';
+      }
       const checked = el.hasAttribute('checked') || (el as HTMLInputElement).checked;
       return (checked ? '[x]' : '[ ]') + ' ';
     },

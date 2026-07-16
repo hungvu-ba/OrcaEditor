@@ -197,6 +197,7 @@ const fromWebview: WebviewToHost[] = [
   { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
   { type: 'dropFile', requestId: 1, name: 'report.pdf', dataBase64: 'AA==' },
   { type: 'zenChanged', zen: true },
+  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
 ];
 const readabilityFixture = {
   enabled: false, preset: 'comfortable', palette: 'followTheme',
@@ -221,9 +222,10 @@ const toWebview: HostToWebview[] = [
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
   { type: 'dropFileResult', requestId: 1, relativePath: 'assets/report.pdf' },
   { type: 'zenChanged', zen: true },
+  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
 ];
-check('contract: WebviewToHost phủ đủ 12 biến thể', fromWebview.length === 12);
-check('contract: HostToWebview phủ đủ 10 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile + zenChanged)', toWebview.length === 10);
+check('contract: WebviewToHost phủ đủ 13 biến thể', fromWebview.length === 13);
+check('contract: HostToWebview phủ đủ 11 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 11);
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho

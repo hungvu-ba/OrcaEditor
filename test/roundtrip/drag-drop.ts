@@ -79,6 +79,27 @@ const domCases: DomCase[] = [
     },
   },
   {
+    // Bug 0716 round 3: swap 2 adjacent paragraphs with a third following —
+    // [P0,P1,P2,P3], drag P1 after P2 -> [P0,P2,P1,P3]. Like every other case in
+    // this file, this hand-authors the DOM applyBlockMove is expected to produce
+    // and only checks the serializer keeps all 4 paragraphs distinct — it does NOT
+    // exercise applyBlockMove/execCommand/Range APIs (see file header), so it
+    // cannot by itself prove the WebKit smart-merge bug stays fixed; that live
+    // regression coverage lives in test/webview/drag-merge.spec.ts.
+    name: 'swap 2 adjacent paragraphs with a third following — all 4 paragraphs stay distinct in the new order',
+    html: '<p>Paragraph 0.</p><p>Paragraph 2.</p><p>Paragraph 1.</p><p>Paragraph 3.</p>',
+    expect: (md) => {
+      const lines = md.trim().split('\n').filter(Boolean);
+      return (
+        lines.length === 4 &&
+        lines[0] === 'Paragraph 0.' &&
+        lines[1] === 'Paragraph 2.' &&
+        lines[2] === 'Paragraph 1.' &&
+        lines[3] === 'Paragraph 3.'
+      );
+    },
+  },
+  {
     // US-17.7 (M5): "move an existing image" — grounds the scope decision that
     // an image standing alone in its own paragraph is ALREADY a normal
     // top-level block (block-map.ts classifies any <p> as 'paragraph'
@@ -91,6 +112,31 @@ const domCases: DomCase[] = [
       const img = md.indexOf('![]');
       const intro = md.indexOf('Intro.');
       return img >= 0 && img < intro && md.includes('assets/diagram.png');
+    },
+  },
+  {
+    // Bug 0716 round 2, #1: the new table-level handle reuses the exact same
+    // top-level-block move machinery as any other block (see drag-drop.ts's
+    // findTableBlockAt/armDrag reuse, no new move logic) — a table hand-
+    // authored in a new position among sibling paragraphs should serialize
+    // and round-trip exactly like moving any other block.
+    name: 'move a whole table below a following paragraph — table content and sibling order both preserved',
+    html:
+      '<p>Before.</p>' +
+      '<p>After.</p>' +
+      '<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>a1</td><td>b1</td></tr></tbody></table>',
+    expect: (md) => {
+      const before = md.indexOf('Before.');
+      const after = md.indexOf('After.');
+      const table = md.indexOf('| A | B |');
+      return (
+        before >= 0 &&
+        after >= 0 &&
+        table >= 0 &&
+        before < after &&
+        after < table &&
+        md.includes('| a1 | b1 |')
+      );
     },
   },
 ];
