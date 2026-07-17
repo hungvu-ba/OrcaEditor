@@ -17,6 +17,7 @@ import {
 } from '../src/text-utils';
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
+import { detectBlockStyle } from '../media/webview/block-style';
 
 let pass = 0;
 let fail = 0;
@@ -325,6 +326,20 @@ eq(
 );
 
 // ---------------------------------------------------------------------------
+// detectBlockStyle (US-18.4a) — detect heading ATX/Setext variant from mdSlice.
+// ---------------------------------------------------------------------------
+
+// Heading: Setext (underline) vs ATX (#). H1 '=', H2 '-'. Underline length kept.
+eq('style: Setext H1 → setext, keep length', detectBlockStyle('Title\n=====', 'heading'), { heading: 'setext', headingUnderlineLength: 5 });
+eq('style: Setext H2 → setext, keep length', detectBlockStyle('Title\n---', 'heading'), { heading: 'setext', headingUnderlineLength: 3 });
+eq('style: ATX H1 → atx', detectBlockStyle('# Title', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+eq('style: ATX H2 → atx', detectBlockStyle('## Title', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+// ATX text containing '=' or '-' must NOT be misread as Setext (single-line slice).
+eq('style: ATX text with "=" → atx', detectBlockStyle('# Title = Draft', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+eq('style: ATX text with "-" → atx', detectBlockStyle('## Section - notes', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+// Heading axis not applicable to a non-heading block → null.
+eq('style: paragraph → heading null', detectBlockStyle('just a paragraph', 'paragraph'), { heading: null, headingUnderlineLength: null });
+eq('style: hr block → heading null', detectBlockStyle('---', 'hr'), { heading: null, headingUnderlineLength: null });
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

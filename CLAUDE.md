@@ -50,6 +50,19 @@ Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't
   -   **Update Content**: max 30 words, states whether it's a fix or feature.
 - Append only — never edit existing rows.
 
+## Mandatory Rule: Reuse Shared Modules
+
+Before adding a new helper function, check whether one of these already covers it — extend it instead of duplicating the logic locally:
+
+- Caret/selection placement & restore → `media/webview/dom-utils.ts`
+- Search/highlight overlay math (ticks, viewport band) → `media/webview/match-utils.ts`
+- List-structure transforms (indent/outdent/retag/unwrap) → `media/webview/list-ops.ts`
+- Extension-host ⇄ webview message payload shapes → `src/shared/messages.ts`
+- Block/line-number mapping → `media/webview/block-map.ts`
+- Shared DOM class names/selectors → `media/webview/constants.ts`
+
+Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-prune) before merge — see [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md).
+
 ## Mandatory Rule: Git Workflow
 
 For any git operation (branch, commit, merge, PR, release, hotfix, worktree...), read and follow [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — it defines branch structure, commit conventions, feature/release/hotfix lifecycle, and presentation style (explain for newcomers + a status sitemap after each commit).
