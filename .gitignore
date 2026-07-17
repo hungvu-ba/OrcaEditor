@@ -8,9 +8,10 @@ playwright-report/
 Plan/
 sample/
 test/2026-*/
-test/images/
+test/assets/
 test/local test/
 test/assets/
+local test/
 Claude Code Monitor - Spec.md
 WIP/
 _bmad/
