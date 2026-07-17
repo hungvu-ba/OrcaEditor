@@ -17,7 +17,7 @@ import {
 } from '../src/text-utils';
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
-import { detectBlockStyle } from '../media/webview/block-style';
+import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 
 let pass = 0;
 let fail = 0;
@@ -326,20 +326,87 @@ eq(
 );
 
 // ---------------------------------------------------------------------------
-// detectBlockStyle (US-18.4a) — detect heading ATX/Setext variant from mdSlice.
+// detectBlockStyle (US-18.4a heading axis + US-18.4b remaining axes) — detect a
+// block's original syntax variant from its mdSlice. `style()` fills the all-null
+// default so each case states only the axes it cares about.
 // ---------------------------------------------------------------------------
 
+function style(over: Partial<StyleOverride>): StyleOverride {
+  return {
+    heading: null,
+    headingUnderlineLength: null,
+    bullet: null,
+    code: null,
+    em: null,
+    strong: null,
+    hr: null,
+    ...over,
+  };
+}
+
 // Heading: Setext (underline) vs ATX (#). H1 '=', H2 '-'. Underline length kept.
-eq('style: Setext H1 → setext, keep length', detectBlockStyle('Title\n=====', 'heading'), { heading: 'setext', headingUnderlineLength: 5 });
-eq('style: Setext H2 → setext, keep length', detectBlockStyle('Title\n---', 'heading'), { heading: 'setext', headingUnderlineLength: 3 });
-eq('style: ATX H1 → atx', detectBlockStyle('# Title', 'heading'), { heading: 'atx', headingUnderlineLength: null });
-eq('style: ATX H2 → atx', detectBlockStyle('## Title', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+eq('style: Setext H1 → setext, keep length', detectBlockStyle('Title\n=====', 'heading'), style({ heading: 'setext', headingUnderlineLength: 5 }));
+eq('style: Setext H2 → setext, keep length', detectBlockStyle('Title\n---', 'heading'), style({ heading: 'setext', headingUnderlineLength: 3 }));
+eq('style: ATX H1 → atx', detectBlockStyle('# Title', 'heading'), style({ heading: 'atx' }));
+eq('style: ATX H2 → atx', detectBlockStyle('## Title', 'heading'), style({ heading: 'atx' }));
 // ATX text containing '=' or '-' must NOT be misread as Setext (single-line slice).
-eq('style: ATX text with "=" → atx', detectBlockStyle('# Title = Draft', 'heading'), { heading: 'atx', headingUnderlineLength: null });
-eq('style: ATX text with "-" → atx', detectBlockStyle('## Section - notes', 'heading'), { heading: 'atx', headingUnderlineLength: null });
+eq('style: ATX text with "=" → atx', detectBlockStyle('# Title = Draft', 'heading'), style({ heading: 'atx' }));
+eq('style: ATX text with "-" → atx', detectBlockStyle('## Section - notes', 'heading'), style({ heading: 'atx' }));
 // Heading axis not applicable to a non-heading block → null.
-eq('style: paragraph → heading null', detectBlockStyle('just a paragraph', 'paragraph'), { heading: null, headingUnderlineLength: null });
-eq('style: hr block → heading null', detectBlockStyle('---', 'hr'), { heading: null, headingUnderlineLength: null });
+eq('style: paragraph → heading null', detectBlockStyle('just a paragraph', 'paragraph'), style({}));
+eq('style: canonical hr block → all axes null', detectBlockStyle('---', 'hr'), style({}));
+
+// Bullet axis: single variant, mixed markers (first wins), ordered-only → null,
+// inapplicable block type → null (no crash).
+eq('style: "+" list → bullet "+"', detectBlockStyle('+ one\n+ two', 'list').bullet, '+');
+eq('style: "-" list → bullet "-"', detectBlockStyle('- one', 'list').bullet, '-');
+eq('style: "*" list → bullet "*" (default, unstamped later)', detectBlockStyle('* one', 'list').bullet, '*');
+eq('style: mixed markers → first-encountered wins', detectBlockStyle('- a\n  * b\n  + c', 'list').bullet, '-');
+eq('style: purely ordered list → bullet null', detectBlockStyle('1. a\n2. b', 'list').bullet, null);
+eq('style: bullet detector on heading → null', detectBlockStyle('# Title', 'heading').bullet, null);
+
+// Code axis: single check on the first non-blank line.
+eq('style: 4-space code → indented', detectBlockStyle('    line1\n    line2', 'code').code, 'indented');
+eq('style: tab code → indented-tab (tabs kept on re-emit)', detectBlockStyle('\tline1', 'code').code, 'indented-tab');
+eq('style: ~~~ fence → fence-tilde', detectBlockStyle('~~~js\ncode\n~~~', 'code').code, 'fence-tilde');
+eq('style: backtick fence → default (null)', detectBlockStyle('```js\ncode\n```', 'code').code, null);
+eq('style: code detector on paragraph → null', detectBlockStyle('    not code type', 'paragraph').code, null);
+
+// Em/strong axes: `_`/`__` win only when encountered before `*`/`**`; backtick
+// code spans are stripped before scanning; intraword `_` never counts.
+eq('style: "_em_" → em "_"', detectBlockStyle('has _em_ here', 'paragraph').em, '_');
+eq('style: "*em*" → em default (null)', detectBlockStyle('has *em* here', 'paragraph').em, null);
+eq('style: "*a*" before "_b_" → first wins (null)', detectBlockStyle('*a* then _b_', 'paragraph').em, null);
+eq('style: "__strong__" → strong "__"', detectBlockStyle('has __strong__ here', 'paragraph').strong, '__');
+eq('style: "**strong**" → strong default (null)', detectBlockStyle('has **strong**', 'paragraph').strong, null);
+eq('style: "_" inside code span ignored', detectBlockStyle('`_x_` only code', 'paragraph').em, null);
+eq('style: intraword "_" (snake_case) ignored', detectBlockStyle('snake_case_name', 'paragraph').em, null);
+eq('style: em detector on code block → null', detectBlockStyle('_not_ emphasis', 'code').em, null);
+
+// HR axis: raw line kept verbatim (incl. legal leading indent); `---` → null.
+eq('style: "***" hr → raw line kept', detectBlockStyle('***', 'hr').hr, '***');
+eq('style: "___" hr → raw line kept', detectBlockStyle('___', 'hr').hr, '___');
+eq('style: "- - -" hr → raw line kept', detectBlockStyle('- - -', 'hr').hr, '- - -');
+eq('style: "  ***" hr → leading indent kept', detectBlockStyle('  ***', 'hr').hr, '  ***');
+eq('style: hr detector on paragraph → null', detectBlockStyle('***', 'paragraph').hr, null);
+
+// Detection hardening (US-18.4b review round): container blocks, false
+// delimiter evidence, triple-delimiter runs.
+eq('style: blockquoted "-" list → bullet "-"', detectBlockStyle('> - quoted\n> - more', 'blockquote').bullet, '-');
+eq('style: blockquote without list → bullet null', detectBlockStyle('> plain quote', 'blockquote').bullet, null);
+eq(
+  'style: "- " inside fenced diff not marker evidence',
+  detectBlockStyle('1. step\n\n   ```diff\n   - removed\n   ```\n\n   * sub', 'list').bullet,
+  '*'
+);
+eq('style: "___x___" → em "_" (triple run opens em+strong)', detectBlockStyle('a ___x___ b', 'paragraph').em, '_');
+eq('style: "___x___" → strong "__"', detectBlockStyle('a ___x___ b', 'paragraph').strong, '__');
+eq('style: "***x***" before "_y_" → em default (null)', detectBlockStyle('***x*** then _y_', 'paragraph').em, null);
+eq('style: literal "2*4" not star evidence → em "_"', detectBlockStyle('Buy 2*4 lumber and _nails_.', 'paragraph').em, '_');
+eq('style: "_" in link URL not em evidence', detectBlockStyle('[doc](https://ex.com/_v2_) and *note*', 'paragraph').em, null);
+eq('style: intraword "_" after non-ASCII letter ignored', detectBlockStyle('chữ_ký here and *em*', 'paragraph').em, null);
+eq('style: escaped backslash before "_" → em "_"', detectBlockStyle('C:\\\\_dir_ here', 'paragraph').em, '_');
+eq('style: backtick-run span strips fully → em null', detectBlockStyle('Use ``x `_foo` y`` here', 'paragraph').em, null);
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

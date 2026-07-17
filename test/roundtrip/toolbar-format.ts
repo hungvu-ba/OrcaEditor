@@ -98,9 +98,9 @@ const domCases: DomCase[] = [
   // "contains-task-list" lên <ul>/<ol> cha.
   // -------------------------------------------------------------------------
   {
-    name: 'bullet list phẳng → "- a" / "- b"',
+    name: 'bullet list phẳng → "* a" / "* b"',
     html: '<ul><li>a</li><li>b</li></ul>',
-    expect: (md) => /^-\s+a$/m.test(md) && /^-\s+b$/m.test(md),
+    expect: (md) => /^\*\s+a$/m.test(md) && /^\*\s+b$/m.test(md),
   },
   {
     name: 'numbered list phẳng → "1. a" / "2. b"',
@@ -114,7 +114,7 @@ const domCases: DomCase[] = [
       '<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox"> chưa xong</li>' +
       '<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" checked> đã xong</li>' +
       '</ul>',
-    expect: (md) => /^-\s+\[ \]\s+chưa xong$/m.test(md) && /^-\s+\[x\]\s+đã xong$/m.test(md),
+    expect: (md) => /^\*\s+\[ \]\s+chưa xong$/m.test(md) && /^\*\s+\[x\]\s+đã xong$/m.test(md),
   },
   {
     name: 'task item bỏ checkbox (stripCheckboxFrom: xoá input + cắt whitespace ĐẦU text node còn lại) → về bullet thường, không dư khoảng trắng đầu dòng',
@@ -122,15 +122,15 @@ const domCases: DomCase[] = [
     // ngay sau checkbox cũ) — mô phỏng đúng: <li> không còn input, text bắt
     // đầu ngay bằng nội dung (không còn khoảng trắng thừa phía trước).
     html: '<ul><li class="task-list-item">việc thường</li></ul>',
-    expect: (md) => /^-\s+việc thường$/m.test(md) && !md.includes('[ ]') && !md.includes('[x]'),
+    expect: (md) => /^\*\s+việc thường$/m.test(md) && !md.includes('[ ]') && !md.includes('[x]'),
   },
   {
-    name: 'stripCheckboxFrom cắt hết whitespace nếu text node CHỈ có khoảng trắng → text node bị remove() luôn (toolbar.ts:1074-1076), không để lại "- " trơ',
+    name: 'stripCheckboxFrom cắt hết whitespace nếu text node CHỈ có khoảng trắng → text node bị remove() luôn (toolbar.ts:1074-1076), không để lại "* " trơ',
     // first.textContent.replace(/^\s+/, '') === '' → first.remove(): mô
     // phỏng bằng <li> có 1 <strong> làm nội dung thật duy nhất (không có text
     // thừa phía trước, đúng hệt kết quả sau strip).
     html: '<ul><li><strong>chỉ có bold</strong></li></ul>',
-    expect: (md) => /^-\s+\*\*chỉ có bold\*\*$/m.test(md),
+    expect: (md) => /^\*\s+\*\*chỉ có bold\*\*$/m.test(md),
   },
   {
     name: 'ordered task list (giữ số thứ tự, độc lập với checkbox — US-4.2 "Checkbox state is independent of list ordering")',
@@ -154,7 +154,7 @@ const domCases: DomCase[] = [
       '</ul>',
     expect: (md) => {
       const tokenCount = (md.match(/\[ \]/g) ?? []).length;
-      return tokenCount === 1 && /^-\s+\[ \]\s+duplicated task$/m.test(md);
+      return tokenCount === 1 && /^\*\s+\[ \]\s+duplicated task$/m.test(md);
     },
   },
   {
@@ -177,7 +177,7 @@ const domCases: DomCase[] = [
       '</ul>',
     expect: (md) => {
       const tokenCount = (md.match(/\[x\]|\[ \]/g) ?? []).length;
-      return tokenCount === 1 && /^-\s+\[x\]\s+loose task$/m.test(md);
+      return tokenCount === 1 && /^\*\s+\[x\]\s+loose task$/m.test(md);
     },
   },
 ];
