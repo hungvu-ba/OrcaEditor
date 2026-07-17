@@ -4,6 +4,17 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.8.0\] - 2026-07-17
+
+### Added
+
+-   Style preservation: headings now keep their original ATX (`#`) vs. Setext (`===`/`---`) style on save instead of always normalizing to ATX (US-18.4a).
+-   Style preservation: bullet list markers, code block style (indented vs. fenced), emphasis/strong delimiters, and horizontal rules now keep their original per-block syntax on save instead of always being rewritten to one convention (US-18.4b).
+
+### Changed
+
+-   New content (no prior style to preserve) now defaults to `*` bullet markers and backslash (`\`) hard line breaks, matching `Template/markdown-syntax-guide.md`, replacing the previous `-` bullet / two-space hard-break defaults.
+
 ## \[0.7.0\] - 2026-07-16
 
 ### Added
