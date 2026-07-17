@@ -1,0 +1,10 @@
+{
+  "path": ["media/webview", "src"],
+  "ignore": ["**/*.d.ts"],
+  "minLines": 5,
+  "minTokens": 40,
+  "threshold": 1.2,
+  "reporters": ["consoleFull"],
+  "absolute": true,
+  "gitignore": true
+}

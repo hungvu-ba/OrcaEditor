@@ -16,6 +16,7 @@ import {
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
+import { HEADING_STYLE_ATTR } from './block-style';
 
 export function createTurndown(): TurndownService {
   const td = new TurndownService({
@@ -100,14 +101,29 @@ export function createTurndown(): TurndownService {
     },
   });
 
-  // --- heading: escape dấu # cuối (markdown-it strip closing sequence của ATX) ---
+  // --- heading: escape a trailing '#' (markdown-it strips an ATX closing
+  //     sequence). If the block is marked to keep its original Setext form
+  //     (US-18.4a: data-md-heading-style, stamped by serialize() from mdSlice)
+  //     and it is H1/H2 → re-emit as Setext instead of ATX, reusing the ORIGINAL
+  //     underline length (attribute value) so an untouched heading isn't
+  //     rewritten; the underline CHAR is re-derived from the current level so a
+  //     since-changed level can't emit the wrong Setext level. H3+ is always ATX
+  //     (Setext has only 2 levels). Empty text can't form a Setext heading, so it
+  //     also falls through to ATX. No mark → unchanged ATX path (Golden Rule:
+  //     canonical files serialize byte-identical). ---
   td.addRule('atxHeadingEscapeTrailingHash', {
     filter: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
     replacement: (content, node) => {
       const level = Number(node.nodeName.charAt(1)) || 1;
-      let text = content.replace(/\n+/g, ' ').trim();
-      text = text.replace(/(\s)(#+)$/, (_m, sp: string, hashes: string) => `${sp}\\${hashes}`);
-      return `\n\n${'#'.repeat(level)} ${text}\n\n`;
+      const text = content.replace(/\n+/g, ' ').trim();
+      const mark = (node as HTMLElement).getAttribute?.(HEADING_STYLE_ATTR);
+      if (mark != null && text && (level === 1 || level === 2)) {
+        const len = Math.max(parseInt(mark, 10) || text.length, 1);
+        const underline = (level === 1 ? '=' : '-').repeat(len);
+        return `\n\n${text}\n${underline}\n\n`;
+      }
+      const atx = text.replace(/(\s)(#+)$/, (_m, sp: string, hashes: string) => `${sp}\\${hashes}`);
+      return `\n\n${'#'.repeat(level)} ${atx}\n\n`;
     },
   });
 

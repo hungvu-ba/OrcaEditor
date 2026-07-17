@@ -26,7 +26,8 @@ import { initToc } from './toc';
 import { initMermaid } from './mermaid';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
-import { buildBlockMap, type BlockEntry } from './block-map';
+import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
+import { detectBlockStyle, stampStyleOverride } from './block-style';
 import { initDragDrop } from './drag-drop';
 import { closestElement, createDomHelpers, scrollBehavior } from './dom-utils';
 import { initPrompt } from './prompt';
@@ -516,8 +517,32 @@ function serialize(): string {
     }
   });
   prepareDomForSerialize(clone, document);
+  applyBlockStyleOverrides(clone);
   const md = turndown.turndown(clone);
   return normalizeMarkdown(md);
+}
+
+/**
+ * US-18.4a: before turndown runs, stamp each block's ORIGINAL style override onto
+ * the clone so serialize keeps every block's initial `.md` syntax variant instead
+ * of forcing the global style. Blocks are matched via `data-block-id` (stamped on
+ * the live DOM by the Block Map, preserved by cloneNode) and the variant is
+ * detected from `mdSlice`. A block with no mdSlice (new content) or an axis not
+ * yet supported gets nothing stamped and falls through to the default. This is
+ * shared infrastructure: US-18.4b extends detectBlockStyle/stampStyleOverride, it
+ * does not rebuild this loop.
+ */
+function applyBlockStyleOverrides(clone: HTMLElement): void {
+  for (const entry of blockMap) {
+    if (!entry.mdSlice) {
+      continue;
+    }
+    const el = clone.querySelector(`[${BLOCK_ID_ATTR}="${entry.id}"]`);
+    if (!el) {
+      continue;
+    }
+    stampStyleOverride(el, detectBlockStyle(entry.mdSlice, entry.type));
+  }
 }
 
 // ---------------------------------------------------------------------------
