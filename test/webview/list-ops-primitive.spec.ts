@@ -12,7 +12,7 @@
 import { test, expect } from '@playwright/test';
 import { openEditor } from './_harness';
 
-test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li > ul nesting, caret restored at the same offset', async ({
+test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li > ul nesting, caret restored precisely inside the moved item', async ({
   page,
 }) => {
   await openEditor(page, '- Alpha\n- Bravo');
@@ -22,9 +22,6 @@ test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li 
     const list = el.querySelector('ul')!;
     const bravo = list.children[1] as HTMLLIElement;
 
-    // Caret 2 chars into "Bravo" — the exact character offset from the start of
-    // `list` depends on incidental whitespace text nodes the real markdown-render
-    // pipeline leaves between <li>s, so it's measured (not hardcoded) below.
     const range = document.createRange();
     range.setStart(bravo.firstChild!, 2);
     range.collapse(true);
@@ -32,16 +29,12 @@ test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li 
     sel.removeAllRanges();
     sel.addRange(range);
 
-    const beforeProbe = document.createRange();
-    beforeProbe.selectNodeContents(list);
-    beforeProbe.setEnd(range.startContainer, range.startOffset);
-    const expectedOffset = beforeProbe.toString().length;
-
     interface ListOpPlan {
       stableRoot: Element;
       rangeStart: Element;
       rangeEnd: Element;
       html: string;
+      caretAnchor?: Element;
     }
     interface ListOpsDebugApi {
       computeIndent(li: Element): ListOpPlan | null;
@@ -91,15 +84,24 @@ test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li 
 
     const liInUl = !!el.querySelector('li > ul');
     const ulInUl = !!el.querySelector('ul > ul');
+    const anchorMarkerLeaked = !!el.querySelector('[data-list-op-caret-anchor]');
 
+    // Assert the caret precisely (text node + local offset), not via a
+    // stableRoot-wide character count: indent removes the whitespace text
+    // node markdown-it renders between sibling <li>s (it's now merged into
+    // ONE <li>), so a stableRoot-wide "same offset as before" comparison is
+    // off by that removed whitespace's length -- not a caret-restore bug,
+    // just the wrong invariant to check (HLR 22 Phase 2.1/2.2 review fix: see
+    // list-ops.ts's `caretAnchor`/`normalizeToAnchor` for the real fix this
+    // test now exercises, for the general case this specific scenario
+    // doesn't hit -- the empty-<li>-after-Enter case is covered separately
+    // in list-verbs-audit.spec.ts).
     const afterSel = window.getSelection()!;
     const afterRange = afterSel.getRangeAt(0);
-    const probe = document.createRange();
-    probe.selectNodeContents(list);
-    probe.setEnd(afterRange.startContainer, afterRange.startOffset);
-    const caretOffset = probe.toString().length;
+    const caretText = afterRange.startContainer.textContent;
+    const caretOffset = afterRange.startOffset;
 
-    return { ok: true as const, insertHtmlCalls, liInUl, ulInUl, expectedOffset, caretOffset };
+    return { ok: true as const, insertHtmlCalls, liInUl, ulInUl, anchorMarkerLeaked, caretText, caretOffset };
   });
 
   expect(result.ok).toBe(true);
@@ -109,7 +111,9 @@ test('commitListOp (indent): exactly one execCommand(insertHTML) call, valid li 
   expect(result.insertHtmlCalls).toBe(1);
   expect(result.liInUl).toBe(true);
   expect(result.ulInUl).toBe(false);
-  expect(result.caretOffset).toBe(result.expectedOffset);
+  expect(result.anchorMarkerLeaked).toBe(false);
+  expect(result.caretText).toBe('Bravo');
+  expect(result.caretOffset).toBe(2);
 });
 
 // Outdent's plan has rangeStart === rangeEnd (a single parent <li>) but replaces

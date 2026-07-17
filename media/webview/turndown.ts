@@ -26,12 +26,15 @@ import {
 } from './block-style';
 
 export function createTurndown(): TurndownService {
+  // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
+  // '*' bullets and backslash hard breaks — see US-18.4b. Named so
+  // blankReplacement's zero-child <li> branch (no access to `options` there)
+  // can share the same fallback as 'listItemWithBulletStyle' below.
+  const BULLET_MARKER = '*';
   const td = new TurndownService({
     headingStyle: 'atx',
     hr: '---',
-    // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
-    // '*' bullets and backslash hard breaks — see US-18.4b.
-    bulletListMarker: '*',
+    bulletListMarker: BULLET_MARKER,
     codeBlockStyle: 'fenced',
     fence: '```',
     emDelimiter: '*',
@@ -55,9 +58,18 @@ export function createTurndown(): TurndownService {
       }
       return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
     },
-    // Node "rỗng" (turndown coi là blank và bỏ qua rule thường):
+    // Node "rỗng" (turndown coi là blank và bỏ qua rule thường, kể cả rule tự
+    // thêm qua addRule — xem forNode trong turndown core: isBlank luôn được xét
+    // TRƯỚC rule lookup):
     //  - placeholder HTML comment phải được giữ lại
     //  - ô bảng rỗng vẫn phải emit "|" để không vỡ cột
+    //  - <li> rỗng hoàn toàn (0 con — markdown-it tự dựng lại từ 1 dòng bullet
+    //    trống khi re-parse) phải emit đúng prefix bullet/số của nó, không phải
+    //    default "\n\n" chung cho mọi block rỗng — nếu không, turndown MẤT hẳn
+    //    mục này khi nối với các <li> anh em (vỡ round-trip, không chỉ vỡ hiển
+    //    thị). Mục rỗng có <br> placeholder (Enter tạo mục mới chưa gõ gì) thì
+    //    KHÔNG rơi vào nhánh này — <br> là void element nên turndown coi <li>
+    //    đó "not blank", đã có rule riêng 'strayTrailingBr' xử lý.
     blankReplacement: (_content, node) => {
       const el = node as HTMLElement;
       if (el.getAttribute?.('data-md-comment') != null) {
@@ -65,6 +77,9 @@ export function createTurndown(): TurndownService {
       }
       if (el.nodeName === 'TD' || el.nodeName === 'TH') {
         return cellPrefix(el) + ' |';
+      }
+      if (el.nodeName === 'LI') {
+        return emptyListItemPrefix(el, BULLET_MARKER);
       }
       return (node as { isBlock?: boolean }).isBlock ? '\n\n' : '';
     },
@@ -287,6 +302,57 @@ export function createTurndown(): TurndownService {
       }
       return '<br>';
     },
+  });
+
+  // --- Residual <br> that would otherwise serialize to a stray "\" under this
+  //     branch's `br: '\\'` convention (US-18.4b hard-break marker). A <br> is
+  //     "residual" when it is the LAST meaningful node inside an <li>/<p>/
+  //     <blockquote> -- no following sibling carries visible content (only other
+  //     <br>s, whitespace text, or empty/void-less elements follow) -- so it
+  //     carries no real hard break and only exists
+  //     as contentEditable/execCommand leftover: an Enter-created empty list
+  //     item, Enter/Backspace residue, or the indent/outdent / list-unwrap /
+  //     blockquote-toggle native fallbacks. Dropping it lets the parent emit a
+  //     clean empty bullet / paragraph / "> " line instead of "\" (the default
+  //     'br' rule would turn it into a hard break, which 'listItem' then indents
+  //     and appends an extra "\n" to when a sibling follows -> "-     \n    \n").
+  //     A GENUINE mid-content hard break (foo<br>bar) is untouched: "bar" follows
+  //     the <br>, so it is not trailing and the default 'br' rule still runs.
+  //     One rule covers all three parents: <li> (bug 0717 / round2 #1 empty item,
+  //     round3 #2/#6), <p> (round3 #6) and <blockquote> (round3 #8). Note: an
+  //     empty <li>/<p> still passes turndown's isBlank() as non-blank because a
+  //     <br> is a void element, so 'listItem'/paragraph rules run normally and
+  //     compute the correct prefix from the now-empty content -- do NOT add a
+  //     prefix here (that would double-prefix). Zero-child <li> is a separate
+  //     path (turndown's isBlank short-circuits to blankReplacement's LI branch).
+  td.addRule('strayTrailingBr', {
+    filter: (node) => {
+      if (node.nodeName !== 'BR') {
+        return false;
+      }
+      const parent = node.parentElement;
+      if (!parent || !/^(LI|P|BLOCKQUOTE)$/.test(parent.nodeName)) {
+        return false;
+      }
+      // Trailing when NO following sibling carries visible content: skip other
+      // <br>s and any node whose textContent is blank AND holds no visible void
+      // (img/input/media/hr) -- covers whitespace text, empty inline cruft like
+      // <span></span>, and empty elements. Any real text or visible void after
+      // the <br> means it is a genuine hard break -> keep it (default 'br' rule).
+      for (let sib = node.nextSibling; sib; sib = sib.nextSibling) {
+        if (sib.nodeName === 'BR') {
+          continue;
+        }
+        if ((sib.textContent ?? '').trim() !== '') {
+          return false;
+        }
+        if ((sib as Element).querySelector?.('img, input, video, audio, iframe, picture, hr')) {
+          return false;
+        }
+      }
+      return true;
+    },
+    replacement: () => '',
   });
 
   // --- HTML comment (đã được prepareDomForSerialize đổi thành placeholder) ---
@@ -527,6 +593,33 @@ function getBlockAlign(el: HTMLElement): string {
   const style = el.getAttribute('style') ?? '';
   const m = /text-align\s*:\s*(left|center|right|justify)/i.exec(style);
   return m ? m[1].toLowerCase() : '';
+}
+
+/**
+ * Prefix markdown ("-   " hoặc "1.  ") cho một <li> RỖNG (không có content thật
+ * để turndown tự tính content/prefix qua rule 'listItem' mặc định) — dùng chung
+ * bởi blankReplacement (li 0 con) và rule 'strayTrailingBr' (li chỉ có <br>).
+ * Công thức numbering khớp CHÍNH XÁC turndown's default 'listItem' rule (start
+ * attribute + vị trí trong danh sách con của cha) để mục rỗng đánh số đúng như
+ * mọi mục khác trong cùng <ol>.
+ */
+function emptyListItemPrefix(li: HTMLElement, defaultMarker: string): string {
+  const parent = li.parentElement;
+  let prefix: string;
+  if (parent && parent.nodeName === 'OL') {
+    const start = parent.getAttribute('start');
+    const index = Array.prototype.indexOf.call(parent.children, li);
+    prefix = `${start ? Number(start) + index : index + 1}.  `;
+  } else {
+    // US-18.4b: honor the block's original bullet marker here too, same lookup
+    // as 'listItemWithBulletStyle' — this branch bypasses that rule entirely
+    // (turndown's isBlank check routes zero-child <li> straight to
+    // blankReplacement), so without this it always fell back to '-'.
+    const block = getAncestor(li, (el) => el.hasAttribute(BULLET_STYLE_ATTR));
+    const marker = block?.getAttribute(BULLET_STYLE_ATTR) ?? defaultMarker;
+    prefix = marker + '   ';
+  }
+  return prefix + (li.nextSibling ? '\n' : '');
 }
 
 /** '| ' cho ô đầu hàng, ' ' cho các ô sau — giống turndown-plugin-gfm. */

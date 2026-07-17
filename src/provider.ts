@@ -237,6 +237,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+    /** Serializes webview-originated document mutations — see case 'edit'. */
+    let editChain: Promise<void> = Promise.resolve();
 
     // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
@@ -356,15 +358,29 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         }
         case 'edit': {
           const text = msg.text;
-          lastTextFromWebview = text;
-          const ok = await this.applyMinimalEdit(document, text);
-          if (!ok) {
-            lastTextFromWebview = undefined;
-          }
+          // Chain, don't apply directly: the webview can post two 'edit's in
+          // the SAME frame (invokeAction: flush of pending typing + the
+          // action's own sync — two deliberate undo units, bug 0717), and
+          // onDidReceiveMessage does not await async handlers. Unchained, the
+          // second applyMinimalEdit would diff against a document the first
+          // edit hasn't committed to yet — a mis-anchored replace corrupting
+          // the text. lastTextFromWebview is set INSIDE the thunk so each
+          // edit's echo suppression is armed exactly while ITS change applies.
+          editChain = editChain.then(async () => {
+            lastTextFromWebview = text;
+            const ok = await this.applyMinimalEdit(document, text);
+            if (!ok) {
+              lastTextFromWebview = undefined;
+            }
+          });
+          await editChain;
           break;
         }
         case 'undo':
         case 'redo': {
+          // Any in-flight chained 'edit' must commit first — its undo unit
+          // precedes this undo/redo chronologically (bug 0717).
+          await editChain;
           // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
           // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
           if (msg.pendingText !== undefined) {
@@ -1125,34 +1141,29 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
 
-    for (const name of candidates) {
-      if (await this.isReferencedInSiblingFiles(name, siblingMdUris, document.uri)) {
-        continue;
-      }
-      await this.deleteOrphanImage(imagesDir, name);
-    }
-  }
-
-  /** true nếu tìm thấy 1 file .md khác (không phải chính document) còn nhắc tới fileName — dừng ngay, không đọc hết danh sách. */
-  private async isReferencedInSiblingFiles(
-    fileName: string,
-    siblingUris: readonly vscode.Uri[],
-    ownDocumentUri: vscode.Uri
-  ): Promise<boolean> {
-    for (const uri of siblingUris) {
-      if (uri.toString() === ownDocumentUri.toString()) {
+    // Đọc nội dung mỗi file .md anh em MỘT lần (bỏ chính document) rồi mới đối
+    // chiếu mọi ứng viên — trước đây mỗi ứng viên lại mở lại cả danh sách sibling,
+    // thành O(candidates × siblings) lượt đọc thay vì O(siblings).
+    const ownUri = document.uri.toString();
+    const siblingTexts: string[] = [];
+    for (const uri of siblingMdUris) {
+      if (uri.toString() === ownUri) {
         continue;
       }
       try {
-        const opened = await vscode.workspace.openTextDocument(uri);
-        if (opened.getText().includes(fileName)) {
-          return true;
-        }
+        siblingTexts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }
     }
-    return false;
+
+    for (const name of candidates) {
+      // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
+      if (siblingTexts.some((text) => text.includes(name))) {
+        continue;
+      }
+      await this.deleteOrphanImage(imagesDir, name);
+    }
   }
 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
@@ -1270,7 +1281,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
     // giật vì toolbar rời flow. Giá trị preset/palette đã được whitelist trong
     // readReadabilityConfig nên an toàn để nội suy vào attribute.
-    const stylingActive = readability.enabled || readability.zen;
+    // bug_General #1: reading styling (reading-mode/preset/palette) gate CHỈ
+    // theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở readability.ts).
+    // `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo `zen`.
+    const stylingActive = readability.enabled;
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),

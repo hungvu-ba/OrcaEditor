@@ -214,6 +214,17 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
   return probe.toString().length;
 }
 
+/**
+ * Tạo một <p><br></p> rỗng — "chỗ thoát" caret / block trống mặc định, dùng ở
+ * nhiều nơi (chèn/xoá bảng, input rule hr/fence, đảm bảo có <p> cuối tài liệu).
+ * Rule 'emptyParagraph' của turndown bỏ mọi <p> rỗng khi lưu nên KHÔNG đổi Markdown.
+ */
+export function emptyParagraph(): HTMLParagraphElement {
+  const p = document.createElement('p');
+  p.appendChild(document.createElement('br'));
+  return p;
+}
+
 export interface DomHelpers {
   restoreSelection(range: Range | undefined): void;
   placeCaretIn(el: Element | null | undefined, selectContents?: boolean): void;
@@ -221,6 +232,7 @@ export interface DomHelpers {
   /** Đặt caret/selection theo offset ký tự (Range.toString()) tính từ đầu `el`. Collapsed khi start === end. */
   placeCaretAtOffsets(el: Element, start: number, end: number): void;
   replaceBlockTag(block: HTMLElement, tag: string): HTMLElement;
+  wrapInBlockquote(block: HTMLElement): HTMLElement;
 }
 
 /**
@@ -228,14 +240,19 @@ export interface DomHelpers {
  * một lần trong main.ts rồi truyền xuống các module khác qua ctx.
  */
 export function createDomHelpers(content: HTMLElement): DomHelpers {
-  function restoreSelection(range: Range | undefined): void {
-    if (!range) {
-      return;
-    }
+  /** Áp một Range làm vùng chọn hiện tại rồi focus lại #content — phần đuôi chung của mọi helper đặt caret/selection bên dưới. */
+  function applyRange(range: Range): void {
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
     content.focus();
+  }
+
+  function restoreSelection(range: Range | undefined): void {
+    if (!range) {
+      return;
+    }
+    applyRange(range);
   }
 
   /** Đặt caret vào element; selectContents=true chọn cả nội dung (kiểu bảng tính). */
@@ -248,10 +265,7 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     if (!selectContents || (el.textContent ?? '').trim() === '') {
       range.collapse(true);
     }
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    content.focus();
+    applyRange(range);
   }
 
   /**
@@ -264,10 +278,7 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     const range = document.createRange();
     range.setStartAfter(el);
     range.collapse(true);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    content.focus();
+    applyRange(range);
   }
 
   /** Tìm (text node, offset trong node đó) ứng với offset ký tự tính từ đầu `root`. */
@@ -292,10 +303,7 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
     const range = document.createRange();
     range.setStart(startPos.node, startPos.offset);
     range.setEnd(endPos.node, endPos.offset);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    content.focus();
+    applyRange(range);
   }
 
   /**
@@ -318,44 +326,36 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
   }
 
   /**
-   * Thay tag của block, giữ nguyên children + căn lề.
+   * Thay tag của block, giữ nguyên children + căn lề (HLR 22 Phase 2.5).
    *
-   * Khi block NGUỒN đang là heading (h1-h6), dùng execCommand('formatBlock')
-   * thay vì insertHTML — đã kiểm chứng thủ công 2 bug của insertHTML riêng
-   * cho trường hợp này: (1) đích là 'p' → Chrome bỏ qua hoàn toàn HTML được
-   * chèn, giữ nguyên tag heading cũ và merge nốt nội dung <p> liền sau vào
-   * trong đó (nguyên nhân chính của bug "bấm lần 2 không revert về normal
-   * text"); (2) đích là heading khác → style heading cũ "rò rỉ" sang block
-   * liền sau (nó bị gắn thành heading dù HTML chèn vào là gì). formatBlock
-   * không dính cả hai và tự giữ đúng caret/vùng chọn (kể cả xuyên qua
-   * formatting lồng như bold) — không cần khôi phục offset thủ công. Chỉ mất
-   * thuộc tính align nên set lại sau.
+   * Dùng MỘT cơ chế cho MỌI chiều: Range.deleteContents() + Range.insertNode()
+   * trên fragment dựng từ <template> — KHÔNG qua execCommand('insertHTML') hay
+   * execCommand('formatBlock'). Cả hai verb native đó đều có bug đã kiểm chứng
+   * thủ công cho một số chiều đổi tag:
+   *   - insertHTML (ReplaceSelectionCommand) khi block NGUỒN là heading: (1)
+   *     đích 'p' → Chrome bỏ qua HTML chèn, giữ tag heading cũ và merge <p>
+   *     liền sau vào (bug "bấm lần 2 không revert về normal text"); (2) đích
+   *     heading khác → style heading cũ rò rỉ sang block liền sau.
+   *   - formatBlock khi bấm lặp trên heading → heading lồng heading (h1 trong
+   *     h1, font-size phình dần).
+   * Chèn Range trực tiếp không đi qua ReplaceSelectionCommand nên né sạch cả
+   * ba — cùng lý do commitListOpDirect (list-ops.ts) né bug outdent. Đánh đổi
+   * (chấp nhận, như commitListOpDirect/applyBlockMove): thao tác không tự nằm
+   * trên native undo stack, nhưng Ctrl+Z/Y ở extension này đều uỷ cho
+   * TextDocument nên không phải hồi quy.
    *
-   * Khi block nguồn KHÔNG phải heading (vd <p> → h1, xem applySpaceInputRule/
-   * formatHeading), tiếp tục dùng execCommand('insertHTML') như cũ — đã kiểm
-   * chứng hoạt động đúng cho chiều này. Lý do không dùng formatBlock cho cả
-   * hai chiều: Chrome có bug tạo heading lồng nhau khi bấm lặp lại
-   * formatBlock('h1') trên một heading (h1 trong h1 → font-size phình dần),
-   * xem lịch sử — insertHTML tránh được bug đó cho chiều tạo heading mới.
-   * Vì nội dung được tạo lại từ chuỗi HTML nên node cũ bị gỡ khỏi DOM (không
-   * giữ được tham chiếu Range cũ) — khôi phục vị trí/vùng chọn bằng offset ký
-   * tự (xem getOffsetWithin/placeCaretAtOffsets) thay vì luôn đặt caret về
-   * đầu block như trước đây.
+   * Vì node cũ bị gỡ khỏi DOM (mất tham chiếu Range cũ) — lưu vị trí/vùng chọn
+   * bằng offset ký tự trong block CŨ (getOffsetWithin) rồi khôi phục trong
+   * phần tử MỚI (placeCaretAtOffsets); nội dung text không đổi nên offset ánh
+   * xạ 1-1. Chỉ mất caret khi không có selection → đặt về đầu block mới.
    */
   function replaceBlockTag(block: HTMLElement, tag: string): HTMLElement {
     const align = block.getAttribute('align');
     const parent = block.parentElement;
     const prevElement = block.previousElementSibling;
-
-    if (/^H[1-6]$/.test(block.tagName)) {
-      document.execCommand('formatBlock', false, tag);
-      const el = (parent && findInsertedElement(parent, prevElement)) ?? (content.lastElementChild as HTMLElement);
-      if (align) {
-        el.setAttribute('align', align);
-      }
-      content.focus();
-      return el;
-    }
+    // Phần tử vừa được chèn (suy theo vị trí DOM), fallback về block cuối #content.
+    const resolveInserted = (): HTMLElement =>
+      (parent && findInsertedElement(parent, prevElement)) ?? (content.lastElementChild as HTMLElement);
 
     const alignAttr = align ? ` align="${escapeAttr(align)}"` : '';
     const innerHtml = block.innerHTML;
@@ -371,20 +371,77 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
 
     const range = document.createRange();
     range.selectNode(block);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    document.execCommand('insertHTML', false, `<${tag}${alignAttr}>${innerHtml}</${tag}>`);
+    range.deleteContents();
+    const template = document.createElement('template');
+    template.innerHTML = `<${tag}${alignAttr}>${innerHtml}</${tag}>`;
+    range.insertNode(template.content);
 
-    const el = (parent && findInsertedElement(parent, prevElement)) ?? (content.lastElementChild as HTMLElement);
+    const el = resolveInserted();
 
     if (startOffset !== null && endOffset !== null) {
       placeCaretAtOffsets(el, startOffset, endOffset);
     } else {
       placeCaretIn(el);
     }
+    content.focus();
     return el;
   }
 
-  return { restoreSelection, placeCaretIn, placeCaretAfter, placeCaretAtOffsets, replaceBlockTag };
+  /**
+   * Bọc `block` (p/heading top-level) vào một <blockquote> MỚI, giữ nguyên block
+   * bên trong — <blockquote><p>…</p></blockquote>, đúng shape canonical mà
+   * markdown-it dựng lại từ "> …" (HLR 22 Phase 2.6, thay cho
+   * execCommand('formatBlock','blockquote') vốn wrap qua ReplaceSelectionCommand
+   * và lồng quote khi bấm lặp — caller đã tự chặn lặp bằng closest('blockquote')).
+   * Cùng cơ chế direct-Range insert + khôi phục caret theo offset ký tự như
+   * replaceBlockTag ngay trên (nội dung text không đổi nên offset trong block cũ
+   * ánh xạ 1-1 vào blockquote mới); cùng đánh đổi no-native-undo đã chấp nhận.
+   */
+  function wrapInBlockquote(block: HTMLElement): HTMLElement {
+    const parent = block.parentElement;
+    const prevElement = block.previousElementSibling;
+
+    const selBefore = window.getSelection();
+    let startOffset: number | null = null;
+    let endOffset: number | null = null;
+    if (selBefore && selBefore.rangeCount > 0) {
+      const r = selBefore.getRangeAt(0);
+      startOffset = getOffsetWithin(block, r.startContainer, r.startOffset);
+      endOffset = selBefore.isCollapsed ? startOffset : getOffsetWithin(block, r.endContainer, r.endOffset);
+    }
+
+    const wrappedHtml = `<blockquote>${block.outerHTML}</blockquote>`;
+    const range = document.createRange();
+    range.selectNode(block);
+    range.deleteContents();
+    const template = document.createElement('template');
+    template.innerHTML = wrappedHtml;
+    range.insertNode(template.content);
+
+    const el =
+      ((parent ? findInsertedElement(parent, prevElement) : null) as HTMLElement | null) ??
+      (content.lastElementChild as HTMLElement);
+
+    // Empty source block (e.g. `>` input rule fired on an empty paragraph): the
+    // wrapped inner block has no text node for locateOffset to descend into, so
+    // an offset-based caret resolves to the <blockquote> boundary (blockquote,0)
+    // and the next keystroke escapes into #content beside the quote (leaking the
+    // typed text out of the blockquote). Place the caret INSIDE the inner block,
+    // adding a <br> placeholder first so the empty block is a valid caret host.
+    const inner = (el?.firstElementChild as HTMLElement | null) ?? el;
+    if (inner && (inner.textContent ?? '') === '') {
+      if (!inner.firstChild) {
+        inner.appendChild(document.createElement('br'));
+      }
+      placeCaretIn(inner);
+    } else if (startOffset !== null && endOffset !== null) {
+      placeCaretAtOffsets(el, startOffset, endOffset);
+    } else {
+      placeCaretIn(el);
+    }
+    content.focus();
+    return el;
+  }
+
+  return { restoreSelection, placeCaretIn, placeCaretAfter, placeCaretAtOffsets, replaceBlockTag, wrapInBlockquote };
 }

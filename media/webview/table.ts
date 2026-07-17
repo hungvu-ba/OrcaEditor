@@ -4,7 +4,7 @@
  * chuột vào bảng (gõ phím không tính).
  */
 import { fillSequenceColumn } from './pipeline';
-import { closestElement, showToast, svgIcon, type DomHelpers } from './dom-utils';
+import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
 import { isValidSiblingGap } from './sibling-move';
 
@@ -459,8 +459,7 @@ function deleteTable(cell: HTMLTableCellElement): void {
   if (!table) {
     return;
   }
-  const p = document.createElement('p');
-  p.appendChild(document.createElement('br'));
+  const p = emptyParagraph();
   table.replaceWith(p);
   ctx.dom.placeCaretIn(p);
   afterTableEdit();
@@ -472,10 +471,7 @@ export function navigateCells(cell: HTMLTableCellElement, dir: 1 | -1): void {
   if (!table) {
     return;
   }
-  const cells: HTMLTableCellElement[] = [];
-  for (const row of Array.from(table.rows)) {
-    cells.push(...Array.from(row.cells));
-  }
+  const cells = Array.from(table.rows).flatMap((row) => Array.from(row.cells));
   const next = cells.indexOf(cell) + dir;
   if (next < 0) {
     return;
@@ -574,20 +570,18 @@ export function insertTable(): void {
   if (enclosingCell && content.contains(enclosingCell)) {
     const outerTable = enclosingCell.closest('table');
     if (outerTable) {
-      const p = document.createElement('p');
-      p.appendChild(document.createElement('br'));
+      const p = emptyParagraph();
       outerTable.after(p);
       ctx.dom.placeCaretIn(p);
     }
   }
 
-  const rows: string[] = [];
-  rows.push('<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead><tbody>');
-  for (let r = 0; r < 2; r++) {
-    rows.push('<tr><td><br></td><td><br></td><td><br></td></tr>');
-  }
-  rows.push('</tbody></table><p><br></p>');
-  document.execCommand('insertHTML', false, rows.join(''));
+  const bodyRow = '<tr><td><br></td><td><br></td><td><br></td></tr>';
+  const html =
+    '<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead><tbody>' +
+    bodyRow.repeat(2) +
+    '</tbody></table><p><br></p>';
+  document.execCommand('insertHTML', false, html);
   // Đặt caret vào ô header đầu tiên của bảng vừa chèn (bảng gần caret nhất)
   const sel = window.getSelection();
   const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;

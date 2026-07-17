@@ -102,3 +102,56 @@ test('multi-line block (fenced code) falls back to caret at the block start', as
   expect(caret!.collapsed).toBe(true);
   expect(caret!.inPre).toBe(true); // caret sits inside the rebuilt <pre>, at its start
 });
+
+test('caret lands inside the edited bullet, not at the first bullet start', async ({ page }) => {
+  await openEditor(page, 'placeholder');
+  // A <ul> is one multi-line top-level block, so the exact-column path is skipped.
+  // Before the fix the caret collapsed to the start of the FIRST bullet ("Alpha").
+  // Undo result edits bullet #2; source col 5 = "- Bra" (2-char "- " marker + "Bra").
+  await sendUndoUpdate(page, '- Alpha\n- Bravo\n- Charlie', 2, 5);
+
+  const caret = await readCaret(page);
+  expect(caret).not.toBeNull();
+  expect(caret!.collapsed).toBe(true);
+  expect(caret!.anchorText).toBe('Bravo'); // inside bullet #2, NOT "Alpha"
+  expect(caret!.anchorOffset).toBe(3); // between "Bra" and "vo", marker "- " stripped
+});
+
+test('caret lands inside a nested bullet with leading indent stripped', async ({ page }) => {
+  await openEditor(page, 'placeholder');
+  // Nested bullet: source line "  - Bravo". Col 7 = 2 indent + "- " marker + "Bra".
+  // The deepest <li> containing the line wins; indent + marker are both stripped.
+  await sendUndoUpdate(page, '- Alpha\n  - Bravo\n- Charlie', 2, 7);
+
+  const caret = await readCaret(page);
+  expect(caret).not.toBeNull();
+  expect(caret!.collapsed).toBe(true);
+  expect(caret!.anchorText).toBe('Bravo'); // inside the nested bullet
+  expect(caret!.anchorOffset).toBe(3); // 7 − 2 indent − 2 marker
+});
+
+test('multi-line list item restores caret to the item, not into a nested bullet', async ({ page }) => {
+  await openEditor(page, 'placeholder');
+  // The outer bullet spans two source lines (its own line + a nested child), so its
+  // <li> is multi-line: the per-line column can't map cleanly onto the <li>'s joined
+  // text. Inline `code` also inflates the source column (13) past the rendered
+  // lead-text length (9). Editing the OUTER line must keep the caret in the OUTER
+  // (top-level) bullet — the caret must NOT overflow into the nested "Nested" item.
+  await sendUndoUpdate(page, '- `code` word\n  - Nested', 1, 13);
+
+  const info = await page.evaluate(() => {
+    const sel = window.getSelection();
+    const n = sel && sel.rangeCount > 0 ? sel.anchorNode : null;
+    const el = n && n.nodeType === 3 ? n.parentElement : (n as Element | null);
+    const li = el ? el.closest('li') : null;
+    let depth = 0;
+    for (let p = li ? li.parentElement : null; p; p = p.parentElement) {
+      if (p.tagName === 'LI') {
+        depth++;
+      }
+    }
+    return { hasLi: !!li, depth };
+  });
+  expect(info.hasLi).toBe(true);
+  expect(info.depth).toBe(0); // top-level bullet, NOT the nested "Nested" child
+});

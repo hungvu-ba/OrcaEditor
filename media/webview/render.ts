@@ -129,11 +129,16 @@ export class MarkdownRenderer {
     });
   }
 
-  /** Render markdown → HTML (kèm block front-matter nếu có). */
-  public render(markdown: string): RenderResult {
+  /** Xoá state "capture" (front-matter + math-block ranges) trước mỗi lần render()/computeTopLevelBlockRanges() — các rule markdown-it ghi lại vào đây trong lúc chạy. */
+  private resetCaptureState(): void {
     this.capturedFrontMatter = undefined;
     this.capturedFrontMatterRange = undefined;
     this.capturedMathBlockRanges = [];
+  }
+
+  /** Render markdown → HTML (kèm block front-matter nếu có). */
+  public render(markdown: string): RenderResult {
+    this.resetCaptureState();
     let html = this.md.render(markdown);
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
@@ -161,9 +166,7 @@ export class MarkdownRenderer {
    * tài liệu (xem refreshFromMarkdown trong gutter.ts).
    */
   public computeTopLevelBlockRanges(markdown: string): TopLevelBlockRange[] {
-    this.capturedFrontMatter = undefined;
-    this.capturedFrontMatterRange = undefined;
-    this.capturedMathBlockRanges = [];
+    this.resetCaptureState();
     const tokens = this.md.parse(markdown, {});
     const groups: TopLevelBlockRange[] = [];
     if (this.capturedFrontMatter !== undefined) {

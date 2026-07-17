@@ -27,8 +27,44 @@ export function prepareDomForSerialize(root: Element, doc: Document): void {
     comment.parentNode?.replaceChild(span, comment);
   }
   normalizeListDom(root);
+  dropEmptyNestedSublists(root);
   flattenSimpleTableCellLists(root, doc);
   normalizeNbsp(root);
+}
+
+/** Media/void content that makes a list item non-empty even with no text. */
+const NESTED_EMPTY_MEDIA_SELECTOR = 'img, input, video, audio, iframe, picture, svg, hr';
+
+/**
+ * Drop a NESTED sublist whose every <li> is empty (no text, no media — only a
+ * <br> caret placeholder or nothing). A truly-empty child bullet directly under
+ * a parent's text line has no faithful CommonMark serialization: with a `-`
+ * bullet marker it serializes as "parentText\n    -", and a lone `-` line under
+ * a paragraph is a SETEXT H2 underline — so re-parsing turns the parent's text
+ * into a heading (reported: "Undo khi indent ở TC2.2c… - dưới Alpha/Bravo bị
+ * nhận diện thành heading"). turndown already drops a nested sublist whose <li>
+ * has ZERO children (the whole all-blank <ul> is isBlank), but a <li><br></li>
+ * is "non-blank" to turndown (a <br> is a void element), so its sublist
+ * survives and emits the trap. This unifies the two paths: an all-blank nested
+ * sublist is transient editing state (a freshly Tab-indented empty item never
+ * typed into), not document content, so it is removed before serialize — same
+ * "blank line in a list is spacing, not content" stance as list-ops' computeToList.
+ *
+ * TOP-LEVEL empty items are left untouched (they serialize as a safe "-" bullet
+ * on their own line, not a setext underline, and must round-trip — see
+ * test/roundtrip/lists.ts). A nested sublist that mixes blank and non-blank
+ * items is also left untouched: its blank items are sibling bullets, not a
+ * setext trap.
+ */
+function dropEmptyNestedSublists(root: Element): void {
+  const isBlankItem = (li: Element): boolean =>
+    (li.textContent ?? '').trim() === '' && !li.querySelector(NESTED_EMPTY_MEDIA_SELECTOR);
+  for (const list of Array.from(root.querySelectorAll('ul ul, ul ol, ol ul, ol ol'))) {
+    const items = Array.from(list.children).filter((c) => c.nodeName === 'LI');
+    if (items.length > 0 && items.every(isBlankItem)) {
+      list.remove();
+    }
+  }
 }
 
 /**

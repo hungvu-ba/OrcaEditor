@@ -38,7 +38,8 @@ const DEFAULT_CONFIG: InitConfig = {
  * exercise a different (already-JS-guarded) code path than the real bug.
  */
 function bakedMarkup(readability: InitConfig['readability']): { bodyClasses: string; toolbarStyle: string } {
-  const stylingActive = readability.enabled || readability.zen;
+  // bug_General #1: reading styling gates on `enabled` only; Zen is independent.
+  const stylingActive = readability.enabled;
   const bodyClasses = [
     ...(stylingActive ? ['reading-mode'] : []),
     ...(readability.zen ? ['reading-zen'] : []),

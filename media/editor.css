@@ -1913,7 +1913,7 @@ body.reading-zen.md-line-numbers #toolbar {
 /* --- US-19.6: chrome (TOC + pop-up) phóng cỡ chữ theo preset ---
  * Đọc biến --reading-ui-font-size (định nghĩa per-preset ở markdown.css). Fallback
  * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
- * tắt đều giữ nguyên. Chỉ áp khi Reading Mode/Zen bật (body.reading-mode). Đây là
+ * tắt đều giữ nguyên. Chỉ áp khi Reading Mode bật (body.reading-mode). Đây là
  * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
 body.reading-mode .toc-item {
   font-size: var(--reading-ui-font-size, 13px);

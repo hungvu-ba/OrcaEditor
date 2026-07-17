@@ -133,7 +133,7 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       // Panel neo mép phải (right:0) → width = mép phải viewport trừ vị trí con trỏ.
       const width = clampWidth(window.innerWidth - ev.clientX);
       applyWidth(width);
-      updateActive();
+      scheduleUpdateActive();
     };
     const onUp = (ev: PointerEvent): void => {
       resizer.releasePointerCapture(ev.pointerId);
@@ -309,7 +309,8 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
     }
   }
 
-  function onScroll(): void {
+  /** Gom nhiều lần gọi trong cùng một frame thành một updateActive() (rAF) — dùng cho cả scroll và kéo resize panel (mỗi pointermove đọc getBoundingClientRect mọi heading, phải throttle). */
+  function scheduleUpdateActive(): void {
     if (!open || scrollScheduled) {
       return;
     }
@@ -318,6 +319,10 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       scrollScheduled = false;
       updateActive();
     });
+  }
+
+  function onScroll(): void {
+    scheduleUpdateActive();
   }
   window.addEventListener('scroll', onScroll, { passive: true });
   window.addEventListener('resize', () => {

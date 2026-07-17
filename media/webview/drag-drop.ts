@@ -326,17 +326,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // leave a selection behind — restore the caret explicitly (bug 0716 round 3), same
     // pattern as finishBlockMove's drag path, or the menu-triggered move drops focus
     // out of #content entirely (closeMenu already removed the clicked button from the DOM).
-    if (movedEl) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
-    }
+    deps.dom.placeCaretIn(movedEl);
     deps.lineGutter.refreshFromDom();
     deps.scheduleSync();
+    // Bug #1 (mở rộng): "Move up/Move down" từ menu dời block nhưng chuột đứng yên
+    // (không có mousemove đảm bảo sau click) — tay cầm position:fixed sẽ đứng lại ở
+    // vị trí cũ. refresh() ẩn/đặt lại toàn bộ handle, tự hiện lại khi di chuột.
+    refresh();
   }
 
   function addMenuItem(label: string, disabled: boolean, onClick: () => void): void {
@@ -1118,22 +1114,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (hoveredTableBlock !== menuTargetBlock) {
       setHighlightedTableBlock(null);
     }
-    document.removeEventListener('mousemove', onDocMouseMove);
-    document.removeEventListener('mouseup', onDocMouseUp);
-    document.removeEventListener('keydown', onDocKeyDown);
+    detachDragListeners();
   }
 
   function finishBlockMove(): void {
     const movedEl = performMove(dragSpan, dragBlocks, currentGap);
-    if (movedEl) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
-    }
+    deps.dom.placeCaretIn(movedEl);
   }
 
   /**
@@ -1169,13 +1155,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // moving the caret away from where the user actually dropped.
     normalizeListDom(content);
     if (movedEl && content.contains(movedEl)) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
+      deps.dom.placeCaretIn(movedEl);
     }
   }
 
@@ -1249,6 +1229,19 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   }
 
+  /** Bộ 3 listener document (mousemove/mouseup/keydown) dùng chung cho cả block-drag và li-drag — gắn khi arm, gỡ khi kết thúc. */
+  function attachDragListeners(): void {
+    document.addEventListener('mousemove', onDocMouseMove);
+    document.addEventListener('mouseup', onDocMouseUp);
+    document.addEventListener('keydown', onDocKeyDown);
+  }
+
+  function detachDragListeners(): void {
+    document.removeEventListener('mousemove', onDocMouseMove);
+    document.removeEventListener('mouseup', onDocMouseUp);
+    document.removeEventListener('keydown', onDocKeyDown);
+  }
+
   function armDrag(block: HTMLElement, clientX: number, clientY: number): void {
     state = 'armed';
     kind = 'block';
@@ -1258,9 +1251,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     dragSpan = computeHeadingSectionSpan(block, dragBlocks);
     armedBlock = block;
     block.classList.add('dd-hover-outline');
-    document.addEventListener('mousemove', onDocMouseMove);
-    document.addEventListener('mouseup', onDocMouseUp);
-    document.addEventListener('keydown', onDocKeyDown);
+    attachDragListeners();
   }
 
   function armLiDrag(li: HTMLLIElement, clientX: number, clientY: number): void {
@@ -1280,9 +1271,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liOrigDepth = liDepth(li);
     currentLiDepth = liOrigDepth;
     li.classList.add('dd-hover-outline');
-    document.addEventListener('mousemove', onDocMouseMove);
-    document.addEventListener('mouseup', onDocMouseUp);
-    document.addEventListener('keydown', onDocKeyDown);
+    attachDragListeners();
   }
 
   handleEl.addEventListener('mousedown', (e) => {
@@ -1291,6 +1280,37 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     e.preventDefault();
     armDrag(hoveredBlock, e.clientX, e.clientY);
+  });
+
+  // Bug #3: hovering a handle GLYPH previews its drag target with the same
+  // `.dd-hover-outline` an actual drag/menu uses, so the user sees exactly which
+  // block will move before pressing. This is NOT a regression of bug 0716 #6 —
+  // that removed the outline on plain CONTENT hover (it flickered while merely
+  // reading a block); here the outline shows only while the cursor is on the
+  // small handle itself. Skip while a drag is in flight (armDrag and the drag
+  // path own the outline then) or while a menu is open (it keeps its own target
+  // outlined until it closes — bug 0716 #6 click-to-menu path).
+  handleEl.addEventListener('mouseenter', () => {
+    if (state !== 'idle') {
+      return;
+    }
+    hoveredBlock?.classList.add('dd-hover-outline');
+  });
+  handleEl.addEventListener('mouseleave', () => {
+    if (state !== 'idle' || isMenuOpen()) {
+      return;
+    }
+    hoveredBlock?.classList.remove('dd-hover-outline');
+  });
+
+  // Bug #3: same hover preview for the li handle. Adding is a plain mouseenter;
+  // removal is folded into the existing `mouseleave` below (which already runs
+  // the leftward climb), so both effects share one exit handler.
+  liHandleEl.addEventListener('mouseenter', () => {
+    if (state !== 'idle') {
+      return;
+    }
+    hoveredLi?.classList.add('dd-hover-outline');
   });
 
   liHandleEl.addEventListener('mousedown', (e) => {
@@ -1333,6 +1353,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
+    // Bug #3: leaving the glyph drops its hover preview outline. The climb below
+    // only re-targets which handle shows (a bare gutter band is not a glyph, so it
+    // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
+    // return-to-#content path — so clear it unconditionally here.
+    hoveredLi?.classList.remove('dd-hover-outline');
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (
@@ -1356,6 +1381,22 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     e.preventDefault();
     armDrag(hoveredTableBlock, e.clientX, e.clientY);
+  });
+
+  // Bug #3: same hover preview for the whole-table handle. A table click opens a
+  // menu too (armDrag sets armedBlock), so guard `mouseleave` with isMenuOpen()
+  // exactly like the block handle.
+  tableHandleEl.addEventListener('mouseenter', () => {
+    if (state !== 'idle') {
+      return;
+    }
+    hoveredTableBlock?.classList.add('dd-hover-outline');
+  });
+  tableHandleEl.addEventListener('mouseleave', () => {
+    if (state !== 'idle' || isMenuOpen()) {
+      return;
+    }
+    hoveredTableBlock?.classList.remove('dd-hover-outline');
   });
 
   function refresh(): void {

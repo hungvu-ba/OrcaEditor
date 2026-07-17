@@ -520,8 +520,8 @@ ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
 /* ===========================================================================
  * Reading Mode / Readability (HLR mục 19)
  * Chỉ CSS class/var trên <body>/#content bật/tắt (readability.ts) — KHÔNG đụng
- * nội dung `.md`. "Reading styling có hiệu lực" = body.reading-mode (đặt khi
- * Reading Mode HOẶC Zen bật).
+ * nội dung `.md`. "Reading styling có hiệu lực" = body.reading-mode (đặt CHỈ khi
+ * Reading Mode bật; bug_General #1: Zen không còn kéo theo — xem readability.ts).
  * ==========================================================================*/
 
 /* --- US-19.2 Measure/Width engine ---

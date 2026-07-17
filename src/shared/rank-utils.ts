@@ -126,5 +126,10 @@ export function rankFileGroups(
   totalCandidateFiles: number
 ): CrossFileMatchGroup[] {
   const idfValue = idf(totalCandidateFiles, groups.length);
-  return [...groups].sort((a, b) => fileScore(b, keyword, idfValue) - fileScore(a, keyword, idfValue));
+  // Tính điểm MỘT lần mỗi group rồi mới sort — trước đây fileScore (bản thân là
+  // một reduce trên mọi match) bị gọi lại ở từng lần so sánh của .sort(), thành
+  // O(n log n) lượt reduce thay vì O(n).
+  const scored = groups.map((group) => ({ group, score: fileScore(group, keyword, idfValue) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((entry) => entry.group);
 }

@@ -31,6 +31,8 @@ export interface ExternalDropDeps {
   pasteImage: PasteImageController;
   /** Renders markdown → HTML and inserts it at the caret (main.ts's insertMarkdownAtCaret) — reused so a dropped-file link renders immediately as a clickable <a>, not literal `[text](url)` characters. */
   insertMarkdown: (text: string) => void;
+  /** dom-utils' canonical restoreSelection (from createDomHelpers) — reused instead of re-implementing the removeAllRanges/addRange/focus tail locally. */
+  restoreSelection: (range: Range | undefined) => void;
 }
 
 export interface ExternalDropController {
@@ -127,12 +129,7 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
   }
 
   function insertLinkAt(range: Range | undefined, name: string, relPath: string): void {
-    if (range) {
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-      content.focus();
-    }
+    deps.restoreSelection(range);
     deps.insertMarkdown(`[${name}](${encodeLinkPath(relPath)})`);
   }
 

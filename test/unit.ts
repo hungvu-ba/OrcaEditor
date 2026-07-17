@@ -4,8 +4,13 @@
  * classifyLink (scheme allowlist) và một kiểm tra type-level của message
  * contract (src/shared/messages.ts). (finding C6)
  *
+ * Cũng gồm security tripwire đọc src/provider.ts dạng text (xem cuối file) —
+ * provider.ts import 'vscode' nên không import trực tiếp được ở đây.
+ *
  * Chạy: npm run test:unit
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
@@ -407,6 +412,69 @@ eq('style: "_" in link URL not em evidence', detectBlockStyle('[doc](https://ex.
 eq('style: intraword "_" after non-ASCII letter ignored', detectBlockStyle('chữ_ký here and *em*', 'paragraph').em, null);
 eq('style: escaped backslash before "_" → em "_"', detectBlockStyle('C:\\\\_dir_ here', 'paragraph').em, '_');
 eq('style: backtick-run span strips fully → em null', detectBlockStyle('Use ``x `_foo` y`` here', 'paragraph').em, null);
+
+// ---------------------------------------------------------------------------
+// Security tripwires (src/provider.ts) — khoá các bất biến từ security review
+// 2026-07-17 (xem Plan/Optimization Notes.md § Security hardening). Đọc source
+// dạng text vì provider.ts import 'vscode', không mock được trong test này.
+// ---------------------------------------------------------------------------
+
+const providerSrc = fs.readFileSync(path.join(process.cwd(), 'src/provider.ts'), 'utf8');
+
+// CSP lock — mọi nới lỏng directive phải sửa test này một cách CÓ CHỦ ĐÍCH,
+// không thể vô tình lọt qua.
+const REQUIRED_CSP_DIRECTIVES = [
+  "default-src 'none'",
+  "script-src 'nonce-${nonce}'",
+  "base-uri ${webview.cspSource}",
+  "form-action 'none'",
+  "frame-src 'none'",
+];
+for (const directive of REQUIRED_CSP_DIRECTIVES) {
+  check(`security: CSP giữ directive "${directive}"`, providerSrc.includes(directive));
+}
+check(
+  'security: img-src KHÔNG có "https:" (chặn ảnh remote/exfil qua .md độc hại)',
+  /img-src[^\n]*data:/.test(providerSrc) && !/img-src[^\n]*https:/.test(providerSrc)
+);
+check(
+  'security: script-src KHÔNG có "unsafe-inline" (chặn inline script tiêm từ .md)',
+  !/script-src[^\n]*unsafe-inline/.test(providerSrc)
+);
+
+/**
+ * Bug đã biết, CHƯA fix — track ở Plan/Optimization Notes.md § Security
+ * hardening (S-1/S-2). PASS ở dạng "đã ghi nhận còn lỗ hổng" (không chặn
+ * npm run test); nếu code đổi khiến điều kiện bỗng thành true mà không ai chủ
+ * động gỡ xfail() — suite FAIL, buộc xác nhận fix thật rồi đổi sang check().
+ */
+function xfail(name: string, fixed: boolean, tracking: string): void {
+  if (!fixed) {
+    pass++;
+    console.log(`XFAIL ${name} (chưa fix — ${tracking})`);
+  } else {
+    fail++;
+    console.log(`FAIL  ${name}`);
+    failures.push(
+      `--- ${name} ---\n  Điều kiện đã true (có vẻ đã fix) nhưng còn đánh dấu xfail().\n  Gỡ wrapper xfail() và đổi sang check() thường, cập nhật status trong ${tracking}.`
+    );
+  }
+}
+
+const readingModeCaseBody =
+  providerSrc.match(/case 'readingModeChanged': \{([\s\S]*?)\n        \}/)?.[1] ?? '';
+xfail(
+  'security S-1: readingModeChanged whitelist preset/palette trước khi lưu',
+  /READING_PRESETS/.test(readingModeCaseBody) && /READING_PALETTES/.test(readingModeCaseBody),
+  'Plan/Optimization Notes.md § Security hardening S-1'
+);
+
+const openResultBody = providerSrc.match(/openCrossFileSearchResult\([\s\S]*?\n  \}/)?.[0] ?? '';
+xfail(
+  'security S-2: crossFileSearch:openResult gate qua isInsideAllowedRoots trước khi mở',
+  /isInsideAllowedRoots/.test(openResultBody),
+  'Plan/Optimization Notes.md § Security hardening S-2'
+);
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

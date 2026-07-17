@@ -754,7 +754,12 @@ test('dragging the block handle past the threshold still reorders the block', as
   expect(md.indexOf('Beta paragraph.')).toBeLessThan(md.indexOf('Alpha paragraph.'));
 });
 
-test('plain hover never adds .dd-hover-outline anywhere, mousedown on a handle does', async ({ page }) => {
+test('hovering block CONTENT never adds .dd-hover-outline (bug 0716 #6); mousedown on a handle does', async ({
+  page,
+}) => {
+  // Bug #3 later added an outline on hovering the handle GLYPH itself — but hovering the block's
+  // own CONTENT (what this test does: it moves to each element's center, not its handle) must
+  // still add nothing, so the outline never flickers while merely reading a block.
   await openEditor(page, DOC);
 
   const alpha = page.locator('p', { hasText: 'Alpha paragraph.' });
@@ -792,6 +797,88 @@ test('plain hover never adds .dd-hover-outline anywhere, mousedown on a handle d
   await page.keyboard.press('Escape');
   await expect(page.locator('.dd-menu-popup:visible')).toBeHidden();
   expect(await classListOf(alpha)).not.toContain('dd-hover-outline');
+});
+
+test('hovering the block handle glyph outlines its block, and moving off the glyph clears it (bug #3)', async ({
+  page,
+}) => {
+  await openEditor(page, DOC);
+  const alpha = page.locator('p', { hasText: 'Alpha paragraph.' });
+
+  // Hover the CONTENT first: the handle appears but the block is not outlined yet (bug 0716 #6).
+  await hoverCenter(page, alpha);
+  const handle = page.locator(BLOCK_HANDLE_SELECTOR);
+  await expect(handle).toHaveCSS('display', 'flex');
+  expect(await classListOf(alpha)).not.toContain('dd-hover-outline');
+
+  // Move onto the handle glyph itself — now the whole block is outlined so the user sees the
+  // drag target. No mousedown involved.
+  const box = await handle.boundingBox();
+  if (!box) {
+    throw new Error('block handle has no bounding box');
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(alpha).toHaveClass(/dd-hover-outline/);
+
+  // Move back onto the content (off the glyph): the preview outline is dropped again.
+  await hoverCenter(page, alpha);
+  await expect(alpha).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('hovering the li handle glyph outlines its item, and moving off the glyph clears it (bug #3)', async ({
+  page,
+}) => {
+  await openEditor(page, DOC);
+  const sibling = page.locator('li', { hasText: 'Sibling item' });
+
+  await hoverCenter(page, sibling);
+  const liHandle = page.locator('.dd-li-handle');
+  await expect(liHandle).toHaveCSS('display', 'flex');
+  expect(await classListOf(sibling)).not.toContain('dd-hover-outline');
+
+  const box = await liHandle.boundingBox();
+  if (!box) {
+    throw new Error('li handle has no bounding box');
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(sibling).toHaveClass(/dd-hover-outline/);
+
+  // Back onto the item's own content — outline cleared (the li mouseleave handles this even
+  // when the exit re-enters #content).
+  await hoverCenter(page, sibling);
+  await expect(sibling).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('hovering the whole-table handle glyph outlines the table, and moving off clears it (bug #3)', async ({
+  page,
+}) => {
+  await openEditor(page, DOC);
+  const cell = page.locator('td', { hasText: 'a1' });
+  const table = page.locator('table');
+  const tableBox = await table.boundingBox();
+  if (!tableBox) {
+    throw new Error('table has no bounding box');
+  }
+
+  // The table-level handle only shows in the band flush above-left of the table's own top-left
+  // corner (not on a plain cell hover, which shows the row/column handles). Move into that
+  // corner's overlap zone to surface it — the block is not outlined there yet (content hover).
+  await page.mouse.move(tableBox.x + 2, tableBox.y + 2);
+  const tableHandle = page.locator('.dd-table-handle');
+  await expect(tableHandle).toHaveCSS('display', 'flex');
+  expect(await classListOf(table)).not.toContain('dd-hover-outline');
+
+  // Move onto the handle glyph itself — the whole table is outlined.
+  const box = await tableHandle.boundingBox();
+  if (!box) {
+    throw new Error('table handle has no bounding box');
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(table).toHaveClass(/dd-hover-outline/);
+
+  // Move onto the cell's own center (off the corner band) — outline cleared.
+  await hoverCenter(page, cell);
+  await expect(table).not.toHaveClass(/dd-hover-outline/);
 });
 
 test('mousedown on the li, row, and column handles adds their own outline classes', async ({ page }) => {
@@ -860,4 +947,116 @@ test('hovering a table cell shows both the row handle and the column handle', as
 
   await expect(page.locator('.dd-row-handle')).toHaveCSS('display', 'flex');
   await expect(page.locator('.dd-col-handle')).toHaveCSS('display', 'flex');
+});
+
+/** Place a collapsed caret inside the <li> whose OWN direct text node includes `itemText`
+ *  (an ancestor <li>'s textContent also contains a nested item's text, so match on firstChild). */
+function placeCaretInLi(el: HTMLElement, itemText: string): void {
+  const li = [...el.querySelectorAll('li')].find((l) => {
+    const first = l.firstChild;
+    return first?.nodeType === Node.TEXT_NODE && (first.textContent ?? '').includes(itemText);
+  })!;
+  const r = document.createRange();
+  r.setStart(li.firstChild!, 1);
+  r.collapse(true);
+  const s = window.getSelection()!;
+  s.removeAllRanges();
+  s.addRange(r);
+}
+
+test('Tab (indent) refreshes the drag handle so it no longer stays frozen over the now-moved <li> (bug 0717 round 3, #1)', async ({
+  page,
+}) => {
+  // The li handle is a position:fixed element whose coordinates are only recomputed on
+  // mousemove/scroll. Tab physically moves the <li> it points at, so without a refresh() the
+  // handle stays frozen over the OLD screen position until the mouse next moves. The Tab handler
+  // must call dragDrop.refresh() (mirroring renderDocument) to drop the now-stale handle.
+  await openEditor(page, `# Heading\n\n- Apple\n- Banana\n- Cherry\n`);
+  const content = page.locator('#content');
+  const banana = page.locator('li', { hasText: 'Banana' });
+
+  // Arm Banana's own li handle by hovering it (arms the handle, leaves the caret alone) ...
+  await hoverCenter(page, banana);
+  const liHandle = page.locator('.dd-li-handle');
+  await expect(liHandle).toHaveCSS('display', 'flex');
+  // ... then drop the caret inside it and indent with NO subsequent mouse movement.
+  await content.evaluate(placeCaretInLi, 'Banana');
+  await content.press('Tab');
+
+  // The op really ran (Banana nested under Apple) AND the stale handle was refreshed away.
+  expect(await content.evaluate((el) => !!el.querySelector('li > ul'))).toBe(true);
+  await expect(liHandle).toHaveCSS('display', 'none');
+});
+
+test('Shift+Tab (outdent) refreshes the drag handle so it no longer stays frozen over the now-moved <li> (bug 0717 round 3, #1)', async ({
+  page,
+}) => {
+  await openEditor(page, `# Heading\n\n- Apple\n  - Banana\n- Cherry\n`);
+  const content = page.locator('#content');
+  const banana = page.locator('li', { hasText: 'Banana' }).last();
+
+  await hoverCenter(page, banana);
+  const liHandle = page.locator('.dd-li-handle');
+  await expect(liHandle).toHaveCSS('display', 'flex');
+  await content.evaluate(placeCaretInLi, 'Banana');
+  await content.press('Shift+Tab');
+
+  // The op really ran (Banana is no longer nested) AND the stale handle was refreshed away.
+  expect(await content.evaluate((el) => !!el.querySelector('ul ul'))).toBe(false);
+  await expect(liHandle).toHaveCSS('display', 'none');
+});
+
+test('typing (an edit that can reflow blocks) hides the armed handle until the mouse next moves (bug 0717 round 3, #1 extended)', async ({
+  page,
+}) => {
+  // The handle is a mouse-hover affordance; an edit can shift/grow the block under it, leaving the
+  // position:fixed handle frozen at the old spot. The input listener calls dragDrop.refresh() so
+  // the handle is dropped while typing (keyboard, mouse parked) and re-armed on the next mousemove.
+  await openEditor(page, `# Heading\n\nAlpha paragraph.\n`);
+  const content = page.locator('#content');
+  const alpha = page.locator('p', { hasText: 'Alpha paragraph.' });
+
+  await hoverCenter(page, alpha);
+  const blockHandle = page.locator(BLOCK_HANDLE_SELECTOR);
+  await expect(blockHandle).toHaveCSS('display', 'flex');
+
+  // Drop the caret in the paragraph and type a character with NO mouse movement.
+  await content.evaluate((el) => {
+    const p = [...el.querySelectorAll('p')].find((n) => (n.textContent ?? '').includes('Alpha'))!;
+    const r = document.createRange();
+    r.setStart(p.firstChild!, 1);
+    r.collapse(true);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await content.press('x');
+
+  await expect(blockHandle).toHaveCSS('display', 'none');
+});
+
+test('"Move up/Move down" from the handle menu refreshes the drag handle so it does not stay frozen over the old position (bug 0717 round 3, #1 extended)', async ({
+  page,
+}) => {
+  await openEditor(page, `# Heading\n\nAlpha paragraph.\n\nBeta paragraph.\n`);
+  await hoverCenter(page, page.locator('p', { hasText: 'Alpha paragraph.' }));
+
+  const blockHandle = page.locator(BLOCK_HANDLE_SELECTOR);
+  await expect(blockHandle).toHaveCSS('display', 'flex');
+  const box = await blockHandle.boundingBox();
+  if (!box) {
+    throw new Error('block handle has no bounding box');
+  }
+  // Open the menu (click = mousedown+up, no move past threshold), then click "Move down".
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  const popup = page.locator('.dd-menu-popup:visible');
+  await expect(popup).toBeVisible();
+  await popup.locator('.dd-menu-item', { hasText: 'Move down' }).click();
+
+  // The move really ran AND the now-stale handle was refreshed away (no mousemove back over content).
+  const md = await waitForEdit(page);
+  expect(md.indexOf('Beta paragraph.')).toBeLessThan(md.indexOf('Alpha paragraph.'));
+  await expect(blockHandle).toHaveCSS('display', 'none');
 });
