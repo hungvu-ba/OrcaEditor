@@ -92,7 +92,7 @@ const taskListCases: DomCase[] = [
     html:
       '<ul class="contains-task-list"><li class="task-list-item">' +
       '<input type="checkbox" class="task-list-item-checkbox">việc chưa xong</li></ul>',
-    expect: (md) => /^-\s+\[ \]\s*việc chưa xong\s*$/.test(md.trim()),
+    expect: (md) => /^\*\s+\[ \]\s*việc chưa xong\s*$/.test(md.trim()),
     looseSpacing: true,
   },
   {
@@ -100,7 +100,7 @@ const taskListCases: DomCase[] = [
     html:
       '<ul class="contains-task-list"><li class="task-list-item">' +
       '<input type="checkbox" class="task-list-item-checkbox" checked="checked">việc đã xong</li></ul>',
-    expect: (md) => /^-\s+\[x\]\s*việc đã xong\s*$/i.test(md.trim()),
+    expect: (md) => /^\*\s+\[x\]\s*việc đã xong\s*$/i.test(md.trim()),
     looseSpacing: true,
   },
 ];
@@ -116,7 +116,7 @@ const bulletCases: DomCase[] = [
   {
     name: 'bullet: "-", "*", "+" + space đều hội tụ về <ul><li>...</li></ul> giống hệt nhau',
     html: '<ul><li>gạch đầu dòng</li></ul>',
-    expect: (md) => /^-\s+gạch đầu dòng\s*$/.test(md.trim()),
+    expect: (md) => /^\*\s+gạch đầu dòng\s*$/.test(md.trim()),
   },
 ];
 
@@ -244,8 +244,8 @@ const taskEnterSplitCases: DomCase[] = [
         .filter((l) => l.trim().length > 0);
       return (
         lines.length === 2 &&
-        /^-\s+\[ \]\s*phần một và\s*$/.test(lines[0]) &&
-        /^-\s+\[ \]\s*phần hai\s*$/.test(lines[1])
+        /^\*\s+\[ \]\s*phần một và\s*$/.test(lines[0]) &&
+        /^\*\s+\[ \]\s*phần hai\s*$/.test(lines[1])
       );
     },
     looseSpacing: true,

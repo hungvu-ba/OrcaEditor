@@ -223,3 +223,6 @@
 | 0.7.0 | 2026-07-16 | Refactor: "Copy @file for Claude" toolbar button generalized to a plain clipboard copy, removing Claude Code-specific tab detection and auto-insert. |
 | 0.7.0 | 2026-07-16 | Test: added Phase 0 safety net (HLR 22, execCommand verb replacement) — characterization + RED clean-DOM-target + delete/cut hardening + roundtrip tests; no production code changed yet. |
 | 0.7.0 | 2026-07-16 | Refactor: added shared list-ops primitive (computeIndent/computeOutdent/computeToList/commitListOp, HLR 22 Phase 1) plus its tests; not wired to any call site yet. |
+| 0.7.0 | 2026-07-17 | Feature (US-18.4a): headings now keep their original ATX (#) vs. Setext (===/---) style on save instead of always normalizing to ATX. |
+| 0.7.0 | 2026-07-17 | Feature (US-18.4b): bullets, code blocks, em/strong, HRs now keep their original per-block syntax on save; new defaults `*` bullets and `\` hard breaks. |
+| 0.8.0 | 2026-07-17 | Release: bumped version to 0.8.0, consolidating heading/bullet/code-block/em-strong/HR style preservation (US-18.4a/18.4b) into one [0.8.0] entry in CHANGELOG.md. |

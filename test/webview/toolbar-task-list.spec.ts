@@ -36,7 +36,7 @@ test('Task List button on one paragraph, then on a separate later paragraph, doe
   await page.locator('#fmt-task').click();
   const mdAfterFirstClick = await waitForEdit(page);
 
-  expect(mdAfterFirstClick).toMatch(/^-\s+\[ \]\s+Paragraph A$/m);
+  expect(mdAfterFirstClick).toMatch(/^\*\s+\[ \]\s+Paragraph A$/m);
   expect(mdAfterFirstClick).toMatch(/^Paragraph B$/m);
   expect(mdAfterFirstClick).toMatch(/^Paragraph C$/m);
   // Only one checkbox token so far — B/C must still be plain paragraphs.
@@ -51,11 +51,11 @@ test('Task List button on one paragraph, then on a separate later paragraph, doe
 
   // Paragraph A: still exactly one checkbox (not stacked/duplicated by the
   // second, unrelated click).
-  expect(mdAfterSecondClick).toMatch(/^-\s+\[ \]\s+Paragraph A$/m);
+  expect(mdAfterSecondClick).toMatch(/^\*\s+\[ \]\s+Paragraph A$/m);
   // Paragraph B: untouched — no checkbox ever added to it.
   expect(mdAfterSecondClick).toMatch(/^Paragraph B$/m);
   // Paragraph C: got exactly one checkbox from this click.
-  expect(mdAfterSecondClick).toMatch(/^-\s+\[ \]\s+Paragraph C$/m);
+  expect(mdAfterSecondClick).toMatch(/^\*\s+\[ \]\s+Paragraph C$/m);
   // Exactly two checkbox tokens total in the whole document (A and C only).
   expect((mdAfterSecondClick.match(/\[ \]/g) ?? []).length).toBe(2);
 });
@@ -101,8 +101,8 @@ test('Task List button on a selection spanning a plain paragraph into an already
   await page.locator('#fmt-task').click();
   const md = await waitForEdit(page);
 
-  expect(md).toMatch(/^-\s+\[ \]\s+Paragraph A$/m);
-  expect(md).toMatch(/^-\s+\[ \]\s+Paragraph B$/m);
+  expect(md).toMatch(/^\*\s+\[ \]\s+Paragraph A$/m);
+  expect(md).toMatch(/^\*\s+\[ \]\s+Paragraph B$/m);
   // Exactly two checkbox tokens total — B must not have picked up a second
   // one from the sweep re-processing its already-existing <li>.
   expect((md.match(/\[ \]/g) ?? []).length).toBe(2);

@@ -40,17 +40,17 @@ const domCases: DomCase[] = [
     expect: (md) => /^1\.\s+First$/m.test(md) && /^2\.\s+Second$/m.test(md),
   },
   {
-    name: 'dom méo (outdent li>li) ngoài bảng → hai bullet riêng, không "- A- B"',
+    name: 'dom méo (outdent li>li) ngoài bảng → hai bullet riêng, không "* A* B"',
     html: '<ul><li>A<li>B</li></li></ul>',
     expect: (md) => {
-      const bullets = md.split('\n').filter((l) => /^\s*-\s+\S/.test(l));
+      const bullets = md.split('\n').filter((l) => /^\s*\*\s+\S/.test(l));
       return bullets.length === 2 && /A/.test(bullets[0]) && /B/.test(bullets[1]);
     },
   },
   {
     name: 'dom méo (outdent 2 mục) ngoài bảng → A,B ngang cấp, C thụt dưới B',
     html: '<ul><li>A<li>B</li><ul><li>C</li></ul></li></ul>',
-    expect: (md) => /^-\s+B/m.test(md) && /^\s+-\s+C/m.test(md),
+    expect: (md) => /^\*\s+B/m.test(md) && /^\s+\*\s+C/m.test(md),
   },
   // US-17.5 (M3): list item drag reorder + drag-triggered indent/outdent. Drag-
   // triggered outdent produces the exact same DOM shape as the Tab-triggered
@@ -74,13 +74,13 @@ const domCases: DomCase[] = [
       const bravo = md.indexOf('Bravo');
       const child = md.indexOf('Bravo child');
       const alpha = md.indexOf('Alpha');
-      return bravo >= 0 && bravo < child && child < alpha && /^\s+-\s+Bravo child/m.test(md);
+      return bravo >= 0 && bravo < child && child < alpha && /^\s+\*\s+Bravo child/m.test(md);
     },
   },
   {
     name: 'list item drag indent (US-17.5) — execCommand(\'indent\') DOM shape (list nested directly in list, Chromium) normalizes to a proper nested bullet',
     html: '<ul><li>Alpha</li><ul><li>Bravo</li></ul></ul>',
-    expect: (md) => /^-\s+Alpha/m.test(md) && /^\s+-\s+Bravo/m.test(md),
+    expect: (md) => /^\*\s+Alpha/m.test(md) && /^\s+\*\s+Bravo/m.test(md),
   },
   {
     name: 'ordered list renumbers by DOM position after drag reorder (US-17.5) — no stored index needed',
@@ -108,10 +108,10 @@ const domCases: DomCase[] = [
         alpha < bravo &&
         bravo < charlie &&
         charlie < delta &&
-        /^-\s+Alpha/m.test(md) &&
-        /^-\s+Bravo/m.test(md) &&
-        /^\s+-\s+Charlie/m.test(md) &&
-        /^\s+-\s+Delta/m.test(md)
+        /^\*\s+Alpha/m.test(md) &&
+        /^\*\s+Bravo/m.test(md) &&
+        /^\s+\*\s+Charlie/m.test(md) &&
+        /^\s+\*\s+Delta/m.test(md)
       );
     },
   },
@@ -128,8 +128,8 @@ const domCases: DomCase[] = [
         bravo >= 0 &&
         bravo < parent &&
         parent < child &&
-        /^-\s+Parent/m.test(md) &&
-        /^\s+-\s+Child/m.test(md)
+        /^\*\s+Parent/m.test(md) &&
+        /^\s+\*\s+Child/m.test(md)
       );
     },
   },
