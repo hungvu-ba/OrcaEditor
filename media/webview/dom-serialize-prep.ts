@@ -82,6 +82,21 @@ function dropEmptyNestedSublists(root: Element): void {
  * từ bước xoá gốc, không hiểu ngữ nghĩa "list phân cấp" để phục hồi đúng cây.
  * Chuẩn hóa về cây lồng nhau hợp lệ, khớp đúng mức thụt lề người dùng nhìn thấy,
  * trước khi phát hiện độ phức tạp và flatten.
+ *
+ * HLR 22 Phase 3 (guarded patch-removal) audit outcome — Rules A/B are NOT dead
+ * after the Phase 2 verb replacement and MUST stay. The primary indent/outdent
+ * and bullet/number toolbar paths now build clean `li > ul` via the list-ops
+ * primitive, but the narrow execCommand fallbacks intentionally kept for the
+ * uncharacterized cases still emit these malformed shapes on the live DOM and
+ * reach this normalizer through the serialize clone:
+ *  - Rule B `ul>ul` / Rule A `li>li`: `execCommand('indent' | 'outdent')` in the
+ *    main.ts Tab handler (non-collapsed selection, or top-level/first `<li>` where
+ *    computeIndent/computeOutdent return null).
+ *  - Rule B `ul>ul`: `execCommand('insert{Un}orderedList')` in toolbar
+ *    setBulletList/setNumberedList/toggleTaskItem (nested-sublist target → plan null).
+ * Rule C additionally has delete/cut/undo as its own independent source (that path
+ * self-heals live via fixOrphanNestedListItems, which runs Rule C only). Do not
+ * delete any rule while those execCommand fallbacks exist.
  */
 export function normalizeListDom(root: Element): void {
   const isList = (n: Node | null): boolean => !!n && (n.nodeName === 'UL' || n.nodeName === 'OL');
