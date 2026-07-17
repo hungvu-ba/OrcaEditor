@@ -27,12 +27,12 @@ const domCases: DomCase[] = [
   {
     name: 'dom méo (insertUnorderedList: <ul> lồng trong <p> còn sót, nhiều đoạn) → 2 bullet đúng, không mất dòng',
     html: '<p><ul><li>First</li><li>Second</li></ul></p>',
-    expect: (md) => /^-\s+First$/m.test(md) && /^-\s+Second$/m.test(md),
+    expect: (md) => /^\*\s+First$/m.test(md) && /^\*\s+Second$/m.test(md),
   },
   {
     name: 'dom méo (insertUnorderedList: <ul> lồng trong <p> còn sót, 1 đoạn) → 1 bullet đúng',
     html: '<p><ul><li>Hello world</li></ul></p>',
-    expect: (md) => /^-\s+Hello world$/m.test(md),
+    expect: (md) => /^\*\s+Hello world$/m.test(md),
   },
   {
     name: 'dom méo (insertOrderedList từ <p> thường, không phải convert ul->ol: <ol> lồng trong <p> còn sót) → đánh số đúng',
