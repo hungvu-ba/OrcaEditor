@@ -16,18 +16,28 @@ import {
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
+import {
+  HEADING_STYLE_ATTR,
+  BULLET_STYLE_ATTR,
+  CODE_STYLE_ATTR,
+  EM_STYLE_ATTR,
+  STRONG_STYLE_ATTR,
+  HR_STYLE_ATTR,
+} from './block-style';
 
 export function createTurndown(): TurndownService {
   const td = new TurndownService({
     headingStyle: 'atx',
     hr: '---',
-    bulletListMarker: '-',
+    // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
+    // '*' bullets and backslash hard breaks — see US-18.4b.
+    bulletListMarker: '*',
     codeBlockStyle: 'fenced',
     fence: '```',
     emDelimiter: '*',
     strongDelimiter: '**',
     linkStyle: 'inlined',
-    br: '  ',
+    br: '\\',
     // Thẻ không nhận diện được → giữ nguyên outerHTML thay vì bóc mất thẻ
     // (div, custom element...). Riêng SPAN là rác contentEditable → chỉ lấy nội dung.
     defaultReplacement: (content, node) => {
@@ -70,7 +80,7 @@ export function createTurndown(): TurndownService {
   td.addRule('complexTableAsHtml', {
     filter: (node) =>
       node.nodeName === 'TABLE' && tableNeedsHtmlSerialization(node as unknown as Element),
-    replacement: (_content, node) => `\n\n${collapseBlankLines((node as HTMLElement).outerHTML)}\n\n`,
+    replacement: (_content, node) => `\n\n${safeOuterHtml(node as HTMLElement)}\n\n`,
   });
 
   // Escape thêm ký tự turndown bỏ sót (với html:true các chuỗi này sẽ bị
@@ -100,14 +110,29 @@ export function createTurndown(): TurndownService {
     },
   });
 
-  // --- heading: escape dấu # cuối (markdown-it strip closing sequence của ATX) ---
+  // --- heading: escape a trailing '#' (markdown-it strips an ATX closing
+  //     sequence). If the block is marked to keep its original Setext form
+  //     (US-18.4a: data-md-heading-style, stamped by serialize() from mdSlice)
+  //     and it is H1/H2 → re-emit as Setext instead of ATX, reusing the ORIGINAL
+  //     underline length (attribute value) so an untouched heading isn't
+  //     rewritten; the underline CHAR is re-derived from the current level so a
+  //     since-changed level can't emit the wrong Setext level. H3+ is always ATX
+  //     (Setext has only 2 levels). Empty text can't form a Setext heading, so it
+  //     also falls through to ATX. No mark → unchanged ATX path (Golden Rule:
+  //     canonical files serialize byte-identical). ---
   td.addRule('atxHeadingEscapeTrailingHash', {
     filter: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
     replacement: (content, node) => {
       const level = Number(node.nodeName.charAt(1)) || 1;
-      let text = content.replace(/\n+/g, ' ').trim();
-      text = text.replace(/(\s)(#+)$/, (_m, sp: string, hashes: string) => `${sp}\\${hashes}`);
-      return `\n\n${'#'.repeat(level)} ${text}\n\n`;
+      const text = content.replace(/\n+/g, ' ').trim();
+      const mark = (node as HTMLElement).getAttribute?.(HEADING_STYLE_ATTR);
+      if (mark != null && text && (level === 1 || level === 2)) {
+        const len = Math.max(parseInt(mark, 10) || text.length, 1);
+        const underline = (level === 1 ? '=' : '-').repeat(len);
+        return `\n\n${text}\n${underline}\n\n`;
+      }
+      const atx = text.replace(/(\s)(#+)$/, (_m, sp: string, hashes: string) => `${sp}\\${hashes}`);
+      return `\n\n${'#'.repeat(level)} ${atx}\n\n`;
     },
   });
 
@@ -134,7 +159,11 @@ export function createTurndown(): TurndownService {
     replacement: (content) => (content ? `~~${content}~~` : ''),
   });
 
-  // --- fenced code giữ ngôn ngữ, bỏ span highlight, chọn fence đủ dài ---
+  // --- fenced code giữ ngôn ngữ, bỏ span highlight, chọn fence đủ dài.
+  //     US-18.4b: blocks stamped data-md-code-style (from mdSlice) re-emit their
+  //     ORIGINAL style — 'indented' → 4-space body, no fence/language;
+  //     'fence-tilde' → ~~~ fence (grown on conflict) keeping the language.
+  //     No mark → unchanged backtick output (Golden Rule). ---
   td.addRule('fencedCodeWithLang', {
     filter: (node) => node.nodeName === 'PRE' && !!node.querySelector('code'),
     replacement: (_content, node) => {
@@ -146,11 +175,102 @@ export function createTurndown(): TurndownService {
       const langClass = Array.from(code.classList ?? []).find((c) => c.startsWith('language-'));
       const lang = langClass ? langClass.slice('language-'.length) : '';
       const text = (code.textContent ?? '').replace(/\n$/, '');
-      let fence = '```';
-      while (text.includes(fence)) {
-        fence += '`';
+      const codeStyle = el.getAttribute(CODE_STYLE_ATTR);
+      if (codeStyle === 'indented' || codeStyle === 'indented-tab') {
+        // Indented syntax can't represent a whitespace-only body (the block
+        // would vanish on reparse) and can't directly follow a list (it would
+        // reparse as the list's continuation) — those two shapes fall through
+        // to the fenced path instead, sacrificing style to keep the content.
+        const prev = el.previousElementSibling;
+        const afterList = prev != null && (prev.nodeName === 'UL' || prev.nodeName === 'OL');
+        if (text.trim() && !afterList) {
+          const indent = codeStyle === 'indented-tab' ? '\t' : '    ';
+          const body = text
+            .split('\n')
+            .map((line) => (line ? indent + line : line))
+            .join('\n');
+          return `\n\n${body}\n\n`;
+        }
+      }
+      const fenceChar = codeStyle === 'fence-tilde' ? '~' : '`';
+      let fence = fenceChar.repeat(3);
+      if (fenceChar === '~') {
+        // Only a line-start tilde run can close a fence — mid-line `~~~` is
+        // harmless and must not grow the fence (byte churn on untouched blocks).
+        for (const run of text.match(/^ {0,3}~{3,}\s*$/gm) ?? []) {
+          const needed = run.trim().length + 1;
+          if (needed > fence.length) {
+            fence = fenceChar.repeat(needed);
+          }
+        }
+      } else {
+        while (text.includes(fence)) {
+          fence += fenceChar;
+        }
       }
       return `\n\n${fence}${lang}\n${text}\n${fence}\n\n`;
+    },
+  });
+
+  // --- US-18.4b: list item honoring the block's ORIGINAL bullet marker.
+  //     Replicates turndown's base listItem emission exactly (marker + 3 spaces,
+  //     `N.` + 2 spaces, continuation indent = prefix width) but reads the
+  //     marker from the nearest ancestor stamped with data-md-bullet-style (the
+  //     top-level list block — nested <li> inherit it), falling back to the
+  //     global bulletListMarker. No mark → byte-identical to the base rule. ---
+  td.addRule('listItemWithBulletStyle', {
+    filter: 'li',
+    replacement: (content, node, options) => {
+      const block = getAncestor(node, (el) => el.hasAttribute(BULLET_STYLE_ATTR));
+      const marker = block?.getAttribute(BULLET_STYLE_ATTR) ?? options.bulletListMarker;
+      let prefix = marker + '   ';
+      const parent = node.parentNode as HTMLElement | null;
+      if (parent && parent.nodeName === 'OL') {
+        const start = parent.getAttribute('start');
+        const index = Array.prototype.indexOf.call(parent.children, node);
+        prefix = (start ? Number(start) + index : index + 1) + '.  ';
+      }
+      const isParagraph = /\n$/.test(content);
+      content = content.replace(/^\n+/, '').replace(/\n+$/, '') + (isParagraph ? '\n' : '');
+      content = content.replace(/\n/gm, '\n' + ' '.repeat(prefix.length));
+      return prefix + content + (node.nextSibling ? '\n' : '');
+    },
+  });
+
+  // --- US-18.4b: em/strong honoring the block's ORIGINAL delimiter (`_x_` /
+  //     `__x__`), read from the nearest ancestor stamped by serialize() from
+  //     mdSlice; no mark → global emDelimiter/strongDelimiter (Golden Rule).
+  //     CommonMark doesn't parse `_` adjacent to a word character (`_th_ing`),
+  //     so an intraword occurrence falls back to the `*` form — parseable
+  //     output beats delimiter fidelity there. ---
+  const delimiterReplacement =
+    (attr: string, globalDelimiter: '*' | '**') =>
+    (content: string, node: Node): string => {
+      if (!content.trim()) {
+        return '';
+      }
+      const block = getAncestor(node, (el) => el.hasAttribute(attr));
+      const delimiter = block?.getAttribute(attr) ?? globalDelimiter;
+      return delimiter.startsWith('_') && isIntrawordEmphasis(node)
+        ? globalDelimiter + content + globalDelimiter
+        : delimiter + content + delimiter;
+    };
+  td.addRule('emphasisWithStyle', {
+    filter: ['em', 'i'],
+    replacement: delimiterReplacement(EM_STYLE_ATTR, '*'),
+  });
+  td.addRule('strongWithStyle', {
+    filter: ['strong', 'b'],
+    replacement: delimiterReplacement(STRONG_STYLE_ATTR, '**'),
+  });
+
+  // --- US-18.4b: HR honoring its ORIGINAL raw line (`***`, `___`, `- - -`...),
+  //     stamped verbatim on the <hr> itself; no mark → global '---'. ---
+  td.addRule('hrWithStyle', {
+    filter: 'hr',
+    replacement: (_content, node, options) => {
+      const raw = (node as HTMLElement).getAttribute(HR_STYLE_ATTR);
+      return `\n\n${raw ?? options.hr}\n\n`;
     },
   });
 
@@ -355,8 +475,47 @@ function collapseBlankLines(html: string): string {
   return html.replace(/\n[ \t]*\n/g, '\n&#10;');
 }
 
+/**
+ * Editor-session metadata that must never leak into `.md` through raw-HTML
+ * serialization paths (complex tables, kept/unknown tags): Block Map ids,
+ * gutter line numbers, and the US-18.4 per-block style attributes — all
+ * stamped on live DOM or the serialize clone, none of them document content.
+ */
+const TRANSIENT_ATTRS = [
+  'data-block-id',
+  'data-line',
+  'data-line-end',
+  HEADING_STYLE_ATTR,
+  BULLET_STYLE_ATTR,
+  CODE_STYLE_ATTR,
+  EM_STYLE_ATTR,
+  STRONG_STYLE_ATTR,
+  HR_STYLE_ATTR,
+];
+
 function safeOuterHtml(el: HTMLElement): string {
-  return collapseBlankLines(el.outerHTML);
+  const copy = el.cloneNode(true) as HTMLElement;
+  for (const attr of TRANSIENT_ATTRS) {
+    copy.removeAttribute(attr);
+    for (const child of Array.from(copy.querySelectorAll(`[${attr}]`))) {
+      child.removeAttribute(attr);
+    }
+  }
+  return collapseBlankLines(copy.outerHTML);
+}
+
+/**
+ * True when the emphasis node touches a word character on either side
+ * (`th<em>i</em>ng`): `_`-delimited output would not reparse as emphasis there.
+ */
+function isIntrawordEmphasis(node: Node): boolean {
+  const before = node.previousSibling?.textContent ?? '';
+  const after = node.nextSibling?.textContent ?? '';
+  const wordChar = /[\p{L}\p{N}_]/u;
+  return (
+    (before !== '' && wordChar.test(before.slice(-1))) ||
+    (after !== '' && wordChar.test(after.charAt(0)))
+  );
 }
 
 /** Căn lề của block: ưu tiên thuộc tính align, sau đó style text-align. */
