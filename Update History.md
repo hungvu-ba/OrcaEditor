@@ -222,3 +222,4 @@
 | 0.7.0 | 2026-07-16 | Fix (packaging): excluded .claude/, _bmad*/, test-results/, playwright-report/ from the published .vsix — bundled by mistake (same class of bug as 0.6.9's fix). |
 | 0.7.0 | 2026-07-17 | Feature (US-18.4a): headings now keep their original ATX (#) vs. Setext (===/---) style on save instead of always normalizing to ATX. |
 | 0.7.0 | 2026-07-17 | Feature (US-18.4b): bullets, code blocks, em/strong, HRs now keep their original per-block syntax on save; new defaults `*` bullets and `\` hard breaks. |
+| 0.8.0 | 2026-07-17 | Release: bumped version to 0.8.0, consolidating heading/bullet/code-block/em-strong/HR style preservation (US-18.4a/18.4b) into one [0.8.0] entry in CHANGELOG.md. |
