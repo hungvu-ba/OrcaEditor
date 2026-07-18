@@ -22,7 +22,7 @@
  * isn't guaranteed to match drop order. Single-file drop (the common case)
  * is unaffected.
  */
-import { encodeLinkPath, showToast } from './dom-utils';
+import { dataUrlToBase64, encodeLinkPath, readAsDataUrl, showToast } from './dom-utils';
 import type { PasteImageController } from './paste-image';
 import type { VsCodeApi } from './vscode-api';
 
@@ -106,26 +106,22 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
       if (file.type.startsWith('image/')) {
         deps.pasteImage.saveDroppedImage(file, file.type, range, fillCell);
       } else {
-        requestDropFile(file, range);
+        void requestDropFile(file, range);
       }
     }
   });
 
-  function requestDropFile(file: File, range: Range | undefined): void {
+  async function requestDropFile(file: File, range: Range | undefined): Promise<void> {
     const requestId = ++seq;
     pending.set(requestId, { range, name: file.name });
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      if (!base64) {
-        pending.delete(requestId);
-        return;
-      }
-      deps.vscode.postMessage({ type: 'dropFile', requestId, name: file.name, dataBase64: base64 });
-    };
-    reader.onerror = () => pending.delete(requestId);
-    reader.readAsDataURL(file);
+    const base64 = dataUrlToBase64(await readAsDataUrl(file));
+    if (!base64) {
+      // Empty on read error too (readAsDataUrl resolves '') — same bail as the
+      // previous FileReader.onerror path.
+      pending.delete(requestId);
+      return;
+    }
+    deps.vscode.postMessage({ type: 'dropFile', requestId, name: file.name, dataBase64: base64 });
   }
 
   function insertLinkAt(range: Range | undefined, name: string, relPath: string): void {

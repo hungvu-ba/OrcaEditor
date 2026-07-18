@@ -36,6 +36,28 @@ export function isAbsoluteUrl(s: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s);
 }
 
+/**
+ * Reads a blob as a `data:` URL (resolves to '' on error). Used instead of
+ * `URL.createObjectURL` (which produces a `blob:` URL) because the webview's
+ * CSP `img-src` only allows `${webview.cspSource}` and `data:` — no `blob:` —
+ * so any `<img>` pointed at a blob: URL silently fails to load (see provider.ts
+ * `getHtml` CSP). paste-image needs the full data: URL to measure the image;
+ * external-drop only needs the base64 slice below.
+ */
+export function readAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** The base64 payload of a `data:...;base64,<payload>` URL (from `readAsDataUrl`). */
+export function dataUrlToBase64(dataUrl: string): string {
+  return dataUrl.slice(dataUrl.indexOf(',') + 1);
+}
+
 export function saveSelection(): Range | undefined {
   const sel = window.getSelection();
   return sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : undefined;

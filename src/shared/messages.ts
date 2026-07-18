@@ -101,6 +101,42 @@ export interface InitConfig {
   readability: ReadabilityConfig;
 }
 
+/**
+ * A caret/selection position shared by `init.reveal` and `scrollToPosition`:
+ * 0-based `line`/`character`; `length` = length of the range to select
+ * (0/undefined = scroll only, no selection). (`crossFileSearch:openResult`
+ * carries the same fields plus a `uri` and a required `matchText`, so it stays
+ * declared inline.)
+ */
+export interface RevealPosition {
+  line: number;
+  character: number;
+  length: number;
+  matchText?: string;
+}
+
+/**
+ * Result of a host-side asset save — shared by `pasteImageResult` and
+ * `dropFileResult`. `relativePath` is absent on failure, when `error` carries
+ * the toast text instead.
+ */
+export interface AssetSaveResult {
+  requestId: number;
+  relativePath?: string;
+  error?: string;
+}
+
+/** Zen/Focus-mode change — same shape in both directions (webview↔host). */
+export type ZenChangedMessage = { type: 'zenChanged'; zen: boolean };
+
+/** Reading-mode bundle change — same shape in both directions (webview↔host). */
+export type ReadingModeChangedMessage = {
+  type: 'readingModeChanged';
+  enabled: boolean;
+  preset: ReadingPreset;
+  palette: ReadingPalette;
+};
+
 /** Message webview → host (discriminated theo `type`). */
 export type WebviewToHost =
   | { type: 'ready' }
@@ -139,7 +175,7 @@ export type WebviewToHost =
    * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Khác
    * preset/palette/enabled (vẫn per-tab, session-only — US-19.18).
    */
-  | { type: 'zenChanged'; zen: boolean }
+  | ZenChangedMessage
   /**
    * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
    * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
@@ -147,7 +183,7 @@ export type WebviewToHost =
    * fontFamily KHÔNG nằm trong bundle này — không có UI toggle runtime, vẫn
    * chỉ seed 1 lần từ setting `orcaEditor.readability.fontFamily`.
    */
-  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };
+  | ReadingModeChangedMessage;
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -163,7 +199,7 @@ export type HostToWebview =
        * `CrossFileMatch` ở trên. `length` = độ dài đoạn cần select luôn (không
        * chỉ scroll tới) — 0/undefined nếu chỉ cần scroll, không select.
        */
-      reveal?: { line: number; character: number; length: number; matchText?: string };
+      reveal?: RevealPosition;
     }
   /**
    * `caretLine`/`caretCol` (1-based dòng, 0-based cột, tuỳ chọn): chỉ gửi khi
@@ -183,12 +219,12 @@ export type HostToWebview =
    */
   | { type: 'crossFileSearch:result'; requestId: number; groups: CrossFileMatchGroup[]; truncated: boolean; usedFallback: boolean }
   /** C6b: file .md đã mở sẵn ở tab khác — gửi thẳng tới panel đó thay vì qua 'init'. Cùng ý nghĩa `length` như `reveal` ở trên. */
-  | { type: 'scrollToPosition'; line: number; character: number; length: number; matchText?: string }
+  | ({ type: 'scrollToPosition' } & RevealPosition)
   /** Kết quả lưu ảnh dán từ clipboard — relativePath thiếu khi lưu thất bại (kèm error để hiện toast). */
-  | { type: 'pasteImageResult'; requestId: number; relativePath?: string; error?: string }
+  | ({ type: 'pasteImageResult' } & AssetSaveResult)
   /** Kết quả lưu file kéo thả (US-17.6, M4) — cùng hình dạng với pasteImageResult. */
-  | { type: 'dropFileResult'; requestId: number; relativePath?: string; error?: string }
+  | ({ type: 'dropFileResult' } & AssetSaveResult)
   /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
-  | { type: 'zenChanged'; zen: boolean }
+  | ZenChangedMessage
   /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
-  | { type: 'readingModeChanged'; enabled: boolean; preset: ReadingPreset; palette: ReadingPalette };
+  | ReadingModeChangedMessage;

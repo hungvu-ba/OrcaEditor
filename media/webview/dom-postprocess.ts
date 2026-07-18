@@ -90,27 +90,40 @@ export function postProcessMathDom(
  * không có chỗ cho toolbar nên nút "Edit" nằm ngay trong dòng, ngay sau công
  * thức đã dựng (`toolbar: false`).
  */
-function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl: Element, opts: { toolbar: boolean }): void {
-  const isBlock = opts.toolbar;
+// Toolbar `<div>` holding a single toggle `<button>` — the shared skeleton of
+// the Math BLOCK toolbar and the Mermaid toolbar. Caller appends the returned
+// toolbar where it wants (Math INLINE builds its own bare toggle instead, with
+// no toolbar). Chained appendChild only — runs under domino for round-trip tests.
+function createToolbarToggle(
+  doc: Document,
+  opts: { toolbarClass: string; toggleClass: string; title: string; toggleContentEditableFalse?: boolean }
+): HTMLElement {
   const toggle = doc.createElement('button');
   toggle.setAttribute('type', 'button');
-  toggle.className = MATH_TOGGLE_CLASS;
-  toggle.setAttribute('title', 'Edit formula');
-  // contenteditable=false trên chính nút, không chỉ trên toolbar bao ngoài
-  // (block): math INLINE gắn toggle thẳng vào wrapper (không có toolbar div
-  // bọc ngoài, xem nhánh !isBlock bên dưới) nên nếu thiếu dòng này, text
-  // "Edit" của nút kế thừa contenteditable=true từ #content — caret/Enter
-  // vẫn lọt vào giữa chữ "Edit" được (bug report mục 11, tái hiện dù đã có
-  // popup sửa TeX ở US-4.19, vì đây là caret của TÀI LIỆU chính, không phải
-  // caret bên trong ô sửa công thức).
-  toggle.setAttribute('contenteditable', 'false');
+  toggle.className = opts.toggleClass;
+  toggle.setAttribute('title', opts.title);
+  if (opts.toggleContentEditableFalse) {
+    toggle.setAttribute('contenteditable', 'false');
+  }
+  const toolbar = doc.createElement('div');
+  toolbar.className = opts.toolbarClass;
+  toolbar.setAttribute('contenteditable', 'false');
+  toolbar.appendChild(toggle);
+  return toolbar;
+}
+
+function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl: Element, opts: { toolbar: boolean }): void {
+  const isBlock = opts.toolbar;
 
   if (isBlock) {
-    const toolbar = doc.createElement('div');
-    toolbar.className = MATH_TOOLBAR_CLASS;
-    toolbar.setAttribute('contenteditable', 'false');
-    toolbar.appendChild(toggle);
-    wrapper.appendChild(toolbar);
+    wrapper.appendChild(
+      createToolbarToggle(doc, {
+        toolbarClass: MATH_TOOLBAR_CLASS,
+        toggleClass: MATH_TOGGLE_CLASS,
+        title: 'Edit formula',
+        toggleContentEditableFalse: true,
+      })
+    );
   }
 
   const renderWrap = doc.createElement(isBlock ? 'div' : 'span');
@@ -120,6 +133,17 @@ function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl:
 
   wrapper.appendChild(renderWrap);
   if (!isBlock) {
+    // Math INLINE: bare toggle straight in the wrapper (no toolbar div). The
+    // contenteditable=false on the button itself is essential here — without it
+    // the "Edit" text inherits contenteditable=true from #content, so the
+    // document caret/Enter can land inside the word "Edit" (bug report item 11,
+    // recurs even with the US-4.19 TeX popup because this is the MAIN document
+    // caret, not the formula-editor caret).
+    const toggle = doc.createElement('button');
+    toggle.setAttribute('type', 'button');
+    toggle.className = MATH_TOGGLE_CLASS;
+    toggle.setAttribute('title', 'Edit formula');
+    toggle.setAttribute('contenteditable', 'false');
     wrapper.appendChild(toggle);
   }
 }
@@ -148,14 +172,11 @@ export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): v
     wrapper.className = MERMAID_CLASS;
     wrapper.setAttribute('data-mermaid-view', 'chart');
 
-    const toolbar = doc.createElement('div');
-    toolbar.className = MERMAID_TOOLBAR_CLASS;
-    toolbar.setAttribute('contenteditable', 'false');
-    const toggle = doc.createElement('button');
-    toggle.setAttribute('type', 'button');
-    toggle.className = MERMAID_TOGGLE_CLASS;
-    toggle.setAttribute('title', 'Toggle between chart and Mermaid source');
-    toolbar.appendChild(toggle);
+    const toolbar = createToolbarToggle(doc, {
+      toolbarClass: MERMAID_TOOLBAR_CLASS,
+      toggleClass: MERMAID_TOGGLE_CLASS,
+      title: 'Toggle between chart and Mermaid source',
+    });
 
     const chart = doc.createElement('div');
     chart.className = MERMAID_CHART_CLASS;
