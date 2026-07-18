@@ -31,6 +31,13 @@ function directChildByTag(parent: Element, tags: string[]): Element | null {
   return Array.from(parent.children).find((c) => tags.includes(c.tagName)) ?? null;
 }
 
+// Any target holding a nested `<ul>`/`<ol>` → flattening/re-nesting is out of
+// scope for retag/unwrap/taskify (legacy execCommand handles that case); those
+// compute functions bail to null. Shared opening guard for all three.
+function hasNestedSublist(targets: Element[]): boolean {
+  return targets.some((t) => directChildByTag(t, ['UL', 'OL']) !== null);
+}
+
 /**
  * Temporary marker attribute a compute function sets on ONE clone in its
  * `html` — the clone corresponding to `ListOpPlan.caretAnchor` (the original
@@ -418,7 +425,7 @@ function buildListSplitHtml(list: Element, targets: Element[], middleHtml: strin
  * found among `list.children`.
  */
 export function computeRetagListRange(list: Element, targets: Element[], ordered: boolean): ListOpPlan | null {
-  if (targets.some((t) => directChildByTag(t, ['UL', 'OL']))) {
+  if (hasNestedSublist(targets)) {
     return null;
   }
   const tag = ordered ? 'ol' : 'ul';
@@ -455,7 +462,7 @@ function paragraphHtmlForUnwrappedItem(li: Element): string {
  * Same nested-sublist/not-found null contract as `computeRetagListRange`.
  */
 export function computeUnwrapListRange(list: Element, targets: Element[]): ListOpPlan | null {
-  if (targets.some((t) => directChildByTag(t, ['UL', 'OL']))) {
+  if (hasNestedSublist(targets)) {
     return null;
   }
   const middleHtml = targets.map((t) => paragraphHtmlForUnwrappedItem(t)).join('');
@@ -480,7 +487,7 @@ export function computeUnwrapListRange(list: Element, targets: Element[]): ListO
  * so this stays pure and domino-safe for roundtrip tests.
  */
 export function computeTaskifyListRange(list: Element, targets: Element[]): ListOpPlan | null {
-  if (targets.some((t) => directChildByTag(t, ['UL', 'OL']))) {
+  if (hasNestedSublist(targets)) {
     return null;
   }
   const taskLi = (t: Element): string => {
@@ -521,21 +528,35 @@ export function computeTaskifyListRange(list: Element, targets: Element[]): List
  * (rather than imported from createDomHelpers) so this module stays free of
  * the #content/focus() coupling that closure carries.
  */
-export function commitListOp(
+// Shared caret-save → build [rangeStart, rangeEnd] Range → commit → caret-restore
+// skeleton for the two commit functions below. Only the middle `commit(range)`
+// step differs (insertHTML vs. deleteContents/insertNode); everything around it
+// is identical.
+function commitListPlan(
   plan: ListOpPlan,
-  placeCaretAtOffsets: (el: Element, start: number, end: number) => void
+  placeCaretAtOffsets: (el: Element, start: number, end: number) => void,
+  commit: (range: Range) => void
 ): void {
   const saved = saveCaretState(plan);
 
   const range = document.createRange();
   range.setStartBefore(plan.rangeStart);
   range.setEndAfter(plan.rangeEnd);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  document.execCommand('insertHTML', false, plan.html);
+  commit(range);
 
   restoreCaretState(plan, saved, placeCaretAtOffsets);
+}
+
+export function commitListOp(
+  plan: ListOpPlan,
+  placeCaretAtOffsets: (el: Element, start: number, end: number) => void
+): void {
+  commitListPlan(plan, placeCaretAtOffsets, (range) => {
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    document.execCommand('insertHTML', false, plan.html);
+  });
 }
 
 /**
@@ -559,16 +580,10 @@ export function commitListOpDirect(
   plan: ListOpPlan,
   placeCaretAtOffsets: (el: Element, start: number, end: number) => void
 ): void {
-  const saved = saveCaretState(plan);
-
-  const range = document.createRange();
-  range.setStartBefore(plan.rangeStart);
-  range.setEndAfter(plan.rangeEnd);
-  range.deleteContents();
-
-  const template = document.createElement('template');
-  template.innerHTML = plan.html;
-  range.insertNode(template.content);
-
-  restoreCaretState(plan, saved, placeCaretAtOffsets);
+  commitListPlan(plan, placeCaretAtOffsets, (range) => {
+    range.deleteContents();
+    const template = document.createElement('template');
+    template.innerHTML = plan.html;
+    range.insertNode(template.content);
+  });
 }

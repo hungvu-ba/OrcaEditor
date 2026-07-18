@@ -558,6 +558,32 @@ function scheduleSync(): void {
   syncTimer = setTimeout(syncNow, SYNC_DEBOUNCE_MS);
 }
 
+// Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
+// strikethrough: swallow the browser default, run the format, then schedule a
+// sync. `apply` is a thunk so it covers both execCommand and toggleInlineCode.
+function applyInlineFormat(e: KeyboardEvent, apply: () => void): void {
+  e.preventDefault();
+  apply();
+  scheduleSync();
+}
+
+// Vẫn phải turndown để có markdown mà so sánh, nhưng chỉ khi nội dung THỰC SỰ
+// đổi mới parse lại gutter (markdown-it lần 2) + cập nhật currentText — bỏ hẳn
+// hai bước này ở nhịp debounce mà nội dung không đổi (finding P-03). Trả markdown
+// mới, hoặc undefined khi không đổi. Lõi chung của syncNow/takePendingSync; mỗi
+// hàm giữ prologue timer + đuôi riêng (post vs. return).
+function serializeIfChanged(): string | undefined {
+  const markdown = serialize();
+  if (markdown === currentText) {
+    return undefined;
+  }
+  if (lineNumbersEnabled) {
+    lineGutter.refreshFromMarkdown(markdown);
+  }
+  currentText = markdown;
+  return markdown;
+}
+
 function syncNow(): void {
   // syncNow is also called directly (invokeAction's post-action sync in
   // toolbar.ts) while a debounce timer armed DURING the action (execCommand's
@@ -569,18 +595,10 @@ function syncNow(): void {
     clearTimeout(syncTimer);
   }
   syncTimer = undefined;
-  // Vẫn phải turndown để có markdown mà so sánh, nhưng chỉ khi nội dung THỰC SỰ
-  // đổi mới parse lại gutter (markdown-it lần 2) + gửi edit — bỏ hẳn hai bước
-  // này ở nhịp debounce mà nội dung không đổi (finding P-03).
-  const markdown = serialize();
-  if (markdown === currentText) {
-    return;
+  const markdown = serializeIfChanged();
+  if (markdown !== undefined) {
+    postToHost({ type: 'edit', text: markdown });
   }
-  if (lineNumbersEnabled) {
-    lineGutter.refreshFromMarkdown(markdown);
-  }
-  currentText = markdown;
-  postToHost({ type: 'edit', text: markdown });
 }
 
 /**
@@ -596,15 +614,7 @@ function takePendingSync(): string | undefined {
   }
   clearTimeout(syncTimer);
   syncTimer = undefined;
-  const markdown = serialize();
-  if (markdown === currentText) {
-    return undefined;
-  }
-  if (lineNumbersEnabled) {
-    lineGutter.refreshFromMarkdown(markdown);
-  }
-  currentText = markdown;
-  return markdown;
+  return serializeIfChanged();
 }
 
 function serialize(): string {
@@ -1124,19 +1134,13 @@ content.addEventListener('keydown', (e) => {
         postToHost({ type: 'redo', pendingText: takePendingSync() });
         return;
       case 'b':
-        e.preventDefault();
-        document.execCommand('bold');
-        scheduleSync();
+        applyInlineFormat(e, () => document.execCommand('bold'));
         return;
       case 'i':
-        e.preventDefault();
-        document.execCommand('italic');
-        scheduleSync();
+        applyInlineFormat(e, () => document.execCommand('italic'));
         return;
       case 'e':
-        e.preventDefault();
-        toggleInlineCode();
-        scheduleSync();
+        applyInlineFormat(e, toggleInlineCode);
         return;
       case 'v':
         e.preventDefault();
@@ -1152,9 +1156,7 @@ content.addEventListener('keydown', (e) => {
     }
   }
   if (mod && e.shiftKey && e.key.toLowerCase() === 'x') {
-    e.preventDefault();
-    document.execCommand('strikeThrough');
-    scheduleSync();
+    applyInlineFormat(e, () => document.execCommand('strikeThrough'));
     return;
   }
   // Ctrl/Cmd+Shift+Z = redo (quy ước Mac, song song với Ctrl+Y ở trên).

@@ -156,13 +156,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * không cần thiết).
    */
   private broadcastZen(zen: boolean, exclude: vscode.WebviewPanel): void {
-    for (const panels of this.panelsByUri.values()) {
-      for (const panel of panels) {
-        if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'zenChanged', zen } satisfies HostToWebview);
-        }
-      }
-    }
+    this.broadcastToOtherPanels(exclude, { type: 'zenChanged', zen });
   }
 
   /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho bundle enabled/preset/palette. */
@@ -170,10 +164,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette },
     exclude: vscode.WebviewPanel
   ): void {
+    this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
+  }
+
+  /** Post `message` to every open .md panel (all uris) except `exclude`. */
+  private broadcastToOtherPanels(exclude: vscode.WebviewPanel, message: HostToWebview): void {
     for (const panels of this.panelsByUri.values()) {
       for (const panel of panels) {
         if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'readingModeChanged', ...state } satisfies HostToWebview);
+          void panel.webview.postMessage(message);
         }
       }
     }
@@ -960,6 +959,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * resolveAssetsDir + isInsideAllowedRoots guard shared by savePastedImage /
+   * saveDroppedFile / cleanupOrphanImages: returns the assets dir only when it
+   * sits inside the allowed workspace roots, else undefined so a mis-configured
+   * customFolderPath cannot write/scan outside. Each caller keeps its own bail.
+   */
+  private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
+    const dir = this.resolveAssetsDir(document);
+    return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+  }
+
+  /**
    * Prefix tên file ảnh suy ra từ basename document — gắn "quyền sở hữu" ảnh
    * vào 1 file .md mà không cần lưu index riêng (xem imageNamePrefix). Rỗng
    * khi basename không chuẩn hoá được (vd toàn CJK) — cleanupOrphanImages bỏ
@@ -990,9 +1000,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured paste-image folder is outside the allowed workspace.' };
     }
 
@@ -1028,9 +1037,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured assets folder is outside the allowed workspace.' };
     }
 
@@ -1110,8 +1118,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
 
-    const imagesDir = this.resolveAssetsDir(document);
-    if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
+    const imagesDir = await this.resolveAllowedAssetsDir(document);
+    if (!imagesDir) {
       return;
     }
 

@@ -45,19 +45,13 @@ export function createTurndown(): TurndownService {
     // (div, custom element...). Riêng SPAN là rác contentEditable → chỉ lấy nội dung.
     defaultReplacement: (content, node) => {
       const el = node as HTMLElement;
-      if (el.nodeName === 'SPAN' || typeof el.outerHTML !== 'string') {
+      if (el.nodeName === 'SPAN') {
         return content;
       }
-      return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+      return outerHtmlFallback(el, content);
     },
     // Thẻ trong keep() cũng phải né dòng trống bên trong (cắt html_block).
-    keepReplacement: (content, node) => {
-      const el = node as HTMLElement;
-      if (typeof el.outerHTML !== 'string') {
-        return content;
-      }
-      return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
-    },
+    keepReplacement: (content, node) => outerHtmlFallback(node as HTMLElement, content),
     // Node "rỗng" (turndown coi là blank và bỏ qua rule thường, kể cả rule tự
     // thêm qua addRule — xem forNode trong turndown core: isBlank luôn được xét
     // TRƯỚC rule lookup):
@@ -207,22 +201,7 @@ export function createTurndown(): TurndownService {
           return `\n\n${body}\n\n`;
         }
       }
-      const fenceChar = codeStyle === 'fence-tilde' ? '~' : '`';
-      let fence = fenceChar.repeat(3);
-      if (fenceChar === '~') {
-        // Only a line-start tilde run can close a fence — mid-line `~~~` is
-        // harmless and must not grow the fence (byte churn on untouched blocks).
-        for (const run of text.match(/^ {0,3}~{3,}\s*$/gm) ?? []) {
-          const needed = run.trim().length + 1;
-          if (needed > fence.length) {
-            fence = fenceChar.repeat(needed);
-          }
-        }
-      } else {
-        while (text.includes(fence)) {
-          fence += fenceChar;
-        }
-      }
+      const fence = pickFence(text, codeStyle === 'fence-tilde' ? '~' : '`');
       return `\n\n${fence}${lang}\n${text}\n${fence}\n\n`;
     },
   });
@@ -404,10 +383,7 @@ export function createTurndown(): TurndownService {
     replacement: (_content, node) => {
       const code = (node as HTMLElement).querySelector(`.${MERMAID_SOURCE_CLASS} code`);
       const text = (code?.textContent ?? '').replace(/\n$/, '');
-      let fence = '```';
-      while (text.includes(fence)) {
-        fence += '`';
-      }
+      const fence = pickFence(text);
       return `\n\n${fence}mermaid\n${text}\n${fence}\n\n`;
     },
   });
@@ -649,6 +625,36 @@ function decodeSafe(s: string): string {
   } catch {
     return s;
   }
+}
+
+// Unrecognized tag → keep its outerHTML (never bleed inner blank lines that
+// would cut an html_block); non-string outerHTML → fall back to plain content.
+// Shared by defaultReplacement/keepReplacement; the former adds its own SPAN guard.
+function outerHtmlFallback(el: HTMLElement, content: string): string {
+  if (typeof el.outerHTML !== 'string') {
+    return content;
+  }
+  return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+}
+
+// Pick a code fence long enough that `text` cannot close it early.
+function pickFence(text: string, fenceChar: '`' | '~' = '`'): string {
+  let fence = fenceChar.repeat(3);
+  if (fenceChar === '~') {
+    // Only a line-start tilde run can close a fence — mid-line `~~~` is
+    // harmless and must not grow the fence (byte churn on untouched blocks).
+    for (const run of text.match(/^ {0,3}~{3,}\s*$/gm) ?? []) {
+      const needed = run.trim().length + 1;
+      if (needed > fence.length) {
+        fence = fenceChar.repeat(needed);
+      }
+    }
+  } else {
+    while (text.includes(fence)) {
+      fence += fenceChar;
+    }
+  }
+  return fence;
 }
 
 /** Chuẩn hóa markdown sau serialize: gộp dòng trống thừa, đảm bảo newline cuối. */

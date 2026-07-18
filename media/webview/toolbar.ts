@@ -250,12 +250,6 @@ interface ToolbarItem {
   dropdown?: ToolbarDropdownEntry[];
   /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
   dropdownTitle?: string;
-  /**
-   * true → mặt chính của split-button MỞ dropdown thay vì chạy `action` (nút
-   * kiểu "menu chọn 1 trong N" không có hành vi mặc định rõ ràng, vd chọn
-   * palette đọc US-19.10). Mặc định (false) giữ hành vi cũ: mặt chính = action.
-   */
-  mainOpensDropdown?: boolean;
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -806,6 +800,15 @@ let overflowMenu: HTMLDivElement | undefined;
 let collapsibleEntries: CollapsibleEntry[] = [];
 let overflowResizeObserver: ResizeObserver | undefined;
 
+// aria-label + tooltip + mousedown-preventDefault (giữ selection trong #content)
+// — bộ dây chung của mọi nút trigger trên toolbar (nút đơn, 2 mặt split-button,
+// nút overflow).
+function wireTriggerButton(el: HTMLElement, title: string): void {
+  el.setAttribute('aria-label', title);
+  attachTooltip(el, title);
+  el.addEventListener('mousedown', (e) => e.preventDefault());
+}
+
 /** Dựng nút đơn (label/icon text, không dropdown) — trường hợp đa số các ToolbarItem. */
 function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
   const btn = document.createElement('button');
@@ -821,10 +824,7 @@ function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
   } else {
     btn.textContent = item.label;
   }
-  btn.setAttribute('aria-label', item.title);
-  attachTooltip(btn, item.title);
-  // mousedown + preventDefault để không mất selection trong #content
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, item.title);
   btn.addEventListener('click', () => invokeItem(item));
   return btn;
 }
@@ -857,9 +857,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   } else {
     main.textContent = item.label;
   }
-  main.setAttribute('aria-label', item.title);
-  attachTooltip(main, item.title);
-  main.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(main, item.title);
 
   const divider = document.createElement('span');
   divider.className = 'split-divider';
@@ -869,9 +867,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   caret.className = 'split-caret';
   caret.innerHTML = CARET_DOWN_ICON;
   const dropdownTitle = item.dropdownTitle ?? `${item.title} — more options`;
-  caret.setAttribute('aria-label', dropdownTitle);
-  attachTooltip(caret, dropdownTitle);
-  caret.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(caret, dropdownTitle);
 
   const popover = buildPopover('toolbar-split-popover');
   if (item.id) {
@@ -898,15 +894,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       entry.onHoverCancel
     );
   }
-  // Menu-only (vd palette US-19.10): mặt chính mở dropdown thay vì chạy action.
-  main.addEventListener('click', () => {
-    if (item.mainOpensDropdown) {
-      hideTooltip();
-      togglePopover(caret, popover);
-    } else {
-      invokeItem(item);
-    }
-  });
+  main.addEventListener('click', () => invokeItem(item));
   caret.addEventListener('click', () => {
     hideTooltip();
     togglePopover(caret, popover);
@@ -979,9 +967,7 @@ function createMoreButton(): HTMLButtonElement {
   btn.className = 'toolbar-more';
   btn.innerHTML = MORE_ICON;
   btn.style.display = 'none';
-  btn.setAttribute('aria-label', 'More tools');
-  attachTooltip(btn, 'More tools');
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, 'More tools');
   btn.addEventListener('click', () => {
     hideTooltip();
     toggleOverflowMenu();
@@ -999,9 +985,7 @@ function createMoreOptionsButton(): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.innerHTML = MORE_OPTIONS_ICON;
-  btn.setAttribute('aria-label', 'More options');
-  attachTooltip(btn, 'More options');
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, 'More options');
 
   // invokeAction (không phải postMessage trần) để khôi phục focus về #content
   // sau khi chọn — quan trọng nhất khi kích hoạt bằng bàn phím (Tab + Enter):
@@ -1127,9 +1111,15 @@ function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
  * formatHeading) VÀ updateHeadingLabel() bên dưới — đảm bảo nút luôn hiển thị
  * đúng cấp mà click vào nó sẽ áp dụng/toggle.
  */
-function currentHeadingTag(): string {
+// window.getSelection()'s anchor as its nearest Element (or null) — the opening
+// every selection-scoped format helper (heading/blockquote) shares.
+function getAnchorElement(): Element | null {
   const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  return sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+}
+
+function currentHeadingTag(): string {
+  const anchor = getAnchorElement();
   const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
   return heading && content.contains(heading) ? heading.tagName.toLowerCase() : DEFAULT_HEADING;
 }
@@ -1149,8 +1139,7 @@ function updateHeadingLabel(): void {
  * heading → trở về đoạn văn (toggle).
  */
 function formatHeading(tag: string): void {
-  const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const anchor = getAnchorElement();
   if (!anchor) {
     return;
   }
@@ -1193,7 +1182,7 @@ function formatHeading(tag: string): void {
 /** Toggle blockquote — formatBlock lặp lại sẽ lồng quote, nên tự xử lý. */
 function toggleBlockquote(): void {
   const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const anchor = getAnchorElement();
   const bq = anchor?.closest('blockquote');
   if (bq && content.contains(bq)) {
     const saved = sel && sel.rangeCount > 0 ? { node: sel.anchorNode, offset: sel.anchorOffset } : null;
