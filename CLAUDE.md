@@ -18,6 +18,11 @@ Every **project output** — code, **all code comments** (inline, block, JSDoc/T
 
 Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't translate code/docs back into Vietnamese "for readability".
 
+## Mandatory Rule: Be Concise (chat replies + user stories)
+
+- **Chat replies**: state the answer or what you did. No preamble, no filler, no restating the request.
+- **User stories (US)**: one clear who/what/why + tight acceptance criteria. Cut anything a reader can infer.
+
 ## Mandatory Rule: Working Principles
 
 ### 1. Think before coding
