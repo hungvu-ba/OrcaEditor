@@ -15,11 +15,20 @@ import {
   MERMAID_CHART_CLASS,
   MERMAID_SOURCE_CLASS,
   MERMAID_TOGGLE_CLASS,
+  MERMAID_ZOOM_CLASS,
 } from './pipeline';
+import { openLightbox } from './lightbox';
 
 export interface MermaidController {
   /** Dựng lại mọi biểu đồ Mermaid hiện có trong #content — gọi sau mỗi renderDocument. */
   renderAll(): void;
+  /**
+   * bug_General #7: reading palette vừa đổi → nếu nền hiệu dụng lật sáng↔tối thì
+   * dựng lại mọi biểu đồ theo theme mới (default/dark). No-op khi độ sáng nền
+   * không đổi (cache theo theme vẫn hợp lệ) — rẻ, tránh nháy khi chỉ đổi
+   * preset/typography.
+   */
+  refreshTheme(): void;
 }
 
 let idCounter = 0;
@@ -33,6 +42,39 @@ const svgCache = new Map<string, string>();
 // đè lên đợt render mới hơn.
 let renderSeq = 0;
 
+// Theme (default/dark) đã initialize lần gần nhất. mermaid.initialize là global
+// nên chỉ gọi lại khi theme đổi (bug_General #7). undefined = chưa init.
+let lastTheme: 'default' | 'dark' | undefined;
+
+/**
+ * bug_General #7: nền hiệu dụng của biểu đồ là do READING PALETTE quyết định
+ * (nếu đang bật), KHÔNG chỉ theme VS Code. Chỉ palette `dark` là nền tối; mọi
+ * palette khác (light/sepia/paper/highContrast) là nền sáng. Không có palette
+ * (followTheme) → rơi về theme VS Code như cũ.
+ */
+function isDarkBackground(): boolean {
+  const cls = document.body.classList;
+  if (cls.contains('reading-palette-dark')) {
+    return true;
+  }
+  for (const c of cls) {
+    if (c.startsWith('reading-palette-')) {
+      return false; // palette sáng bất kỳ (chỉ `dark` mới tối, đã bắt ở trên)
+    }
+  }
+  return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
+}
+
+/** Đảm bảo mermaid đang dùng theme khớp nền hiệu dụng; re-init khi đổi. Trả theme hiện dùng. */
+function ensureTheme(): 'default' | 'dark' {
+  const theme: 'default' | 'dark' = isDarkBackground() ? 'dark' : 'default';
+  if (theme !== lastTheme) {
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme });
+    lastTheme = theme;
+  }
+  return theme;
+}
+
 /** Hash chuỗi đơn giản (djb2) — không cần dependency ngoài. */
 function hashSource(s: string): string {
   let h = 5381;
@@ -43,21 +85,32 @@ function hashSource(s: string): string {
 }
 
 export function initMermaid(content: HTMLElement): MermaidController {
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: isDarkTheme() ? 'dark' : 'default',
-  });
+  // Theme được set khi render đầu tiên (ensureTheme, theo nền hiệu dụng lúc đó)
+  // thay vì cứng ở đây — nền có thể do reading palette quyết định (bug_General #7).
 
   // mousedown + preventDefault để không mất selection trong #content, giống các nút toolbar khác.
   content.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest(`.${MERMAID_TOGGLE_CLASS}`)) {
+    if ((e.target as HTMLElement).closest(`.${MERMAID_TOGGLE_CLASS}, .${MERMAID_ZOOM_CLASS}`)) {
       e.preventDefault();
     }
   });
 
   content.addEventListener('click', (e) => {
-    const toggle = (e.target as HTMLElement).closest(`.${MERMAID_TOGGLE_CLASS}`);
+    const target = e.target as HTMLElement;
+
+    // Zoom button: open the diagram in the fullscreen lightbox (bug_General #6).
+    const zoom = target.closest(`.${MERMAID_ZOOM_CLASS}`);
+    if (zoom) {
+      const wrapper = zoom.closest(`.${MERMAID_CLASS}`) as HTMLElement | null;
+      const chart = wrapper?.querySelector(`.${MERMAID_CHART_CLASS}`) as HTMLElement | null;
+      const svg = chart?.querySelector('svg');
+      if (svg) {
+        openLightbox({ kind: 'svg', svg: chart!.innerHTML });
+      }
+      return;
+    }
+
+    const toggle = target.closest(`.${MERMAID_TOGGLE_CLASS}`);
     if (!toggle) {
       return;
     }
@@ -73,20 +126,25 @@ export function initMermaid(content: HTMLElement): MermaidController {
     }
   });
 
+  function renderAll(): void {
+    const seq = ++renderSeq; // đánh dấu đợt render mới; kết quả cũ sẽ bị coi là stale
+    const wrappers = Array.from(content.querySelectorAll<HTMLElement>(`.${MERMAID_CLASS}`));
+    for (const wrapper of wrappers) {
+      void renderDiagram(wrapper, { fallbackToCodeOnError: true, seq });
+    }
+  }
+
   return {
-    renderAll(): void {
-      const seq = ++renderSeq; // đánh dấu đợt render mới; kết quả cũ sẽ bị coi là stale
-      const wrappers = Array.from(content.querySelectorAll<HTMLElement>(`.${MERMAID_CLASS}`));
-      for (const wrapper of wrappers) {
-        void renderDiagram(wrapper, { fallbackToCodeOnError: true, seq });
+    renderAll,
+    refreshTheme(): void {
+      // Chỉ dựng lại khi độ sáng nền thực sự lật — nếu không, SVG trong cache
+      // (khoá theo theme) vẫn đúng, khỏi đụng DOM.
+      const theme: 'default' | 'dark' = isDarkBackground() ? 'dark' : 'default';
+      if (theme !== lastTheme) {
+        renderAll();
       }
     },
   };
-}
-
-function isDarkTheme(): boolean {
-  const cls = document.body.classList;
-  return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
 }
 
 async function renderDiagram(
@@ -103,8 +161,12 @@ async function renderDiagram(
   // để nó trở thành đợt mới nhất và các kết quả cũ đang chờ bị coi là stale.
   const seq = opts.seq ?? ++renderSeq;
 
-  // Cache hit: source không đổi → tái dùng SVG cũ, khỏi gọi mermaid.render (đồng bộ).
-  const key = hashSource(source);
+  // Đảm bảo theme khớp nền hiệu dụng và khoá cache theo theme (bug_General #7):
+  // cùng source nhưng khác theme phải là 2 SVG khác nhau.
+  const theme = ensureTheme();
+
+  // Cache hit: source + theme không đổi → tái dùng SVG cũ, khỏi gọi mermaid.render.
+  const key = `${theme}:${hashSource(source)}`;
   const cached = svgCache.get(key);
   if (cached !== undefined) {
     chart.innerHTML = cached;
@@ -115,10 +177,15 @@ async function renderDiagram(
   const id = `md-mermaid-svg-${++idCounter}`;
   try {
     const { svg } = await mermaid.render(id, source);
-    svgCache.set(key, svg); // lưu cache bất kể còn dùng được cho DOM hiện tại hay không
     if (!wrapper.isConnected || seq !== renderSeq) {
       return; // tài liệu đã render lại / có đợt render mới hơn — bỏ kết quả cũ, tránh ghi đè
     }
+    // Chỉ cache SVG sau khi thắng seq guard (bug_General #7 review): theme là 1
+    // biến GLOBAL của mermaid, mà render bất đồng bộ. Nếu cache trước guard, một
+    // đợt cũ (đã bị đợt mới có theme khác chen ngang) có thể lưu SVG lệch theme
+    // dưới khoá `theme:hash` của nó → lần sau cache hit trả về biểu đồ sai theme.
+    // Đợt đã qua guard chắc chắn là mới nhất nên SVG khớp theme của khoá.
+    svgCache.set(key, svg);
     chart.innerHTML = svg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {

@@ -13,6 +13,7 @@ import {
   MATH_BLOCK_CLASS,
   MERMAID_CLASS,
   MERMAID_SOURCE_CLASS,
+  AUTOLINK_PATH_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
@@ -338,6 +339,29 @@ export function createTurndown(): TurndownService {
   td.addRule('mdComment', {
     filter: (node) => (node as HTMLElement).hasAttribute?.('data-md-comment') ?? false,
     replacement: (_content, node) => commentReplacement(node as HTMLElement),
+  });
+
+  // --- display-only auto-link path: <a data-autolink-path> created by
+  // postProcessRelativePathLinks (text = file name, href = encoded path).
+  // Emit the ORIGINAL raw path run through td.escape() — the SAME escaping the
+  // plain-text serializer applies — so serialize-with-feature is byte-identical
+  // to serialize-without-feature (display-only must not alter the .md). Custom
+  // rules are checked before the built-in inlineLink; this rule's data-attr
+  // filter is disjoint from bareUrl (text = file name ≠ href), so it is the one
+  // that fires for these anchors.
+  td.addRule('autolinkPath', {
+    filter: (node) =>
+      node.nodeName === 'A' && ((node as HTMLElement).hasAttribute?.(AUTOLINK_PATH_ATTR) ?? false),
+    replacement: (_content, node) => td.escape((node as HTMLElement).getAttribute(AUTOLINK_PATH_ATTR) ?? ''),
+  });
+
+  // --- display-only auto-link path in an inline code span: <code data-autolink-path>
+  // shows only the file name but must serialize back to the ORIGINAL `full-path`
+  // code span (inline-code content is literal — no escaping) so the .md is unchanged.
+  td.addRule('autolinkCodePath', {
+    filter: (node) =>
+      node.nodeName === 'CODE' && ((node as HTMLElement).hasAttribute?.(AUTOLINK_PATH_ATTR) ?? false),
+    replacement: (_content, node) => '`' + ((node as HTMLElement).getAttribute(AUTOLINK_PATH_ATTR) ?? '') + '`',
   });
 
   // --- linkify/autolink: <a> có text trùng href → giữ dạng URL trần ---

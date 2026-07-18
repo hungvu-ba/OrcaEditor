@@ -189,7 +189,8 @@ test('the menu opened via the table handle is positioned at the table handle, no
   if (!handleBox) {
     throw new Error('table handle has no bounding box');
   }
-  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  const clickY = handleBox.y + handleBox.height / 2;
+  await page.mouse.move(handleBox.x + handleBox.width / 2, clickY);
   await page.mouse.down();
   await page.mouse.up();
 
@@ -197,19 +198,14 @@ test('the menu opened via the table handle is positioned at the table handle, no
   if (!popupBox) {
     throw new Error('menu popup has no bounding box');
   }
-  // bug General #1: the popup now opens clear of the table's own content (just below it, or
-  // above when there's no room below) instead of at the handle's own row — but still anchored
-  // to the real table, never at the block handle's stale (display:none, zero-rect) position,
-  // which would park it at the viewport's top-left corner (bug 0716 round 2, #1 follow-up).
-  const overlaps =
-    popupBox.x < tableBox.x + tableBox.width &&
-    popupBox.x + popupBox.width > tableBox.x &&
-    popupBox.y < tableBox.y + tableBox.height &&
-    popupBox.y + popupBox.height > tableBox.y;
-  expect(overlaps).toBe(false);
-  const justBelow = Math.abs(popupBox.y - (tableBox.y + tableBox.height)) < 20;
-  const justAbove = Math.abs(popupBox.y + popupBox.height - tableBox.y) < 20;
-  expect(justBelow || justAbove).toBe(true);
+  // bug General R3 #1: the popup opens at the table handle's own click point, never at the block
+  // handle's stale (display:none, zero-rect) position, which would park it at the viewport's
+  // top-left corner (bug 0716 round 2, #1 follow-up). Anchored at the click, its top sits just
+  // below the clicked handle row (or its bottom just above, if it flipped) — near the real table.
+  const openedBelow = Math.abs(popupBox.y - clickY) < 40;
+  const openedAbove = Math.abs(popupBox.y + popupBox.height - clickY) < 40;
+  expect(openedBelow || openedAbove).toBe(true);
+  expect(popupBox.y).toBeGreaterThan(tableBox.y - 40);
 });
 
 test('the row handle menu opens clear of the row, like the block/table menu (bug General R2 #2)', async ({ page }) => {

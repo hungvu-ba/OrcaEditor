@@ -23,6 +23,7 @@ import {
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { headingSiblingGaps } from '../media/webview/drag-drop';
 
 let pass = 0;
 let fail = 0;
@@ -458,6 +459,80 @@ check(
   'security S-2: crossFileSearch:openResult gate qua isInsideAllowedRoots trước khi mở',
   /isInsideAllowedRoots/.test(openResultBody)
 );
+
+// Bug 1 (2026-07-18): file kéo-thả (không phải ảnh) giờ được orphan-cleanup như
+// ảnh dán — saveDroppedFile phải theo dõi file, cleanupOrphanImages phải gộp tập
+// theo dõi, và restore qua undo phải re-track. Scan source (host-fs, không có
+// harness vscode) — cùng kiểu guard như S-1/S-2.
+const saveDroppedBody = providerSrc.match(/private async saveDroppedFile\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: saveDroppedFile theo dõi asset để dọn khi mồ côi', /trackDroppedAsset/.test(saveDroppedBody));
+const cleanupBody = providerSrc.match(/private async cleanupOrphanImages\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: cleanupOrphanImages gộp file kéo-thả đã theo dõi', /droppedAssetsByDoc/.test(cleanupBody));
+const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /trackDroppedAsset/.test(restoreBody));
+
+// headingSiblingGaps (bug_General #2 follow-up): same-level/same-parent heading move scope.
+// Pure outline math on level arrays (null = non-heading block) — mirrors the I/O matrix cases.
+{
+  // #H1 / ##A + content / ##B  →  A(idx1) siblings = {A@1, B@3}; scope end = doc end.
+  const g = headingSiblingGaps([1, 2, null, 2], 1);
+  check('sibling: H2 siblings under one H1', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: scope end = doc end (no closing heading)', g.scopeEndGap === 4);
+  check('sibling: first sibling has no Move Up', g.moveUpGap === null);
+  check('sibling: Move Down past next sibling → scope end', g.moveDownGap === 4);
+}
+{
+  // Move the second sibling B up over A: [#H1, ##A, ##B] moving B(idx2).
+  const g = headingSiblingGaps([1, 2, 2], 2);
+  check('sibling: last sibling Move Up = previous sibling start', g.moveUpGap === 1);
+  check('sibling: last sibling has no Move Down', g.moveDownGap === null);
+}
+{
+  // Only child: #H1 / ##A  → A(idx1) has no sibling to swap with (immovable within scope).
+  const g = headingSiblingGaps([1, 2], 1);
+  check('sibling: only child has just itself', JSON.stringify(g.siblingStarts) === '[1]');
+  check('sibling: only child cannot Move Up/Down', g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Top-level H1s (parent = root): #A / #B / #C → all reorder among each other, scope = whole doc.
+  const g = headingSiblingGaps([1, 1, 1], 1);
+  check('sibling: top-level H1s are all siblings', JSON.stringify(g.siblingStarts) === '[0,1,2]');
+  check('sibling: top-level scope = whole doc', g.scopeEndGap === 3);
+  check('sibling: middle H1 Move Up=0, Move Down=3', g.moveUpGap === 0 && g.moveDownGap === 3);
+}
+{
+  // Different parents: #H1a / ##x / #H1b / ##y  → ##x(idx1) parent = H1a; ##y is NOT its sibling.
+  const g = headingSiblingGaps([1, 2, 1, 2], 1);
+  check('sibling: different-parent H2 excluded (scope ends at next H1)', JSON.stringify(g.siblingStarts) === '[1]' && g.scopeEndGap === 2, JSON.stringify(g));
+}
+{
+  // Nested levels: #H1 / ##A / ###a1 / ##B  → A(idx1) siblings under H1 = {A@1, B@3}; a1 is A's child.
+  const g = headingSiblingGaps([1, 2, 3, 2], 1);
+  check('sibling: nested child (###) is not a sibling of its parent (##)', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: A Move Down past its own [A, a1] section → scope end', g.moveDownGap === 4);
+}
+
+{
+  // Malformed outline: #H1 / ###X / ##Y  → X(idx1, H3) has NO same-level sibling. Its scope must
+  // END at the following H2 (level 2 < 3), so it can't be dragged below the H2 and nest under it.
+  const g = headingSiblingGaps([1, 3, 2], 1);
+  check('sibling: H3 scope stops at a following shallower H2 (no nest-under)', g.scopeEndGap === 2, JSON.stringify(g));
+  check('sibling: lone H3 among different levels is immovable', JSON.stringify(g.siblingStarts) === '[1]' && g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Skipped-level, two siblings: #H1 / ###A / ###B / ##C  → A,B are H3 siblings under H1; the
+  // trailing H2 (level 2 < 3) must bound the scope so Move Down keeps them BEFORE the H2, never
+  // nesting into it (blind review F1 repro B).
+  const g = headingSiblingGaps([1, 3, 3, 2], 1);
+  check('sibling: skipped-level scope ends at trailing shallower heading', g.scopeEndGap === 3, JSON.stringify(g));
+  check('sibling: first of two H3 siblings Move Down stays before the H2', g.moveDownGap === 3);
+}
+{
+  // Doc starting shallower-then-deeper reversed: ##A / #B  → A(idx0, H2) at root has no sibling and
+  // must not be draggable below the H1 (would nest under it). scope ends at the H1 (level 1 < 2).
+  const g = headingSiblingGaps([2, 1], 0);
+  check('sibling: top H2 before an H1 is immovable (scope ends at the H1)', g.scopeEndGap === 1 && JSON.stringify(g.siblingStarts) === '[0]' && g.moveDownGap === null, JSON.stringify(g));
+}
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

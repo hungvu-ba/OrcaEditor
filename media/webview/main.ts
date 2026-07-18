@@ -17,7 +17,9 @@ import {
   normalizeMarkdown,
   postProcessMathDom,
   postProcessMermaidDom,
+  postProcessRelativePathLinks,
   prepareDomForSerialize,
+  AUTOLINK_PATH_ATTR,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
@@ -29,8 +31,8 @@ import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
 import { detectBlockStyle, stampStyleOverride } from './block-style';
-import { initDragDrop } from './drag-drop';
-import { closestElement, createDomHelpers, emptyParagraph, scrollBehavior } from './dom-utils';
+import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
+import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
 import { initPrompt } from './prompt';
 import { initPasteImage } from './paste-image';
@@ -108,6 +110,8 @@ const readability = initReadability({
   isPopoverOpen,
   onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
   onReadingModeChange: (state) => postToHost({ type: 'readingModeChanged', ...state }),
+  // bug_General #7: khi commit 1 bộ style, Mermaid dựng lại nếu nền sáng/tối lật.
+  onStyleApplied: () => mermaidView.refreshTheme(),
 });
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
@@ -155,14 +159,27 @@ let blockMap: BlockEntry[] = [];
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
 /**
- * Tab (webview) hẹp hơn nửa màn hình vật lý → không đủ chỗ cho panel mục lục
- * cố định bên phải mà không đè lên nội dung. So window.innerWidth (bề rộng
- * tab) với screen.width (màn hình) chứ không phải bề rộng #content, vì mục
- * đích là phát hiện tab đang bị chia đôi/thu nhỏ, không phải nội dung dài hay
- * ngắn.
+ * Reference prose-column width = Comfortable Reading — Sepia size: measure 70ch
+ * @ 16px font (markdown.css #content.reading-preset-comfortable). ch→px via the
+ * fixed estimate 1ch ≈ 0.5em → 70 × 0.5 × 16 = 560px. A reference constant,
+ * independent of whether Reading Mode is currently on.
+ */
+const COMFORTABLE_MEASURE_PX = 70 * 0.5 * 16;
+
+/** Right-side space body.toc-open reserves BEYOND --toc-width (editor.css). */
+const TOC_GUTTER_PX = 26;
+
+/**
+ * The tab (webview) is no longer wide enough to show the prose column at
+ * Comfortable Reading size WHILE the TOC panel is open → auto-hide so content
+ * isn't squeezed too narrow. Threshold = reference column (COMFORTABLE_MEASURE_PX)
+ * + panel width (--toc-width, read live since the user can resize it) + gutter.
+ * Compared against window.innerWidth (tab width), not the physical screen.
  */
 function isNarrowViewport(): boolean {
-  return window.innerWidth < window.screen.width / 2;
+  const tocWidth =
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--toc-width')) || 300;
+  return window.innerWidth < COMFORTABLE_MEASURE_PX + tocWidth + TOC_GUTTER_PX;
 }
 
 /**
@@ -291,10 +308,11 @@ window.addEventListener('message', (event) => {
 
 postToHost({ type: 'ready' });
 
-// Tab bị thu hẹp xuống dưới nửa màn hình (vd. chia đôi split editor) → tự ẩn
-// mục lục để không choán chỗ nội dung. Chỉ tự ẩn đúng lúc CHUYỂN từ rộng sang
-// hẹp — nếu user tự bật lại panel trong lúc tab vẫn đang hẹp, không tự đóng
-// lại lần nữa (tôn trọng lựa chọn thủ công của họ) cho tới lần hẹp tiếp theo.
+// Tab shrank below the width needed for the prose column + panel
+// (isNarrowViewport, e.g. a split editor) → auto-hide the TOC so it doesn't
+// crowd content. Only auto-hides on the wide→narrow TRANSITION — if the user
+// re-opens the panel while the tab is still narrow, don't auto-close it again
+// (respect their manual choice) until the next time it goes narrow.
 let wasNarrowViewport = isNarrowViewport();
 window.addEventListener('resize', () => {
   const narrow = isNarrowViewport();
@@ -335,6 +353,7 @@ function renderDocument(markdown: string): void {
   content.innerHTML = html;
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
+  postProcessRelativePathLinks(content, document);
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
@@ -556,6 +575,13 @@ function scheduleSync(): void {
     clearTimeout(syncTimer);
   }
   syncTimer = setTimeout(syncNow, SYNC_DEBOUNCE_MS);
+  // Any content mutation may have added/removed/retitled a heading. Raw-DOM
+  // toolbar ops (formatHeading's replaceBlockTag, list/blockquote conversions)
+  // call scheduleSync but never fire an 'input' event, so refreshing here — not
+  // only in the 'input' handler — is the single place that keeps the TOC in sync
+  // for BOTH keyboard edits and toolbar actions. (renderDocument refreshes on
+  // its own for host-driven re-renders, which don't go through scheduleSync.)
+  toc.refresh();
 }
 
 // Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
@@ -722,7 +748,8 @@ content.addEventListener('input', (e) => {
     flushPendingSync();
   }
   search.refresh();
-  toc.refresh();
+  // toc.refresh() intentionally omitted here — scheduleSync() above already
+  // refreshes the TOC for every content mutation (see scheduleSync).
   // Bug #1 (mở rộng): mọi edit đều có thể dồn/dời block, để lại drag/hover handle
   // (position:fixed) đứng sai chỗ tới lần di chuột kế. Handle là affordance của
   // chuột nên ẩn khi gõ, tự hiện lại khi onContentHover chạy lúc di chuột. refresh()
@@ -1013,6 +1040,16 @@ content.addEventListener('click', (e) => {
     if (e.metaKey || e.ctrlKey) {
       openLink(anchor.getAttribute('href') ?? '');
     }
+    return;
+  }
+  // Inline code span marked as a relative path (bug General #5) — clickable but
+  // NOT wrapped in <a> (that would corrupt the code span's round-trip). Only act
+  // on Cmd/Ctrl+Click; a plain click must still place the caret for editing.
+  const codeLink = target.closest(`code[${AUTOLINK_PATH_ATTR}]`);
+  if (codeLink && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    e.stopPropagation();
+    openLink(encodeLinkPath(codeLink.getAttribute(AUTOLINK_PATH_ATTR) ?? ''));
   }
 });
 
@@ -1202,6 +1239,56 @@ content.addEventListener('keydown', (e) => {
     if (cellInside) {
       e.preventDefault();
       navigateCells(cell as HTMLTableCellElement, e.shiftKey ? -1 : 1);
+      return;
+    }
+    // Bug_General #9: inside a heading, Tab/Shift+Tab demotes/promotes the heading
+    // level and applies the SAME delta to every descendant heading in its section
+    // (up to, not including, the next same-or-higher heading). Placed AFTER the
+    // li/cell branches so list indent and table-cell nav keep priority. Gate on a
+    // TOP-LEVEL heading only: a heading nested in a blockquote is not in
+    // content.children, so computeHeadingSectionSpan would index-of miss, scan from
+    // doc start, and corrupt unrelated headings (mirror drag-drop.ts's includes guard).
+    const heading = anchor?.closest('h1,h2,h3,h4,h5,h6') as HTMLElement | null;
+    if (heading && heading.parentElement === content) {
+      e.preventDefault();
+      const delta = e.shiftKey ? -1 : 1;
+      const level = headingLevel(heading)!; // 1..6
+      // Promote H1: cannot go higher → no-op (including descendant headings).
+      if (delta < 0 && level === 1) {
+        return;
+      }
+      // Capture the caret offsets on the ORIGINAL heading before re-tagging; block
+      // text is unchanged so offsets map 1-1 into the new element, restored after the
+      // whole section is retagged (each replaceBlockTag moves the caret transiently;
+      // the final placeCaretAtOffsets overrides it).
+      const r = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+      const startOff = r ? getOffsetWithin(heading, r.startContainer, r.startOffset) : null;
+      const endOff = r
+        ? sel!.isCollapsed
+          ? startOff
+          : getOffsetWithin(heading, r.endContainer, r.endOffset)
+        : null;
+      const section = computeHeadingSectionSpan(heading, Array.from(content.children) as HTMLElement[]);
+      let target: HTMLElement = heading;
+      for (const block of section) {
+        const lvl = headingLevel(block);
+        if (lvl === null) {
+          continue; // non-heading content in the section keeps its tag
+        }
+        const next = lvl + delta;
+        // Demote past H6 → normal paragraph; otherwise clamp into 1..6.
+        const el = dom.replaceBlockTag(block, next > 6 ? 'p' : `h${Math.max(1, next)}`);
+        if (block === heading) {
+          target = el;
+        }
+      }
+      if (startOff !== null && endOff !== null) {
+        dom.placeCaretAtOffsets(target, startOff, endOff);
+      } else {
+        dom.placeCaretIn(target);
+      }
+      dragDrop.refresh();
+      scheduleSync();
       return;
     }
   }

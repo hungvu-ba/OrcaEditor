@@ -1042,10 +1042,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * pasted images, which get a generated + prefixed name for orphan-cleanup
    * bookkeeping, dropped files keep their ORIGINAL name (so a linked
    * `report.pdf` reads as `report.pdf`, not a hash) with a numeric suffix
-   * added only if that name is already taken. Not covered by
-   * cleanupOrphanImages — deleting an unused dropped file is manual for now
-   * (scope cut: extending orphan detection to arbitrary `[text](path)` links,
-   * not just `<img>`, is a larger change deferred to a later pass).
+   * added only if that name is already taken. Because they carry no marker,
+   * orphan cleanup tracks them per-document in memory (trackDroppedAsset) so
+   * deleting the link removes + caches the file the same way pasted images are
+   * handled (cleanupOrphanImages / restoreUndoneImageDeletions).
    */
   private async saveDroppedFile(
     document: vscode.TextDocument,
@@ -1062,6 +1062,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       await vscode.workspace.fs.createDirectory(targetDir);
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+      this.trackDroppedAsset(document, path.basename(targetUri.path));
       return { relativePath: relativePath(documentDir.path, targetUri.path) };
     } catch (err) {
       MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
@@ -1108,6 +1109,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * File kéo-thả (không phải ảnh) giữ TÊN GỐC nên không mang marker như ảnh dán
+   * — theo dõi tên file theo document (chỉ trong phiên) để cleanupOrphanImages
+   * biết file nào là asset do lần drop này tạo mà dọn khi link bị xoá. Giới hạn
+   * phiên: đóng/mở lại editor sẽ quên (giống ảnh dán trước khi có tính năng).
+   */
+  private readonly droppedAssetsByDoc = new Map<string, Set<string>>();
+
+  private trackDroppedAsset(document: vscode.TextDocument, fileName: string): void {
+    const key = document.uri.toString();
+    let set = this.droppedAssetsByDoc.get(key);
+    if (!set) {
+      set = new Set<string>();
+      this.droppedAssetsByDoc.set(key, set);
+    }
+    set.add(fileName);
+  }
+
+  /**
    * Dọn ảnh mồ côi khi save (đăng ký ở onDidSaveTextDocument, xem
    * resolveCustomTextEditor): ảnh do document này "sở hữu" (tên file có
    * prefix từ imagePrefixFor, xem savePastedImage) nhưng không còn xuất hiện
@@ -1139,55 +1158,73 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
 
-    const prefix = this.imagePrefixFor(document);
-    if (!prefix) {
-      return;
-    }
-
-    let entries: [string, vscode.FileType][];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(imagesDir);
-    } catch {
-      return; // Chưa có thư mục ảnh nào — không có gì để dọn.
-    }
-
-    const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
     const text = document.getText();
-    const candidates = entries
-      .filter(([name, type]) => type === vscode.FileType.File && name.startsWith(ownedMarker))
-      .map(([name]) => name)
-      .filter((name) => !text.includes(name));
 
-    if (candidates.length === 0) {
+    // Ứng viên = ảnh dán do document sở hữu (nhận diện qua prefix marker, quét
+    // thư mục) ∪ file kéo-thả không phải ảnh (giữ tên gốc, không marker — theo
+    // dõi trong phiên qua droppedAssetsByDoc).
+    const pool = new Set<string>();
+
+    const prefix = this.imagePrefixFor(document);
+    if (prefix) {
+      const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
+      try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(imagesDir)) {
+          if (type === vscode.FileType.File && name.startsWith(ownedMarker)) {
+            pool.add(name);
+          }
+        }
+      } catch {
+        // Chưa có thư mục ảnh — không có ảnh dán để dọn (file drop xử lý bên dưới).
+      }
+    }
+
+    const dropped = this.droppedAssetsByDoc.get(document.uri.toString());
+    if (dropped) {
+      for (const name of dropped) {
+        pool.add(name);
+      }
+    }
+
+    // Còn xuất hiện trong nội dung vừa lưu ⇒ đang dùng, bỏ. Chỉ đọc sibling khi
+    // thật sự còn ứng viên mồ côi (tránh quét thư mục khi không cần).
+    const orphans = [...pool].filter((name) => !text.includes(name));
+    if (orphans.length === 0) {
       return;
     }
 
+    const siblingTexts = await this.readSiblingMdTexts(document);
+    for (const name of orphans) {
+      // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
+      if (siblingTexts.some((sibling) => sibling.includes(name))) {
+        continue;
+      }
+      await this.deleteOrphanImage(imagesDir, name);
+      dropped?.delete(name); // đã xoá+cache; thôi theo dõi (undo sẽ re-track qua restore).
+    }
+  }
+
+  /**
+   * Nội dung mọi file .md anh em CÙNG THƯ MỤC (bỏ chính document), đọc mỗi file
+   * đúng MỘT lần — để cleanupOrphanImages đối chiếu mọi ứng viên trong O(siblings)
+   * thay vì mở lại danh sách sibling cho từng ứng viên.
+   */
+  private async readSiblingMdTexts(document: vscode.TextDocument): Promise<string[]> {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
-
-    // Đọc nội dung mỗi file .md anh em MỘT lần (bỏ chính document) rồi mới đối
-    // chiếu mọi ứng viên — trước đây mỗi ứng viên lại mở lại cả danh sách sibling,
-    // thành O(candidates × siblings) lượt đọc thay vì O(siblings).
     const ownUri = document.uri.toString();
-    const siblingTexts: string[] = [];
+    const texts: string[] = [];
     for (const uri of siblingMdUris) {
       if (uri.toString() === ownUri) {
         continue;
       }
       try {
-        siblingTexts.push((await vscode.workspace.openTextDocument(uri)).getText());
+        texts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }
     }
-
-    for (const name of candidates) {
-      // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
-      if (siblingTexts.some((text) => text.includes(name))) {
-        continue;
-      }
-      await this.deleteOrphanImage(imagesDir, name);
-    }
+    return texts;
   }
 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
@@ -1223,6 +1260,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       try {
         await vscode.workspace.fs.createDirectory(imagesDir);
         await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+        // File kéo-thả (không có marker ảnh dán) vừa khôi phục qua undo → theo
+        // dõi lại để lần xoá link kế tiếp vẫn dọn được; ảnh dán tự nhận diện
+        // qua marker nên không cần.
+        if (!fileName.includes(MarkdownWysiwygProvider.PASTE_IMAGE_MARKER)) {
+          this.trackDroppedAsset(document, fileName);
+        }
       } catch (err) {
         MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: failed to restore ${fileName}`, err);
       }

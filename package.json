@@ -220,6 +220,7 @@
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
+    "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",

@@ -1060,3 +1060,298 @@ test('"Move up/Move down" from the handle menu refreshes the drag handle so it d
   expect(md.indexOf('Beta paragraph.')).toBeLessThan(md.indexOf('Alpha paragraph.'));
   await expect(blockHandle).toHaveCSS('display', 'none');
 });
+
+/** A heading whose section (Section A) is a clear SUBSET of the doc — a second heading closes it,
+ * so the handle/outline span can be told apart from "the whole document". */
+const SECTION_DOC = `# Section A
+
+Alpha paragraph.
+
+Beta paragraph.
+
+# Section B
+
+Gamma paragraph.
+`;
+
+test('hovering a heading block handle makes it span the whole section, not just the heading (bug General #2)', async ({
+  page,
+}) => {
+  await openEditor(page, SECTION_DOC);
+  const heading = page.locator('h1', { hasText: 'Section A' });
+  await hoverCenter(page, heading);
+
+  const handle = page.locator(BLOCK_HANDLE_SELECTOR);
+  await expect(handle).toHaveCSS('display', 'flex');
+  const handleBox = await handle.boundingBox();
+  const headingBox = await heading.boundingBox();
+  const betaBox = await page.locator('p', { hasText: 'Beta paragraph.' }).boundingBox();
+  if (!handleBox || !headingBox || !betaBox) {
+    throw new Error('missing bounding box');
+  }
+  // Top aligns with the heading; bottom reaches the last block of the section (Beta) — so the
+  // handle covers heading + content, matching computeHeadingSectionSpan (what a drag carries),
+  // instead of only the heading's own (much shorter) box.
+  expect(Math.round(handleBox.y)).toBe(Math.round(headingBox.y));
+  expect(Math.round(handleBox.y + handleBox.height)).toBe(Math.round(betaBox.y + betaBox.height));
+  expect(handleBox.height).toBeGreaterThan(headingBox.height + 1);
+});
+
+test('hovering the heading handle glyph outlines the whole section and nothing beyond it (bug General #2)', async ({
+  page,
+}) => {
+  await openEditor(page, SECTION_DOC);
+  const heading = page.locator('h1', { hasText: 'Section A' });
+  await hoverCenter(page, heading);
+  const handle = page.locator(BLOCK_HANDLE_SELECTOR);
+  const box = await handle.boundingBox();
+  if (!box) {
+    throw new Error('block handle has no bounding box');
+  }
+
+  // Onto the (tall) section handle → the preview outline covers every block a drag would move.
+  await page.mouse.move(box.x + box.width / 2, box.y + 6);
+  await expect(heading).toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Alpha paragraph.' })).toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Beta paragraph.' })).toHaveClass(/dd-hover-outline/);
+  // The next section (past the closing heading) is NOT part of the span — must stay clean.
+  await expect(page.locator('h1', { hasText: 'Section B' })).not.toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Gamma paragraph.' })).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('a non-heading block handle still spans only that block and outlines only it (bug General #2 regression)', async ({
+  page,
+}) => {
+  await openEditor(page, SECTION_DOC);
+  const alpha = page.locator('p', { hasText: 'Alpha paragraph.' });
+  await hoverCenter(page, alpha);
+
+  const handle = page.locator(BLOCK_HANDLE_SELECTOR);
+  const handleBox = await handle.boundingBox();
+  const alphaBox = await alpha.boundingBox();
+  if (!handleBox || !alphaBox) {
+    throw new Error('missing bounding box');
+  }
+  // Unchanged: a paragraph's handle is exactly its own height, never the section's.
+  expect(Math.round(handleBox.height)).toBe(Math.round(alphaBox.height));
+
+  // Onto the glyph → only Alpha is outlined; not the heading above nor the sibling below.
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await expect(alpha).toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('h1', { hasText: 'Section A' })).not.toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Beta paragraph.' })).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('dropping a dragged heading section leaves no block with a stale section outline (bug General #2)', async ({
+  page,
+}) => {
+  await openEditor(page, SECTION_DOC);
+  const heading = page.locator('h1', { hasText: 'Section A' });
+  await hoverCenter(page, heading);
+  const handleBox = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  const gammaBox = await page.locator('p', { hasText: 'Gamma paragraph.' }).boundingBox();
+  if (!handleBox || !gammaBox) {
+    throw new Error('missing bounding box');
+  }
+
+  // Grab the (tall) section handle and drop the whole section below the last block.
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, gammaBox.y + gammaBox.height + 12, { steps: 10 });
+  await page.mouse.up();
+
+  const md = await waitForEdit(page);
+  // The whole section really moved (Section A now after Section B) ...
+  expect(md.indexOf('Section A')).toBeGreaterThan(md.indexOf('Section B'));
+  // ... and the multi-block section outline was cleared before the move cloned the nodes — no
+  // block is left carrying it (the new stale-outline risk this feature introduces).
+  await expect(page.locator('.dd-hover-outline')).toHaveCount(0);
+});
+
+test('a heading section stays outlined while its handle menu is open, even as the mouse moves over other content (bug General #2)', async ({
+  page,
+}) => {
+  await openEditor(page, SECTION_DOC);
+  const heading = page.locator('h1', { hasText: 'Section A' });
+  await hoverCenter(page, heading);
+  const box = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  if (!box) {
+    throw new Error('block handle has no bounding box');
+  }
+
+  // Click (no move) the section handle → opens the Move menu; the whole section is outlined.
+  await page.mouse.move(box.x + box.width / 2, box.y + 8);
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect(page.locator('.dd-menu-popup:visible')).toBeVisible();
+  await expect(heading).toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Beta paragraph.' })).toHaveClass(/dd-hover-outline/);
+
+  // Moving the mouse over an unrelated block below must NOT strip the open menu's section outline.
+  await hoverCenter(page, page.locator('p', { hasText: 'Gamma paragraph.' }));
+  await expect(heading).toHaveClass(/dd-hover-outline/);
+  await expect(page.locator('p', { hasText: 'Beta paragraph.' })).toHaveClass(/dd-hover-outline/);
+
+  // Closing the menu clears the whole section — no orphaned outline left behind.
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.dd-menu-popup:visible')).toBeHidden();
+  await expect(page.locator('.dd-hover-outline')).toHaveCount(0);
+});
+
+/** An H1 chapter with three H2 sibling sections, each a heading + its own body paragraph — the
+ * canonical shape for the same-level/same-parent heading move restriction (bug_General #2 f/u). */
+const OUTLINE_DOC = `# Chapter
+
+## Section A
+
+A body.
+
+## Section B
+
+B body.
+
+## Section C
+
+C body.
+`;
+
+/** An H1 with a single H2 child — that H2 has no sibling to swap with, so it is immovable. */
+const SINGLE_DOC = `# Chapter
+
+## Only
+
+Body.
+`;
+
+async function openBlockMenu(page: Page, target: Locator): Promise<Locator> {
+  await hoverCenter(page, target);
+  const box = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  if (!box) {
+    throw new Error('block handle has no bounding box');
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + 8);
+  await page.mouse.down();
+  await page.mouse.up();
+  const popup = page.locator('.dd-menu-popup:visible');
+  await expect(popup).toBeVisible();
+  return popup;
+}
+
+test('Move Up/Down and "Move to..." for a heading act on same-level siblings only (bug_General #2 f/u)', async ({
+  page,
+}) => {
+  await openEditor(page, OUTLINE_DOC);
+  const popup = await openBlockMenu(page, page.locator('h2', { hasText: 'Section B' }));
+
+  // "Move to..." lists only the sibling H2s — never the parent H1 "Chapter" (different level).
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Section A' })).toHaveCount(1);
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Section C' })).toHaveCount(1);
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Chapter' })).toHaveCount(0);
+
+  // Move Up swaps B with its previous sibling A (whole sections), levels unchanged.
+  await popup.locator('.dd-menu-item', { hasText: 'Move up' }).click();
+  const md = await waitForEdit(page);
+  expect(md.indexOf('Section B')).toBeLessThan(md.indexOf('Section A'));
+  expect(md).toContain('## Section B');
+  expect(md.indexOf('Section C')).toBeGreaterThan(md.indexOf('Section A'));
+});
+
+test('dragging a heading snaps to a sibling boundary and never splits/nests into another section (bug_General #2 f/u)', async ({
+  page,
+}) => {
+  await openEditor(page, OUTLINE_DOC);
+  await hoverCenter(page, page.locator('h2', { hasText: 'Section A' }));
+  const handleBox = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  // Aim the drop AT Section B's own heading row — a raw gap that falls *inside* B's section
+  // (between its heading and body). The constraint must snap it out to a real sibling boundary.
+  const bHeadingBox = await page.locator('h2', { hasText: 'Section B' }).boundingBox();
+  if (!handleBox || !bHeadingBox) {
+    throw new Error('missing bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, bHeadingBox.y + bHeadingBox.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  const md = await waitForEdit(page);
+  // A stayed an H2 and landed as a whole sibling section after B — never inside B.
+  expect(md).toContain('## Section A');
+  expect(md.indexOf('Section A')).toBeGreaterThan(md.indexOf('B body.'));
+  // B's own section is intact: its heading is still immediately followed by its own body.
+  expect(md).toMatch(/## Section B\s+B body\./);
+});
+
+test('an only-child heading cannot be moved: menu items disabled and drag shows no drop target (bug_General #2 f/u)', async ({
+  page,
+}) => {
+  await openEditor(page, SINGLE_DOC);
+  const popup = await openBlockMenu(page, page.locator('h2', { hasText: 'Only' }));
+  // No sibling → Move Up/Down disabled, and no "Move to..." targets at all.
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Move up' })).toBeDisabled();
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Move down' })).toBeDisabled();
+  await expect(popup.locator('.dd-menu-label', { hasText: 'Move to' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  // A drag finds no valid boundary → the drop-line never shows.
+  await hoverCenter(page, page.locator('h2', { hasText: 'Only' }));
+  const handleBox = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  const bodyBox = await page.locator('p', { hasText: 'Body.' }).boundingBox();
+  if (!handleBox || !bodyBox) {
+    throw new Error('missing bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, bodyBox.y + bodyBox.height + 20, { steps: 10 });
+  await expect(page.locator('.dd-drop-line:visible')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+
+  // Untouched: still exactly one H2 in original order.
+  const headings = await page.locator('#content h2').allTextContents();
+  expect(headings).toEqual(['Only']);
+});
+
+test('a non-heading block is unaffected: its "Move to..." still lists every heading (bug_General #2 f/u)', async ({
+  page,
+}) => {
+  await openEditor(page, OUTLINE_DOC);
+  const popup = await openBlockMenu(page, page.locator('p', { hasText: 'A body.' }));
+  // Unchanged behavior: a paragraph can still target the parent-level H1 and any heading.
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Chapter' })).toHaveCount(1);
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Section C' })).toHaveCount(1);
+});
+
+test('a heading with no same-level sibling is immovable even in a skipped-level outline (blind review F1)', async ({
+  page,
+}) => {
+  // "Deep" is an H3 directly under the H1; the following H2 "Shallow" is shallower, so Deep has no
+  // H3 sibling and must NOT be draggable down past the H2 (that would nest it under the H2).
+  await openEditor(page, `# Chapter\n\n### Deep\n\nDeep body.\n\n## Shallow\n\nShallow body.\n`);
+  await hoverCenter(page, page.locator('h3', { hasText: 'Deep' }));
+  const handleBox = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  const shallowBody = await page.locator('p', { hasText: 'Shallow body.' }).boundingBox();
+  if (!handleBox || !shallowBody) {
+    throw new Error('missing bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, shallowBody.y + shallowBody.height + 20, { steps: 10 });
+  // No valid same-level destination → drop-line never shows.
+  await expect(page.locator('.dd-drop-line:visible')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  // Order preserved: Deep still before Shallow, still an H3.
+  const headings = await page.locator('#content h3, #content h2').allTextContents();
+  expect(headings).toEqual(['Deep', 'Shallow']);
+});
+
+test('"Move to..." disables the sibling directly above (would be a self no-op) (blind review F2)', async ({
+  page,
+}) => {
+  await openEditor(page, OUTLINE_DOC);
+  const popup = await openBlockMenu(page, page.locator('h2', { hasText: 'Section B' }));
+  // Section A sits directly above B — "Move to A" would resolve to B's own slot, so it is disabled.
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Section A' })).toBeDisabled();
+  // Section C is below B — a real move, still enabled.
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Section C' })).toBeEnabled();
+});

@@ -517,6 +517,93 @@ ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
   font-weight: bold;
 }
 
+/* ---------------------------------------------------------------------------
+ * bug_General #7: syntax colors follow the READING PALETTE, not just the VS
+ * Code theme. The two blocks above key off .vscode-light / default (dark) only,
+ * so a light palette on a dark VS Code theme (e.g. Sepia) kept dark-optimized
+ * token colors on a light background → washed out. Reading palette decides the
+ * real background, so re-scope the SAME two color sets by palette lightness:
+ * light palettes (light/sepia/paper/highContrast) → light-theme colors; the
+ * `dark` palette → dark-theme colors. `#content` + `:is(...)` lift specificity
+ * above `.vscode-light .hljs-*` so these win regardless of the VS Code theme.
+ * followTheme (no palette class) matches nothing here → unchanged behavior.
+ *--------------------------------------------------------------------------*/
+
+/* Light palettes → light-theme token colors (mirror `.vscode-light .hljs-*`). */
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-function, .hljs-params, .hljs-number, .hljs-class) {
+  color: inherit;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-comment, .hljs-quote, .hljs-number, .hljs-class, .hljs-variable) {
+  color: #008000;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-keyword, .hljs-selector-tag, .hljs-name, .hljs-tag) {
+  color: #00f;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-built_in, .hljs-builtin-name) {
+  color: #007acc;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-string, .hljs-section, .hljs-attribute, .hljs-literal, .hljs-template-tag, .hljs-template-variable, .hljs-type) {
+  color: #a31515;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-subst, .hljs-selector-attr, .hljs-selector-pseudo, .hljs-meta) {
+  color: #2b91af;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content .hljs-title {
+  color: #808080;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content .hljs-attr {
+  color: #f00;
+}
+body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-symbol, .hljs-bullet, .hljs-link) {
+  color: #00b0e8;
+}
+
+/* Dark palette → dark-theme token colors (mirror the unprefixed `.hljs-*`
+ * defaults) so a `dark` palette on a light VS Code theme isn't left with
+ * `.vscode-light`'s dark-on-light colors sitting on a dark background. */
+body.reading-palette-dark #content :is(.hljs-keyword, .hljs-literal, .hljs-symbol, .hljs-name) {
+  color: #569cd6;
+}
+body.reading-palette-dark #content .hljs-link {
+  color: #569cd6;
+}
+body.reading-palette-dark #content :is(.hljs-built_in, .hljs-type) {
+  color: #4ec9b0;
+}
+body.reading-palette-dark #content :is(.hljs-number, .hljs-class) {
+  color: #b8d7a3;
+}
+body.reading-palette-dark #content :is(.hljs-string, .hljs-meta .hljs-string) {
+  color: #d69d85;
+}
+body.reading-palette-dark #content :is(.hljs-regexp, .hljs-template-tag) {
+  color: #9a5334;
+}
+body.reading-palette-dark #content :is(.hljs-subst, .hljs-function, .hljs-title, .hljs-params, .hljs-formula) {
+  color: #dcdcaa;
+}
+body.reading-palette-dark #content :is(.hljs-comment, .hljs-quote) {
+  color: #57a64a;
+}
+body.reading-palette-dark #content .hljs-doctag {
+  color: #608b4e;
+}
+body.reading-palette-dark #content :is(.hljs-meta, .hljs-meta .hljs-keyword, .hljs-tag) {
+  color: #9b9b9b;
+}
+body.reading-palette-dark #content :is(.hljs-variable, .hljs-template-variable) {
+  color: #bd63c5;
+}
+body.reading-palette-dark #content :is(.hljs-attr, .hljs-attribute) {
+  color: #9cdcfe;
+}
+body.reading-palette-dark #content .hljs-section {
+  color: gold;
+}
+body.reading-palette-dark #content :is(.hljs-bullet, .hljs-selector-tag, .hljs-selector-id, .hljs-selector-class, .hljs-selector-attr, .hljs-selector-pseudo) {
+  color: #d7ba7d;
+}
+
 /* ===========================================================================
  * Reading Mode / Readability (HLR mục 19)
  * Chỉ CSS class/var trên <body>/#content bật/tắt (readability.ts) — KHÔNG đụng

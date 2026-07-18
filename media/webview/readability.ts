@@ -81,6 +81,13 @@ export interface ReadabilityDeps {
    * trống ở môi trường test (không có host).
    */
   onReadingModeChange?: (state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }) => void;
+  /**
+   * bug_General #7: một bộ style vừa được COMMIT (apply()) — palette có thể đã
+   * đổi. Cho phép phần khác (Mermaid) phản ứng khi nền sáng/tối lật. CHỈ gọi ở
+   * apply(), KHÔNG ở previewStyle() (hover): re-render mermaid lúc hover dễ gây
+   * nháy. Bỏ trống ở test/không cần Mermaid.
+   */
+  onStyleApplied?: () => void;
 }
 
 const PRESETS: ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
@@ -246,6 +253,8 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       body.style.removeProperty('--reading-font-override');
     }
     deps.syncButtons();
+    // bug_General #7: palette có thể vừa đổi → cho Mermaid dựng lại theo theme mới.
+    deps.onStyleApplied?.();
   }
 
   /**

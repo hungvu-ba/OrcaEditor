@@ -1,8 +1,8 @@
 /**
- * Bug General #1: clicking a block/table handle opens the move menu positioned so it never
- * covers the selected block's own content, marks the whole block as selected, and Delete/
- * Backspace then removes the entire block. Needs real click + keyboard + Selection API
- * behavior — not reducible to a hand-built DOM snapshot (Plan/Archived/WEBVIEW_TEST.md).
+ * Bug General #1 / R3 #1: clicking a block/table handle opens the move menu anchored at the
+ * click point (context-menu-at-cursor), not far below the whole block; it marks the whole block
+ * as selected, and Delete/Backspace then removes the entire block. Needs real click + keyboard +
+ * Selection API behavior — not reducible to a hand-built DOM snapshot (Plan/Archived/WEBVIEW_TEST.md).
  */
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { openEditor, clearPosted, waitForEdit } from './_harness';
@@ -14,6 +14,16 @@ Alpha paragraph.
 Beta paragraph.
 
 Gamma paragraph.
+`;
+
+// A single very tall (many-line-wrapping) paragraph: its handle spans the whole block, so a click
+// at the handle's center is far above the block's bottom — the old block-rect anchoring opened the
+// menu way down there, the R3 #1 fix opens it at the click.
+const TALL_DOC = `# Heading
+
+${'Long wrapping paragraph sentence. '.repeat(60)}
+
+Tail paragraph.
 `;
 
 const TABLE_DOC = `# Heading
@@ -41,37 +51,46 @@ async function clickHandle(page: Page, handle: Locator): Promise<void> {
   await page.mouse.up();
 }
 
-test('clicking the block handle opens the menu clear of the block and marks it selected without selecting text', async ({
+test('clicking the block handle opens the menu at the click point (not far below a tall block) and marks it selected without selecting text', async ({
   page,
 }) => {
-  await openEditor(page, DOC);
-  const beta = page.locator('p', { hasText: 'Beta paragraph.' });
-  await beta.hover();
+  await openEditor(page, TALL_DOC);
+  const para = page.locator('p', { hasText: 'Long wrapping paragraph sentence.' });
+  await para.hover();
   const handle = page.locator(BLOCK_HANDLE_SELECTOR);
   await expect(handle).toHaveCSS('display', 'flex');
+
+  const handleBox = await handle.boundingBox();
+  const blockBox = await para.boundingBox();
+  if (!handleBox || !blockBox) {
+    throw new Error('missing bounding box');
+  }
+  // Sanity: the block is tall enough that its center (where we click) is well above its bottom,
+  // so anchoring at the click vs. at the block rect is measurably different (needs > ~88px for the
+  // popup-top-vs-block-bottom assertion below to have margin).
+  expect(blockBox.height).toBeGreaterThan(120);
+  const clickY = handleBox.y + handleBox.height / 2;
   await clickHandle(page, handle);
 
   const popup = page.locator('.dd-menu-popup:visible');
   await expect(popup).toBeVisible();
 
   const popupBox = await popup.boundingBox();
-  const blockBox = await beta.boundingBox();
-  if (!popupBox || !blockBox) {
+  if (!popupBox) {
     throw new Error('missing bounding box');
   }
-  // The popup must not overlap the selected block's own content rectangle (bug General #1) —
-  // a full-width block leaves no room to the side, so it opens above/below the block instead.
-  const overlaps =
-    popupBox.x < blockBox.x + blockBox.width &&
-    popupBox.x + popupBox.width > blockBox.x &&
-    popupBox.y < blockBox.y + blockBox.height &&
-    popupBox.y + popupBox.height > blockBox.y;
-  expect(overlaps).toBe(false);
+  // R3 #1: the popup opens at the click point — its top just below the cursor, or (if it had to
+  // flip for lack of room below) its bottom just above the cursor — NEVER anchored down at the
+  // whole block's bottom the way the old block-rect placement did.
+  const openedBelow = Math.abs(popupBox.y - clickY) < 40;
+  const openedAbove = Math.abs(popupBox.y + popupBox.height - clickY) < 40;
+  expect(openedBelow || openedAbove).toBe(true);
+  expect(popupBox.y).toBeLessThan(blockBox.y + blockBox.height - 40);
 
   // Selected state is the outline only — no native text selection over the block (bug General R2 #1).
-  expect((await beta.getAttribute('class')) ?? '').toContain('dd-hover-outline');
+  expect((await para.getAttribute('class')) ?? '').toContain('dd-hover-outline');
   const sel = await page.evaluate(() => window.getSelection()?.toString() ?? '');
-  expect(sel).not.toContain('Beta paragraph.');
+  expect(sel).not.toContain('Long wrapping paragraph sentence.');
 });
 
 test('the block-handle menu near the top of the document never overlaps the sticky toolbar', async ({ page }) => {

@@ -267,3 +267,17 @@
 | 0.8.0 | 2026-07-18 | Refactor (Code Optimization Notes — re-triaged defers): shared readAsDataUrl/dataUrlToBase64 (dom-utils, dedup paste-image + external-drop), createToolbarToggle (dom-postprocess, dedup math/mermaid toolbar), and named message payload types (RevealPosition/AssetSaveResult/Zen/ReadingModeChanged in messages.ts); behavior unchanged. |
 | 0.8.0 | 2026-07-18 | Feature: register Orca MD Editor with customEditor priority "default" so .md files (incl. followed links) open in Orca instead of raw text. |
 | 0.8.0 | 2026-07-18 | Refactor + security (Optimization Notes): shared el() helper, toggleAttribute checkbox mirror, cellPrefix/rangeToInnerHtml/fillSequenceColumn dedup, zen toolbar-height rAF-coalesce; S-1/S-2 message-boundary validation. |
+| 0.8.0 | 2026-07-18 | Fix: dropped non-image files now orphan-cleaned like pasted images — deleting the link removes+caches the asset (undo restores it) via per-document in-session tracking. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #2): heading block handle + hover-preview outline now span the whole section (heading + content), matching what a drag actually moves. |
+| 0.8.0 | 2026-07-18 | Feature: heading Move Up/Down/"Move to"/drag now restricted to same-level sibling positions under the same parent heading; level changes stay separate (Tab/Shift+Tab). |
+| 0.8.0 | 2026-07-18 | Fix (bug General #4): TOC auto-hides based on Comfortable Reading content width + live panel width, not half the physical screen. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #6): Mermaid diagrams get a toolbar "Zoom" button opening a fullscreen lightbox (scroll to zoom, drag to pan, Esc to close), sharing the image-zoom overlay. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): bare relative file paths render as clickable links labelled by file name (display-only); the raw path round-trips unchanged in the .md. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): a relative path written as inline code (backticks) is now Cmd/Ctrl+Click-openable while keeping its code style; the code span round-trips unchanged. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): auto-linked inline-code paths now display just the file name in link colour (code background kept); the .md still round-trips to the full `path`. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #10): TOC entries now render as bordered, rounded cards (subtle background, per-level indent) instead of flat hyperlinks; palette-aware in reading modes. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #10): TOC card text no longer painted as an underlined link on hover/active; the accent moved to the card border/background. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #10): TOC now rebuilds after toolbar heading-level changes (raw-DOM ops that skip 'input'), via scheduleSync — matching keyboard edits. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #7): code-block syntax highlighting and Mermaid diagrams now follow the active reading palette, not just the VS Code theme, so both stay readable on light palettes (e.g. Sepia). |
+| 0.8.0 | 2026-07-18 | Feature (bug General #9): in a heading, Tab demotes / Shift+Tab promotes it and its descendant headings; Tab past H6 becomes a paragraph, Shift+Tab on H1 is a no-op. |
+| 0.8.0 | 2026-07-18 | Fix (bug General R3 #1): clicking a block/table drag handle now opens the Move menu at the click point, not far below a tall block/section. |

@@ -15,12 +15,15 @@ import {
   MERMAID_CLASS,
   MERMAID_TOOLBAR_CLASS,
   MERMAID_TOGGLE_CLASS,
+  MERMAID_ZOOM_CLASS,
   MERMAID_CHART_CLASS,
   MERMAID_SOURCE_CLASS,
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
+  AUTOLINK_PATH_ATTR,
 } from './render';
 import { hasAncestor } from './dom-portable';
+import { encodeLinkPath } from './dom-utils';
 
 /**
  * @param mathBlockRanges range dòng nguồn (1-based, bao gồm) của từng khối
@@ -178,6 +181,16 @@ export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): v
       title: 'Toggle between chart and Mermaid source',
     });
 
+    // "Zoom" button opens the diagram in the fullscreen lightbox (bug_General #6).
+    // Shown only in chart view (hidden via CSS when data-mermaid-view='code').
+    // Domino has no ParentNode.append → use appendChild.
+    const zoom = doc.createElement('button');
+    zoom.setAttribute('type', 'button');
+    zoom.className = MERMAID_ZOOM_CLASS;
+    zoom.setAttribute('contenteditable', 'false');
+    zoom.setAttribute('title', 'Zoom diagram');
+    toolbar.appendChild(zoom);
+
     const chart = doc.createElement('div');
     chart.className = MERMAID_CHART_CLASS;
     chart.setAttribute('contenteditable', 'false');
@@ -188,5 +201,130 @@ export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): v
     wrapper.appendChild(toolbar);
     wrapper.appendChild(chart);
     wrapper.appendChild(pre);
+  }
+}
+
+/**
+ * Wrap a bare relative file path written as plain text (e.g.
+ * "../OrcaEditor-Requirements/Requirement - 20 Trigger-based Quick Actions.md")
+ * in an <a> that DISPLAYS the file name (with extension); href = encoded path.
+ * This is a DISPLAY-only transform: the original path string is kept verbatim in
+ * AUTOLINK_PATH_ATTR so turndown serializes it back unchanged (see the
+ * autolinkPath rule) → the .md file is not modified. Clicks are handled by the
+ * existing <a> handler in main.ts (Cmd/Ctrl+Click → openLink; the host blocks
+ * unsafe schemes + path traversal).
+ *
+ * Runs under Node/domino (round-trip tests): builds DOM with createElement/
+ * insertBefore/removeChild only (NO .append/innerHTML — avoids the domino trap
+ * and blocks HTML injection from paths with special characters).
+ */
+// Qualifying path: MUST start with "./" or "../" (one or more), then optional
+// directory segments, then a file name ending in ".<ext>" (1–8 alnum, one or more
+// extension segments so "archive.tar.gz" is kept whole) at a whitespace/closing-
+// punctuation/end boundary. Requiring the ./|../ prefix keeps prose slash-idioms
+// ("and/or logic.md"), dates ("12/25/2024.txt") and ratios ("1/2.5") from being
+// linkified (bug #5 review — chosen over broad matching). The left boundary also
+// accepts a leading opener ( [ { ' " so "(../foo.md)" links without swallowing "(".
+// Directory segments exclude whitespace (the "/" delimiter is excluded from the
+// class → no ambiguous splitting = ReDoS-safe); only the file-name segment allows
+// spaces. Hard bounds {1,40}/{0,40}/{1,200} cap worst-case work on pathological input.
+// safe-regex flags the nested quantifiers, but those hard bounds make the worst case
+// a bounded polynomial, not exponential — the "redos" test (< 500ms on 5000 segments)
+// in test/roundtrip/autolink-path.ts guards this.
+const RELATIVE_PATH_RE =
+  // eslint-disable-next-line security/detect-unsafe-regex
+  /(?:^|(?<=[\s([{'"]))((?:\.\.?\/){1,40}(?:[^\s/<>"|]+\/){0,40}[^/<>"|\n]{1,200}?\.[A-Za-z0-9]{1,8}(?:\.[A-Za-z0-9]{1,8})*)(?=$|[\s)\]}.,;!?'"])/g;
+
+/** true when the text node is inside a region that must NOT be linkified (existing link/code/atom). */
+function inSkippedContext(node: Node): boolean {
+  return hasAncestor(node, (el) => {
+    const tag = el.nodeName;
+    if (tag === 'A' || tag === 'CODE' || tag === 'PRE') {
+      return true;
+    }
+    const cl = el.classList;
+    return !!cl && (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS) || cl.contains(MERMAID_CLASS));
+  });
+}
+
+function collectTextNodes(node: Node, out: Text[]): void {
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    if (child.nodeType === 3) {
+      out.push(child as Text);
+    } else if (child.nodeType === 1) {
+      collectTextNodes(child, out);
+    }
+  }
+}
+
+export function postProcessRelativePathLinks(root: ParentNode & Node, doc: Document): void {
+  const textNodes: Text[] = [];
+  collectTextNodes(root, textNodes);
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue ?? '';
+    if (!text.includes('/') || inSkippedContext(textNode)) {
+      continue;
+    }
+    RELATIVE_PATH_RE.lastIndex = 0;
+    let match = RELATIVE_PATH_RE.exec(text);
+    if (!match) {
+      continue;
+    }
+    const parent = textNode.parentNode;
+    if (!parent) {
+      continue;
+    }
+    // Replace the text node with an interleaved sequence: [text, <a>, text, <a>, ..., trailing text].
+    let cursor = 0;
+    do {
+      const raw = match[1];
+      const start = match.index + match[0].length - raw.length;
+      if (start > cursor) {
+        parent.insertBefore(doc.createTextNode(text.slice(cursor, start)), textNode);
+      }
+      const anchor = doc.createElement('a');
+      anchor.setAttribute('href', encodeLinkPath(raw));
+      anchor.setAttribute(AUTOLINK_PATH_ATTR, raw);
+      anchor.textContent = raw.slice(raw.lastIndexOf('/') + 1);
+      parent.insertBefore(anchor, textNode);
+      cursor = start + raw.length;
+      match = RELATIVE_PATH_RE.exec(text);
+    } while (match);
+    if (cursor < text.length) {
+      parent.insertBefore(doc.createTextNode(text.slice(cursor)), textNode);
+    }
+    parent.removeChild(textNode);
+  }
+  markCodeSpanPathLinks(root);
+}
+
+/**
+ * Inline code spans whose ENTIRE content is a single qualifying path (e.g.
+ * `../OrcaEditor-Requirements/Requirement - 20 ....md` written in backticks) are
+ * common for cross-references. Turn them into a link: stamp AUTOLINK_PATH_ATTR on
+ * the <code> (the full path) and show only the file name (the click handler in
+ * main.ts opens it; CSS gives it a link colour). The full path is preserved in the
+ * attribute, and turndown's autolinkCodePath rule serializes the <code> back to
+ * `<full-path>` from it → the .md is unchanged. A whole-span match only: partial
+ * paths inside code are left alone (splitting a code span would corrupt both its
+ * meaning and its round-trip). Fenced code (<pre>) and code already inside an <a>
+ * are excluded.
+ */
+function markCodeSpanPathLinks(root: ParentNode & Node): void {
+  const codes = Array.from(root.querySelectorAll('code'));
+  for (const code of codes) {
+    if (hasAncestor(code, (el) => el.nodeName === 'PRE' || el.nodeName === 'A')) {
+      continue;
+    }
+    const raw = (code.textContent ?? '').trim();
+    if (!raw.includes('/')) {
+      continue;
+    }
+    RELATIVE_PATH_RE.lastIndex = 0;
+    const match = RELATIVE_PATH_RE.exec(raw);
+    if (match && match[1] === raw) {
+      code.setAttribute(AUTOLINK_PATH_ATTR, raw);
+      code.textContent = raw.slice(raw.lastIndexOf('/') + 1);
+    }
   }
 }
