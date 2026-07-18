@@ -299,9 +299,8 @@ export function fillSequenceColumn(table: Element, newRow: Element): boolean {
   if (!tbody) {
     return false;
   }
-  const rows = Array.from(tbody.children).filter((el) => el.tagName === 'TR');
-  const firstCellOf = (r: Element): Element | undefined =>
-    Array.from(r.children).find((el) => el.tagName === 'TD' || el.tagName === 'TH');
+  const rows = Array.from(tbody.rows);
+  const firstCellOf = (r: HTMLTableRowElement): Element | undefined => r.cells[0];
   const others = rows.filter((r) => r !== newRow);
   if (others.length === 0) {
     return false;

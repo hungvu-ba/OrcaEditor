@@ -428,6 +428,17 @@ function cellListMergeTarget(
 }
 
 /**
+ * Nội dung HTML của `range` (clone vào div tạm), fallback '<br>' khi rỗng để
+ * <li>/block mới luôn có caret host hợp lệ. Gom pattern lặp ở
+ * convertCellLineToListItem/applyTaskListEnterRule.
+ */
+function rangeToInnerHtml(range: Range): string {
+  const container = document.createElement('div');
+  container.appendChild(range.cloneContents());
+  return container.textContent ? container.innerHTML : '<br>';
+}
+
+/**
  * Rút "dòng" hiện tại trong ô bảng (từ lineStart tới <br>/<ul>/<ol> kế tiếp ở
  * cấp con trực tiếp, hoặc tới hết ô) thành một <li> — gộp vào list liền
  * trước nếu cùng loại (xem cellListMergeTarget), nếu không thì tạo list mới.
@@ -449,9 +460,7 @@ function convertCellLineToListItem(cell: HTMLElement, lineStart: number, ordered
   const lineRange = document.createRange();
   lineRange.setStart(cell, lineStart);
   lineRange.setEnd(cell, endIdx);
-  const container = document.createElement('div');
-  container.appendChild(lineRange.cloneContents());
-  const innerHtml = container.textContent ? container.innerHTML : '<br>';
+  const innerHtml = rangeToInnerHtml(lineRange);
 
   const listTag = ordered ? 'OL' : 'UL';
   const merge = cellListMergeTarget(cell, lineStart, listTag);
@@ -541,9 +550,7 @@ function applyTaskListEnterRule(): boolean {
     return false;
   }
 
-  const container = document.createElement('div');
-  container.appendChild(afterRange.cloneContents());
-  const afterHtml = container.textContent ? container.innerHTML : '<br>';
+  const afterHtml = rangeToInnerHtml(afterRange);
   afterRange.deleteContents();
 
   const listTag = li.parentElement?.nodeName === 'OL' ? 'OL' : 'UL';

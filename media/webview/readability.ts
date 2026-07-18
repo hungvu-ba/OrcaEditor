@@ -296,6 +296,17 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     document.body.classList.remove(REVEAL_CLASS);
   }
 
+  // #toolbar.offsetHeight bắt layout reflow — cache lại, chỉ đọc lại tối đa 1
+  // lần/frame qua rAF thay vì mỗi mousemove (chiều cao toolbar chỉ đổi khi
+  // resize/zoom chứ không theo di chuột). Trễ 1 frame vô hại với dải SHOW/HIDE
+  // margin rộng sẵn — cùng kiểu rAF-coalesce như onScroll/scheduleUpdateActive.
+  let cachedToolbarH = 40;
+  let toolbarHRaf = 0;
+  function refreshToolbarH(): void {
+    toolbarHRaf = 0;
+    cachedToolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
+  }
+
   document.addEventListener('mousemove', (e) => {
     if (!state.zen) {
       if (document.body.classList.contains(REVEAL_CLASS)) {
@@ -303,7 +314,10 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       }
       return;
     }
-    const toolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
+    if (toolbarHRaf === 0) {
+      toolbarHRaf = requestAnimationFrame(refreshToolbarH);
+    }
+    const toolbarH = cachedToolbarH;
     if (e.clientY > toolbarH + HIDE_MARGIN_PX) {
       revealArmed = true;
       // Đang mở dropdown (popover neo dưới toolbar, sâu quá ngưỡng) thì giữ

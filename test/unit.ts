@@ -442,38 +442,21 @@ check(
   !/script-src[^\n]*unsafe-inline/.test(providerSrc)
 );
 
-/**
- * Bug đã biết, CHƯA fix — track ở Plan/Optimization Notes.md § Security
- * hardening (S-1/S-2). PASS ở dạng "đã ghi nhận còn lỗ hổng" (không chặn
- * npm run test); nếu code đổi khiến điều kiện bỗng thành true mà không ai chủ
- * động gỡ xfail() — suite FAIL, buộc xác nhận fix thật rồi đổi sang check().
- */
-function xfail(name: string, fixed: boolean, tracking: string): void {
-  if (!fixed) {
-    pass++;
-    console.log(`XFAIL ${name} (chưa fix — ${tracking})`);
-  } else {
-    fail++;
-    console.log(`FAIL  ${name}`);
-    failures.push(
-      `--- ${name} ---\n  Điều kiện đã true (có vẻ đã fix) nhưng còn đánh dấu xfail().\n  Gỡ wrapper xfail() và đổi sang check() thường, cập nhật status trong ${tracking}.`
-    );
-  }
-}
-
+// Security hardening (Plan/Optimization Notes.md § Security hardening) — S-1/S-2
+// đã fix: message boundary webview→host phải whitelist/gate trước khi dùng giá
+// trị. Scan trực tiếp source provider.ts để bám sát fix thật.
 const readingModeCaseBody =
   providerSrc.match(/case 'readingModeChanged': \{([\s\S]*?)\n        \}/)?.[1] ?? '';
-xfail(
+check(
   'security S-1: readingModeChanged whitelist preset/palette trước khi lưu',
-  /READING_PRESETS/.test(readingModeCaseBody) && /READING_PALETTES/.test(readingModeCaseBody),
-  'Plan/Optimization Notes.md § Security hardening S-1'
+  /READING_PRESETS/.test(readingModeCaseBody) && /READING_PALETTES/.test(readingModeCaseBody)
 );
 
-const openResultBody = providerSrc.match(/openCrossFileSearchResult\([\s\S]*?\n  \}/)?.[0] ?? '';
-xfail(
+// Anchor vào ĐỊNH NGHĨA method (không phải chỗ gọi cùng tên đứng trước nó).
+const openResultBody = providerSrc.match(/private async openCrossFileSearchResult\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
   'security S-2: crossFileSearch:openResult gate qua isInsideAllowedRoots trước khi mở',
-  /isInsideAllowedRoots/.test(openResultBody),
-  'Plan/Optimization Notes.md § Security hardening S-2'
+  /isInsideAllowedRoots/.test(openResultBody)
 );
 
 console.log(`\n${pass} pass, ${fail} fail`);

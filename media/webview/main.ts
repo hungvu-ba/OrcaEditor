@@ -627,11 +627,7 @@ function serialize(): string {
     if (!c) {
       return;
     }
-    if ((live as HTMLInputElement).checked) {
-      c.setAttribute('checked', 'checked');
-    } else {
-      c.removeAttribute('checked');
-    }
+    c.toggleAttribute('checked', (live as HTMLInputElement).checked);
   });
   prepareDomForSerialize(clone, document);
   applyBlockStyleOverrides(clone);
@@ -992,11 +988,7 @@ content.addEventListener('click', (e) => {
     // đã set nhưng property bị revert nên checkbox không đổi trạng thái hiển
     // thị/tương tác được (đúng lỗi user báo). Ở đây chỉ đồng bộ attribute
     // theo property đã được browser toggle sẵn.
-    if (target.checked) {
-      target.setAttribute('checked', 'checked');
-    } else {
-      target.removeAttribute('checked');
-    }
+    target.toggleAttribute('checked', target.checked);
     scheduleSync();
     return;
   }

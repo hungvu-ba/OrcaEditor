@@ -247,6 +247,26 @@ export function emptyParagraph(): HTMLParagraphElement {
   return p;
 }
 
+/**
+ * Tạo phần tử với className + text tuỳ chọn — gom cụm createElement + gán
+ * className (+ textContent) lặp lại khi dựng DOM popover/dialog. `text` chỉ set
+ * khi được truyền (undefined ≠ ''), giữ nguyên hành vi từng chỗ gọi cũ.
+ */
+export function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+  text?: string
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
 export interface DomHelpers {
   restoreSelection(range: Range | undefined): void;
   placeCaretIn(el: Element | null | undefined, selectContents?: boolean): void;

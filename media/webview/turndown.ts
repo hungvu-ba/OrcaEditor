@@ -604,13 +604,7 @@ function cellPrefix(cell: HTMLElement): string {
   if (!parent) {
     return '| ';
   }
-  const kids = parent.childNodes;
-  for (let i = 0; i < kids.length; i++) {
-    if (kids[i] === cell) {
-      return i === 0 ? '| ' : ' ';
-    }
-  }
-  return ' ';
+  return Array.prototype.indexOf.call(parent.childNodes, cell) === 0 ? '| ' : ' ';
 }
 
 function blockLike(el: HTMLElement): boolean {

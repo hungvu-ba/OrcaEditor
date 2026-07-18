@@ -102,7 +102,7 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
     e.preventDefault();
     const range = caretRangeAt(e.clientX, e.clientY);
     const fillCell = cellAt(range) !== null;
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       if (file.type.startsWith('image/')) {
         deps.pasteImage.saveDroppedImage(file, file.type, range, fillCell);
       } else {

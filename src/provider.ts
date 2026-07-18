@@ -446,7 +446,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'crossFileSearch:openResult': {
-          void this.openCrossFileSearchResult(msg.uri, msg.line, msg.character, msg.length, msg.matchText);
+          void this.openCrossFileSearchResult(document, msg.uri, msg.line, msg.character, msg.length, msg.matchText);
           break;
         }
         case 'crossFileSearch:openInSearchPanel': {
@@ -474,7 +474,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // Bug 0716 #2: enabled/preset/palette giờ global (đảo ngược per-tab
           // cũ, cùng mô hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi
           // phát cho mọi panel .md khác đang mở.
-          this.globalReadingMode = { enabled: msg.enabled, preset: msg.preset, palette: msg.palette };
+          // S-1: whitelist preset/palette trước khi lưu — message từ webview có
+          // thể bị giả giá trị ngoài enum, mà globalReadingMode được nội suy vào
+          // class attribute của getHtml cho panel mở sau (cùng ràng buộc mà
+          // readReadabilityConfig áp cho đường settings). Giá trị lạ → mặc định.
+          this.globalReadingMode = {
+            enabled: msg.enabled,
+            preset: READING_PRESETS.includes(msg.preset) ? msg.preset : 'comfortable',
+            palette: READING_PALETTES.includes(msg.palette) ? msg.palette : 'followTheme',
+          };
           this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
         }
@@ -575,6 +583,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    *    đọc lại giá trị này khi gửi message 'init' (xem case 'ready' ở trên).
    */
   private async openCrossFileSearchResult(
+    document: vscode.TextDocument,
     uriStr: string,
     line: number,
     character: number,
@@ -583,6 +592,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   ): Promise<void> {
     try {
       const uri = vscode.Uri.parse(uriStr);
+      // S-2: kết quả tìm thật luôn nằm trong workspace — chặn uri không phải
+      // scheme file hoặc trỏ ra ngoài allowed roots (webview có thể bị giả uri
+      // để mở file tuỳ ý), cùng guard như đường link tương đối trong openLink().
+      if (uri.scheme !== 'file' || !(await this.isInsideAllowedRoots(document, uri))) {
+        void vscode.window.showWarningMessage(`Blocked opening a file outside the workspace: ${uriStr}`);
+        return;
+      }
       const range = new vscode.Range(
         new vscode.Position(line, character),
         new vscode.Position(line, character + length)
@@ -1287,8 +1303,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Bug 0715 (US-19.9): class trạng thái đọc phải có mặt NGAY từ first paint
     // — nếu chờ message 'init' mới áp (readability.applyFromHost) thì toolbar
     // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
-    // giật vì toolbar rời flow. Giá trị preset/palette đã được whitelist trong
-    // readReadabilityConfig nên an toàn để nội suy vào attribute.
+    // giật vì toolbar rời flow. Giá trị preset/palette luôn được whitelist
+    // trước khi tới đây — đường settings qua readReadabilityConfig, đường
+    // message qua handler 'readingModeChanged' (S-1) — nên an toàn để nội suy
+    // vào attribute.
     // bug_General #1: reading styling (reading-mode/preset/palette) gate CHỈ
     // theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở readability.ts).
     // `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo `zen`.
