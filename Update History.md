@@ -281,3 +281,4 @@
 | 0.8.0 | 2026-07-18 | Fix (bug General #7): code-block syntax highlighting and Mermaid diagrams now follow the active reading palette, not just the VS Code theme, so both stay readable on light palettes (e.g. Sepia). |
 | 0.8.0 | 2026-07-18 | Feature (bug General #9): in a heading, Tab demotes / Shift+Tab promotes it and its descendant headings; Tab past H6 becomes a paragraph, Shift+Tab on H1 is a no-op. |
 | 0.8.0 | 2026-07-18 | Fix (bug General R3 #1): clicking a block/table drag handle now opens the Move menu at the click point, not far below a tall block/section. |
+| 0.8.0 | 2026-07-18 | Fix (bug2): undo after deleting a just-pasted image now restores it — the inverse paste↔delete pair is split so VS Code no longer merges them into one net-zero undo step. |

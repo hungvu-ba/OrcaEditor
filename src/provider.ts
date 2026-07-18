@@ -238,6 +238,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     let lastTextFromWebview: string | undefined;
     /** Serializes webview-originated document mutations — see case 'edit'. */
     let editChain: Promise<void> = Promise.resolve();
+    /**
+     * Trạng thái document NGAY TRƯỚC edit webview liền trước. Nếu edit hiện tại đưa
+     * document về đúng chuỗi này → nó là nghịch đảo chính xác của edit trước (vd
+     * paste ảnh rồi xoá ngay). VS Code gộp cặp insert↔delete nghịch đảo thành MỘT
+     * undo-element net-zero (trạng thái giữa — có ảnh — không undo tới được). Tách
+     * để phá coalescing (xem applyEditBreakingCoalesce).
+     */
+    let prevEditBeforeText: string | undefined;
 
     // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
@@ -366,11 +374,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // the text. lastTextFromWebview is set INSIDE the thunk so each
           // edit's echo suppression is armed exactly while ITS change applies.
           editChain = editChain.then(async () => {
+            const beforeThis = document.getText();
+            // Nghịch đảo chính xác của edit trước → phá coalescing để undo dừng được
+            // ở trạng thái giữa (xem prevEditBeforeText).
+            const isInverseOfPrev =
+              prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
             lastTextFromWebview = text;
-            const ok = await this.applyMinimalEdit(document, text);
+            const ok = isInverseOfPrev
+              ? await this.applyEditBreakingCoalesce(document, text)
+              : await this.applyMinimalEdit(document, text);
             if (!ok) {
               lastTextFromWebview = undefined;
             }
+            prevEditBeforeText = beforeThis;
           });
           await editChain;
           break;
@@ -525,6 +541,45 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       diff.newText
     );
     return vscode.workspace.applyEdit(edit);
+  }
+
+  /** Áp một replace đơn qua applyEdit (helper cho applyEditBreakingCoalesce). */
+  private applyRange(document: vscode.TextDocument, start: number, end: number, text: string): Thenable<boolean> {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(document.positionAt(start), document.positionAt(end)), text);
+    return vscode.workspace.applyEdit(edit);
+  }
+
+  /**
+   * Áp newText bằng HAI applyEdit riêng, tạo một trạng thái GIỮA khác biệt mọi
+   * checkpoint đã có → phá việc VS Code gộp cặp edit nghịch đảo thành một
+   * undo-element net-zero (vd paste ảnh rồi xoá ngay: trạng thái giữa có ảnh không
+   * undo tới được). Kết quả cuối luôn đúng bằng newText. Dùng khi edit là nghịch đảo
+   * chính xác của edit liền trước (xem prevEditBeforeText).
+   */
+  private async applyEditBreakingCoalesce(document: vscode.TextDocument, newText: string): Promise<boolean> {
+    const diff = computeMinimalEdit(document.getText(), newText);
+    if (!diff) {
+      return true;
+    }
+    const { start, oldEnd, newText: ins } = diff;
+    if (ins === '' && oldEnd - start >= 2) {
+      // Xoá thuần: tách vùng xoá làm đôi (xoá nửa sau trước, rồi nửa đầu).
+      const mid = start + Math.floor((oldEnd - start) / 2);
+      if (!(await this.applyRange(document, mid, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, mid, '');
+    }
+    if (ins !== '' && oldEnd > start) {
+      // Replace: xoá cũ trước, chèn mới sau (trạng thái giữa = đã xoá, chưa chèn).
+      if (!(await this.applyRange(document, start, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, start, ins);
+    }
+    // Chèn thuần hoặc xoá 1 ký tự: không tách được có ý nghĩa → áp bình thường.
+    return this.applyRange(document, start, oldEnd, ins);
   }
 
   private async openLink(document: vscode.TextDocument, href: string): Promise<void> {
