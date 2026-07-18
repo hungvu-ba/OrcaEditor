@@ -847,9 +847,7 @@ function tdResetState(): void {
     setHighlightedRow(null);
   }
   setColumnHighlight(null);
-  document.removeEventListener('mousemove', onTdMouseMove);
-  document.removeEventListener('mouseup', onTdMouseUp);
-  document.removeEventListener('keydown', onTdKeyDown);
+  detachDragListeners();
 }
 
 function isRowMenuOpen(): boolean {
@@ -1136,6 +1134,20 @@ function onTdKeyDown(e: KeyboardEvent): void {
   }
 }
 
+// The mousemove/mouseup/keydown trio every table drag arms, and the reset path
+// tears down — identical across armRowDrag/armColDrag and tdResetState.
+function attachDragListeners(): void {
+  document.addEventListener('mousemove', onTdMouseMove);
+  document.addEventListener('mouseup', onTdMouseUp);
+  document.addEventListener('keydown', onTdKeyDown);
+}
+
+function detachDragListeners(): void {
+  document.removeEventListener('mousemove', onTdMouseMove);
+  document.removeEventListener('mouseup', onTdMouseUp);
+  document.removeEventListener('keydown', onTdKeyDown);
+}
+
 function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number): void {
   const table = row.closest('table') as HTMLTableElement | null;
   if (!table) {
@@ -1149,9 +1161,7 @@ function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number):
   tdRows = tbodyRows(table);
   tdRowIdx = tdRows.indexOf(row);
   row.classList.add('dd-hover-outline');
-  document.addEventListener('mousemove', onTdMouseMove);
-  document.addEventListener('mouseup', onTdMouseUp);
-  document.addEventListener('keydown', onTdKeyDown);
+  attachDragListeners();
 }
 
 function armColDrag(table: HTMLTableElement, index: number, clientX: number, clientY: number): void {
@@ -1164,9 +1174,7 @@ function armColDrag(table: HTMLTableElement, index: number, clientX: number, cli
   for (const row of Array.from(table.rows)) {
     row.cells[index]?.classList.add('dd-hover-outline-cell');
   }
-  document.addEventListener('mousemove', onTdMouseMove);
-  document.addEventListener('mouseup', onTdMouseUp);
-  document.addEventListener('keydown', onTdKeyDown);
+  attachDragListeners();
 }
 
 function initTableDragDrop(): void {

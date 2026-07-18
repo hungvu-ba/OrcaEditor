@@ -219,6 +219,29 @@ function removeStrayEmptyParagraphAfter(list: Element | null): void {
   }
 }
 
+// Post-`<li>`-creation tail shared by the top-level and table-cell task-item
+// rules: add the checkbox, mark it checked for "[x]"/"[X]", place the caret.
+// The `<li>` creation + marker removal differ per call site and stay there.
+function finishTaskItem(li: HTMLLIElement, task: RegExpExecArray): void {
+  addCheckbox(li);
+  if (task[1] === 'x' || task[1] === 'X') {
+    li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
+  }
+  placeCaretAtBlockStart(li);
+}
+
+// Ordered-list start-number tail shared by the same two rules: a non-1 start
+// stamps `start` on the parent `<ol>`. Operates only on the created `<li>`.
+function applyOrderedStart(li: HTMLLIElement, ordered: RegExpExecArray): void {
+  const start = parseInt(ordered[1], 10);
+  if (start !== 1) {
+    const list = li.parentElement;
+    if (list && list.nodeName === 'OL') {
+      list.setAttribute('start', String(start));
+    }
+  }
+}
+
 /** Xử lý các input rule kích hoạt bằng Space. Trả về true nếu đã chuyển đổi. */
 function applySpaceInputRule(): boolean {
   const block = inputRuleParagraph();
@@ -248,12 +271,7 @@ function applySpaceInputRule(): boolean {
   const task = /^\[( |x|X)?\]$/.exec(marker);
   if (task) {
     stripMarkerBeforeCaret(block);
-    const li = convertBlockToListItem(block, false);
-    addCheckbox(li);
-    if (task[1] === 'x' || task[1] === 'X') {
-      li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
-    }
-    placeCaretAtBlockStart(li);
+    finishTaskItem(convertBlockToListItem(block, false), task);
     ctx.scheduleSync();
     return true;
   }
@@ -268,14 +286,7 @@ function applySpaceInputRule(): boolean {
   const ordered = /^(\d{1,9})[.)]$/.exec(marker);
   if (ordered) {
     stripMarkerBeforeCaret(block);
-    const li = convertBlockToListItem(block, true);
-    const start = parseInt(ordered[1], 10);
-    if (start !== 1) {
-      const list = li.parentElement;
-      if (list && list.nodeName === 'OL') {
-        list.setAttribute('start', String(start));
-      }
-    }
+    applyOrderedStart(convertBlockToListItem(block, true), ordered);
     ctx.scheduleSync();
     return true;
   }
@@ -355,21 +366,9 @@ function applyCellListInputRule(): boolean {
   del.deleteContents();
 
   if (task) {
-    const li = convertCellLineToListItem(cell, lineStart, false);
-    addCheckbox(li);
-    if (task[1] === 'x' || task[1] === 'X') {
-      li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
-    }
-    placeCaretAtBlockStart(li);
+    finishTaskItem(convertCellLineToListItem(cell, lineStart, false), task);
   } else if (ordered) {
-    const li = convertCellLineToListItem(cell, lineStart, true);
-    const start = parseInt(ordered[1], 10);
-    if (start !== 1) {
-      const list = li.parentElement;
-      if (list && list.nodeName === 'OL') {
-        list.setAttribute('start', String(start));
-      }
-    }
+    applyOrderedStart(convertCellLineToListItem(cell, lineStart, true), ordered);
   } else {
     convertCellLineToListItem(cell, lineStart, false);
   }
