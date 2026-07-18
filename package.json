@@ -27,7 +27,7 @@
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
           }
         ],
-        "priority": "option"
+        "priority": "default"
       }
     ],
     "commands": [
