@@ -6,6 +6,7 @@
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
+import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { isValidSiblingGap } from './sibling-move';
 
 export interface TableContext {
@@ -15,6 +16,10 @@ export interface TableContext {
 
 export interface TableController {
   hideTableToolbar(): void;
+  /** Close the row handle menu (and release its scroll lock) — called on a full #content rebuild
+   * (renderDocument), where the menu's target `<tr>` is destroyed; block menu has the symmetric
+   * `dragDrop.refresh()` hook, the row menu needs its own (bug General R2 follow-up). */
+  closeRowMenu(): void;
 }
 
 let content: HTMLElement;
@@ -155,7 +160,7 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
 
   initTableDragDrop();
 
-  return { hideTableToolbar };
+  return { hideTableToolbar, closeRowMenu };
 }
 
 function clearHideTimer(): void {
@@ -522,9 +527,10 @@ function alignTableColumn(cell: HTMLTableCellElement, align: 'left' | 'center' |
 }
 
 /**
- * Ô có list lồng list không? Đếm theo tổ tiên ul/ol nên bắt được cả cấu trúc
- * DOM méo do execCommand indent/outdent sinh ra (ul>ul, li>li…), khớp với mức
- * thụt lề người dùng nhìn thấy.
+ * Ô có list lồng list không? Đếm theo tổ tiên ul/ol: bắt được list lồng HỢP LỆ
+ * (li>ul>li — dạng chuẩn primitive sinh ra sau HLR 22) LẪN cấu trúc DOM méo
+ * (ul>ul, li>li…) mà các fallback execCommand indent/outdent còn giữ vẫn có thể
+ * sinh, đều khớp với mức thụt lề người dùng nhìn thấy.
  */
 function cellHasNestedList(cell: Element): boolean {
   for (const list of Array.from(cell.querySelectorAll('ul, ol'))) {
@@ -857,6 +863,9 @@ function closeRowMenu(): void {
     rowMenuTargetRow.classList.remove('dd-hover-outline');
     rowMenuTargetRow = null;
   }
+  // Release the scroll freeze taken in openRowMenu (bug General R2 #3) — ref-counted, safe no-op
+  // when nothing is locked.
+  unlockPageScroll();
 }
 
 /** Click (not drag) on a row handle opens this — currently a single action, "Set as header row",
@@ -876,10 +885,14 @@ function openRowMenu(row: HTMLTableRowElement): void {
   });
   rowMenuPopupEl.appendChild(item);
 
-  const rect = rowHandleEl.getBoundingClientRect();
   rowMenuPopupEl.style.display = 'block';
-  rowMenuPopupEl.style.top = `${rect.top + rect.height / 2}px`;
-  rowMenuPopupEl.style.left = `${rect.right + 4}px`;
+  // Place the menu clear of the selected row via the shared helper (bug General R2 #2/#4):
+  // below the row, flipping above, clamped into the viewport and never over `#toolbar` —
+  // consistent with the block/table handle menu. Replaces the old `left = rect.right + 4`
+  // that opened over the row's own cells.
+  positionMenuClearOf(rowMenuPopupEl, row.getBoundingClientRect());
+  // Freeze page scroll while the menu is open (bug General R2 #3); released in closeRowMenu.
+  lockPageScroll();
 
   rowMenuTargetRow = row;
   row.classList.add('dd-hover-outline');
@@ -1189,8 +1202,11 @@ function initTableDragDrop(): void {
       closeRowMenu();
     }
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isRowMenuOpen()) {
+  document.addEventListener('keydown', () => {
+    // Any key ends the transient row menu (it has no keyboard actions of its own) — so keyboard
+    // scroll (PageDown/Space, not captured by lockPageScroll) or Ctrl+Z can't leave it drifting
+    // open or its scroll lock stuck (bug General R2 follow-up); Escape is just one such key.
+    if (isRowMenuOpen()) {
       closeRowMenu();
     }
   });

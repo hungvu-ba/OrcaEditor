@@ -260,3 +260,5 @@
 | 0.8.0 | 2026-07-18 | Feature (bug_General #3): hovering a drag handle glyph (block/list-item/table) now outlines its drag target so the user sees what will move; plain content hover still adds nothing (bug 0716 #6). |
 | 0.8.0 | 2026-07-18 | Fix (bug_General #1): toggling Zen/Focus mode no longer forces Reading Mode styling on; reading styling now gates on Reading Mode only, so Zen keeps the current reading state (Zen and Reading Mode fully independent). |
 | 0.8.0 | 2026-07-18 | Fix (bug_General #2): copying editor content now also writes formatted text/html to the clipboard, so pasting into external rich-text tools (email, Word) keeps formatting; text/plain stays Markdown for paste-back into the editor. |
+| 0.8.0 | 2026-07-18 | Fix (bug_General #1): clicking a block/table handle now opens its menu clear of the block content and selects the whole block, deletable via Delete/Backspace. |
+| 0.8.0 | 2026-07-18 | Fix (bug_General R2): handle menus (block/table/row) open clear of the selected element and below the toolbar; handle click no longer selects text; scroll locks while a menu is open. |

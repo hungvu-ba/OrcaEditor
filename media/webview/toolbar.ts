@@ -1287,9 +1287,13 @@ function findListItemsBetween(parent: Element, before: Element | null, after: El
   return result;
 }
 
-/** Đặt lại selection = Range bao trọn từ items[0] đến items cuối — đảm bảo
- * execCommand gọi NGAY SAU đó (vd. đổi <ol>↔<ul>) áp lên đúng toàn bộ các
- * <li> vừa xử lý, không bị thu hẹp về caret đơn lẻ mà insertHTML để lại. */
+/** Đặt lại selection = Range bao trọn từ items[0] đến items cuối. Thao tác đổi
+ * kiểu list ngay sau đó ở đường CHÍNH giờ đi qua compute-then-commit primitive
+ * (computeRetag/UnwrapListRange → commitListOpDirect, HLR 22 Phase 2.3/2.4) vốn
+ * TỰ dựng range từ plan nên KHÔNG đọc selection này; reselection chỉ còn cần cho
+ * nhánh fallback execCommand('insert{Un}orderedList') còn giữ (khi plan = null)
+ * — execCommand cần selection trải đúng toàn bộ <li> vừa xử lý, không bị thu về
+ * caret đơn lẻ mà insertHTML để lại. */
 function reselectItems(items: HTMLLIElement[]): void {
   if (items.length === 0) {
     return;
@@ -1328,9 +1332,11 @@ function removeStrayEmptyParagraphNear(list: Element | null): void {
  * trực tiếp) — thao tác DOM trần không được trình duyệt ghi vào lịch sử
  * undo/redo gốc, cùng lý do đã sửa ở replaceBlockTag (dom-utils.ts) và
  * convertBlockToListItem (input-rules.ts). Trả về các <li> MỚI vừa chèn (xem
- * findListItemsBetween) để caller re-select đúng phạm vi nếu cần thao tác
- * execCommand tiếp theo — insertHTML để lại selection collapse về 1 điểm,
- * không đủ để execCommand sau đó áp lên toàn bộ targets.
+ * findListItemsBetween) để caller re-select đúng phạm vi cho nhánh fallback
+ * execCommand('insert{Un}orderedList') còn giữ (đổi kiểu list khi primitive trả
+ * null) — insertHTML để lại selection collapse về 1 điểm, không đủ để execCommand
+ * áp lên toàn bộ targets. Đường chính (computeRetag/UnwrapListRange →
+ * commitListOpDirect, HLR 22 Phase 2.3/2.4) tự dựng range nên không cần bước này.
  */
 function replaceListItems(items: HTMLLIElement[], mutate: (clone: HTMLLIElement) => void): HTMLLIElement[] {
   const parent = items[0].parentElement;

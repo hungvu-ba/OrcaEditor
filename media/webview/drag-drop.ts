@@ -2,16 +2,17 @@
  * Drag & drop reorder for top-level blocks (US-17.3) and list items
  * (US-17.5, M3) — HLR section 17.
  *
- * Undo mechanism (F1, spike decision): a move never mutates the DOM directly
- * (appendChild/insertBefore/remove) — that would desync the browser's native
- * undo stack the same way raw DOM surgery does for
- * fixOrphanNestedListItems/replaceBlockTag (main.ts / dom-utils.ts). Instead,
- * exactly like those two, a move selects a single Range spanning every
- * top-level block between the old and new position (inclusive) and replaces
- * it with ONE `execCommand('insertHTML', ...)` call carrying the same blocks
- * in their new order. One Range + one execCommand call = one native undo
- * step, regardless of how far the block travels or how many blocks a
- * section-move carries along.
+ * Undo mechanism: a move commits through sibling-move.ts's Range APIs
+ * (applyBlockMove / applyLiReparentMove — Range.deleteContents()+insertNode()),
+ * not appendChild/insertBefore and not execCommand. Undo/redo is delegated
+ * entirely to VS Code's TextDocument (main.ts / provider.ts replace
+ * #content.innerHTML wholesale on every undo/redo), so the scheduleSync() after
+ * a move records it as ONE TextDocument edit = one Ctrl+Z step, regardless of
+ * how far the block travels or how many blocks a section-move carries along.
+ * There is no native browser undo stack to keep in sync — the historical
+ * `execCommand('insertHTML', ...)` approach (one *native* undo step per move)
+ * is gone; raw Range surgery + a single host edit is the convention here, the
+ * same one replaceBlockTag / commitListOpDirect (dom-utils / list-ops.ts) use.
  *
  * DOM stays the source of truth (architecture note in the code plan): the
  * live #content DOM is read fresh on every drag start, nothing is cached
@@ -21,17 +22,16 @@
  * which is exactly what readSrcRange() (already shared with block-map.ts and
  * gutter.ts) tells us, filtered straight off content.children.
  *
- * Note (US-17.7, M6): the "never mutates the DOM directly" rule above no
- * longer holds universally — `finishLiMove`'s cross-level move runs a direct
- * `normalizeListDom(content)` cleanup pass on the live DOM after the Range
- * move. Safe now because undo/redo is fully TextDocument-based (main.ts /
- * provider.ts replace #content.innerHTML wholesale on every undo/redo), so
- * there is no native browser undo stack left to desync.
+ * Note (US-17.7, M6): `finishLiMove`'s cross-level move additionally runs a
+ * `normalizeListDom(content)` cleanup pass directly on the live DOM after the
+ * Range move — fine under the TextDocument-undo model above (one host edit, no
+ * native stack to desync).
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
 import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
 import { normalizeListDom } from './dom-serialize-prep';
+import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -39,6 +39,10 @@ export interface DragDropDeps {
   scheduleSync: () => void;
   dom: DomHelpers;
   lineGutter: LineGutter;
+  /** Re-establish #content's caret-host invariants (trailing typable <p>, caret spots around
+   * atoms/hr) after a direct DOM mutation whose host echo is suppressed so renderDocument won't
+   * re-run — used by deleteSelectedBlock (bug General #1) to keep the doc editable after a delete. */
+  ensureCaretHost: () => void;
 }
 
 export interface DragDropController {
@@ -295,6 +299,9 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       menuTargetBlock.classList.remove('dd-hover-outline');
       menuTargetBlock = null;
     }
+    // Release the scroll freeze taken in openMenu (bug General R2 #3) — ref-counted, so a stray
+    // close while nothing is locked is a safe no-op.
+    unlockPageScroll();
   }
 
   function moveBlockToGap(block: HTMLElement, gap: number): void {
@@ -332,6 +339,49 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Bug #1 (mở rộng): "Move up/Move down" từ menu dời block nhưng chuột đứng yên
     // (không có mousemove đảm bảo sau click) — tay cầm position:fixed sẽ đứng lại ở
     // vị trí cũ. refresh() ẩn/đặt lại toàn bộ handle, tự hiện lại khi di chuột.
+    refresh();
+  }
+
+  /**
+   * Bug General #1: Delete/Backspace on a handle-selected block removes the whole block.
+   * DOM removal via Range (selectNode + deleteContents, the module's Range-based convention)
+   * + scheduleSync() — the host commits it as one TextDocument edit, so Ctrl+Z restores it;
+   * no native undo stack to desync. Caret goes to the previous top-level block, or the next
+   * one when the deleted block was first.
+   */
+  function deleteSelectedBlock(block: HTMLElement): void {
+    const blocks = draggableBlocks();
+    const idx = blocks.indexOf(block);
+    closeMenu();
+    // Stale/detached target (e.g. a host-driven re-render between the click and the keypress) —
+    // nothing left to delete; bail before selectNode() throws on a parent-less node.
+    if (idx < 0) {
+      return;
+    }
+    // Capture caret neighbours BEFORE the delete (prefer the previous block, else the next).
+    const prev = blocks[idx - 1] ?? null;
+    const next = blocks[idx + 1] ?? null;
+    const range = document.createRange();
+    range.selectNode(block);
+    range.deleteContents();
+    // Re-establish the caret-host invariants renderDocument guarantees (a trailing typable <p>,
+    // caret spots around atoms/hr). The host suppresses this delete's echo, so renderDocument
+    // won't re-run — without this a plain single-paragraph doc is left with no caret host at all.
+    deps.ensureCaretHost();
+    // An atom block (mermaid/math) is contenteditable=false, so step off it onto the typable <p>
+    // ensureCaretHost just placed beside it; fall back to the last child for an emptied doc.
+    let caretTarget: Element | null = prev ?? next;
+    if (caretTarget && isAtomBlock(caretTarget)) {
+      caretTarget = caretTarget.nextElementSibling ?? caretTarget.previousElementSibling;
+    }
+    if (!caretTarget || !content.contains(caretTarget)) {
+      caretTarget = content.lastElementChild;
+    }
+    deps.dom.placeCaretIn(caretTarget);
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    // Handles are position:fixed and only recompute on mousemove — drop/reset all handle
+    // state so a stale one doesn't linger over the now-removed block (mirrors moveBlockToGap).
     refresh();
   }
 
@@ -379,20 +429,17 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
     }
 
-    // Anchor to the icon's own vertical center, not the hit column's bottom edge — the
-    // hit column now spans the whole block's height (bug 0716 #4), so for a tall block
-    // `rect.bottom` would place the menu far below where the (vertically centered) icon
-    // and the user's click actually were. A table's own menu is opened via tableHandleEl
-    // (armDrag(hoveredTableBlock, ...) always originates there, never handleEl, which stays
-    // hidden the whole time), so anchor to whichever handle actually triggered this menu —
-    // otherwise the popup renders at handleEl's stale zero-rect position (bug 0716 round 2,
-    // #1 follow-up: confirmed live, popup appeared at the viewport's top-left corner).
-    const anchorEl = block.tagName === 'TABLE' ? tableHandleEl : handleEl;
-    const rect = anchorEl.getBoundingClientRect();
     menuPopupEl.style.display = 'block';
-    menuPopupEl.style.top = `${rect.top + rect.height / 2}px`;
-    menuPopupEl.style.left = `${rect.right + 4}px`;
+    // Place the popup clear of the selected block via the shared helper (bug General R2 #2/#4):
+    // below the block, flipping above, clamped into the viewport and never over `#toolbar`.
+    positionMenuClearOf(menuPopupEl, block.getBoundingClientRect());
+    // Freeze page scroll while the menu is open so the fixed popup can't drift off its block
+    // (bug General R2 #3); released in closeMenu.
+    lockPageScroll();
 
+    // Track the block by reference only (bug General R2 #1) — no native text selection; the
+    // `.dd-hover-outline` outline is the "selected" cue and the Delete/Backspace handler keys
+    // off `menuTargetBlock`, so atom blocks / tables still delete cleanly as whole elements.
     menuTargetBlock = block;
     block.classList.add('dd-hover-outline');
   }
@@ -403,9 +450,31 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isMenuOpen()) {
-      closeMenu();
+    if (!isMenuOpen()) {
+      return;
     }
+    if (e.key === 'Escape') {
+      closeMenu();
+      return;
+    }
+    // With a handle menu open its block is the tracked target (bug General #1/R2 #1 — outline
+    // only, no text selection) — Delete/Backspace removes the whole block. preventDefault so any
+    // native delete at whatever caret happens to be focused never runs alongside it.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && menuTargetBlock) {
+      e.preventDefault();
+      deleteSelectedBlock(menuTargetBlock);
+      return;
+    }
+    // A bare modifier keydown is the start of a combo (e.g. Ctrl+Z), not an action on its own —
+    // leave the menu open so the combo's final key below decides, instead of closing on the
+    // modifier alone.
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
+      return;
+    }
+    // Any other key (arrow, typing, a shortcut's final key) ends the selected-block mode: close
+    // the menu so a later Delete/Backspace can't wipe a block the caret has since moved off of.
+    // The key itself is left to act normally (no preventDefault).
+    closeMenu();
   });
 
   // ---------------------------------------------------------------------

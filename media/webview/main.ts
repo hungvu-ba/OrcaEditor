@@ -72,7 +72,18 @@ let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
-const dragDrop = initDragDrop(content, { scheduleSync, dom, lineGutter });
+const dragDrop = initDragDrop(content, {
+  scheduleSync,
+  dom,
+  lineGutter,
+  // Same caret-host invariants renderDocument enforces — reused after a handle-delete (bug
+  // General #1) whose suppressed host echo means renderDocument won't re-run.
+  ensureCaretHost: () => {
+    ensureCaretSpotAfterAtomBlocks();
+    ensureCaretSpotBeforeHr();
+    ensureTrailingParagraph();
+  },
+});
 const prompt = initPrompt(vscode, dom);
 const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
 // US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
@@ -328,6 +339,9 @@ function renderDocument(markdown: string): void {
   ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
   table.hideTableToolbar();
+  // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
+  // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
+  table.closeRowMenu();
   if (lineNumbersEnabled) {
     lineGutter.refreshFromDom();
   }

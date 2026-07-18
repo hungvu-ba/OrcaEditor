@@ -307,10 +307,11 @@ export function createDomHelpers(content: HTMLElement): DomHelpers {
   }
 
   /**
-   * Phần tử vừa được execCommand('insertHTML') chèn vào chỗ `block` cũ từng
-   * đứng — suy ra bằng VỊ TRÍ DOM (previousElementSibling đã lưu từ trước khi
-   * block bị thay) thay vì đoán qua window.getSelection() sau insertHTML:
-   * Chrome không phải lúc nào cũng đặt selection bên trong phần tử vừa chèn
+   * Phần tử vừa được chèn vào chỗ `block` cũ từng đứng (nay qua Range.insertNode
+   * trong replaceBlockTag/wrapInBlockquote — HLR 22 Phase 2.5/2.6; trước kia
+   * execCommand('insertHTML')) — suy ra bằng VỊ TRÍ DOM (previousElementSibling
+   * đã lưu từ trước khi block bị thay) thay vì đoán qua window.getSelection() sau
+   * khi chèn: Chrome không phải lúc nào cũng đặt selection bên trong phần tử vừa chèn
    * như kỳ vọng, khiến việc đoán chọn nhầm phần tử (từng fallback về
    * content.lastElementChild — block cuối tài liệu, không liên quan).
    * Dùng previousElementSibling/nextElementSibling (nhảy thẳng qua text
