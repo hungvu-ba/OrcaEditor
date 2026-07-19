@@ -8,8 +8,8 @@
  *
  * SCOPE (bug 0716 #2, reversal 2026-07-16 — supersedes bug 0715 mục 4's
  * per-tab design): `enabled`/`preset`/`palette` đều **global-in-memory ở
- * host** (không persist Settings), cùng mô hình `zen` bên dưới — 1 trong 10
- * bundle `READING_STYLES` đã kiểm chứng (US-19.18) đổi ở 1 tab lan sang MỌI
+ * host** (không persist Settings), cùng mô hình `zen` bên dưới — 1 trong 9
+ * bundle `READING_STYLES` (US-19.18, chỉnh về 9 ở US-4.27) đổi ở 1 tab lan sang MỌI
  * tab .md đang mở và tab mới mở sau đó trong cùng phiên VS Code.
  * toggle/setStyle/disable báo host qua `onReadingModeChange`, host broadcast
  * lại, applyReadingModeFromHost() áp cục bộ khi tab này nhận broadcast từ tab
@@ -30,8 +30,8 @@
  * toolbar/gutter (class `reading-zen`). Hai toggle hoàn toàn độc lập.
  *
  * US-19.18 (bug 0715): palette KHÔNG còn là lớp GLOBAL độc lập của US-19.11 —
- * giờ đi kèm 1:1 với preset qua 1 trong 10 bundle `READING_STYLES` đã kiểm
- * chứng. Dropdown Reading Mode trên toolbar chỉ còn liệt kê 10 bundle này +
+ * giờ đi kèm 1:1 với preset qua 1 trong 9 bundle `READING_STYLES` đã kiểm
+ * chứng. Dropdown Reading Mode trên toolbar chỉ còn liệt kê 9 bundle này +
  * dòng "Follow VS Code" (tắt hẳn Reading Mode).
  */
 import type {
@@ -93,7 +93,7 @@ export interface ReadabilityDeps {
 const PRESETS: ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
 const PALETTES: ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
 
-/** 1 bộ preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp). */
+/** 1 bộ preset+palette đã kiểm chứng (contrast WCAG + soi ảnh khi ship US-19.18). */
 export interface ReadingStyle {
   id: string;
   preset: ReadingPreset;
@@ -102,23 +102,25 @@ export interface ReadingStyle {
 }
 
 /**
- * US-19.18 (bug 0715): dropdown Reading Mode giờ chỉ liệt kê 10 bộ preset+palette
- * đã kiểm chứng (thay vì 2 dropdown Reading/Palette độc lập = 30 tổ hợp reachable,
- * nhiều tổ hợp trùng lặp/không ai tối ưu riêng). Xếp hạng + lý do chọn: xem
- * Requirement - 19 Readability.md US-19.18. Palette giờ đi kèm 1:1 với bundle —
- * không còn là lớp GLOBAL độc lập (thay thế phần đó của US-19.11).
+ * US-19.18 (bug 0715): dropdown Reading Mode liệt kê các bộ preset+palette đã
+ * kiểm chứng (thay vì 2 dropdown Reading/Palette độc lập). Palette đi kèm 1:1 với
+ * bundle — không còn là lớp GLOBAL độc lập (thay phần đó của US-19.11).
+ * US-4.27 (2026-07-19): chỉnh bộ này về ĐÚNG 9 combo của wireframe state (d) —
+ * bỏ academic-sepia/dyslexia-highContrast/compact-highContrast, thêm compact-light
+ * + dyslexia-sepia; xếp theo nhóm preset để dropdown render caption nhóm. Đổi bộ
+ * combo an toàn: state persist theo preset+palette (không theo id), một combo bị
+ * bỏ vẫn render đúng look, chỉ mất dấu ✓ trên hàng tương ứng.
  */
 export const READING_STYLES: ReadingStyle[] = [
   { id: 'comfortable-sepia', preset: 'comfortable', palette: 'sepia', label: 'Comfortable Reading — Sepia' },
-  { id: 'academic-paper', preset: 'academic', palette: 'paper', label: 'Academic Paper — Paper' },
-  { id: 'academic-sepia', preset: 'academic', palette: 'sepia', label: 'Academic Paper — Sepia' },
   { id: 'comfortable-light', preset: 'comfortable', palette: 'light', label: 'Comfortable Reading — Light' },
   { id: 'comfortable-dark', preset: 'comfortable', palette: 'dark', label: 'Comfortable Reading — Dark' },
   { id: 'comfortable-paper', preset: 'comfortable', palette: 'paper', label: 'Comfortable Reading — Paper' },
-  { id: 'dyslexia-highContrast', preset: 'dyslexia', palette: 'highContrast', label: 'Dyslexia-friendly — High-contrast' },
-  { id: 'dyslexia-light', preset: 'dyslexia', palette: 'light', label: 'Dyslexia-friendly — Light' },
+  { id: 'academic-paper', preset: 'academic', palette: 'paper', label: 'Academic Paper — Paper' },
   { id: 'compact-dark', preset: 'compact', palette: 'dark', label: 'Compact — Dark' },
-  { id: 'compact-highContrast', preset: 'compact', palette: 'highContrast', label: 'Compact — High-contrast' },
+  { id: 'compact-light', preset: 'compact', palette: 'light', label: 'Compact — Light' },
+  { id: 'dyslexia-sepia', preset: 'dyslexia', palette: 'sepia', label: 'Dyslexia-friendly — Sepia' },
+  { id: 'dyslexia-light', preset: 'dyslexia', palette: 'light', label: 'Dyslexia-friendly — Light' },
 ];
 
 export interface ReadabilityController {

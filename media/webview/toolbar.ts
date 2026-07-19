@@ -30,6 +30,8 @@ import type { VsCodeApi } from './vscode-api';
 import { READING_STYLES, type ReadabilityController } from './readability';
 import { attachTooltip, hideTooltip, setTooltip } from './tooltip';
 import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
+import { codeLangDisplayName, codeLangFromClass } from './dom-postprocess';
+import { MD_CODE_LANG_CLASS } from './render';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
@@ -207,8 +209,12 @@ interface ToolbarDropdownEntry {
    */
   onHoverPreview?: () => void;
   onHoverCancel?: () => void;
-  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi 10 bundle bên dưới). */
+  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi các bundle bên dưới). */
   separatorBefore?: boolean;
+  /** US-4.27: caption nhóm (đậm, mờ) render NGAY TRƯỚC hàng này (vd "Comfortable Reading"). */
+  groupCaption?: string;
+  /** US-4.27: dữ liệu vẽ swatch 14×14 xem trước style (nền palette + "A" màu chữ + font preset). */
+  swatch?: { palette: string; preset: string };
 }
 
 interface ToolbarItem {
@@ -324,17 +330,29 @@ const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
  * chung `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo
  * vùng chọn (US-4.4) giữ nguyên cho cả 9 ngôn ngữ, chỉ khác class `language-*`.
  */
-const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
-  { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
-  { label: 'JavaScript', badge: 'Common', action: () => insertCodeBlock('javascript') },
-  { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
-  { label: 'Python', action: () => insertCodeBlock('python') },
-  { label: 'Bash', action: () => insertCodeBlock('bash') },
-  { label: 'JSON', action: () => insertCodeBlock('json') },
-  { label: 'HTML', action: () => insertCodeBlock('html') },
-  { label: 'CSS', action: () => insertCodeBlock('css') },
-  { label: 'SQL', action: () => insertCodeBlock('sql') },
+/**
+ * Nguồn duy nhất cho danh sách 9 ngôn ngữ code — dùng chung cho cả nút chèn
+ * (CODE_BLOCK_DROPDOWN, US-4.10) và bộ đổi ngôn ngữ tại chỗ (openCodeLangSwitcher,
+ * US-4.28). `value` là token `language-*` ghi vào `<code>` (turndown đọc đúng
+ * token này ra fence). Sửa danh sách 1 chỗ → cả hai đồng bộ.
+ */
+const CODE_LANGUAGES: { value: string; label: string; badge?: string }[] = [
+  { value: 'plaintext', label: 'Plain text' },
+  { value: 'javascript', label: 'JavaScript', badge: 'Common' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'python', label: 'Python' },
+  { value: 'bash', label: 'Bash' },
+  { value: 'json', label: 'JSON' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'sql', label: 'SQL' },
 ];
+
+const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = CODE_LANGUAGES.map((c) => ({
+  label: c.label,
+  badge: c.badge,
+  action: () => insertCodeBlock(c.value),
+}));
 
 /**
  * Dropdown của Math split-button (US-4.11) — Inline (mặc định của mặt chính)
@@ -376,9 +394,10 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 
 /**
  * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
- * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 10 bundle
- * preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp,
- * xem `READING_STYLES` trong readability.ts và Requirement - 19
+ * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 9 bundle
+ * preset+palette đã kiểm chứng (US-4.27 chỉnh về đúng 9 combo wireframe + thêm
+ * swatch/caption nhóm/tag "Previewing…"; xem `READING_STYLES` trong readability.ts
+ * và Requirement - 19
  * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
  * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
  * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
@@ -387,12 +406,20 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
  * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
  *
  * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
- * reset" duy nhất, khác loại với 10 bundle bên dưới (đều là biến thể "bật");
+ * reset" duy nhất, khác loại với 9 bundle bên dưới (đều là biến thể "bật");
  * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
- * phải cuộn qua hết 10 hàng mới thấy, và tách riêng bằng 1 vạch chia
+ * phải cuộn qua hết 9 hàng mới thấy, và tách riêng bằng 1 vạch chia
  * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
  * chọn "style" thứ 11.
  */
+/** US-4.27: caption nhóm dropdown Reading Mode theo preset (wireframe state d). */
+const READING_GROUP_CAPTIONS: Record<string, string> = {
+  comfortable: 'Comfortable Reading',
+  academic: 'Academic Paper',
+  compact: 'Compact',
+  dyslexia: 'Dyslexia-friendly',
+};
+
 const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   {
     label: 'Follow VS Code (no reading style)',
@@ -409,6 +436,9 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
     onHoverPreview: () => ctx.readability.previewStyle(style.id),
     onHoverCancel: () => ctx.readability.cancelPreview(),
     separatorBefore: i === 0,
+    // US-4.27: caption ở hàng ĐẦU mỗi nhóm preset; swatch mọi hàng.
+    groupCaption: i === 0 || style.preset !== READING_STYLES[i - 1].preset ? READING_GROUP_CAPTIONS[style.preset] : undefined,
+    swatch: { palette: style.palette, preset: style.preset },
   })),
 ];
 
@@ -553,7 +583,7 @@ const toolbarItems: ToolbarItem[] = [
     icon: READING_ICON,
     title: 'Reading Mode (comfortable reading layout)',
     action: () => ctx.readability.toggle(),
-    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành 10 bundle đã
+    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành các bundle đã
     // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
     dropdownTitle: 'Choose reading style (hover to preview)',
@@ -686,6 +716,21 @@ function buildPopover(extraClassName?: string): HTMLDivElement {
  * mà user KHÔNG chọn (Escape/click ra ngoài), tránh kẹt theme preview (US-19.18).
  */
 let activeHoverCancel: (() => void) | undefined;
+/**
+ * US-4.27: timer debounce của hover-preview ở CẤP MODULE (chỉ 1 hàng hover tại
+ * một thời điểm) — để closePopover() huỷ được nó. Trước đây timer là closure
+ * per-row, chỉ mouseleave của chính hàng đó huỷ; đóng popover bằng Escape/click
+ * ngoài TRONG cửa sổ debounce (chuột chưa rời hàng → không có mouseleave) khiến
+ * timer vẫn bắn sau khi popover đã đóng → áp preview "mồ côi" (theme kẹt) + tag
+ * .is-previewing stale. Giữ ở module + clear khi đóng vá cả 2.
+ */
+let hoverPreviewTimer: ReturnType<typeof setTimeout> | undefined;
+function clearHoverPreviewTimer(): void {
+  if (hoverPreviewTimer !== undefined) {
+    clearTimeout(hoverPreviewTimer);
+    hoverPreviewTimer = undefined;
+  }
+}
 
 /** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
 function addPopoverRow(
@@ -696,7 +741,8 @@ function addPopoverRow(
   onClick: () => void,
   value?: string,
   onHoverPreview?: () => void,
-  onHoverCancel?: () => void
+  onHoverCancel?: () => void,
+  swatch?: { palette: string; preset: string }
 ): void {
   const row = document.createElement('button');
   row.type = 'button';
@@ -709,6 +755,15 @@ function addPopoverRow(
     iconSpan.className = 'toolbar-popover-icon';
     iconSpan.innerHTML = icon;
     row.appendChild(iconSpan);
+  }
+  if (swatch) {
+    // US-4.27: swatch xem trước style — nền/chữ/font do CSS map theo data-*.
+    const sw = document.createElement('span');
+    sw.className = 'toolbar-popover-swatch';
+    sw.dataset.palette = swatch.palette;
+    sw.dataset.preset = swatch.preset;
+    sw.textContent = 'A';
+    row.appendChild(sw);
   }
   const labelSpan = document.createElement('span');
   labelSpan.className = 'toolbar-popover-label';
@@ -723,28 +778,38 @@ function addPopoverRow(
   row.addEventListener('mousedown', (e) => e.preventDefault());
   row.addEventListener('click', onClick);
   if (onHoverPreview && onHoverCancel) {
+    // US-4.27: tag "Previewing…" hiện trên hàng đang preview (CSS ẩn khi thiếu
+    // .is-previewing). Chỉ hàng có hover-preview mới có tag.
+    const previewingTag = document.createElement('span');
+    previewingTag.className = 'toolbar-popover-previewing';
+    previewingTag.textContent = 'Previewing…';
+    row.appendChild(previewingTag);
     // US-19.18 follow-up (bug report "theme apply quá nhanh gây choáng"): trễ
     // READING_PREVIEW_DEBOUNCE_MS trước khi THẬT SỰ áp preview — rê chuột lướt
     // qua nhiều hàng liên tục (không dừng ở hàng nào) sẽ không kích hoạt lần
     // preview nào cả, chỉ hàng con trỏ dừng đủ lâu mới đổi theme. mouseleave
     // luôn huỷ timer + revert ngay lập tức (không debounce chiều huỷ) nên rời
     // hàng luôn phản hồi tức thì dù preview đã kịp áp hay chưa.
-    let previewTimer: ReturnType<typeof setTimeout> | undefined;
     row.addEventListener('mouseenter', () => {
       activeHoverCancel = onHoverCancel;
-      previewTimer = setTimeout(() => {
-        previewTimer = undefined;
+      clearHoverPreviewTimer(); // huỷ debounce đang chờ của hàng trước (nếu có)
+      hoverPreviewTimer = setTimeout(() => {
+        hoverPreviewTimer = undefined;
+        // US-4.27: tag "Previewing…" bám đúng 1 hàng — gỡ khỏi các hàng khác
+        // rồi gắn hàng này, đồng thời với lúc preview THẬT SỰ áp.
+        for (const r of popoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+          r.classList.remove('is-previewing');
+        }
+        row.classList.add('is-previewing');
         onHoverPreview();
       }, READING_PREVIEW_DEBOUNCE_MS);
     });
     row.addEventListener('mouseleave', () => {
-      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce
-      // của CHÍNH hàng này nếu nó chưa kịp bắn, để rời hàng trước khi preview
-      // áp thì không áp preview đó nữa (giữ nguyên preview trước đó, nếu có).
-      if (previewTimer !== undefined) {
-        clearTimeout(previewTimer);
-        previewTimer = undefined;
-      }
+      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce nếu
+      // nó chưa kịp bắn, để rời hàng trước khi preview áp thì không áp nữa (giữ
+      // nguyên preview trước đó, nếu có).
+      clearHoverPreviewTimer();
+      row.classList.remove('is-previewing');
     });
   }
   popoverEl.appendChild(row);
@@ -793,9 +858,17 @@ function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
 }
 
 function closePopover(): void {
+  // US-4.27: huỷ debounce hover-preview đang chờ — nếu không, đóng bằng Escape
+  // TRONG cửa sổ debounce (chuột chưa rời hàng) để timer bắn sau khi popover đã
+  // đóng → áp preview mồ côi (theme kẹt) + tag stale.
+  clearHoverPreviewTimer();
   if (openPopoverEl) {
     openPopoverEl.style.display = 'none';
     unfreezePopoverRowSize(openPopoverEl);
+    // US-4.27: đóng popover → gỡ tag "Previewing…" kẻo còn kẹt lần mở sau.
+    for (const r of openPopoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+      r.classList.remove('is-previewing');
+    }
   }
   openPopoverEl = undefined;
   openPopoverTrigger = undefined;
@@ -923,6 +996,13 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       sep.className = 'toolbar-popover-sep';
       popover.appendChild(sep);
     }
+    if (entry.groupCaption) {
+      // US-4.27: caption nhóm (không tương tác) trước hàng đầu mỗi nhóm.
+      const caption = document.createElement('div');
+      caption.className = 'toolbar-popover-caption';
+      caption.textContent = entry.groupCaption;
+      popover.appendChild(caption);
+    }
     addPopoverRow(
       popover,
       entry.icon,
@@ -934,7 +1014,8 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       },
       entry.value,
       entry.onHoverPreview,
-      entry.onHoverCancel
+      entry.onHoverCancel,
+      entry.swatch
     );
   }
   main.addEventListener('click', () => invokeItem(item));
@@ -1883,6 +1964,83 @@ function highlightNewCodeBlocks(): void {
   content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
     hljs.highlightElement(el as HTMLElement);
   });
+}
+
+/**
+ * US-4.28: đổi ngôn ngữ của MỘT code block đã có. Ghi lại đúng 1 class
+ * `language-<lang>` trên `<code>` (turndown.ts `fencedCodeWithLang` đọc đúng
+ * class này ra fence info-string), reset token hljs cũ về text thô rồi tô sáng
+ * lại theo ngôn ngữ mới, và cập nhật nhãn trên header. Trả về `false` (no-op)
+ * khi ngôn ngữ chọn trùng ngôn ngữ hiện tại — caller bỏ qua việc phát 'edit'.
+ */
+function setCodeBlockLanguage(code: HTMLElement, lang: string): boolean {
+  if (codeLangFromClass(code) === lang) {
+    return false;
+  }
+  // Gỡ mọi class language-*/hljs cũ (giữ nguyên class khác nếu có), thêm đúng 1
+  // language mới. Iterate qua bản sao vì classList là live-list.
+  for (const c of Array.from(code.classList)) {
+    if (c.startsWith('language-') || c === 'hljs' || c.startsWith('hljs-')) {
+      code.classList.remove(c);
+    }
+  }
+  code.classList.add(`language-${lang}`);
+  // hljs v11 đánh dấu phần tử đã tô bằng data-highlighted → gỡ đi và trả nội
+  // dung về text thô (bỏ các <span> token cũ) để highlightElement tô lại từ đầu
+  // theo ngôn ngữ mới thay vì cảnh báo "already highlighted".
+  code.removeAttribute('data-highlighted');
+  const rawText = code.textContent ?? '';
+  code.textContent = rawText;
+  hljs.highlightElement(code);
+  const label = code.parentElement?.querySelector<HTMLElement>(`.${MD_CODE_LANG_CLASS}`);
+  if (label) {
+    label.textContent = codeLangDisplayName(lang);
+  }
+  return true;
+}
+
+/** Popover dùng lại cho bộ đổi ngôn ngữ tại chỗ — dựng 1 lần, mở lại nhiều block. */
+let codeLangPopover: HTMLDivElement | undefined;
+
+/**
+ * US-4.28: mở dropdown 9 ngôn ngữ (đúng danh sách US-4.10) neo theo nhãn ngôn
+ * ngữ `labelEl` trên header của một code block, đánh dấu ✓ ngôn ngữ hiện tại;
+ * chọn 1 hàng → đổi ngôn ngữ block đó tại chỗ rồi phát 'edit' (bỏ qua nếu trùng).
+ * Gọi từ listener delegated ở main.ts. Không đụng selection nên caret không lọt
+ * vào block (header vốn contenteditable=false), không kích hoạt state US-4.23.
+ */
+export function openCodeLangSwitcher(labelEl: HTMLElement): void {
+  const code = labelEl.closest('pre')?.querySelector<HTMLElement>(':scope > code');
+  if (!code) {
+    return;
+  }
+  if (!codeLangPopover) {
+    codeLangPopover = buildPopover('code-lang-popover');
+  }
+  const popover = codeLangPopover;
+  // Dựng lại hàng mỗi lần mở để closure bám đúng `<code>` đang thao tác.
+  popover.replaceChildren();
+  for (const c of CODE_LANGUAGES) {
+    addPopoverRow(
+      popover,
+      undefined,
+      c.label,
+      c.badge,
+      () => {
+        closePopover();
+        if (setCodeBlockLanguage(code, c.value)) {
+          ctx.syncNow();
+        }
+      },
+      c.value
+    );
+  }
+  // Dấu ✓ cho ngôn ngữ hiện tại của block (khớp data-dropdown-value).
+  const current = codeLangFromClass(code) ?? '';
+  popover.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.dropdownValue === current);
+  });
+  togglePopover(labelEl, popover);
 }
 
 function insertLink(): void {

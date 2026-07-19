@@ -579,6 +579,75 @@ body.dd-dragging .dd-handle {
   margin-left: 8px;
 }
 
+/* --- US-4.27: dropdown Reading Mode — caption nhóm, swatch xem trước, tag
+ * "Previewing…" (wireframe state d). --- */
+.toolbar-popover-caption {
+  padding: 7px 9px 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground, rgba(128, 128, 128, 0.9));
+}
+/* Swatch vẽ trong theme HIỆN TẠI nên phải hardcode màu palette content (--rp-*
+ * của style đích, không đọc được qua var); font xấp xỉ theo preset. */
+.toolbar-popover-swatch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  font-size: 9px;
+  line-height: 1;
+}
+.toolbar-popover-swatch[data-palette='light'] {
+  background: #f7f3ea;
+  color: #1c1b18;
+}
+.toolbar-popover-swatch[data-palette='dark'] {
+  background: #1e1f22;
+  color: #e6e1d5;
+}
+.toolbar-popover-swatch[data-palette='sepia'] {
+  background: #f4ecd8;
+  color: #3b2f22;
+}
+.toolbar-popover-swatch[data-palette='paper'] {
+  background: #fffff8;
+  color: #111110;
+}
+.toolbar-popover-swatch[data-palette='highContrast'] {
+  background: #ffffff;
+  color: #000000;
+}
+.toolbar-popover-swatch[data-preset='comfortable'] {
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+}
+.toolbar-popover-swatch[data-preset='academic'] {
+  font-family: Georgia, 'Times New Roman', serif;
+}
+.toolbar-popover-swatch[data-preset='compact'] {
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  font-size: 8px;
+}
+.toolbar-popover-swatch[data-preset='dyslexia'] {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.toolbar-popover-previewing {
+  display: none;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--toolbar-badge-bg);
+}
+.toolbar-popover-item.is-previewing .toolbar-popover-previewing {
+  display: inline;
+}
+
 /* --- Split-button (mặt chính + caret): Heading/Code block/Math (US-4.9–4.11).
  * Port cấu trúc từ prototype HTML đã duyệt — 2 nút con trong 1 khung viền
  * chung, vạch chia ở giữa. --- */

@@ -25,6 +25,7 @@ import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
+import { READING_STYLES } from '../media/webview/readability';
 
 let pass = 0;
 let fail = 0;
@@ -207,6 +208,16 @@ const fromWebview: WebviewToHost[] = [
   { type: 'zenChanged', zen: true },
   { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
 ];
+// US-4.27: READING_STYLES reconciled to the wireframe state (d)'s exactly 9
+// combos (removed academic-sepia/dyslexia-highContrast/compact-highContrast;
+// added compact-light/dyslexia-sepia), ordered by preset group.
+check(
+  'US-4.27: READING_STYLES = 9 wireframe combos in group order',
+  READING_STYLES.map((s) => s.id).join(',') ===
+    ['comfortable-sepia', 'comfortable-light', 'comfortable-dark', 'comfortable-paper', 'academic-paper', 'compact-dark', 'compact-light', 'dyslexia-sepia', 'dyslexia-light'].join(','),
+  `  nhận: ${READING_STYLES.map((s) => s.id).join(',')}`,
+);
+
 const readabilityFixture = {
   enabled: false, preset: 'comfortable', palette: 'followTheme',
   fontFamily: '', zen: false,
