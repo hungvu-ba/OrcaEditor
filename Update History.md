@@ -292,3 +292,4 @@
 | 0.8.0 | 2026-07-19 | Fix: during TOC resize-drag the editor content + toolbar now track the panel edge 1:1 — their `padding-right`/`margin-right` transition is suppressed while dragging, removing the 0.3s lag. |
 | 0.8.0 | 2026-07-19 | Feature: fixed-px heading scale (H1–H6) per Document Blocks design — plain editor + the 4 Reading-Mode groups, with per-level weight, H2-only border, small-heading opacity and letter-spacing; headings no longer scale with font-size. |
 | 0.8.0 | 2026-07-19 | Feature: Link/Image toolbar buttons disable (dim, cursor:not-allowed, "unavailable inside a code block" tooltip) when the caret is inside a code block, per design state (f) — US-4.23. |
+| 0.8.0 | 2026-07-19 | Refactor/Feature: toolbar controls reordered to wireframe sequence (Undo/Redo lead, Inline code by B/I/S) + explicit collapse-priority overflow so Zen can collapse and Link/Image stay — US-4.24. |

@@ -223,6 +223,13 @@ interface ToolbarItem {
   /** Đẩy nút (và mọi nút sau nó) sang mép phải toolbar — nhóm tiện ích. */
   alignRight?: boolean;
   /**
+   * Thứ tự thu vào menu tràn "•••" khi toolbar hẹp (US-4.24): số NHỎ = thu
+   * TRƯỚC. Nút KHÔNG có field này thì không bao giờ thu (pinned) — kể cả nút ở
+   * nhóm `alignRight`. Tách hẳn khỏi vị trí trong mảng vì tập nút luôn-hiện của
+   * wireframe không liền mạch (Link/Image phải sống lâu hơn Table/Rule dù đứng sau).
+   */
+  collapsePriority?: number;
+  /**
    * true nếu action tự mở popup nhập liệu bất đồng bộ (chèn liên kết/ảnh).
    * Popup tự focus vào ô nhập và tự restore selection khi đóng (xem prompt.ts) —
    * nếu vẫn để click handler gọi content.focus() ngay, nó sẽ cướp focus khỏi ô
@@ -405,19 +412,50 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   })),
 ];
 
-// Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
-// Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
-// code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
-// chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
-// chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
+// Thứ tự control theo wireframe (US-4.24, thay phần thứ tự của US-4.8):
+// Undo/Redo → B/I/S/Inline code/Clear formatting → Heading → Bullet/Numbered/
+// Task/Blockquote → Table/Rule → Link/Image → Code block → Math → Mermaid →
+// [nhóm phải: Reading Mode, Zen, Outline].
+// `collapsePriority` (nhỏ = thu vào menu "•••" trước) điều khiển thứ tự thu gọn
+// khi toolbar hẹp — KHÔNG suy ra từ vị trí mảng, vì tập nút luôn-hiện (Undo/Redo/
+// B/I/Heading/Bullet/Numbered/Link/Image + Reading Mode/Outline) không liền mạch
+// (US-4.24 thay cơ chế thu-theo-vị-trí-mảng của US-4.7). Nút KHÔNG có
+// collapsePriority thì không bao giờ thu (pinned), kể cả khi nằm ở nhóm phải.
+// INVARIANT separator: mỗi `separatorBefore` "thuộc về" item MỞ nhóm; khi item
+// đó thu thì sep thu cùng. Để không bị sep mồ côi/lơ lửng, item mở nhóm phải
+// hoặc PINNED, hoặc là item có collapsePriority LỚN NHẤT nhóm (thu SAU cùng).
+// Hiện chỉ nhóm Table/Rule có leader collapsible (Table=5 > Rule=4 ✓). Nếu sau
+// này đổi priority/thêm item, giữ nguyên bất biến này.
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold' },
+  // Undo/redo in this extension is TextDocument-based (one single stack, see
+  // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
+  // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
+  // execCommand('undo') here would skip those changes and desync the stacks.
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true },
   { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
   {
     label: 'S',
     title: 'Strikethrough (⌘⇧X)',
     action: () => document.execCommand('strikeThrough'),
     id: 'fmt-strike',
+    collapsePriority: 10,
+  },
+  {
+    label: '</>',
+    title: 'Inline code (⌘E)',
+    action: toggleInlineCode,
+    id: 'fmt-inline-code',
+    collapsePriority: 9,
+  },
+  {
+    label: '⌫',
+    icon: FMT_ICONS.eraser,
+    title: 'Clear formatting',
+    action: () => document.execCommand('removeFormat'),
+    id: 'fmt-clear',
+    collapsePriority: 8,
   },
   {
     label: DEFAULT_HEADING.toUpperCase(),
@@ -428,19 +466,6 @@ const toolbarItems: ToolbarItem[] = [
     separatorBefore: true,
     id: 'fmt-heading',
   },
-  {
-    label: '⌫',
-    icon: FMT_ICONS.eraser,
-    title: 'Clear formatting',
-    action: () => document.execCommand('removeFormat'),
-    separatorBefore: true,
-  },
-  // Undo/redo in this extension is TextDocument-based (one single stack, see
-  // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
-  // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
-  // execCommand('undo') here would skip those changes and desync the stacks.
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true },
   {
     label: '•',
     icon: FMT_ICONS.ul,
@@ -456,21 +481,23 @@ const toolbarItems: ToolbarItem[] = [
     action: setNumberedList,
     id: 'fmt-numbered',
   },
-  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task' },
+  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task', collapsePriority: 7 },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
     title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
-    separatorBefore: true,
     id: 'fmt-blockquote',
+    collapsePriority: 6,
   },
-  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
+  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable, id: 'fmt-table', separatorBefore: true, collapsePriority: 5 },
   {
     label: '—',
     icon: FMT_ICONS.hr,
     title: 'Horizontal rule',
     action: () => document.execCommand('insertHTML', false, '<hr><p><br></p>'),
+    id: 'fmt-hr',
+    collapsePriority: 4,
   },
   {
     label: '🔗',
@@ -490,19 +517,15 @@ const toolbarItems: ToolbarItem[] = [
     opensAsyncPrompt: true,
   },
   {
-    label: '</>',
-    title: 'Inline code (⌘E)',
-    action: toggleInlineCode,
-    separatorBefore: true,
-    id: 'fmt-inline-code',
-  },
-  {
     label: '{ }',
     icon: FMT_ICONS.codeBlock,
     title: 'Code block (default: JavaScript)',
     action: () => insertCodeBlock('javascript'),
     dropdown: CODE_BLOCK_DROPDOWN,
     dropdownTitle: 'Choose code language',
+    id: 'fmt-codeblock',
+    separatorBefore: true,
+    collapsePriority: 3,
   },
   {
     label: '∑',
@@ -510,6 +533,9 @@ const toolbarItems: ToolbarItem[] = [
     action: insertInlineMath,
     dropdown: MATH_DROPDOWN,
     dropdownTitle: 'Choose math type',
+    id: 'fmt-math',
+    separatorBefore: true,
+    collapsePriority: 2,
   },
   {
     label: '⎇',
@@ -518,6 +544,9 @@ const toolbarItems: ToolbarItem[] = [
     action: insertMermaidFlowchart,
     dropdown: MERMAID_DROPDOWN,
     dropdownTitle: 'Choose diagram type',
+    id: 'fmt-mermaid',
+    separatorBefore: true,
+    collapsePriority: 1,
   },
   {
     label: 'Read',
@@ -537,6 +566,7 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Focus Mode (hide chrome, center text — Esc to exit)',
     action: () => ctx.readability.toggleZen(),
     id: 'zen-toggle',
+    collapsePriority: 11,
   },
   {
     label: '☰',
@@ -803,6 +833,8 @@ interface CollapsibleEntry {
   btn: HTMLElement;
   /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
   sep: HTMLSpanElement | null;
+  /** Thứ tự thu (nhỏ = thu trước) — copy từ item.collapsePriority (US-4.24). */
+  priority: number;
 }
 
 let toolbarElRef: HTMLElement | undefined;
@@ -950,8 +982,11 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     const el = item.dropdown ? buildSplitButtonEl(item) : buildPlainButtonEl(item);
     toolbarEl.appendChild(el);
 
-    if (!inPinnedGroup) {
-      collapsibleEntries.push({ item, btn: el, sep });
+    // US-4.24: collapsibility do `collapsePriority` quyết định, KHÔNG do vị trí
+    // so với nhóm alignRight nữa — nên Zen (nằm SAU Reading Mode alignRight) vẫn
+    // thu được, còn Link/Image (đứng trước) vẫn pinned.
+    if (item.collapsePriority !== undefined) {
+      collapsibleEntries.push({ item, btn: el, sep, priority: item.collapsePriority });
     }
   }
 
@@ -1078,19 +1113,24 @@ function recalcOverflow(): void {
   }
 
   moreBtn.style.display = '';
-  const hidden: CollapsibleEntry[] = [];
-  for (let i = collapsibleEntries.length - 1; i >= 0; i--) {
+  // US-4.24: thu theo `priority` TĂNG DẦN (nhỏ = thu trước), không theo vị trí
+  // mảng. Khi rộng ra sẽ hiện lại theo chiều ngược (priority lớn hiện lại trước)
+  // — chỉ cần dừng ngay khi vừa đủ chỗ.
+  const hiddenSet = new Set<CollapsibleEntry>();
+  const byPriority = [...collapsibleEntries].sort((a, b) => a.priority - b.priority);
+  for (const entry of byPriority) {
     if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
       break;
     }
-    const entry = collapsibleEntries[i];
     entry.btn.style.display = 'none';
     if (entry.sep) {
       entry.sep.style.display = 'none';
     }
-    hidden.unshift(entry);
+    hiddenSet.add(entry);
   }
-  rebuildOverflowMenu(hidden);
+  // Menu liệt kê theo thứ tự hiển thị trên toolbar (collapsibleEntries đã theo
+  // đúng thứ tự mảng), không theo thứ tự bị thu.
+  rebuildOverflowMenu(collapsibleEntries.filter((e) => hiddenSet.has(e)));
 }
 
 /**
