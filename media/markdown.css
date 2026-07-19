@@ -98,42 +98,54 @@ h3,
 h4,
 h5,
 h6 {
-  font-weight: 600;
   margin-top: 24px;
   margin-bottom: 16px;
   line-height: 1.25;
 }
 
-#content h1,
+/* Fixed-px heading scale (Document Blocks Item 1). Base = plain-editor
+ * "Follow VS Code" column — headings no longer scale with --markdown-font-size
+ * (PO decision 2026-07-19). Reading-Mode presets override font-size below;
+ * weight / H2 border / opacity / letter-spacing are shared from here. */
 #content h2 {
-  padding-bottom: 0.3em;
+  padding-bottom: 6px;
   border-bottom-width: 1px;
   border-bottom-style: solid;
 }
 
 h1 {
-  font-size: 2em;
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
   margin-top: 0;
 }
 
 h2 {
-  font-size: 1.5em;
+  font-size: 21px;
+  font-weight: 650;
 }
 
 h3 {
-  font-size: 1.25em;
+  font-size: 17.5px;
+  font-weight: 650;
 }
 
 h4 {
-  font-size: 1em;
+  font-size: 15.5px;
+  font-weight: 700;
 }
 
 h5 {
-  font-size: 0.875em;
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0.82;
 }
 
 h6 {
-  font-size: 0.85em;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  opacity: 0.62;
 }
 
 img,
@@ -236,6 +248,11 @@ table > tbody > tr + tr > td {
 .vscode-high-contrast th,
 .vscode-high-contrast table > tbody > tr + tr > td {
   border-color: var(--vscode-contrastBorder, currentColor);
+}
+
+/* High-Contrast: thicker H2 rule (Document Blocks heading scale). */
+.vscode-high-contrast #content h2 {
+  border-bottom-width: 2px;
 }
 
 /* Căn lề cột từ thuộc tính align (round-trip) */
@@ -933,7 +950,7 @@ body.reading-mode #content pre {
   --reading-font-stack: 'et-book', Palatino, 'Palatino Linotype', 'Palatino LT STD',
     'Book Antiqua', Georgia, 'Literata', 'Times New Roman', serif;
   /* Cỡ chữ lớn kiểu essay in (ai-2027.com dùng ET Book ~20px) — 19px cho serif
-   * đọc "thảnh thơi" trên cột hẹp 62ch; heading em tự scale theo. */
+   * đọc "thảnh thơi" trên cột hẹp 62ch. */
   --reading-font-size: 19px;
   --reading-line-height: 1.75;
   --reading-measure: 62ch;
@@ -948,10 +965,94 @@ body.reading-mode #content pre {
   --reading-font-stack: 'Literata', Palatino, 'Palatino Linotype', 'Book Antiqua',
     Georgia, 'Times New Roman', serif;
 }
-/* Heading serif in hoa nhỏ hơn body-scale để nhịp giống trang giấy in. */
-#content.reading-preset-academic :is(h1, h2, h3, h4, h5, h6) {
-  font-weight: 600;
-  letter-spacing: 0.01em;
+/* --- Reading-Mode per-group heading scale (Reading Mode plan gap #3) ---
+ * Palette-independent: heading size is a function of the typography preset
+ * only (Sepia/Light/Dark/Paper change color, not size). Shared weight / H2
+ * border / opacity / letter-spacing come from the base heading rules; each
+ * preset overrides font-size + its own accessibility deviations. Values:
+ * Reading Mode Typography - Review Notes.md (designer-authored 2026-07-19). */
+#content.reading-preset-comfortable h1 {
+  font-size: 30px;
+}
+#content.reading-preset-comfortable h2 {
+  font-size: 23px;
+}
+#content.reading-preset-comfortable h3 {
+  font-size: 19px;
+}
+#content.reading-preset-comfortable h4 {
+  font-size: 18px;
+}
+#content.reading-preset-comfortable h5 {
+  font-size: 16px;
+}
+#content.reading-preset-comfortable h6 {
+  font-size: 14.5px;
+}
+
+#content.reading-preset-academic h1 {
+  font-size: 38px;
+  letter-spacing: 0; /* serif needs no optical tightening at large sizes */
+}
+#content.reading-preset-academic h2 {
+  font-size: 28.5px;
+}
+#content.reading-preset-academic h3 {
+  font-size: 23.75px;
+}
+#content.reading-preset-academic h4 {
+  font-size: 19px;
+}
+#content.reading-preset-academic h5 {
+  font-size: 16.5px;
+}
+#content.reading-preset-academic h6 {
+  font-size: 16px;
+}
+
+#content.reading-preset-compact h1 {
+  font-size: 25px;
+  letter-spacing: -0.2px; /* smaller size needs less correction */
+}
+#content.reading-preset-compact h2 {
+  font-size: 18.5px;
+}
+#content.reading-preset-compact h3 {
+  font-size: 15.5px;
+}
+#content.reading-preset-compact h4 {
+  font-size: 14.5px;
+}
+#content.reading-preset-compact h5 {
+  font-size: 13px;
+  opacity: 0.85; /* raised floor — avoid stacking fade on already-tight type */
+}
+#content.reading-preset-compact h6 {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+#content.reading-preset-dyslexia h1 {
+  font-size: 36px;
+  letter-spacing: 0; /* BDA: negative tracking hurts dyslexic reading */
+}
+#content.reading-preset-dyslexia h2 {
+  font-size: 27px;
+}
+#content.reading-preset-dyslexia h3 {
+  font-size: 22.5px;
+}
+#content.reading-preset-dyslexia h4 {
+  font-size: 18px;
+}
+#content.reading-preset-dyslexia h5 {
+  font-size: 15.75px;
+  opacity: 0.9; /* accessibility override — avoid low-contrast fade */
+}
+#content.reading-preset-dyslexia h6 {
+  font-size: 15.5px;
+  letter-spacing: 0.04em; /* positive tracking is dyslexia-beneficial */
+  opacity: 0.78;
 }
 
 /* --- US-19.6 Chrome font-size theo preset (TOC + pop-up) ---
