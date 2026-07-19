@@ -340,6 +340,23 @@ body.dd-dragging .dd-handle {
  * flex-wrap: nowrap + overflow: hidden — thay vì để tràn xuống dòng 2 khi
  * cửa sổ hẹp (gây xô lệch layout), các nút cuối dãy được toolbar.ts ẩn dần
  * và gom vào menu "..." (.toolbar-more / .toolbar-overflow-menu). */
+/* US-4.25: bộ token chrome toolbar riêng. Mặc định (followTheme) → --vscode-*
+ * (adaptive theo theme VS Code đang cài; hex wireframe chỉ là fallback cuối) —
+ * KHÔNG hardcode hex để không phá các theme không mặc định. Badge dùng accent
+ * (--vscode-button-*) thay cho --vscode-badge xám. Mỗi reading mode ghi đè bộ
+ * này bằng hue RIÊNG bên dưới (không phải content --rp-*), nên toolbar là chrome
+ * tách biệt với trang. Chỉ đổi MÀU — kích thước ở rule sẵn có, không đụng. */
+:root {
+  --toolbar-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #f3f3f3));
+  --toolbar-fg: var(--vscode-foreground, #3b3b3b);
+  --toolbar-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  --toolbar-hover-bg: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  --toolbar-active-bg: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.3));
+  --toolbar-active-fg: var(--vscode-inputOption-activeForeground, var(--vscode-foreground));
+  --toolbar-badge-bg: var(--vscode-button-background, #005fb8);
+  --toolbar-badge-fg: var(--vscode-button-foreground, #ffffff);
+}
+
 /* Scale-up ratio 1.25x (bug report: toolbar felt too small) — chosen so every
  * base value (16/24/26/2/4px) lands on a clean integer at ×1.25, keeping
  * buttons/icons/separators proportional instead of some pieces growing more
@@ -363,8 +380,8 @@ body.dd-dragging .dd-handle {
   margin: 0 -26px 8px;
   padding-left: 26px;
   padding-right: 26px;
-  background: var(--vscode-editor-background, var(--vscode-sideBar-background));
-  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--toolbar-border);
 }
 
 #toolbar button {
@@ -381,7 +398,7 @@ body.dd-dragging .dd-handle {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: var(--vscode-foreground);
+  color: var(--toolbar-fg);
   cursor: pointer;
 }
 
@@ -410,13 +427,13 @@ body.dd-dragging .dd-handle {
 }
 
 #toolbar button:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  background: var(--toolbar-hover-bg);
 }
 
 #toolbar button.active {
-  background: var(--vscode-inputOption-activeBackground, rgba(128, 128, 128, 0.3));
-  color: var(--vscode-inputOption-activeForeground, var(--vscode-foreground));
-  border-color: var(--vscode-inputOption-activeBorder, transparent);
+  background: var(--toolbar-active-bg);
+  color: var(--toolbar-active-fg);
+  border-color: var(--toolbar-border);
 }
 
 /* US-4.23: Link/Image bị vô hiệu khi caret trong code block (design state f) —
@@ -434,7 +451,7 @@ body.dd-dragging .dd-handle {
   width: 1px;
   height: 20px;
   margin: 0 5px;
-  background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  background: var(--toolbar-border);
 }
 
 /* Tooltip tự vẽ dùng chung (nút toolbar, mục TOC bị cắt...) — xem showTooltip() trong tooltip.ts. */
@@ -533,8 +550,8 @@ body.dd-dragging .dd-handle {
   line-height: 1.4;
   border-radius: 999px;
   white-space: nowrap;
-  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.3));
-  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  background: var(--toolbar-badge-bg);
+  color: var(--toolbar-badge-fg);
 }
 
 /* Hàng "đang áp" trong dropdown mang trạng thái chọn (vd palette đọc US-19.10):
@@ -568,7 +585,7 @@ body.dd-dragging .dd-handle {
 }
 
 #toolbar .split-btn:hover {
-  border-color: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-color: var(--toolbar-border);
 }
 
 #toolbar .split-main,
@@ -583,7 +600,7 @@ body.dd-dragging .dd-handle {
   height: 30px;
   border: none;
   background: transparent;
-  color: var(--vscode-foreground);
+  color: var(--toolbar-fg);
   cursor: pointer;
 }
 
@@ -607,14 +624,14 @@ body.dd-dragging .dd-handle {
 
 #toolbar .split-main:hover,
 #toolbar .split-caret:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  background: var(--toolbar-hover-bg);
 }
 
 #toolbar .split-divider {
   flex-shrink: 0;
   width: 1px;
   margin: 5px 0;
-  background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  background: var(--toolbar-border);
 }
 
 /* --- Toolbar nổi cho bảng --- */
@@ -2193,43 +2210,78 @@ body.reading-mode #search-input {
   font-size: var(--reading-ui-font-size, 13px);
 }
 
-/* --- US-19.11 (bug 0715 mục 1): chrome (toolbar/popover/table-toolbar) đi theo
- * reading palette ---
- * Palette (US-19.5) chỉ tô màu `#content`; toolbar vẫn dùng --vscode-* (nền tối)
- * nên "lệch" với vùng chữ sepia/ivory. Khi có palette (body.reading-palette-*),
- * chrome kế thừa --rp-* để đồng bộ một hệ màu. followTheme = không có class này
- * → chrome giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout. */
-body[class*='reading-palette-'] #toolbar,
+/* --- US-4.25: mỗi reading mode có bộ --toolbar-* RIÊNG (hue chrome độc lập theo
+ * wireframe, KHÔNG kế thừa content --rp-*) — toolbar đọc như chrome tách biệt với
+ * trang, đúng mock. Thay riêng phần #toolbar của block "chrome kế thừa --rp-*"
+ * (US-19.11); #table-toolbar + popover vẫn theo --rp-* (giữ nguyên bên dưới).
+ * followTheme (không có class palette) dùng --toolbar-* mặc định → --vscode-*. */
+body.reading-palette-light {
+  --toolbar-bg: #f3f3f3;
+  --toolbar-fg: #3b3b3b;
+  --toolbar-border: #e5e5e5;
+  --toolbar-hover-bg: rgba(0, 0, 0, 0.06);
+  --toolbar-active-bg: rgba(0, 0, 0, 0.11);
+  --toolbar-active-fg: #1c1b18;
+  --toolbar-badge-bg: #005fb8;
+  --toolbar-badge-fg: #ffffff;
+}
+body.reading-palette-dark {
+  --toolbar-bg: #252526;
+  --toolbar-fg: #cccccc;
+  --toolbar-border: #2b2b2b;
+  --toolbar-hover-bg: rgba(255, 255, 255, 0.08);
+  --toolbar-active-bg: rgba(255, 255, 255, 0.14);
+  --toolbar-active-fg: #ffffff;
+  --toolbar-badge-bg: #4daafc;
+  --toolbar-badge-fg: #1e1e1e;
+}
+body.reading-palette-sepia {
+  --toolbar-bg: #ece0c4;
+  --toolbar-fg: #5b4636;
+  --toolbar-border: #d9c9a6;
+  --toolbar-hover-bg: rgba(90, 70, 54, 0.1);
+  --toolbar-active-bg: rgba(90, 70, 54, 0.16);
+  --toolbar-active-fg: #3a2c20;
+  --toolbar-badge-bg: #8a4b08;
+  --toolbar-badge-fg: #fbf3e2;
+}
+body.reading-palette-paper {
+  --toolbar-bg: #f3efe0;
+  --toolbar-fg: #2b2b26;
+  --toolbar-border: #e0d9c4;
+  --toolbar-hover-bg: rgba(43, 43, 38, 0.07);
+  --toolbar-active-bg: rgba(43, 43, 38, 0.12);
+  --toolbar-active-fg: #14140f;
+  --toolbar-badge-bg: #1a5fb4;
+  --toolbar-badge-fg: #ffffff;
+}
+body.reading-palette-highContrast {
+  --toolbar-bg: #000000;
+  --toolbar-fg: #ffffff;
+  --toolbar-border: #6fc3ff;
+  --toolbar-hover-bg: rgba(111, 195, 255, 0.2);
+  --toolbar-active-bg: rgba(111, 195, 255, 0.33);
+  --toolbar-active-fg: #ffffff;
+  --toolbar-badge-bg: #3794ff;
+  --toolbar-badge-fg: #000000;
+}
+/* #table-toolbar vẫn kế thừa --rp-* như US-19.11 (chỉ #toolbar tách sang
+ * --toolbar-* riêng ở trên). */
 body[class*='reading-palette-'] #table-toolbar {
   background: var(--rp-bg);
   border-color: var(--rp-border);
 }
-body[class*='reading-palette-'] #toolbar button,
-body[class*='reading-palette-'] #table-toolbar button,
-body[class*='reading-palette-'] #toolbar .split-main,
-body[class*='reading-palette-'] #toolbar .split-caret {
+body[class*='reading-palette-'] #table-toolbar button {
   color: var(--rp-fg);
 }
-body[class*='reading-palette-'] #toolbar .toolbar-sep,
-body[class*='reading-palette-'] #toolbar .split-divider,
 body[class*='reading-palette-'] #table-toolbar .toolbar-sep {
   background: var(--rp-border);
 }
-body[class*='reading-palette-'] #toolbar button:hover,
-body[class*='reading-palette-'] #table-toolbar button:hover,
-body[class*='reading-palette-'] #toolbar .split-btn:hover,
-body[class*='reading-palette-'] #toolbar .split-main:hover,
-body[class*='reading-palette-'] #toolbar .split-caret:hover {
+body[class*='reading-palette-'] #table-toolbar button:hover {
   background: var(--rp-chrome-hover);
 }
-body[class*='reading-palette-'] #toolbar button.active {
-  background: var(--rp-chrome-active);
-  color: var(--rp-fg);
-  border-color: var(--rp-border);
-}
-/* US-4.23 parity: dưới reading palette không có token disabled riêng và các
- * rule button/`:hover` ở trên có specificity cao hơn base rule, nên dim bằng
- * opacity (palette-independent) + đè lại nền hover ở đúng ngữ cảnh palette. */
+/* US-4.23: dưới reading palette, dim nút vô hiệu bằng opacity (độc lập palette)
+ * thay vì --vscode-disabledForeground vốn lệch tông với nền palette. */
 body[class*='reading-palette-'] #toolbar button[aria-disabled='true'],
 body[class*='reading-palette-'] #toolbar button[aria-disabled='true']:hover {
   background: none;

@@ -293,3 +293,4 @@
 | 0.8.0 | 2026-07-19 | Feature: fixed-px heading scale (H1–H6) per Document Blocks design — plain editor + the 4 Reading-Mode groups, with per-level weight, H2-only border, small-heading opacity and letter-spacing; headings no longer scale with font-size. |
 | 0.8.0 | 2026-07-19 | Feature: Link/Image toolbar buttons disable (dim, cursor:not-allowed, "unavailable inside a code block" tooltip) when the caret is inside a code block, per design state (f) — US-4.23. |
 | 0.8.0 | 2026-07-19 | Refactor/Feature: toolbar controls reordered to wireframe sequence (Undo/Redo lead, Inline code by B/I/S) + explicit collapse-priority overflow so Zen can collapse and Link/Image stay — US-4.24. |
+| 0.8.0 | 2026-07-19 | Feature: dedicated `--toolbar-*` chrome token set — each reading mode gets its own toolbar hue (not inherited from content) + the "Common" badge is now an accent per theme instead of flat gray; followTheme stays adaptive — US-4.25. |
