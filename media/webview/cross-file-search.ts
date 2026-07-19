@@ -47,13 +47,9 @@ const ICON_SVG =
   '<path d="M10.5 10.5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
   '</svg>';
 
-function pluralResults(n: number): string {
-  return n === 1 ? '1 result' : `${n} results`;
-}
-
-/** Badge số lượng trên header 1 nhóm file (vd "12 matches") — dùng totalInFile, không phải số match đã serialize. */
-function pluralMatches(n: number): string {
-  return n === 1 ? '1 match' : `${n} matches`;
+/** "1 result" / "3 results", "1 match" / "12 matches" — `plural` mặc định là `word + 's'`, truyền tay cho từ bất quy tắc như "match" → "matches". */
+function pluralize(n: number, word: string, plural = `${word}s`): string {
+  return `${n} ${n === 1 ? word : plural}`;
 }
 
 /** Cắt bớt đầu chuỗi (giữ đoạn sát match) khi vượt ngân sách, thêm tiền tố "…". */
@@ -66,15 +62,24 @@ function truncateContextRight(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
+/** Tạo element + gán className (+ textContent nếu truyền) — gom cụm createElement/className/textContent lặp lại khắp phần dựng DOM. */
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
 export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): CrossFileSearchController {
   function postToHost(msg: WebviewToHost): void {
     vscode.postMessage(msg);
   }
 
   // --- Icon nổi ---
-  const icon = document.createElement('button');
+  const icon = el('button', 'cross-file-search-icon');
   icon.type = 'button';
-  icon.className = 'cross-file-search-icon';
   icon.innerHTML = ICON_SVG;
   icon.title = 'Search across project files (⌘⇧F / Ctrl+Shift+F)';
   icon.setAttribute('aria-label', 'Search across project files');
@@ -84,8 +89,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   document.body.appendChild(icon);
 
   // --- Popover kết quả ---
-  const popover = document.createElement('div');
-  popover.className = 'cross-file-search-popover';
+  const popover = el('div', 'cross-file-search-popover');
   popover.hidden = true;
   // Kéo (drag) popover đi chỗ khác để lộ nội dung phía sau đang bị nó che —
   // dùng chung makeDraggable() (dom-utils.ts) như popup Insert Link/Image
@@ -101,16 +105,12 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   // = OFF — cùng registry/khuôn với Ctrl+F (search.ts).
   const matchOptions: MatchOptions = { matchCase: false, wholeWord: true };
 
-  const header = document.createElement('div');
-  header.className = 'cross-file-search-header';
+  const header = el('div', 'cross-file-search-header');
   // Hàng trên: count + scope (giữ nguyên bố cục cũ). Header giờ là cột, toggle
   // xuống hàng phụ bên dưới (header vốn chật — chốt #6 cho phép tách 2 hàng).
-  const headerTop = document.createElement('div');
-  headerTop.className = 'cross-file-search-header-top';
-  const countEl = document.createElement('span');
-  countEl.className = 'cross-file-search-count';
-  const scopeSelect = document.createElement('select');
-  scopeSelect.className = 'cross-file-search-scope';
+  const headerTop = el('div', 'cross-file-search-header-top');
+  const countEl = el('span', 'cross-file-search-count');
+  const scopeSelect = el('select', 'cross-file-search-scope');
   scopeSelect.setAttribute('aria-label', 'Search scope');
   const optMarkdown = document.createElement('option');
   optMarkdown.value = 'markdown';
@@ -123,8 +123,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
 
   // Hàng phụ: nút toggle Aa/ab. Bấm → lật state → re-run query hiện tại (giống
   // đổi scope). doSearch là function declaration (hoisted) nên callback hợp lệ.
-  const optionsRow = document.createElement('div');
-  optionsRow.className = 'cross-file-search-options';
+  const optionsRow = el('div', 'cross-file-search-options');
   const toggles = buildMatchOptionToggles(matchOptions, () => {
     if (currentQuery) {
       doSearch(currentQuery, currentScope);
@@ -134,13 +133,10 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
 
   header.append(headerTop, optionsRow);
 
-  const resultsEl = document.createElement('div');
-  resultsEl.className = 'cross-file-search-results';
+  const resultsEl = el('div', 'cross-file-search-results');
 
-  const moreEl = document.createElement('button');
+  const moreEl = el('button', 'cross-file-search-more', 'See more in Search panel');
   moreEl.type = 'button';
-  moreEl.className = 'cross-file-search-more';
-  moreEl.textContent = 'See more in Search panel';
   moreEl.hidden = true;
 
   popover.append(header, resultsEl, moreEl);
@@ -215,6 +211,12 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     popover.hidden = true;
     resultsEl.textContent = '';
     moreEl.hidden = true;
+  }
+
+  /** Đóng cả popover kết quả lẫn icon lơ lửng — cặp closePopover()+hideIcon() lặp ở mọi chỗ "xong việc/huỷ" (chọn kết quả, Esc, click ngoài...). */
+  function dismiss(): void {
+    closePopover();
+    hideIcon();
   }
 
   /**
@@ -327,9 +329,8 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
 
   function renderMatchRow(group: CrossFileMatchGroup, matchIndex: number): HTMLButtonElement {
     const match = group.matches[matchIndex];
-    const row = document.createElement('button');
+    const row = el('button', 'cross-file-search-match');
     row.type = 'button';
-    row.className = 'cross-file-search-match';
 
     const before = match.lineText.slice(0, match.character);
     const mid = match.lineText.slice(match.character, match.character + match.length);
@@ -345,19 +346,15 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     const left = truncateContextLeft(leftRaw, SNIPPET_CONTEXT_CHARS);
     const right = truncateContextRight(rightRaw, SNIPPET_CONTEXT_CHARS);
 
-    const parts: (string | HTMLElement)[] = [];
+    // Element.append() nhận string trực tiếp (tự tạo text node) — không cần
+    // gom parts rồi tự phân biệt string/Element.
+    const mark = el('span', 'cross-file-search-mark', mid);
     if (left) {
-      parts.push(left);
+      row.append(left);
     }
-    const mark = document.createElement('span');
-    mark.className = 'cross-file-search-mark';
-    mark.textContent = mid;
-    parts.push(mark);
+    row.append(mark);
     if (right) {
-      parts.push(right);
-    }
-    for (const part of parts) {
-      row.append(typeof part === 'string' ? document.createTextNode(part) : part);
+      row.append(right);
     }
 
     row.addEventListener('mousedown', (e) => e.preventDefault());
@@ -372,40 +369,30 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
         // trí bằng text thay vì áp offset thô (lệch với rendered, xem bug #2).
         matchText: mid,
       });
-      closePopover();
-      hideIcon();
+      dismiss();
     });
     return row;
   }
 
   /** Tên file/đường dẫn + badge số match — phần dùng chung giữa header có chevron (≥2 match) và dòng tĩnh (đúng 1 match, xem renderSingleMatchHeader). */
   function renderGroupInfoAndBadge(group: CrossFileMatchGroup): { info: HTMLSpanElement; badge: HTMLSpanElement } {
-    const fileEl = document.createElement('span');
-    fileEl.className = 'cross-file-search-file';
-    fileEl.textContent = group.fileName;
-    const pathEl = document.createElement('span');
-    pathEl.className = 'cross-file-search-path';
-    pathEl.textContent = group.relativePath;
-    const info = document.createElement('span');
-    info.className = 'cross-file-search-group-info';
+    const fileEl = el('span', 'cross-file-search-file', group.fileName);
+    const pathEl = el('span', 'cross-file-search-path', group.relativePath);
+    const info = el('span', 'cross-file-search-group-info');
     info.append(fileEl, pathEl);
 
-    const badge = document.createElement('span');
-    badge.className = 'cross-file-search-badge';
-    badge.textContent = pluralMatches(group.totalInFile);
+    const badge = el('span', 'cross-file-search-badge', pluralize(group.totalInFile, 'match', 'matches'));
 
     return { info, badge };
   }
 
   /** Header 1 nhóm file có ≥2 match (dòng khi collapsed): chevron + tên file/đường dẫn + badge. Click → chỉ toggle, KHÔNG mở file (tránh lẫn với renderMatchRow). */
   function renderGroupHeader(group: CrossFileMatchGroup, onToggle: () => void): HTMLButtonElement {
-    const btn = document.createElement('button');
+    const btn = el('button', 'cross-file-search-group-header');
     btn.type = 'button';
-    btn.className = 'cross-file-search-group-header';
     btn.setAttribute('aria-expanded', 'false');
 
-    const chevron = document.createElement('span');
-    chevron.className = 'cross-file-search-chevron';
+    const chevron = el('span', 'cross-file-search-chevron');
     chevron.setAttribute('aria-hidden', 'true');
 
     const { info, badge } = renderGroupInfoAndBadge(group);
@@ -424,11 +411,9 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
    * renderResults().
    */
   function renderSingleMatchHeader(group: CrossFileMatchGroup): HTMLDivElement {
-    const row = document.createElement('div');
-    row.className = 'cross-file-search-group-header cross-file-search-group-header-static';
+    const row = el('div', 'cross-file-search-group-header cross-file-search-group-header-static');
 
-    const chevronSpacer = document.createElement('span');
-    chevronSpacer.className = 'cross-file-search-chevron cross-file-search-chevron-hidden';
+    const chevronSpacer = el('span', 'cross-file-search-chevron cross-file-search-chevron-hidden');
     chevronSpacer.setAttribute('aria-hidden', 'true');
 
     const { info, badge } = renderGroupInfoAndBadge(group);
@@ -443,10 +428,12 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     if (remaining <= 0) {
       return undefined;
     }
-    const row = document.createElement('button');
+    const row = el(
+      'button',
+      'cross-file-search-overflow',
+      `+${remaining} match khác trong file này → xem trong Search panel`
+    );
     row.type = 'button';
-    row.className = 'cross-file-search-overflow';
-    row.textContent = `+${remaining} match khác trong file này → xem trong Search panel`;
     row.addEventListener('mousedown', (e) => e.preventDefault());
     row.addEventListener('click', () => {
       // GĐ4: scope Search panel về ĐÚNG file này (không phải toàn `currentScope`).
@@ -456,8 +443,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
         scope: currentScope,
         relativePath: group.relativePath,
       });
-      closePopover();
-      hideIcon();
+      dismiss();
     });
     return row;
   }
@@ -475,12 +461,13 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
     if (groups.length === 0) {
       countEl.textContent = '0 results';
       countEl.title = '';
-      const empty = document.createElement('div');
-      empty.className = 'cross-file-search-empty';
-      empty.textContent =
+      const empty = el(
+        'div',
+        'cross-file-search-empty',
         currentScope === 'markdown'
           ? 'No results in project. Try switching scope to "All files".'
-          : 'No results in project.';
+          : 'No results in project.'
+      );
       resultsEl.appendChild(empty);
       moreEl.hidden = true;
       return;
@@ -491,38 +478,48 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
       countEl.textContent = msg;
       countEl.title = msg;
     } else {
-      countEl.textContent = pluralResults(total);
+      countEl.textContent = pluralize(total, 'result');
       countEl.title = '';
     }
     const frag = document.createDocumentFragment();
     for (const group of groups) {
-      const groupEl = document.createElement('div');
-      groupEl.className = 'cross-file-search-group';
+      const groupEl = el('div', 'cross-file-search-group');
 
       // [US-15.6, đổi 2026-07-14] File chỉ có đúng 1 match — show thẳng snippet,
       // không cần accordion (không có chevron, không toggle expand/collapse).
       if (group.totalInFile === 1) {
         groupEl.classList.add('cross-file-search-group-single');
-        const matchesEl = document.createElement('div');
-        matchesEl.className = 'cross-file-search-group-matches';
+        const matchesEl = el('div', 'cross-file-search-group-matches');
         matchesEl.appendChild(renderMatchRow(group, 0));
         groupEl.append(renderSingleMatchHeader(group), matchesEl);
         frag.appendChild(groupEl);
         continue;
       }
 
-      const matchesEl = document.createElement('div');
-      matchesEl.className = 'cross-file-search-group-matches';
+      const matchesEl = el('div', 'cross-file-search-group-matches');
       matchesEl.hidden = true;
-      group.matches.forEach((_m, i) => matchesEl.appendChild(renderMatchRow(group, i)));
-      const overflowRow = renderOverflowRow(group);
-      if (overflowRow) {
-        matchesEl.appendChild(overflowRow);
-      }
+      // Dựng các dòng match LƯỜI — chỉ khi group được mở lần đầu. Trước đây mọi
+      // dòng của mọi group đều dựng sẵn dù đang thu gọn (matchesEl.hidden), phí
+      // công DOM cho nội dung người dùng có thể không bao giờ mở ra.
+      let built = false;
+      const buildRows = (): void => {
+        if (built) {
+          return;
+        }
+        built = true;
+        group.matches.forEach((_m, i) => matchesEl.appendChild(renderMatchRow(group, i)));
+        const overflowRow = renderOverflowRow(group);
+        if (overflowRow) {
+          matchesEl.appendChild(overflowRow);
+        }
+      };
 
       let expanded = false;
       const headerBtn = renderGroupHeader(group, () => {
         expanded = !expanded;
+        if (expanded) {
+          buildRows();
+        }
         matchesEl.hidden = !expanded;
         headerBtn.setAttribute('aria-expanded', String(expanded));
         groupEl.classList.toggle('expanded', expanded);
@@ -607,8 +604,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   moreEl.addEventListener('mousedown', (e) => e.preventDefault());
   moreEl.addEventListener('click', () => {
     postToHost({ type: 'crossFileSearch:openInSearchPanel', query: currentQuery, scope: currentScope });
-    closePopover();
-    hideIcon();
+    dismiss();
   });
 
   // Bấm ra ngoài icon và popover → ẩn/đóng, giống pattern của search.ts.
@@ -618,8 +614,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
       return;
     }
     if (!icon.contains(target) && !popover.contains(target)) {
-      hideIcon();
-      closePopover();
+      dismiss();
     }
   });
 
@@ -631,8 +626,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   // icon đã hiện, nếu không icon có thể tự bật lại 750ms sau đó.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      hideIcon();
-      closePopover();
+      dismiss();
       return;
     }
     cancelPendingIcon();
@@ -666,8 +660,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
         clearTimeout(debounceTimer);
         debounceTimer = undefined;
       }
-      hideIcon();
-      closePopover();
+      dismiss();
     },
     setDefaultScope(scope: CrossFileSearchScope): void {
       currentScope = scope;

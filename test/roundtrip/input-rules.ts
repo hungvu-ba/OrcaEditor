@@ -77,6 +77,14 @@ const blockquoteCases: DomCase[] = [
     html: '<blockquote><p>trích dẫn quan trọng</p></blockquote>',
     expect: (md) => /^>\s*trích dẫn quan trọng\s*$/.test(md.trim()),
   },
+  {
+    // Nested blockquote (Bug #4): "> " gõ trong một blockquote sẵn có bọc đoạn
+    // đó vào <blockquote> con — applyBlockquoteNestInputRule hội tụ về cấu trúc
+    // này. turndown serialize đệ quy → "> > ..." (KHÔNG escape thành "\>").
+    name: 'nested blockquote: <blockquote>...<blockquote><p>x</p></blockquote></blockquote> → "> > x"',
+    html: '<blockquote><p>Type here</p><blockquote><p>fsdfdsfs</p></blockquote></blockquote>',
+    expect: (md) => /^>\s*Type here$/m.test(md) && />\s*>\s*fsdfdsfs/.test(md) && !md.includes('\\>'),
+  },
 ];
 
 // ---------------------------------------------------------------------------

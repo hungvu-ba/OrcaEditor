@@ -104,15 +104,20 @@ export function computeSiblingMove(
  * back to `execCommand('insertHTML')` — that's the corruption this function
  * exists to avoid.
  */
+/** Parse an HTML string into a DocumentFragment via a `<template>` — works under @mixmark-io/domino (round-trip tests) as well as in the browser. */
+function parseHtml(html: string): DocumentFragment {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  return template.content;
+}
+
 export function applyBlockMove(parent: Element, result: SiblingMoveResult): HTMLElement | null {
   const range = document.createRange();
   range.setStartBefore(result.low);
   range.setEndAfter(result.high);
   range.deleteContents();
 
-  const template = document.createElement('template');
-  template.innerHTML = result.html;
-  range.insertNode(template.content);
+  range.insertNode(parseHtml(result.html));
 
   let el: Element | null = result.beforeEl ? result.beforeEl.nextElementSibling : parent.firstElementChild;
   for (let i = 0; i < result.movedHopCount && el; i++) {
@@ -142,9 +147,7 @@ export function applyLiReparentMove(li: HTMLLIElement, target: LiReparentTarget)
   // Build+validate the replacement BEFORE detaching the original — `li` must stay live in the
   // DOM until a valid replacement exists, so a parse failure never leaves the source deleted
   // with nothing inserted in its place.
-  const template = document.createElement('template');
-  template.innerHTML = li.outerHTML;
-  const newLi = template.content.firstElementChild as HTMLLIElement | null;
+  const newLi = parseHtml(li.outerHTML).firstElementChild as HTMLLIElement | null;
   if (!newLi) {
     return null;
   }

@@ -8,7 +8,12 @@
  *
  * Roundtrip-safe: nút hover + overlay đều gắn vào <body>, KHÔNG bọc/chèn gì vào
  * #content (serialize chỉ đọc #content) nên không rò tag ra `.md`.
+ *
+ * The zoom/pan overlay is shared with Mermaid — see lightbox.ts. This file only
+ * keeps the image-hover detection + 🔍 button; openLightbox() owns the lightbox.
  */
+
+import { openLightbox } from './lightbox';
 
 const ZOOM_ICON =
   '<svg width="15" height="15" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
@@ -53,7 +58,8 @@ export function initImageZoom(content: HTMLElement, toolbarEl: HTMLElement): voi
       e.preventDefault();
       e.stopPropagation();
       if (currentImg) {
-        openLightbox(currentImg);
+        openLightbox({ kind: 'image', src: currentImg.currentSrc || currentImg.src, alt: currentImg.alt });
+        hideBtn();
       }
     });
     document.body.appendChild(btn);
@@ -110,106 +116,4 @@ export function initImageZoom(content: HTMLElement, toolbarEl: HTMLElement): voi
   });
   // Cuộn trang → toạ độ nút lệch khỏi ảnh, ẩn cho gọn.
   window.addEventListener('scroll', hideBtn, { passive: true });
-
-  // -------------------------------------------------------------------------
-  // Lightbox overlay (zoom/pan) — đóng bằng Esc / click nền.
-  // -------------------------------------------------------------------------
-  let overlay: HTMLDivElement | undefined;
-  let overlayImg: HTMLImageElement | undefined;
-  let scale = 1;
-  let panX = 0;
-  let panY = 0;
-  let dragging = false;
-  let dragStartX = 0;
-  let dragStartY = 0;
-
-  function ensureOverlay(): HTMLDivElement {
-    if (overlay) {
-      return overlay;
-    }
-    const el = document.createElement('div');
-    el.id = 'img-lightbox';
-    el.style.display = 'none';
-    const img = document.createElement('img');
-    img.id = 'img-lightbox-img';
-    el.appendChild(img);
-    const hint = document.createElement('div');
-    hint.id = 'img-lightbox-hint';
-    hint.textContent = 'Scroll to zoom · drag to pan · Esc to close';
-    el.appendChild(hint);
-
-    el.addEventListener('click', (e) => {
-      if (e.target === el) {
-        closeLightbox();
-      }
-    });
-    el.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      scale = Math.min(8, Math.max(1, scale * factor));
-      if (scale === 1) {
-        panX = 0;
-        panY = 0;
-      }
-      applyTransform();
-    }, { passive: false });
-    img.addEventListener('mousedown', (e) => {
-      if (scale <= 1) {
-        return;
-      }
-      e.preventDefault();
-      dragging = true;
-      dragStartX = e.clientX - panX;
-      dragStartY = e.clientY - panY;
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (!dragging) {
-        return;
-      }
-      panX = e.clientX - dragStartX;
-      panY = e.clientY - dragStartY;
-      applyTransform();
-    });
-    window.addEventListener('mouseup', () => {
-      dragging = false;
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && overlay?.style.display === 'flex') {
-        closeLightbox();
-      }
-    });
-
-    document.body.appendChild(el);
-    overlay = el;
-    overlayImg = img;
-    return el;
-  }
-
-  function applyTransform(): void {
-    if (overlayImg) {
-      overlayImg.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-      overlayImg.style.cursor = scale > 1 ? 'grab' : 'default';
-    }
-  }
-
-  function openLightbox(img: HTMLImageElement): void {
-    ensureOverlay();
-    if (!overlay || !overlayImg) {
-      return;
-    }
-    hideBtn();
-    scale = 1;
-    panX = 0;
-    panY = 0;
-    overlayImg.src = img.currentSrc || img.src;
-    overlayImg.alt = img.alt;
-    applyTransform();
-    overlay.style.display = 'flex';
-  }
-
-  function closeLightbox(): void {
-    if (overlay) {
-      overlay.style.display = 'none';
-    }
-  }
 }

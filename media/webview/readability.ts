@@ -24,9 +24,10 @@
  * seed qua 'init'), applyZenFromHost() áp cục bộ khi tab này nhận broadcast
  * từ tab khác (không gọi lại onZenChange, tránh vòng lặp).
  *
- * "Reading styling có hiệu lực" = Reading Mode bật HOẶC Zen bật — Zen tự kéo
- * theo styling đọc dù Reading Mode tắt (chốt US-19.9), nhưng vẫn là 2 toggle
- * độc lập (đọc đẹp mà giữ toolbar vẫn được).
+ * "Reading styling có hiệu lực" = CHỈ Reading Mode bật (`enabled`). bug_General
+ * #1 (đảo chốt cũ của US-19.9): Zen KHÔNG còn tự kéo theo styling đọc — vào Zen
+ * giữ nguyên Reading Mode hiện tại (tắt thì vẫn Follow VS Code), Zen chỉ ẩn
+ * toolbar/gutter (class `reading-zen`). Hai toggle hoàn toàn độc lập.
  *
  * US-19.18 (bug 0715): palette KHÔNG còn là lớp GLOBAL độc lập của US-19.11 —
  * giờ đi kèm 1:1 với preset qua 1 trong 10 bundle `READING_STYLES` đã kiểm
@@ -80,29 +81,17 @@ export interface ReadabilityDeps {
    * trống ở môi trường test (không có host).
    */
   onReadingModeChange?: (state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette }) => void;
+  /**
+   * bug_General #7: một bộ style vừa được COMMIT (apply()) — palette có thể đã
+   * đổi. Cho phép phần khác (Mermaid) phản ứng khi nền sáng/tối lật. CHỈ gọi ở
+   * apply(), KHÔNG ở previewStyle() (hover): re-render mermaid lúc hover dễ gây
+   * nháy. Bỏ trống ở test/không cần Mermaid.
+   */
+  onStyleApplied?: () => void;
 }
 
 const PRESETS: ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
 const PALETTES: ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
-
-/** Nhãn preset — dùng để ghép label bundle (READING_STYLES) và font tiếng Việt lookup. */
-export const READING_PRESET_LABELS: Record<ReadingPreset, string> = {
-  comfortable: 'Comfortable Reading',
-  default: 'Default (follow VS Code)',
-  compact: 'Compact',
-  dyslexia: 'Dyslexia-friendly',
-  academic: 'Academic Paper',
-};
-
-/** Nhãn palette — dùng để ghép label bundle (READING_STYLES). */
-export const READING_PALETTE_LABELS: Record<ReadingPalette, string> = {
-  followTheme: 'Follow VS Code',
-  light: 'Light (warm ivory)',
-  dark: 'Dark (dimmed)',
-  sepia: 'Sepia',
-  highContrast: 'High-contrast',
-  paper: 'Paper (warm white)',
-};
 
 /** 1 bộ preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp). */
 export interface ReadingStyle {
@@ -135,8 +124,6 @@ export const READING_STYLES: ReadingStyle[] = [
 export interface ReadabilityController {
   isEnabled(): boolean;
   isZen(): boolean;
-  getPreset(): ReadingPreset;
-  getPalette(): ReadingPalette;
   /** id trong READING_STYLES khớp (preset, palette) hiện tại, hoặc undefined nếu không khớp bộ nào (seed tay qua settings.json). */
   getStyleId(): string | undefined;
   /**
@@ -209,9 +196,14 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
    */
   let initApplyDone = false;
 
-  /** Reading styling đang có hiệu lực (Reading Mode HOẶC Zen). */
+  /**
+   * Reading styling đang có hiệu lực = CHỈ Reading Mode (`state.enabled`).
+   * bug_General #1: Zen KHÔNG còn tự kéo theo reading styling — vào/ra Zen phải
+   * giữ nguyên Reading Mode hiện tại (tắt thì vẫn Follow VS Code). Zen chỉ ẩn
+   * toolbar/gutter qua class `reading-zen` (độc lập, xem apply()).
+   */
   function stylingActive(): boolean {
-    return state.enabled || state.zen;
+    return state.enabled;
   }
 
   /**
@@ -261,6 +253,8 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       body.style.removeProperty('--reading-font-override');
     }
     deps.syncButtons();
+    // bug_General #7: palette có thể vừa đổi → cho Mermaid dựng lại theo theme mới.
+    deps.onStyleApplied?.();
   }
 
   /**
@@ -311,6 +305,17 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     document.body.classList.remove(REVEAL_CLASS);
   }
 
+  // #toolbar.offsetHeight bắt layout reflow — cache lại, chỉ đọc lại tối đa 1
+  // lần/frame qua rAF thay vì mỗi mousemove (chiều cao toolbar chỉ đổi khi
+  // resize/zoom chứ không theo di chuột). Trễ 1 frame vô hại với dải SHOW/HIDE
+  // margin rộng sẵn — cùng kiểu rAF-coalesce như onScroll/scheduleUpdateActive.
+  let cachedToolbarH = 40;
+  let toolbarHRaf = 0;
+  function refreshToolbarH(): void {
+    toolbarHRaf = 0;
+    cachedToolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
+  }
+
   document.addEventListener('mousemove', (e) => {
     if (!state.zen) {
       if (document.body.classList.contains(REVEAL_CLASS)) {
@@ -318,7 +323,10 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       }
       return;
     }
-    const toolbarH = document.getElementById('toolbar')?.offsetHeight ?? 40;
+    if (toolbarHRaf === 0) {
+      toolbarHRaf = requestAnimationFrame(refreshToolbarH);
+    }
+    const toolbarH = cachedToolbarH;
     if (e.clientY > toolbarH + HIDE_MARGIN_PX) {
       revealArmed = true;
       // Đang mở dropdown (popover neo dưới toolbar, sâu quá ngưỡng) thì giữ
@@ -352,20 +360,31 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     hideReveal();
   }
 
+  /**
+   * Khuôn chung của toggle/setStyle/disable: chụp snapshot enabled/preset/palette
+   * TRƯỚC, chạy `mutate`, apply() rồi notifyReadingModeChange(prev) để broadcast
+   * (guard "không đổi thì thôi" nằm trong notify) — gom giống cách setZen() gom
+   * mọi thay đổi Zen về một chỗ.
+   */
+  function mutateAndNotify(mutate: () => void): void {
+    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
+    mutate();
+    apply();
+    notifyReadingModeChange(prev);
+  }
+
   function toggle(): void {
     // Tắt qua nút chính phải mang đúng nghĩa hàng "Follow VS Code" trong
-    // dropdown — dùng chung disable() thay vì chỉ lật `enabled`, vì nếu Zen
-    // đang bật thì `stylingActive() = enabled || zen` vẫn true dù `enabled`
-    // vừa tắt, khiến nút chính bấm xong nhìn như "không làm gì" (bug report:
-    // click để bỏ Reading Mode, kỳ vọng về Follow VS Code, nhưng không đổi gì).
+    // dropdown — dùng chung disable() thay vì chỉ lật `enabled` để cùng lúc
+    // thoát Zen (xem disable()): nếu để nguyên Zen, bấm nút chính xong toolbar
+    // lại trượt đi mất, người dùng tưởng nút hỏng.
     if (state.enabled) {
       disable();
       return;
     }
-    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
-    state.enabled = true;
-    apply();
-    notifyReadingModeChange(prev);
+    mutateAndNotify(() => {
+      state.enabled = true;
+    });
   }
 
   function getStyleId(): string | undefined {
@@ -378,31 +397,27 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
     if (!style) {
       return;
     }
-    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
-    state.preset = style.preset;
-    state.palette = style.palette;
-    state.enabled = true;
-    apply();
-    notifyReadingModeChange(prev);
+    mutateAndNotify(() => {
+      state.preset = style.preset;
+      state.palette = style.palette;
+      state.enabled = true;
+    });
   }
 
   /**
-   * Dòng "Follow VS Code" — tắt hẳn Reading Mode. Phải tắt luôn Zen (không chỉ
-   * `enabled`): `stylingActive() = enabled || zen` (US-19.9, Zen tự kéo theo
-   * styling đọc dù Reading Mode tắt) — nếu Zen đang bật mà chỉ tắt `enabled`,
-   * `stylingActive()` vẫn true nên `apply()` tiếp tục render `state.preset`/
-   * `state.palette` CŨ (disable() không đụng 2 field này) y hệt như chưa bấm gì
-   * — đúng triệu chứng bug report: "preview thấy đổi nhưng chọn thì lại về
-   * style cũ". Reset luôn reveal (giống toggleZen/exitZen) vì Zen tắt rồi thì
-   * cơ chế "arm" của lần Zen tiếp theo phải bắt đầu lại từ đầu.
+   * Dòng "Follow VS Code" (và nút chính khi đang bật) — reset hẳn về VS Code
+   * gốc. Ngoài `enabled = false`, cũng thoát Zen: đây là hướng Reading→Zen
+   * (khác bug_General #1 chỉ tách hướng Zen→Reading ở stylingActive()) — chủ
+   * đích để toolbar hiện lại thay vì kẹt ẩn sau khi rời Reading Mode. Reset
+   * luôn reveal (giống toggleZen/exitZen) vì Zen tắt rồi thì cơ chế "arm" của
+   * lần Zen tiếp theo phải bắt đầu lại từ đầu.
    */
   function disable(): void {
-    const prev = { enabled: state.enabled, preset: state.preset, palette: state.palette };
-    state.enabled = false;
-    setZen(false);
-    resetZenReveal();
-    apply();
-    notifyReadingModeChange(prev);
+    mutateAndNotify(() => {
+      state.enabled = false;
+      setZen(false);
+      resetZenReveal();
+    });
   }
 
   /**
@@ -568,8 +583,6 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   return {
     isEnabled: () => state.enabled,
     isZen: () => state.zen,
-    getPreset: () => state.preset,
-    getPalette: () => state.palette,
     getStyleId,
     toggle,
     setStyle,

@@ -93,6 +93,17 @@ body.md-line-numbers #toolbar {
   z-index: 20;
 }
 
+/* A heading's block handle spans its whole section (bug General #2); keep the grab glyph up at
+ * the heading row instead of centered in the middle of a tall section. Base/short handles are
+ * unaffected — the modifier is toggled on only when the handle covers more than one block. */
+.dd-handle.dd-handle--section {
+  /* border-box so the inline height (the section's exact span) stays authoritative and the
+   * padding-top pushes the glyph down WITHIN it, rather than growing the handle 2px taller. */
+  box-sizing: border-box;
+  align-items: flex-start;
+  padding-top: 2px;
+}
+
 .dd-handle:hover {
   color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
@@ -954,7 +965,8 @@ body.dd-dragging .dd-handle {
   border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-.md-mermaid-toggle {
+.md-mermaid-toggle,
+.md-mermaid-zoom {
   font-family: inherit;
   font-size: 11px;
   line-height: 1;
@@ -967,7 +979,8 @@ body.dd-dragging .dd-handle {
   cursor: pointer;
 }
 
-.md-mermaid-toggle:hover {
+.md-mermaid-toggle:hover,
+.md-mermaid-zoom:hover {
   opacity: 1;
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
@@ -978,6 +991,15 @@ body.dd-dragging .dd-handle {
 
 .md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after {
   content: 'View chart';
+}
+
+.md-mermaid-zoom::after {
+  content: 'Zoom';
+}
+
+/* Zoom only makes sense while viewing the chart — hide it in source view. */
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-zoom {
+  display: none;
 }
 
 .md-mermaid-chart {
@@ -1023,12 +1045,20 @@ th:empty::after {
 /* --- Liên kết trong chế độ edit: gợi ý Cmd+Click ---
  * position: absolute để không chiếm chỗ trong dòng, tránh đẩy giãn chữ
  * phía sau khi hover (::after vẫn được layout dù opacity: 0). */
-#content a {
+#content a,
+#content code[data-autolink-path] {
   cursor: text;
   position: relative;
 }
 
-#content a:hover::after {
+/* Path written as inline code but auto-linked: keep the code background, tint the
+   text like a link so it reads as clickable (bug General #5). */
+#content code[data-autolink-path] {
+  color: var(--vscode-textLink-foreground, #3794ff);
+}
+
+#content a:hover::after,
+#content code[data-autolink-path]:hover::after {
   content: ' ⌘⏎';
   position: absolute;
   white-space: nowrap;
@@ -1410,18 +1440,78 @@ body.toc-resizing {
   padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
 }
 
-#toc-title {
-  /* H2 level (markdown.css: h2 { font-size: 1.5em }) — `em` (not a fixed px)
-   * nên vẫn tỉ lệ đúng theo --markdown-font-size nếu user đổi cỡ chữ preview. */
-  font-size: 1.5em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  opacity: 0.8;
+/* US-10.7: reading-stats block (progress ring + read-time/word-count text),
+ * replaces the former #toc-title row. Sits inside #toc-header, which already
+ * reserves the toolbar-height top padding above. */
+#toc-stats {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   min-width: 0;
+  width: 100%;
+}
+
+/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is
+ * 54px in its 272px-wide rail (~0.2 of panel width). This panel is resizable
+ * (200-600px, --toc-width) rather than the mockup's fixed rail, so the ring
+ * scales with it via the same ratio — clamped so it never shrinks below a
+ * legible floor or grows past the hifi's 54px target. */
+#toc-progress-ring {
+  flex: none;
+  width: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
+  height: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
+}
+
+/* SVG elements aren't covered by the UA [hidden] { display: none } rule
+ * (that rule only targets the HTML namespace) — enforce it explicitly. */
+#toc-progress-ring[hidden] {
+  display: none;
+}
+
+#toc-progress-ring .toc-progress-track {
+  fill: none;
+  stroke: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  stroke-width: 6;
+}
+
+#toc-progress-ring .toc-progress-fill {
+  fill: none;
+  stroke: var(--vscode-textLink-foreground, #3794ff);
+  stroke-width: 6;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset 0.15s linear;
+}
+
+#toc-progress-ring .toc-progress-value {
+  fill: var(--vscode-foreground, #cccccc);
+  font-size: 12px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+#toc-stats-text {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.toc-stats-minutes,
+.toc-stats-words {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toc-stats-minutes {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toc-stats-words {
+  font-size: 12px;
+  opacity: 0.75;
 }
 
 /* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
@@ -1460,10 +1550,15 @@ body.toc-resizing {
   opacity: 0.6;
 }
 
+/* Card TOC: mỗi mục là một thẻ viền + bo góc, cách nhau bằng margin dọc. Level
+ * thể hiện bằng margin-left (thẻ con thụt vào), giữ cắt 1 dòng + ellipsis như cũ. */
 .toc-item {
   display: block;
-  padding: 3px 12px;
-  border-left: 2px solid transparent;
+  margin: 4px 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
   color: var(--vscode-foreground);
   text-decoration: none;
   font-size: 13px;
@@ -1474,22 +1569,29 @@ body.toc-resizing {
   cursor: pointer;
 }
 
+/* color + text-decoration reset: the global `a`/`a:hover` rules (markdown.css)
+ * otherwise repaint the card text as an underlined link on hover — the TOC text
+ * must read as plain text, the accent lives on the card border/background. */
 .toc-item:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+  border-color: var(--vscode-focusBorder, rgba(128, 128, 128, 0.5));
+  color: var(--vscode-foreground);
+  text-decoration: none;
 }
 
 .toc-item.active {
-  color: var(--vscode-textLink-foreground, #3794ff);
-  border-left-color: var(--vscode-textLink-foreground, #3794ff);
+  color: var(--vscode-foreground);
+  border-color: var(--vscode-textLink-foreground, #3794ff);
   background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.12));
 }
 
-.toc-level-1 { padding-left: 14px; font-weight: 600; }
-.toc-level-2 { padding-left: 26px; }
-.toc-level-3 { padding-left: 38px; }
-.toc-level-4 { padding-left: 50px; }
-.toc-level-5 { padding-left: 62px; }
-.toc-level-6 { padding-left: 74px; opacity: 0.85; }
+/* Thụt lề theo level (chỉ đổi margin-left, giữ margin phải/dọc từ .toc-item). */
+.toc-level-1 { font-weight: 600; }
+.toc-level-2 { margin-left: 22px; }
+.toc-level-3 { margin-left: 34px; }
+.toc-level-4 { margin-left: 46px; }
+.toc-level-5 { margin-left: 58px; }
+.toc-level-6 { margin-left: 70px; opacity: 0.85; }
 
 /* Toast nhỏ (vd. cảnh báo bảng phân cấp sẽ lưu dạng HTML) */
 #wysiwyg-toast {
@@ -1913,7 +2015,7 @@ body.reading-zen.md-line-numbers #toolbar {
 /* --- US-19.6: chrome (TOC + pop-up) phóng cỡ chữ theo preset ---
  * Đọc biến --reading-ui-font-size (định nghĩa per-preset ở markdown.css). Fallback
  * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
- * tắt đều giữ nguyên. Chỉ áp khi Reading Mode/Zen bật (body.reading-mode). Đây là
+ * tắt đều giữ nguyên. Chỉ áp khi Reading Mode bật (body.reading-mode). Đây là
  * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
 body.reading-mode .toc-item {
   font-size: var(--reading-ui-font-size, 13px);
@@ -2006,13 +2108,16 @@ body[class*='reading-palette-'] #toc-header {
 }
 body[class*='reading-palette-'] .toc-item {
   color: var(--rp-fg);
+  background: var(--rp-elev-bg);
+  border-color: var(--rp-border);
 }
 body[class*='reading-palette-'] .toc-item:hover {
   background: var(--rp-chrome-hover);
+  border-color: var(--rp-border);
 }
 body[class*='reading-palette-'] .toc-item.active {
-  color: var(--rp-link);
-  border-left-color: var(--rp-link);
+  color: var(--rp-fg);
+  border-color: var(--rp-link);
   background: var(--rp-chrome-active);
 }
 
@@ -2117,10 +2222,12 @@ body[class*='reading-palette-'] .md-math-toggle {
   color: var(--rp-fg);
 }
 body[class*='reading-palette-'] .md-math-toggle:hover,
-body[class*='reading-palette-'] .md-mermaid-toggle:hover {
+body[class*='reading-palette-'] .md-mermaid-toggle:hover,
+body[class*='reading-palette-'] .md-mermaid-zoom:hover {
   background: var(--rp-chrome-hover);
 }
-body[class*='reading-palette-'] .md-mermaid-toggle {
+body[class*='reading-palette-'] .md-mermaid-toggle,
+body[class*='reading-palette-'] .md-mermaid-zoom {
   color: var(--rp-fg);
 }
 
@@ -2204,8 +2311,9 @@ body[class*='reading-palette-'] ::highlight(search-current) {
   pointer-events: none;
 }
 
-/* Lightbox overlay: xem full-size, scroll để zoom, kéo để pan, Esc/click nền đóng. */
-#img-lightbox {
+/* Shared lightbox overlay (image + mermaid): view full-size, scroll to zoom,
+ * drag to pan, Esc/backdrop click to close. See lightbox.ts. */
+#md-lightbox {
   position: fixed;
   inset: 0;
   z-index: 400;
@@ -2216,14 +2324,26 @@ body[class*='reading-palette-'] ::highlight(search-current) {
   cursor: zoom-out;
   overflow: hidden;
 }
-#img-lightbox-img {
-  max-width: 92vw;
-  max-height: 92vh;
+#md-lightbox-stage {
   transform-origin: center center;
   user-select: none;
+}
+#md-lightbox-stage img,
+#md-lightbox-stage svg {
+  display: block;
+  max-width: 92vw;
+  max-height: 92vh;
+  height: auto;
   -webkit-user-drag: none;
 }
-#img-lightbox-hint {
+/* Mermaid SVG has a transparent background; put it on an editor-background card
+ * so light-theme diagrams stay readable against the dark overlay. */
+#md-lightbox-stage[data-kind='svg'] {
+  padding: 24px;
+  background: var(--vscode-editor-background, #fff);
+  border-radius: 6px;
+}
+#md-lightbox-hint {
   position: fixed;
   bottom: 16px;
   left: 50%;

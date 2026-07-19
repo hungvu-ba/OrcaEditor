@@ -23,25 +23,6 @@ import {
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 
-/**
- * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
- * manh: không có tín hiệu "đã sẵn sàng" nào để chờ, nên phải đợi cứng cho
- * webview/panel của Claude khởi tạo hoặc reveal xong trước bước kế. Máy chậm
- * hoặc Claude Code đổi thời gian khởi tạo có thể làm các mốc này không còn đủ
- * — chỉnh khi thấy chèn @mention thỉnh thoảng trượt. (finding C9)
- *
- * Không dùng media/webview/constants.ts: file này thuộc bundle Node của
- * extension, tách biệt với bundle webview.
- */
-/** Chờ tab chat Claude có sẵn thành visible sau khi reveal. */
-const CLAUDE_REVEAL_DELAY_MS = 300;
-/** Chờ webview chat Claude vừa mở khởi tạo xong. */
-const CLAUDE_OPEN_DELAY_MS = 700;
-/** Chờ text editor tạm mở xong trước khi chạy insertAtMention. */
-const CLAUDE_TEMP_EDITOR_DELAY_MS = 150;
-/** Chờ chat panel reveal xong trước khi đóng text editor tạm. */
-const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
-
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
 const UNDO_SETTLE_MS = 200;
 
@@ -175,13 +156,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * không cần thiết).
    */
   private broadcastZen(zen: boolean, exclude: vscode.WebviewPanel): void {
-    for (const panels of this.panelsByUri.values()) {
-      for (const panel of panels) {
-        if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'zenChanged', zen } satisfies HostToWebview);
-        }
-      }
-    }
+    this.broadcastToOtherPanels(exclude, { type: 'zenChanged', zen });
   }
 
   /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho bundle enabled/preset/palette. */
@@ -189,10 +164,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette },
     exclude: vscode.WebviewPanel
   ): void {
+    this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
+  }
+
+  /** Post `message` to every open .md panel (all uris) except `exclude`. */
+  private broadcastToOtherPanels(exclude: vscode.WebviewPanel, message: HostToWebview): void {
     for (const panels of this.panelsByUri.values()) {
       for (const panel of panels) {
         if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'readingModeChanged', ...state } satisfies HostToWebview);
+          void panel.webview.postMessage(message);
         }
       }
     }
@@ -256,6 +236,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+    /** Serializes webview-originated document mutations — see case 'edit'. */
+    let editChain: Promise<void> = Promise.resolve();
+    /**
+     * Trạng thái document NGAY TRƯỚC edit webview liền trước. Nếu edit hiện tại đưa
+     * document về đúng chuỗi này → nó là nghịch đảo chính xác của edit trước (vd
+     * paste ảnh rồi xoá ngay). VS Code gộp cặp insert↔delete nghịch đảo thành MỘT
+     * undo-element net-zero (trạng thái giữa — có ảnh — không undo tới được). Tách
+     * để phá coalescing (xem applyEditBreakingCoalesce).
+     */
+    let prevEditBeforeText: string | undefined;
 
     // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
@@ -307,8 +297,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
-    // cần đóng/mở lại preview (claudeAutoInsert không cần vì đã đọc live ở
-    // addToClaudeContext, tại thời điểm bấm nút).
+    // cần đóng/mở lại preview.
     const configSubscription = vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('orcaEditor', document.uri)) {
         return;
@@ -376,15 +365,37 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         }
         case 'edit': {
           const text = msg.text;
-          lastTextFromWebview = text;
-          const ok = await this.applyMinimalEdit(document, text);
-          if (!ok) {
-            lastTextFromWebview = undefined;
-          }
+          // Chain, don't apply directly: the webview can post two 'edit's in
+          // the SAME frame (invokeAction: flush of pending typing + the
+          // action's own sync — two deliberate undo units, bug 0717), and
+          // onDidReceiveMessage does not await async handlers. Unchained, the
+          // second applyMinimalEdit would diff against a document the first
+          // edit hasn't committed to yet — a mis-anchored replace corrupting
+          // the text. lastTextFromWebview is set INSIDE the thunk so each
+          // edit's echo suppression is armed exactly while ITS change applies.
+          editChain = editChain.then(async () => {
+            const beforeThis = document.getText();
+            // Nghịch đảo chính xác của edit trước → phá coalescing để undo dừng được
+            // ở trạng thái giữa (xem prevEditBeforeText).
+            const isInverseOfPrev =
+              prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
+            lastTextFromWebview = text;
+            const ok = isInverseOfPrev
+              ? await this.applyEditBreakingCoalesce(document, text)
+              : await this.applyMinimalEdit(document, text);
+            if (!ok) {
+              lastTextFromWebview = undefined;
+            }
+            prevEditBeforeText = beforeThis;
+          });
+          await editChain;
           break;
         }
         case 'undo':
         case 'redo': {
+          // Any in-flight chained 'edit' must commit first — its undo unit
+          // precedes this undo/redo chronologically (bug 0717).
+          await editChain;
           // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
           // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
           if (msg.pendingText !== undefined) {
@@ -434,8 +445,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({ type: 'fileSearchResult', requestId: msg.requestId, files });
           break;
         }
-        case 'addToClaudeContext': {
-          void this.addToClaudeContext(document, webviewPanel.viewColumn);
+        case 'copyFileMention': {
+          void this.copyFileMention(document);
           break;
         }
         case 'viewSource': {
@@ -451,7 +462,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'crossFileSearch:openResult': {
-          void this.openCrossFileSearchResult(msg.uri, msg.line, msg.character, msg.length, msg.matchText);
+          void this.openCrossFileSearchResult(document, msg.uri, msg.line, msg.character, msg.length, msg.matchText);
           break;
         }
         case 'crossFileSearch:openInSearchPanel': {
@@ -479,7 +490,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // Bug 0716 #2: enabled/preset/palette giờ global (đảo ngược per-tab
           // cũ, cùng mô hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi
           // phát cho mọi panel .md khác đang mở.
-          this.globalReadingMode = { enabled: msg.enabled, preset: msg.preset, palette: msg.palette };
+          // S-1: whitelist preset/palette trước khi lưu — message từ webview có
+          // thể bị giả giá trị ngoài enum, mà globalReadingMode được nội suy vào
+          // class attribute của getHtml cho panel mở sau (cùng ràng buộc mà
+          // readReadabilityConfig áp cho đường settings). Giá trị lạ → mặc định.
+          this.globalReadingMode = {
+            enabled: msg.enabled,
+            preset: READING_PRESETS.includes(msg.preset) ? msg.preset : 'comfortable',
+            palette: READING_PALETTES.includes(msg.palette) ? msg.palette : 'followTheme',
+          };
           this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
         }
@@ -522,6 +541,45 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       diff.newText
     );
     return vscode.workspace.applyEdit(edit);
+  }
+
+  /** Áp một replace đơn qua applyEdit (helper cho applyEditBreakingCoalesce). */
+  private applyRange(document: vscode.TextDocument, start: number, end: number, text: string): Thenable<boolean> {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(document.positionAt(start), document.positionAt(end)), text);
+    return vscode.workspace.applyEdit(edit);
+  }
+
+  /**
+   * Áp newText bằng HAI applyEdit riêng, tạo một trạng thái GIỮA khác biệt mọi
+   * checkpoint đã có → phá việc VS Code gộp cặp edit nghịch đảo thành một
+   * undo-element net-zero (vd paste ảnh rồi xoá ngay: trạng thái giữa có ảnh không
+   * undo tới được). Kết quả cuối luôn đúng bằng newText. Dùng khi edit là nghịch đảo
+   * chính xác của edit liền trước (xem prevEditBeforeText).
+   */
+  private async applyEditBreakingCoalesce(document: vscode.TextDocument, newText: string): Promise<boolean> {
+    const diff = computeMinimalEdit(document.getText(), newText);
+    if (!diff) {
+      return true;
+    }
+    const { start, oldEnd, newText: ins } = diff;
+    if (ins === '' && oldEnd - start >= 2) {
+      // Xoá thuần: tách vùng xoá làm đôi (xoá nửa sau trước, rồi nửa đầu).
+      const mid = start + Math.floor((oldEnd - start) / 2);
+      if (!(await this.applyRange(document, mid, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, mid, '');
+    }
+    if (ins !== '' && oldEnd > start) {
+      // Replace: xoá cũ trước, chèn mới sau (trạng thái giữa = đã xoá, chưa chèn).
+      if (!(await this.applyRange(document, start, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, start, ins);
+    }
+    // Chèn thuần hoặc xoá 1 ký tự: không tách được có ý nghĩa → áp bình thường.
+    return this.applyRange(document, start, oldEnd, ins);
   }
 
   private async openLink(document: vscode.TextDocument, href: string): Promise<void> {
@@ -580,6 +638,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    *    đọc lại giá trị này khi gửi message 'init' (xem case 'ready' ở trên).
    */
   private async openCrossFileSearchResult(
+    document: vscode.TextDocument,
     uriStr: string,
     line: number,
     character: number,
@@ -588,6 +647,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   ): Promise<void> {
     try {
       const uri = vscode.Uri.parse(uriStr);
+      // S-2: kết quả tìm thật luôn nằm trong workspace — chặn uri không phải
+      // scheme file hoặc trỏ ra ngoài allowed roots (webview có thể bị giả uri
+      // để mở file tuỳ ý), cùng guard như đường link tương đối trong openLink().
+      if (uri.scheme !== 'file' || !(await this.isInsideAllowedRoots(document, uri))) {
+        void vscode.window.showWarningMessage(`Blocked opening a file outside the workspace: ${uriStr}`);
+        return;
+      }
       const range = new vscode.Range(
         new vscode.Position(line, character),
         new vscode.Position(line, character + length)
@@ -644,162 +710,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /**
-   * Thêm nhanh file hiện tại vào context chat của Claude Code.
-   *
-   * Cơ chế phía Claude Code: command insertAtMention đọc activeTextEditor và
-   * bắn sự kiện; sự kiện chỉ được xử lý khi ĐÃ có panel chat (consumer gửi
-   * "insert_at_mention" vào webview rồi tự reveal panel). Vì vậy thứ tự đúng:
-   *   1. Mở latest conversation (claude-vscode.editor.openLast) để chắc chắn
-   *      có panel nhận sự kiện, chờ panel khởi tạo.
-   *   2. Đưa file về làm activeTextEditor (webview WYSIWYG không được tính).
-   *   3. Gọi insertAtMention — chat tự reveal với "@file" trong ô nhập.
-   * Không có Claude Code thì fallback copy "@file" vào clipboard.
-   */
-  /** Tab webview chat của Claude Code — cách nhận diện giống chính Claude Code. */
-  private static isClaudeChatTab(tab: vscode.Tab): boolean {
-    return (
-      tab.input instanceof vscode.TabInputWebview &&
-      (tab.input as vscode.TabInputWebview).viewType.includes('claudeVSCodePanel')
-    );
-  }
-
-  private findClaudeChatTabs(): vscode.Tab[] {
-    return vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter(MarkdownWysiwygProvider.isClaudeChatTab);
-  }
-
-  /**
-   * Điều hướng tới một tab bất kỳ: focus đúng editor group theo viewColumn,
-   * rồi chọn tab theo vị trí trong group (cơ chế như phím Ctrl/Alt+1..9).
-   */
-  private async revealTab(tab: vscode.Tab): Promise<void> {
-    const FOCUS_GROUP_COMMANDS = [
-      'workbench.action.focusFirstEditorGroup',
-      'workbench.action.focusSecondEditorGroup',
-      'workbench.action.focusThirdEditorGroup',
-      'workbench.action.focusFourthEditorGroup',
-      'workbench.action.focusFifthEditorGroup',
-      'workbench.action.focusSixthEditorGroup',
-      'workbench.action.focusSeventhEditorGroup',
-      'workbench.action.focusEighthEditorGroup',
-    ];
-    const column = tab.group.viewColumn;
-    if (column >= 1 && column <= FOCUS_GROUP_COMMANDS.length) {
-      await vscode.commands.executeCommand(FOCUS_GROUP_COMMANDS[column - 1]);
-    }
-    const index = tab.group.tabs.indexOf(tab);
-    if (index >= 0 && index < 9) {
-      await vscode.commands.executeCommand(`workbench.action.openEditorAtIndex${index + 1}`);
-      return;
-    }
-    // Group có hơn 9 tab — duyệt tuần tự tới khi tab chat thành active
-    for (let i = 0; i < tab.group.tabs.length; i++) {
-      const active = vscode.window.tabGroups.all.find((g) => g.viewColumn === column)?.activeTab;
-      if (active && MarkdownWysiwygProvider.isClaudeChatTab(active)) {
-        return;
-      }
-      await vscode.commands.executeCommand('workbench.action.nextEditorInGroup');
-    }
-  }
-
-  private async addToClaudeContext(document: vscode.TextDocument, panelColumn?: vscode.ViewColumn): Promise<void> {
+  /** Copies the current file's "@relativePath" mention to the clipboard — works with any chat that understands @file mention syntax. */
+  private async copyFileMention(document: vscode.TextDocument): Promise<void> {
     const mention = `@${vscode.workspace.asRelativePath(document.uri, false)}`;
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     try {
-      const available = await vscode.commands.getCommands(true);
-
-      // 1) Đảm bảo tab chat Claude đang hiển thị: reveal tab có sẵn (giữ nguyên
-      //    hội thoại), chỉ mở mới khi chưa có chat nào.
-      const tabs = this.findClaudeChatTabs();
-      let visibleChat = tabs.find((t) => t.isActive);
-      if (!visibleChat && tabs.length > 0) {
-        await this.revealTab(tabs[0]);
-        await delay(CLAUDE_REVEAL_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      } else if (tabs.length === 0 && available.includes('claude-vscode.editor.openLast')) {
-        await vscode.commands.executeCommand('claude-vscode.editor.openLast');
-        await delay(CLAUDE_OPEN_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      }
-
-      // 2) Tự chèn @mention (mặc định): command insertAtMention của Claude Code
-      //    bắt buộc đọc activeTextEditor nên phải mở tạm text editor của file
-      //    rồi tự đóng lại — không còn cách nào khác để "paste thẳng" vào
-      //    webview của extension khác (VS Code không expose command paste cho
-      //    webview; Electron xử lý ⌘V ở tầng native).
-      const autoInsert = vscode.workspace
-        .getConfiguration('orcaEditor')
-        .get<boolean>('claudeAutoInsert', false);
-      const insertCmd = ['claude-vscode.insertAtMention', 'claude-code.insertAtMentioned'].find((c) =>
-        available.includes(c)
-      );
-      if (autoInsert && insertCmd) {
-        await this.insertMentionViaTempEditor(document, insertCmd, visibleChat, panelColumn);
-        vscode.window.setStatusBarMessage(`Đã chèn ${mention} vào chat Claude Code`, 4000);
-        return;
-      }
-
-      // 3) Mặc định: KHÔNG mở file — copy mention + focus thẳng ô nhập chat,
-      //    người dùng chỉ cần ⌘V.
-      await vscode.env.clipboard.writeText(`${mention} `);
-      if (available.includes('claude-vscode.focus')) {
-        await vscode.commands.executeCommand('claude-vscode.focus');
-      }
-      vscode.window.setStatusBarMessage(`Đã copy "${mention}" — nhấn ⌘V trong ô chat để chèn`, 6000);
-      return;
+      await vscode.env.clipboard.writeText(mention);
     } catch (err) {
-      // C8: log lỗi trước khi rơi xuống fallback clipboard để không nuốt lỗi.
-      MarkdownWysiwygProvider.log('addToClaudeContext failed, falling back to clipboard', err);
+      MarkdownWysiwygProvider.log('copyFileMention failed', err);
+      void vscode.window.showWarningMessage(`Could not copy "${mention}" to the clipboard.`);
+      return;
     }
-    await vscode.env.clipboard.writeText(mention);
-    void vscode.window.showInformationMessage(
-      `Copied "${mention}" — paste it into the Claude chat input to add the file to context.`
-    );
-  }
-
-  /**
-   * Chèn @mention tự động: mở tạm text editor của file (điều kiện bắt buộc để
-   * insertAtMention của Claude Code đọc được), chèn xong tự đóng — layout giữ
-   * nguyên. Mở ở group KHÁC group chứa chat để không che tab chat (mention chỉ
-   * được panel đang hiển thị xử lý).
-   */
-  private async insertMentionViaTempEditor(
-    document: vscode.TextDocument,
-    insertCmd: string,
-    visibleChat: vscode.Tab | undefined,
-    panelColumn?: vscode.ViewColumn
-  ): Promise<void> {
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-    const uriStr = document.uri.toString();
-    const findTextTab = () =>
-      vscode.window.tabGroups.all
-        .flatMap((g) => g.tabs)
-        .find((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uriStr);
-    // File đã được user tự mở dạng text từ trước thì không đóng của họ
-    const openedByUser = findTextTab() !== undefined;
-
-    const chatColumn = visibleChat?.group.viewColumn;
-    let targetColumn: vscode.ViewColumn | undefined = panelColumn;
-    if (chatColumn !== undefined && (targetColumn === undefined || targetColumn === chatColumn)) {
-      targetColumn =
-        vscode.window.tabGroups.all.map((g) => g.viewColumn).find((c) => c !== chatColumn) ??
-        vscode.ViewColumn.Beside;
-    }
-    await vscode.window.showTextDocument(document, {
-      viewColumn: targetColumn ?? vscode.ViewColumn.Active,
-      preview: true,
-      preserveFocus: false,
-    });
-    await delay(CLAUDE_TEMP_EDITOR_DELAY_MS);
-    await vscode.commands.executeCommand(insertCmd);
-
-    if (!openedByUser) {
-      await delay(CLAUDE_PANEL_REVEAL_DELAY_MS);
-      const tempTab = findTextTab();
-      if (tempTab) {
-        await vscode.window.tabGroups.close(tempTab);
-      }
-    }
+    vscode.window.setStatusBarMessage(`Copied "${mention}"`, 4000);
   }
 
   /** Mở chính file đang xem ở text editor thường (mã nguồn .md thô) cạnh bên. */
@@ -1109,6 +1030,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * resolveAssetsDir + isInsideAllowedRoots guard shared by savePastedImage /
+   * saveDroppedFile / cleanupOrphanImages: returns the assets dir only when it
+   * sits inside the allowed workspace roots, else undefined so a mis-configured
+   * customFolderPath cannot write/scan outside. Each caller keeps its own bail.
+   */
+  private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
+    const dir = this.resolveAssetsDir(document);
+    return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+  }
+
+  /**
    * Prefix tên file ảnh suy ra từ basename document — gắn "quyền sở hữu" ảnh
    * vào 1 file .md mà không cần lưu index riêng (xem imageNamePrefix). Rỗng
    * khi basename không chuẩn hoá được (vd toàn CJK) — cleanupOrphanImages bỏ
@@ -1139,9 +1071,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured paste-image folder is outside the allowed workspace.' };
     }
 
@@ -1166,10 +1097,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * pasted images, which get a generated + prefixed name for orphan-cleanup
    * bookkeeping, dropped files keep their ORIGINAL name (so a linked
    * `report.pdf` reads as `report.pdf`, not a hash) with a numeric suffix
-   * added only if that name is already taken. Not covered by
-   * cleanupOrphanImages — deleting an unused dropped file is manual for now
-   * (scope cut: extending orphan detection to arbitrary `[text](path)` links,
-   * not just `<img>`, is a larger change deferred to a later pass).
+   * added only if that name is already taken. Because they carry no marker,
+   * orphan cleanup tracks them per-document in memory (trackDroppedAsset) so
+   * deleting the link removes + caches the file the same way pasted images are
+   * handled (cleanupOrphanImages / restoreUndoneImageDeletions).
    */
   private async saveDroppedFile(
     document: vscode.TextDocument,
@@ -1177,9 +1108,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured assets folder is outside the allowed workspace.' };
     }
 
@@ -1187,6 +1117,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       await vscode.workspace.fs.createDirectory(targetDir);
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+      this.trackDroppedAsset(document, path.basename(targetUri.path));
       return { relativePath: relativePath(documentDir.path, targetUri.path) };
     } catch (err) {
       MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
@@ -1233,6 +1164,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * File kéo-thả (không phải ảnh) giữ TÊN GỐC nên không mang marker như ảnh dán
+   * — theo dõi tên file theo document (chỉ trong phiên) để cleanupOrphanImages
+   * biết file nào là asset do lần drop này tạo mà dọn khi link bị xoá. Giới hạn
+   * phiên: đóng/mở lại editor sẽ quên (giống ảnh dán trước khi có tính năng).
+   */
+  private readonly droppedAssetsByDoc = new Map<string, Set<string>>();
+
+  private trackDroppedAsset(document: vscode.TextDocument, fileName: string): void {
+    const key = document.uri.toString();
+    let set = this.droppedAssetsByDoc.get(key);
+    if (!set) {
+      set = new Set<string>();
+      this.droppedAssetsByDoc.set(key, set);
+    }
+    set.add(fileName);
+  }
+
+  /**
    * Dọn ảnh mồ côi khi save (đăng ký ở onDidSaveTextDocument, xem
    * resolveCustomTextEditor): ảnh do document này "sở hữu" (tên file có
    * prefix từ imagePrefixFor, xem savePastedImage) nhưng không còn xuất hiện
@@ -1259,65 +1208,78 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
 
-    const imagesDir = this.resolveAssetsDir(document);
-    if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
+    const imagesDir = await this.resolveAllowedAssetsDir(document);
+    if (!imagesDir) {
       return;
     }
+
+    const text = document.getText();
+
+    // Ứng viên = ảnh dán do document sở hữu (nhận diện qua prefix marker, quét
+    // thư mục) ∪ file kéo-thả không phải ảnh (giữ tên gốc, không marker — theo
+    // dõi trong phiên qua droppedAssetsByDoc).
+    const pool = new Set<string>();
 
     const prefix = this.imagePrefixFor(document);
-    if (!prefix) {
+    if (prefix) {
+      const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
+      try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(imagesDir)) {
+          if (type === vscode.FileType.File && name.startsWith(ownedMarker)) {
+            pool.add(name);
+          }
+        }
+      } catch {
+        // Chưa có thư mục ảnh — không có ảnh dán để dọn (file drop xử lý bên dưới).
+      }
+    }
+
+    const dropped = this.droppedAssetsByDoc.get(document.uri.toString());
+    if (dropped) {
+      for (const name of dropped) {
+        pool.add(name);
+      }
+    }
+
+    // Còn xuất hiện trong nội dung vừa lưu ⇒ đang dùng, bỏ. Chỉ đọc sibling khi
+    // thật sự còn ứng viên mồ côi (tránh quét thư mục khi không cần).
+    const orphans = [...pool].filter((name) => !text.includes(name));
+    if (orphans.length === 0) {
       return;
     }
 
-    let entries: [string, vscode.FileType][];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(imagesDir);
-    } catch {
-      return; // Chưa có thư mục ảnh nào — không có gì để dọn.
-    }
-
-    const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
-    const text = document.getText();
-    const candidates = entries
-      .filter(([name, type]) => type === vscode.FileType.File && name.startsWith(ownedMarker))
-      .map(([name]) => name)
-      .filter((name) => !text.includes(name));
-
-    if (candidates.length === 0) {
-      return;
-    }
-
-    const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
-
-    for (const name of candidates) {
-      if (await this.isReferencedInSiblingFiles(name, siblingMdUris, document.uri)) {
+    const siblingTexts = await this.readSiblingMdTexts(document);
+    for (const name of orphans) {
+      // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
+      if (siblingTexts.some((sibling) => sibling.includes(name))) {
         continue;
       }
       await this.deleteOrphanImage(imagesDir, name);
+      dropped?.delete(name); // đã xoá+cache; thôi theo dõi (undo sẽ re-track qua restore).
     }
   }
 
-  /** true nếu tìm thấy 1 file .md khác (không phải chính document) còn nhắc tới fileName — dừng ngay, không đọc hết danh sách. */
-  private async isReferencedInSiblingFiles(
-    fileName: string,
-    siblingUris: readonly vscode.Uri[],
-    ownDocumentUri: vscode.Uri
-  ): Promise<boolean> {
-    for (const uri of siblingUris) {
-      if (uri.toString() === ownDocumentUri.toString()) {
+  /**
+   * Nội dung mọi file .md anh em CÙNG THƯ MỤC (bỏ chính document), đọc mỗi file
+   * đúng MỘT lần — để cleanupOrphanImages đối chiếu mọi ứng viên trong O(siblings)
+   * thay vì mở lại danh sách sibling cho từng ứng viên.
+   */
+  private async readSiblingMdTexts(document: vscode.TextDocument): Promise<string[]> {
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
+    const ownUri = document.uri.toString();
+    const texts: string[] = [];
+    for (const uri of siblingMdUris) {
+      if (uri.toString() === ownUri) {
         continue;
       }
       try {
-        const opened = await vscode.workspace.openTextDocument(uri);
-        if (opened.getText().includes(fileName)) {
-          return true;
-        }
+        texts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }
     }
-    return false;
+    return texts;
   }
 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
@@ -1353,6 +1315,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       try {
         await vscode.workspace.fs.createDirectory(imagesDir);
         await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+        // File kéo-thả (không có marker ảnh dán) vừa khôi phục qua undo → theo
+        // dõi lại để lần xoá link kế tiếp vẫn dọn được; ảnh dán tự nhận diện
+        // qua marker nên không cần.
+        if (!fileName.includes(MarkdownWysiwygProvider.PASTE_IMAGE_MARKER)) {
+          this.trackDroppedAsset(document, fileName);
+        }
       } catch (err) {
         MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: failed to restore ${fileName}`, err);
       }
@@ -1433,9 +1401,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Bug 0715 (US-19.9): class trạng thái đọc phải có mặt NGAY từ first paint
     // — nếu chờ message 'init' mới áp (readability.applyFromHost) thì toolbar
     // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
-    // giật vì toolbar rời flow. Giá trị preset/palette đã được whitelist trong
-    // readReadabilityConfig nên an toàn để nội suy vào attribute.
-    const stylingActive = readability.enabled || readability.zen;
+    // giật vì toolbar rời flow. Giá trị preset/palette luôn được whitelist
+    // trước khi tới đây — đường settings qua readReadabilityConfig, đường
+    // message qua handler 'readingModeChanged' (S-1) — nên an toàn để nội suy
+    // vào attribute.
+    // bug_General #1: reading styling (reading-mode/preset/palette) gate CHỈ
+    // theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở readability.ts).
+    // `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo `zen`.
+    const stylingActive = readability.enabled;
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),

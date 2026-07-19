@@ -17,7 +17,7 @@
  * `contenteditable="false"` trực tiếp trên nút — US-4.22).
  */
 import { renderToString } from 'katex';
-import { makeDraggable, positionNear } from './dom-utils';
+import { el, makeDraggable, positionNear } from './dom-utils';
 import { MATH_BLOCK_CLASS, MATH_INLINE_CLASS, MATH_RENDER_CLASS, MATH_TOGGLE_CLASS } from './render';
 
 const MATH_WRAPPER_SELECTOR = `.${MATH_BLOCK_CLASS}, .${MATH_INLINE_CLASS}`;
@@ -60,31 +60,23 @@ function openEditPopover(wrapper: HTMLElement): void {
   closeActivePopover?.();
 
   const currentTex = wrapper.getAttribute('data-tex') ?? '';
-  const popover = document.createElement('div');
-  popover.className = 'md-math-edit-popover';
+  const popover = el('div', 'md-math-edit-popover');
 
-  const textarea = document.createElement('textarea');
-  textarea.className = 'md-math-edit-input';
+  const textarea = el('textarea', 'md-math-edit-input');
   textarea.spellcheck = false;
   textarea.value = currentTex;
   popover.appendChild(textarea);
 
-  const cheatSheet = document.createElement('div');
-  cheatSheet.className = 'md-math-edit-cheatsheet';
+  const cheatSheet = el('div', 'md-math-edit-cheatsheet');
   for (const { label, snippet } of KATEX_CHEAT_SHEET) {
-    const btn = document.createElement('button');
+    const btn = el('button', 'md-math-cheat-btn');
     btn.type = 'button';
-    btn.className = 'md-math-cheat-btn';
     btn.title = snippet;
     // Show cả tên gọi lẫn cú pháp TeX ngay trên nút (bug report mục 11: trước
     // đó snippet chỉ nằm trong `title`, phải hover mới thấy) — label + snippet
     // xếp 2 dòng thay vì chỉ 1 dòng label như trước.
-    const labelEl = document.createElement('span');
-    labelEl.className = 'md-math-cheat-label';
-    labelEl.textContent = label;
-    const snippetEl = document.createElement('code');
-    snippetEl.className = 'md-math-cheat-snippet';
-    snippetEl.textContent = snippet;
+    const labelEl = el('span', 'md-math-cheat-label', label);
+    const snippetEl = el('code', 'md-math-cheat-snippet', snippet);
     btn.append(labelEl, snippetEl);
     // mousedown + preventDefault: không cướp focus khỏi textarea khi bấm gợi ý.
     btn.addEventListener('mousedown', (e) => e.preventDefault());
@@ -93,14 +85,11 @@ function openEditPopover(wrapper: HTMLElement): void {
   }
   popover.appendChild(cheatSheet);
 
-  const buttons = document.createElement('div');
-  buttons.className = 'md-math-edit-buttons';
-  const cancelBtn = document.createElement('button');
+  const buttons = el('div', 'md-math-edit-buttons');
+  const cancelBtn = el('button', undefined, 'Cancel');
   cancelBtn.type = 'button';
-  cancelBtn.textContent = 'Cancel';
-  const applyBtn = document.createElement('button');
+  const applyBtn = el('button', undefined, 'Apply');
   applyBtn.type = 'button';
-  applyBtn.textContent = 'Apply';
   buttons.append(cancelBtn, applyBtn);
   popover.appendChild(buttons);
 

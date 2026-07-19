@@ -231,15 +231,11 @@ export function initLineGutter(
   // Mỗi <li> đã được gắn data-line lúc render nên readBlockInfo đọc được số
   // dòng của chính nó.
   function enumerateNumberedElements(): HTMLElement[] {
-    const els: HTMLElement[] = [];
-    for (const child of Array.from(content.children) as HTMLElement[]) {
-      if (child.tagName === 'UL' || child.tagName === 'OL') {
-        child.querySelectorAll('li').forEach((li) => els.push(li as HTMLElement));
-      } else {
-        els.push(child);
-      }
-    }
-    return els;
+    return (Array.from(content.children) as HTMLElement[]).flatMap((child) =>
+      child.tagName === 'UL' || child.tagName === 'OL'
+        ? (Array.from(child.querySelectorAll('li')) as HTMLElement[])
+        : [child]
+    );
   }
 
   // Gom nhiều callback ResizeObserver trong cùng một frame lại thành một lần

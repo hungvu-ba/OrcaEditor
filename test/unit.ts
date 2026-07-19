@@ -4,8 +4,13 @@
  * classifyLink (scheme allowlist) và một kiểm tra type-level của message
  * contract (src/shared/messages.ts). (finding C6)
  *
+ * Cũng gồm security tripwire đọc src/provider.ts dạng text (xem cuối file) —
+ * provider.ts import 'vscode' nên không import trực tiếp được ở đây.
+ *
  * Chạy: npm run test:unit
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
@@ -18,6 +23,8 @@ import {
 import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
 let pass = 0;
 let fail = 0;
@@ -190,7 +197,7 @@ const fromWebview: WebviewToHost[] = [
   { type: 'edit', text: 'x' },
   { type: 'openLink', href: 'https://x' },
   { type: 'searchFiles', query: 'q', requestId: 1 },
-  { type: 'addToClaudeContext' },
+  { type: 'copyFileMention' },
   { type: 'viewSource' },
   { type: 'crossFileSearch:request', requestId: 1, query: 'q', scope: 'markdown', matchCase: false, wholeWord: true },
   { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
@@ -407,6 +414,139 @@ eq('style: "_" in link URL not em evidence', detectBlockStyle('[doc](https://ex.
 eq('style: intraword "_" after non-ASCII letter ignored', detectBlockStyle('chữ_ký here and *em*', 'paragraph').em, null);
 eq('style: escaped backslash before "_" → em "_"', detectBlockStyle('C:\\\\_dir_ here', 'paragraph').em, '_');
 eq('style: backtick-run span strips fully → em null', detectBlockStyle('Use ``x `_foo` y`` here', 'paragraph').em, null);
+
+// ---------------------------------------------------------------------------
+// reading-stats (US-10.7) — word count (CJK char = 1 word), read-time
+// estimate (200 WPM, 0 words → 0 min), hardcoded thousands separator.
+// ---------------------------------------------------------------------------
+
+eq('countWords: mixed non-CJK + CJK → 2 words + 5 chars = 7', countWords('Hello world こんにちは'), 7);
+// Supplementary-plane Han (CJK Extension B, U+20000) is still one word each,
+// not collapsed into a single run — a plain BMP-only regex would miss these.
+eq('countWords: supplementary-plane Han counts per character', countWords(String.fromCodePoint(0x20000, 0x20001, 0x20002)), 3);
+eq('estimateReadMinutes: 0 words → 0 min', estimateReadMinutes(0), 0);
+eq('estimateReadMinutes: 7 words → 1 min (floor never shown for real content)', estimateReadMinutes(7), 1);
+eq('formatCount: hardcoded comma, not toLocaleString', formatCount(1860), '1,860');
+
+// ---------------------------------------------------------------------------
+// Security tripwires (src/provider.ts) — khoá các bất biến từ security review
+// 2026-07-17 (xem Plan/Optimization Notes.md § Security hardening). Đọc source
+// dạng text vì provider.ts import 'vscode', không mock được trong test này.
+// ---------------------------------------------------------------------------
+
+const providerSrc = fs.readFileSync(path.join(process.cwd(), 'src/provider.ts'), 'utf8');
+
+// CSP lock — mọi nới lỏng directive phải sửa test này một cách CÓ CHỦ ĐÍCH,
+// không thể vô tình lọt qua.
+const REQUIRED_CSP_DIRECTIVES = [
+  "default-src 'none'",
+  "script-src 'nonce-${nonce}'",
+  "base-uri ${webview.cspSource}",
+  "form-action 'none'",
+  "frame-src 'none'",
+];
+for (const directive of REQUIRED_CSP_DIRECTIVES) {
+  check(`security: CSP giữ directive "${directive}"`, providerSrc.includes(directive));
+}
+check(
+  'security: img-src KHÔNG có "https:" (chặn ảnh remote/exfil qua .md độc hại)',
+  /img-src[^\n]*data:/.test(providerSrc) && !/img-src[^\n]*https:/.test(providerSrc)
+);
+check(
+  'security: script-src KHÔNG có "unsafe-inline" (chặn inline script tiêm từ .md)',
+  !/script-src[^\n]*unsafe-inline/.test(providerSrc)
+);
+
+// Security hardening (Plan/Optimization Notes.md § Security hardening) — S-1/S-2
+// đã fix: message boundary webview→host phải whitelist/gate trước khi dùng giá
+// trị. Scan trực tiếp source provider.ts để bám sát fix thật.
+const readingModeCaseBody =
+  providerSrc.match(/case 'readingModeChanged': \{([\s\S]*?)\n        \}/)?.[1] ?? '';
+check(
+  'security S-1: readingModeChanged whitelist preset/palette trước khi lưu',
+  /READING_PRESETS/.test(readingModeCaseBody) && /READING_PALETTES/.test(readingModeCaseBody)
+);
+
+// Anchor vào ĐỊNH NGHĨA method (không phải chỗ gọi cùng tên đứng trước nó).
+const openResultBody = providerSrc.match(/private async openCrossFileSearchResult\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
+  'security S-2: crossFileSearch:openResult gate qua isInsideAllowedRoots trước khi mở',
+  /isInsideAllowedRoots/.test(openResultBody)
+);
+
+// Bug 1 (2026-07-18): file kéo-thả (không phải ảnh) giờ được orphan-cleanup như
+// ảnh dán — saveDroppedFile phải theo dõi file, cleanupOrphanImages phải gộp tập
+// theo dõi, và restore qua undo phải re-track. Scan source (host-fs, không có
+// harness vscode) — cùng kiểu guard như S-1/S-2.
+const saveDroppedBody = providerSrc.match(/private async saveDroppedFile\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: saveDroppedFile theo dõi asset để dọn khi mồ côi', /trackDroppedAsset/.test(saveDroppedBody));
+const cleanupBody = providerSrc.match(/private async cleanupOrphanImages\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: cleanupOrphanImages gộp file kéo-thả đã theo dõi', /droppedAssetsByDoc/.test(cleanupBody));
+const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /trackDroppedAsset/.test(restoreBody));
+
+// headingSiblingGaps (bug_General #2 follow-up): same-level/same-parent heading move scope.
+// Pure outline math on level arrays (null = non-heading block) — mirrors the I/O matrix cases.
+{
+  // #H1 / ##A + content / ##B  →  A(idx1) siblings = {A@1, B@3}; scope end = doc end.
+  const g = headingSiblingGaps([1, 2, null, 2], 1);
+  check('sibling: H2 siblings under one H1', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: scope end = doc end (no closing heading)', g.scopeEndGap === 4);
+  check('sibling: first sibling has no Move Up', g.moveUpGap === null);
+  check('sibling: Move Down past next sibling → scope end', g.moveDownGap === 4);
+}
+{
+  // Move the second sibling B up over A: [#H1, ##A, ##B] moving B(idx2).
+  const g = headingSiblingGaps([1, 2, 2], 2);
+  check('sibling: last sibling Move Up = previous sibling start', g.moveUpGap === 1);
+  check('sibling: last sibling has no Move Down', g.moveDownGap === null);
+}
+{
+  // Only child: #H1 / ##A  → A(idx1) has no sibling to swap with (immovable within scope).
+  const g = headingSiblingGaps([1, 2], 1);
+  check('sibling: only child has just itself', JSON.stringify(g.siblingStarts) === '[1]');
+  check('sibling: only child cannot Move Up/Down', g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Top-level H1s (parent = root): #A / #B / #C → all reorder among each other, scope = whole doc.
+  const g = headingSiblingGaps([1, 1, 1], 1);
+  check('sibling: top-level H1s are all siblings', JSON.stringify(g.siblingStarts) === '[0,1,2]');
+  check('sibling: top-level scope = whole doc', g.scopeEndGap === 3);
+  check('sibling: middle H1 Move Up=0, Move Down=3', g.moveUpGap === 0 && g.moveDownGap === 3);
+}
+{
+  // Different parents: #H1a / ##x / #H1b / ##y  → ##x(idx1) parent = H1a; ##y is NOT its sibling.
+  const g = headingSiblingGaps([1, 2, 1, 2], 1);
+  check('sibling: different-parent H2 excluded (scope ends at next H1)', JSON.stringify(g.siblingStarts) === '[1]' && g.scopeEndGap === 2, JSON.stringify(g));
+}
+{
+  // Nested levels: #H1 / ##A / ###a1 / ##B  → A(idx1) siblings under H1 = {A@1, B@3}; a1 is A's child.
+  const g = headingSiblingGaps([1, 2, 3, 2], 1);
+  check('sibling: nested child (###) is not a sibling of its parent (##)', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: A Move Down past its own [A, a1] section → scope end', g.moveDownGap === 4);
+}
+
+{
+  // Malformed outline: #H1 / ###X / ##Y  → X(idx1, H3) has NO same-level sibling. Its scope must
+  // END at the following H2 (level 2 < 3), so it can't be dragged below the H2 and nest under it.
+  const g = headingSiblingGaps([1, 3, 2], 1);
+  check('sibling: H3 scope stops at a following shallower H2 (no nest-under)', g.scopeEndGap === 2, JSON.stringify(g));
+  check('sibling: lone H3 among different levels is immovable', JSON.stringify(g.siblingStarts) === '[1]' && g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Skipped-level, two siblings: #H1 / ###A / ###B / ##C  → A,B are H3 siblings under H1; the
+  // trailing H2 (level 2 < 3) must bound the scope so Move Down keeps them BEFORE the H2, never
+  // nesting into it (blind review F1 repro B).
+  const g = headingSiblingGaps([1, 3, 3, 2], 1);
+  check('sibling: skipped-level scope ends at trailing shallower heading', g.scopeEndGap === 3, JSON.stringify(g));
+  check('sibling: first of two H3 siblings Move Down stays before the H2', g.moveDownGap === 3);
+}
+{
+  // Doc starting shallower-then-deeper reversed: ##A / #B  → A(idx0, H2) at root has no sibling and
+  // must not be draggable below the H1 (would nest under it). scope ends at the H1 (level 1 < 2).
+  const g = headingSiblingGaps([2, 1], 0);
+  check('sibling: top H2 before an H1 is immovable (scope ends at the H1)', g.scopeEndGap === 1 && JSON.stringify(g.siblingStarts) === '[0]' && g.moveDownGap === null, JSON.stringify(g));
+}
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

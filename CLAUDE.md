@@ -18,6 +18,11 @@ Every **project output** — code, **all code comments** (inline, block, JSDoc/T
 
 Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't translate code/docs back into Vietnamese "for readability".
 
+## Mandatory Rule: Be Concise (chat replies + user stories)
+
+- **Chat replies**: state the answer or what you did. No preamble, no filler, no restating the request.
+- **User stories (US)**: one clear who/what/why + tight acceptance criteria. Cut anything a reader can infer.
+
 ## Mandatory Rule: Working Principles
 
 ### 1. Think before coding
@@ -62,6 +67,16 @@ Before adding a new helper function, check whether one of these already covers i
 - Shared DOM class names/selectors → `media/webview/constants.ts`
 
 Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-prune) before merge — see [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md).
+
+## Mandatory Rule: Known Traps
+
+**Correctness trap (not performance):**
+
+- **Domino has no `ParentNode.append`.** `media/webview/dom-postprocess.ts`, `dom-serialize-prep.ts`, `sibling-move.ts`, and `turndown.ts` also run under Node via `@mixmark-io/domino` for round-trip tests. Domino does not implement `element.append(a, b, c)` — always use chained `element.appendChild(a); element.appendChild(b);` in these files. `.append()` looks like a harmless shortening but breaks at runtime under domino, so don't "clean it up."
+
+**Performance trap:**
+
+- **Throttle layout-forcing reads in hot handlers.** Any `getBoundingClientRect`/`offsetHeight`/`offsetWidth`/`scrollWidth` read inside a `mousemove`/`scroll`/`pointermove`/drag handler must be rAF-coalesced or throttled — follow the existing pattern in `match-utils.ts`/`search.ts` (`SELECT_OVERVIEW_THROTTLE_MS`) or `toc.ts`'s `onScroll`, not the uncoalesced version.
 
 ## Mandatory Rule: Git Workflow
 

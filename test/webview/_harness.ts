@@ -38,7 +38,8 @@ const DEFAULT_CONFIG: InitConfig = {
  * exercise a different (already-JS-guarded) code path than the real bug.
  */
 function bakedMarkup(readability: InitConfig['readability']): { bodyClasses: string; toolbarStyle: string } {
-  const stylingActive = readability.enabled || readability.zen;
+  // bug_General #1: reading styling gates on `enabled` only; Zen is independent.
+  const stylingActive = readability.enabled;
   const bodyClasses = [
     ...(stylingActive ? ['reading-mode'] : []),
     ...(readability.zen ? ['reading-zen'] : []),
@@ -80,6 +81,11 @@ function harnessHtml(readability: InitConfig['readability']): string {
   <div id="line-gutter" aria-hidden="true"></div>
   <div id="content" role="main" aria-label="Document content" contenteditable="true" spellcheck="false"></div>
   <script src="./main.js"></script>
+  <!-- HLR 22 Phase 1: test-only bundle exposing list-ops.ts's pure functions +
+       commitListOp/commitListOpDirect on window.ListOpsDebug, so
+       list-ops-primitive.spec.ts can drive them directly without wiring into
+       any real call site (Phase 2). -->
+  <script src="./list-ops-debug.js"></script>
 </body>
 </html>`;
 }

@@ -7,7 +7,7 @@
  * (debounce). Chọn gợi ý (click hoặc ↑↓ + Enter) → trả về đường dẫn tương
  * đối đã mã hóa, kèm tên file làm displayText khi không có selection.
  */
-import { encodeLinkPath, makeDraggable, saveSelection, type DomHelpers } from './dom-utils';
+import { el, encodeLinkPath, makeDraggable, saveSelection, type DomHelpers } from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
 import { FILE_SEARCH_DEBOUNCE_MS } from './constants';
 
@@ -37,26 +37,20 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     cb: (value: string | undefined, displayText?: string) => void,
     opts?: { fileSearchQuery?: string }
   ): void {
-    const overlay = document.createElement('div');
-    overlay.className = 'prompt-overlay';
-    const box = document.createElement('div');
-    box.className = 'prompt-box';
+    const overlay = el('div', 'prompt-overlay');
+    const box = el('div', 'prompt-box');
     // Kéo box đi chỗ khác để lộ nội dung phía sau nó đang bị che (vd 1 URL
     // nằm ngay dưới popup) — bug report 2026-07-14 (mục 6): trước đó chỉ kéo
     // được từ 1 thanh handle mỏng ở mép trên, nay bấm được ở bất kỳ đâu trên
     // box (trừ input/nút — `DRAG_IGNORE_SELECTOR` trong dom-utils.ts).
     makeDraggable(box);
-    const lbl = document.createElement('label');
-    lbl.textContent = label;
-    const input = document.createElement('input');
+    const lbl = el('label', undefined, label);
+    const input = el('input');
     input.type = 'text';
     input.placeholder = placeholder;
-    const buttons = document.createElement('div');
-    buttons.className = 'prompt-buttons';
-    const ok = document.createElement('button');
-    ok.textContent = 'OK';
-    const cancel = document.createElement('button');
-    cancel.textContent = 'Cancel';
+    const buttons = el('div', 'prompt-buttons');
+    const ok = el('button', undefined, 'OK');
+    const cancel = el('button', undefined, 'Cancel');
     buttons.append(cancel, ok);
     box.append(lbl, input, buttons);
     overlay.appendChild(box);
@@ -67,8 +61,7 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
     let activeIndex = -1;
     let searchSeq = 0;
     let searchTimer: ReturnType<typeof setTimeout> | undefined;
-    const list = document.createElement('div');
-    list.className = 'prompt-suggestions';
+    const list = el('div', 'prompt-suggestions');
     list.style.display = 'none';
     // Cả khu vực gợi ý file (không chỉ mỗi item) là vùng "không kéo" — box giờ
     // kéo được từ bất kỳ đâu (xem makeDraggable ở trên), nhưng bấm vào đây
@@ -79,14 +72,9 @@ export function initPrompt(vscode: VsCodeApi, dom: DomHelpers): PromptController
       list.textContent = '';
       list.style.display = suggestions.length ? '' : 'none';
       suggestions.forEach((f, i) => {
-        const item = document.createElement('div');
-        item.className = 'prompt-suggestion' + (i === activeIndex ? ' active' : '');
-        const name = document.createElement('span');
-        name.className = 'prompt-suggestion-name';
-        name.textContent = f.name;
-        const dir = document.createElement('span');
-        dir.className = 'prompt-suggestion-dir';
-        dir.textContent = f.dir;
+        const item = el('div', 'prompt-suggestion' + (i === activeIndex ? ' active' : ''));
+        const name = el('span', 'prompt-suggestion-name', f.name);
+        const dir = el('span', 'prompt-suggestion-dir', f.dir);
         item.append(name, dir);
         // mousedown + preventDefault: không cướp focus khỏi ô nhập
         item.addEventListener('mousedown', (e) => e.preventDefault());

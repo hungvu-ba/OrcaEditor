@@ -27,7 +27,7 @@
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
           }
         ],
-        "priority": "option"
+        "priority": "default"
       }
     ],
     "commands": [
@@ -95,11 +95,6 @@
     "configuration": {
       "title": "Orca MD Editor",
       "properties": {
-        "orcaEditor.claudeAutoInsert": {
-          "type": "boolean",
-          "default": false,
-          "description": "Copy @file button: insert @file directly into the Claude Code chat input instead of just copying it — requires briefly opening a text editor for the file then closing it right away (a mechanism required by Claude Code; you'll see a brief flicker). Default off: navigates to the chat tab, focuses the input, and copies @file to the clipboard so you can paste with ⌘V."
-        },
         "orcaEditor.autoOpenToc": {
           "type": "boolean",
           "default": true,
@@ -215,6 +210,7 @@
     "test:roundtrip:rendering": "node esbuild.js --test && node dist/test/roundtrip/rendering.js",
     "test:roundtrip:table": "node esbuild.js --test && node dist/test/roundtrip/table.js",
     "test:roundtrip:lists": "node esbuild.js --test && node dist/test/roundtrip/lists.js",
+    "test:roundtrip:list-ops": "node esbuild.js --test && node dist/test/roundtrip/list-ops.js",
     "test:roundtrip:dom-normalize": "node esbuild.js --test && node dist/test/roundtrip/dom-normalize.js",
     "test:roundtrip:toolbar-format": "node esbuild.js --test && node dist/test/roundtrip/toolbar-format.js",
     "test:roundtrip:toolbar-insert": "node esbuild.js --test && node dist/test/roundtrip/toolbar-insert.js",
@@ -224,8 +220,9 @@
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
+    "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
-    "test:webview": "node esbuild.js && playwright test",
+    "test:webview": "node esbuild.js --test && playwright test",
     "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",

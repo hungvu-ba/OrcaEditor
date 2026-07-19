@@ -38,12 +38,21 @@ export const MATH_RENDER_CLASS = 'md-math-render';
 export const MERMAID_CLASS = 'md-mermaid';
 export const MERMAID_TOOLBAR_CLASS = 'md-mermaid-toolbar';
 export const MERMAID_TOGGLE_CLASS = 'md-mermaid-toggle';
+export const MERMAID_ZOOM_CLASS = 'md-mermaid-zoom';
 export const MERMAID_CHART_CLASS = 'md-mermaid-chart';
 export const MERMAID_SOURCE_CLASS = 'md-mermaid-source';
 /** Attribute gắn lên mỗi block cấp cao nhất, giá trị = số dòng bắt đầu (1-based) trong Markdown gốc. */
 export const LINE_NUMBER_ATTR = 'data-line';
 /** Attribute gắn kèm data-line, giá trị = số dòng kết thúc (1-based, bao gồm) của block trong Markdown gốc. */
 export const LINE_NUMBER_END_ATTR = 'data-line-end';
+
+/**
+ * Attribute on the <a> created by postProcessRelativePathLinks (displays a bare
+ * relative file path as a link). Value = the exact original path string from the
+ * .md; turndown uses it to serialize back to the bare path → the .md is unchanged
+ * (display-only).
+ */
+export const AUTOLINK_PATH_ATTR = 'data-autolink-path';
 
 /** [dòng bắt đầu, dòng kết thúc] (1-based, bao gồm) của một block trong Markdown gốc. */
 export interface LineRange {
@@ -129,11 +138,16 @@ export class MarkdownRenderer {
     });
   }
 
-  /** Render markdown → HTML (kèm block front-matter nếu có). */
-  public render(markdown: string): RenderResult {
+  /** Xoá state "capture" (front-matter + math-block ranges) trước mỗi lần render()/computeTopLevelBlockRanges() — các rule markdown-it ghi lại vào đây trong lúc chạy. */
+  private resetCaptureState(): void {
     this.capturedFrontMatter = undefined;
     this.capturedFrontMatterRange = undefined;
     this.capturedMathBlockRanges = [];
+  }
+
+  /** Render markdown → HTML (kèm block front-matter nếu có). */
+  public render(markdown: string): RenderResult {
+    this.resetCaptureState();
     let html = this.md.render(markdown);
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
@@ -161,9 +175,7 @@ export class MarkdownRenderer {
    * tài liệu (xem refreshFromMarkdown trong gutter.ts).
    */
   public computeTopLevelBlockRanges(markdown: string): TopLevelBlockRange[] {
-    this.capturedFrontMatter = undefined;
-    this.capturedFrontMatterRange = undefined;
-    this.capturedMathBlockRanges = [];
+    this.resetCaptureState();
     const tokens = this.md.parse(markdown, {});
     const groups: TopLevelBlockRange[] = [];
     if (this.capturedFrontMatter !== undefined) {

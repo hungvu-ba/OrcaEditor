@@ -189,7 +189,8 @@ test('the menu opened via the table handle is positioned at the table handle, no
   if (!handleBox) {
     throw new Error('table handle has no bounding box');
   }
-  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  const clickY = handleBox.y + handleBox.height / 2;
+  await page.mouse.move(handleBox.x + handleBox.width / 2, clickY);
   await page.mouse.down();
   await page.mouse.up();
 
@@ -197,8 +198,97 @@ test('the menu opened via the table handle is positioned at the table handle, no
   if (!popupBox) {
     throw new Error('menu popup has no bounding box');
   }
-  // Must be anchored near the table handle's own row, not at the block handle's stale
-  // (display:none, zero-rect) position, which would place the popup at the viewport's
-  // top-left corner (bug 0716 round 2, #1 follow-up, confirmed live).
-  expect(Math.abs(popupBox.y - handleBox.y)).toBeLessThan(50);
+  // bug General R3 #1: the popup opens at the table handle's own click point, never at the block
+  // handle's stale (display:none, zero-rect) position, which would park it at the viewport's
+  // top-left corner (bug 0716 round 2, #1 follow-up). Anchored at the click, its top sits just
+  // below the clicked handle row (or its bottom just above, if it flipped) — near the real table.
+  const openedBelow = Math.abs(popupBox.y - clickY) < 40;
+  const openedAbove = Math.abs(popupBox.y + popupBox.height - clickY) < 40;
+  expect(openedBelow || openedAbove).toBe(true);
+  expect(popupBox.y).toBeGreaterThan(tableBox.y - 40);
+});
+
+test('the row handle menu opens clear of the row, like the block/table menu (bug General R2 #2)', async ({ page }) => {
+  await openEditor(page, DOC);
+  const row = page.locator('tbody tr', { hasText: 'a1' });
+  await page.locator('td', { hasText: 'a1' }).hover();
+  const rowHandleBox = await page.locator('.dd-row-handle').boundingBox();
+  if (!rowHandleBox) {
+    throw new Error('row handle has no bounding box');
+  }
+  await page.mouse.move(rowHandleBox.x + rowHandleBox.width / 2, rowHandleBox.y + rowHandleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+
+  const popup = page.locator('.dd-menu-popup:visible');
+  await expect(popup).toBeVisible();
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Set as header row' })).toHaveCount(1);
+
+  const popupBox = await popup.boundingBox();
+  const rowBox = await row.boundingBox();
+  if (!popupBox || !rowBox) {
+    throw new Error('missing bounding box');
+  }
+  // The menu must not cover the row's own cells (bug General R2 #2) — placed above/below it.
+  const overlaps =
+    popupBox.x < rowBox.x + rowBox.width &&
+    popupBox.x + popupBox.width > rowBox.x &&
+    popupBox.y < rowBox.y + rowBox.height &&
+    popupBox.y + popupBox.height > rowBox.y;
+  expect(overlaps).toBe(false);
+});
+
+// A tall doc (table near the top, lots of filler below) so there is room to scroll.
+const TALL_TABLE_DOC = `# Heading
+
+| Col A | Col B |
+| --- | --- |
+| a1 | b1 |
+| a2 | b2 |
+
+${Array.from({ length: 60 }, (_, i) => `Filler ${i}.`).join('\n\n')}
+`;
+
+async function openRowMenu(page: import('@playwright/test').Page): Promise<void> {
+  await page.locator('td', { hasText: 'a1' }).hover();
+  const rowHandleBox = await page.locator('.dd-row-handle').boundingBox();
+  if (!rowHandleBox) {
+    throw new Error('row handle has no bounding box');
+  }
+  await page.mouse.move(rowHandleBox.x + rowHandleBox.width / 2, rowHandleBox.y + rowHandleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect(page.locator('.dd-menu-popup:visible')).toBeVisible();
+}
+
+test('an open row menu locks scroll; any key closes it and releases the lock (bug General R2 follow-up)', async ({ page }) => {
+  await openEditor(page, TALL_TABLE_DOC);
+  await openRowMenu(page);
+
+  const before = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => window.scrollY)).toBe(before); // scroll frozen while open
+
+  await page.keyboard.press('a'); // a non-Escape key must also close the transient row menu
+  await expect(page.locator('.dd-menu-popup:visible')).toBeHidden();
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(before); // lock released
+});
+
+test('a document re-render closes an open row menu and releases the scroll lock (bug General R2 follow-up)', async ({ page }) => {
+  await openEditor(page, TALL_TABLE_DOC);
+  await openRowMenu(page);
+  const before = await page.evaluate(() => window.scrollY);
+
+  // Simulate an external edit / undo pushing new content → renderDocument rebuilds #content,
+  // destroying the row the menu was anchored to.
+  const tall = `# Changed\n\n${Array.from({ length: 60 }, (_, i) => `New ${i}.`).join('\n\n')}\n`;
+  await page.evaluate((t) => window.postMessage({ type: 'update', text: t }, '*'), tall);
+
+  await expect(page.locator('.dd-menu-popup:visible')).toBeHidden();
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(50);
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(before); // lock released
 });
