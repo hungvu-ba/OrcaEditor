@@ -107,6 +107,7 @@ h6 {
  * "Follow VS Code" column — headings no longer scale with --markdown-font-size
  * (PO decision 2026-07-19). Reading-Mode presets override font-size below;
  * weight / H2 border / opacity / letter-spacing are shared from here. */
+#content h1,
 #content h2 {
   padding-bottom: 6px;
   border-bottom-width: 1px;
@@ -255,6 +256,27 @@ table > tbody > tr + tr > td {
   border-bottom-width: 2px;
 }
 
+/* Document Blocks item 8 — High-Contrast code chrome: 2px borders on the code
+ * container + header, white header text, and a border on inline code. */
+.vscode-high-contrast pre {
+  border-width: 2px;
+}
+
+.vscode-high-contrast .md-code-header {
+  border-bottom-width: 2px;
+  color: var(--vscode-foreground, #ffffff);
+}
+
+.vscode-high-contrast .md-code-lang,
+.vscode-high-contrast .md-code-header button.md-code-copy,
+.vscode-high-contrast .md-code-header button.md-code-wrap {
+  font-weight: 700;
+}
+
+.vscode-high-contrast #content :not(pre) > code {
+  border: 1px solid var(--vscode-contrastBorder, currentColor);
+}
+
 /* Căn lề cột từ thuộc tính align (round-trip) */
 th[align='center'],
 td[align='center'] {
@@ -319,11 +341,34 @@ li {
 blockquote {
   margin: 0;
   padding: 0 16px 0 10px;
-  border-left-width: 5px;
+  border-left-width: 3px;
   border-left-style: solid;
   border-radius: 2px;
   border-color: var(--vscode-textBlockQuote-border);
   background: var(--vscode-textBlockQuote-background);
+  font-style: italic;
+}
+
+/* Keep code upright inside an italic blockquote — monospace must not slant. */
+#content blockquote :is(code, pre) {
+  font-style: normal;
+}
+
+/* Nested blockquote recedes one step (Document Blocks item 10). opacity is
+ * theme-independent, so one rule covers all themes/palettes. */
+#content blockquote blockquote {
+  opacity: 0.82;
+}
+
+/* Plain-editor blockquote size (Document Blocks item 5). Scoped away from
+ * Reading Mode so its preset-driven sizing is preserved. */
+body:not(.reading-mode) #content blockquote {
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+.vscode-high-contrast #content blockquote {
+  font-weight: 500;
 }
 
 /* --- Code --- */
@@ -349,7 +394,7 @@ pre {
   background-color: var(--vscode-textCodeBlock-background, rgba(220, 220, 220, 0.4));
   border: 1px solid var(--vscode-widget-border, transparent);
   padding: 16px;
-  border-radius: 3px;
+  border-radius: 8px; /* Document Blocks item 8 (was 3px) */
   overflow: auto;
 }
 
@@ -359,6 +404,119 @@ pre code {
   tab-size: 4;
   background: none;
   padding: 0;
+}
+
+/* Document Blocks item 8 — code-block header (language label + Copy button).
+ * The header, injected inside <pre> before <code> (dom-postprocess.ts), carries
+ * the top chrome; the <code> body carries the reading padding, and the <pre> is
+ * flush so the bar spans edge-to-edge. Scoped with :has() so the header-less
+ * mermaid source <pre> keeps the base 16px padding. */
+pre:has(> .md-code-header) {
+  padding: 0;
+}
+
+pre:has(> .md-code-header) > code {
+  padding: 14px 16px;
+  line-height: 1.7;
+}
+
+/* Fixed 13px code body in the plain editor; Reading Mode keeps its preset-driven
+ * sizing (mirrors the heading/blockquote plain-vs-reading split). */
+body:not(.reading-mode) #content pre code {
+  font-size: 13px;
+}
+
+/* position:sticky + left:0 pins the bar to the visible left edge while long code
+ * scrolls horizontally inside <pre> (the scroll container). */
+.md-code-header {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--vscode-widget-border, transparent);
+  user-select: none;
+  font-size: 11.5px;
+  color: var(--vscode-descriptionForeground, inherit);
+}
+
+.md-code-lang {
+  font-weight: 600;
+}
+
+/* US-4.28: the language label is the in-place language switcher — show it as an
+ * affordance (pointer + a small caret) and brighten on hover/focus. */
+.md-code-lang[role='button'] {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 3px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+}
+
+.md-code-lang[role='button']::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border: solid currentColor;
+  border-width: 0 1.2px 1.2px 0;
+  transform: translateY(-2px) rotate(45deg);
+  opacity: 0.7;
+}
+
+.md-code-lang[role='button']:hover,
+.md-code-lang[role='button']:focus-visible {
+  color: var(--vscode-foreground, inherit);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.18));
+}
+
+.md-code-header button.md-code-copy,
+.md-code-header button.md-code-wrap {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.md-code-header button.md-code-copy:hover,
+.md-code-header button.md-code-wrap:hover {
+  color: var(--vscode-foreground, inherit);
+}
+
+/* Push the trailing buttons (Wrap, then Copy via `gap`) to the right edge.
+ * margin-left:auto on the first button is immune to the language label's own
+ * `.md-code-lang[role='button']` margin shorthand (which would override a
+ * margin-right:auto on the label). */
+.md-code-header button.md-code-wrap {
+  margin-left: auto;
+}
+
+/* Wrap button reflects its on/off state — dim when wrap is off (aria-pressed=false). */
+.md-code-header button.md-code-wrap[aria-pressed='false'] {
+  opacity: 0.55;
+}
+
+/* Per-block word-wrap toggle. A code block with a header wraps by default
+ * (.md-code-wrapped, added by postProcessCodeHeaders); the Wrap button removes
+ * the class → the <code> scrolls horizontally instead. white-space is set
+ * explicitly on the <code> so the per-block toggle wins over `body.wordWrap`
+ * below (which only targets the <pre>). Order matters: the wrapped rule must
+ * follow the base rule (equal specificity). */
+pre:has(> .md-code-header) > code {
+  white-space: pre;
+}
+
+pre.md-code-wrapped > code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Code block wrap theo setting word wrap của editor (giống preview gốc) */
@@ -534,6 +692,36 @@ ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
   font-weight: bold;
 }
 
+/* VS Code High-Contrast: dedicated hljs token colors (Document Blocks item 9).
+ * HC is a dark background — grouped like the default-dark set (type stays
+ * distinct from string). Only the five design tokens are overridden; other
+ * hljs classes keep the default-dark palette. */
+.vscode-high-contrast .hljs-keyword,
+.vscode-high-contrast .hljs-literal,
+.vscode-high-contrast .hljs-symbol,
+.vscode-high-contrast .hljs-name,
+.vscode-high-contrast .hljs-selector-tag,
+.vscode-high-contrast .hljs-tag {
+  color: #4fc1ff;
+}
+.vscode-high-contrast .hljs-string,
+.vscode-high-contrast .hljs-meta .hljs-string {
+  color: #ce9178;
+}
+.vscode-high-contrast .hljs-comment,
+.vscode-high-contrast .hljs-quote {
+  color: #7ca668;
+  font-style: italic;
+}
+.vscode-high-contrast .hljs-number,
+.vscode-high-contrast .hljs-class {
+  color: #b5cea8;
+}
+.vscode-high-contrast .hljs-built_in,
+.vscode-high-contrast .hljs-type {
+  color: #4ec9b0;
+}
+
 /* ---------------------------------------------------------------------------
  * bug_General #7: syntax colors follow the READING PALETTE, not just the VS
  * Code theme. The two blocks above key off .vscode-light / default (dark) only,
@@ -573,6 +761,22 @@ body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, 
 }
 body:is(.reading-palette-light, .reading-palette-sepia, .reading-palette-paper, .reading-palette-highContrast) #content :is(.hljs-symbol, .hljs-bullet, .hljs-link) {
   color: #00b0e8;
+}
+
+/* Academic Paper: distinct print-manuscript token colors (US-19.15 prototype
+ * spec) — overrides the shared light-palette group above for function/number/
+ * type/variable so Academic Paper doesn't just reuse the generic VS-light set. */
+body.reading-palette-paper #content :is(.hljs-function, .hljs-params) {
+  color: #8a6d1f;
+}
+body.reading-palette-paper #content :is(.hljs-number, .hljs-class) {
+  color: #098658;
+}
+body.reading-palette-paper #content .hljs-type {
+  color: #267f99;
+}
+body.reading-palette-paper #content :is(.hljs-variable, .hljs-template-variable) {
+  color: #001080;
 }
 
 /* Dark palette → dark-theme token colors (mirror the unprefixed `.hljs-*`
@@ -1073,6 +1277,8 @@ body.reading-mode:has(#content.reading-preset-compact) {
 }
 body.reading-mode:has(#content.reading-preset-dyslexia) {
   --reading-ui-font-size: 15px;
+  --reading-ui-letter-spacing: 0.03em;
+  --reading-ui-word-spacing: 0.08em;
 }
 body.reading-mode:has(#content.reading-preset-academic) {
   --reading-ui-font-size: 14px;
@@ -1129,9 +1335,27 @@ body[class*='reading-palette-'] #content pre {
 body[class*='reading-palette-'] #content pre code {
   color: var(--rp-fg);
 }
+/* Document Blocks item 8 — code-block header colors in reading palettes. The
+ * label/Copy text is muted (opacity, not a token — palettes define no muted fg)
+ * to match the VS-theme headers' --vscode-descriptionForeground; the separator
+ * border keeps full --rp-embed-border strength. */
+body[class*='reading-palette-'] #content .md-code-header {
+  border-bottom-color: var(--rp-embed-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] #content .md-code-lang,
+body[class*='reading-palette-'] #content .md-code-header button.md-code-copy,
+body[class*='reading-palette-'] #content .md-code-header button.md-code-wrap {
+  opacity: 0.62;
+}
+/* Document Blocks item 8 — Sepia inline code a touch smaller (0.85em vs 0.9em). */
+body.reading-palette-sepia #content :not(pre) > code {
+  font-size: 0.85em;
+}
 body[class*='reading-palette-'] #content blockquote {
   background: var(--rp-quote-bg);
   border-color: var(--rp-quote-border);
+  color: var(--rp-quote-fg, var(--rp-fg));
 }
 body[class*='reading-palette-'] #content th,
 body[class*='reading-palette-'] #sticky-table-header th {
@@ -1233,13 +1457,34 @@ body.reading-palette-paper {
   --rp-border: rgba(0, 0, 0, 0.14);
   --rp-th-border: rgba(0, 0, 0, 0.6);
   --rp-quote-bg: rgba(0, 0, 0, 0.03);
-  --rp-quote-border: #d8d4bf;
+  --rp-quote-border: rgba(37, 84, 160, 0.5);
+  --rp-quote-fg: rgba(17, 17, 16, 0.85);
   --rp-chrome-hover: rgba(0, 0, 0, 0.07);
   --rp-chrome-active: rgba(0, 0, 0, 0.13);
   --rp-elev-bg: #f7f6ec;
   --rp-embed-border: rgba(0, 0, 0, 0.22);
   --rp-selection-bg: rgba(37, 84, 160, 0.2);
   --rp-selection-fg: var(--rp-fg);
+  /* Floating-widget chrome (US-19.15 prototype spec) — dull tabs-bg surface with
+   * the active/selected row popping brighter, opposite of the shared --rp-bg/
+   * --rp-chrome-active pattern other palettes still use. Other palettes fall
+   * back to that shared pattern (see editor.css .toolbar-popover) until they
+   * define their own --rp-widget-bg/--rp-tab-active/--rp-widget-shadow. */
+  --rp-widget-bg: #f4f4ea;
+  --rp-tab-active: #fffff8;
+  --rp-widget-shadow: rgba(0, 0, 0, 0.16);
+  /* Defined for future consumers (US-19.15 prototype spec) — no selector reads
+   * these yet; kept here so upcoming features (broken-link warning state,
+   * entity badges, image-placeholder stripes, gutter line numbers, a distinct
+   * hover-outline ring) don't have to invent per-palette values from scratch. */
+  --rp-muted: rgba(0, 0, 0, 0.55);
+  --rp-warning: #a13d2b;
+  --rp-entity-accent: #9c3fa6;
+  --rp-entity-muted: rgba(156, 63, 166, 0.14);
+  --rp-gutter-num: rgba(0, 0, 0, 0.4);
+  --rp-hover-outline: #2554a0;
+  --rp-stripe-a: #f7f6ec;
+  --rp-stripe-b: #efeee0;
 }
 
 /* High-contrast (accessibility): tương phản tối đa, viền đậm. */

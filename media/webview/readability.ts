@@ -182,7 +182,7 @@ const VN_CHAR_RE = /[Ạ-ỹĂăĐđƠơƯư]/g;
 export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   const { content, toolbar } = deps;
   const state: ReadabilityConfig = {
-    enabled: true,
+    enabled: false,
     preset: 'comfortable',
     palette: 'followTheme',
     fontFamily: '',

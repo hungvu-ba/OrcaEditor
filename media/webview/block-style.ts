@@ -20,9 +20,17 @@
 export const HEADING_STYLE_ATTR = 'data-md-heading-style';
 export const BULLET_STYLE_ATTR = 'data-md-bullet-style';
 export const CODE_STYLE_ATTR = 'data-md-code-style';
+/**
+ * US-4.28: marks a code block whose language the user changed in place. An
+ * INDENTED block can't carry a language token, so `applyBlockStyleOverrides`
+ * must NOT re-force its original indented style (which would drop the picked
+ * language on serialize) — it drops the code axis for a marked block instead.
+ */
+export const LANG_SWITCHED_ATTR = 'data-md-lang-switched';
 export const EM_STYLE_ATTR = 'data-md-em-style';
 export const STRONG_STYLE_ATTR = 'data-md-strong-style';
 export const HR_STYLE_ATTR = 'data-md-hr-style';
+export const TABLE_SEP_STYLE_ATTR = 'data-md-table-sep-style';
 
 /**
  * A block's style override, one field per axis; `null` = axis not applicable to
@@ -47,6 +55,8 @@ export interface StyleOverride {
   strong: '__' | null;
   /** Raw trimmed HR line (`***`, `___`, `- - -`...) when it differs from `---`. */
   hr: string | null;
+  /** `compact` (`|---|---|`, no inner spaces) when it differs from the padded default. */
+  tableSeparator: 'compact' | null;
 }
 
 /** Block types whose mdSlice can contain markdown emphasis (not literal text). */
@@ -77,6 +87,7 @@ export function detectBlockStyle(mdSlice: string, blockType: string): StyleOverr
     em: emphasisSource != null ? detectEmDelimiter(emphasisSource) : null,
     strong: emphasisSource != null ? detectStrongDelimiter(emphasisSource) : null,
     hr: blockType === 'hr' ? detectHrVariant(mdSlice) : null,
+    tableSeparator: blockType === 'table' ? detectTableSeparatorStyle(mdSlice) : null,
   };
 }
 
@@ -229,6 +240,17 @@ function detectHrVariant(mdSlice: string): string | null {
 }
 
 /**
+ * `compact` when the header-separator row (the table block's 2nd line, e.g.
+ * `|---|---|` or `|:--|--:|`) has no whitespace between any pipe/dash/colon —
+ * `null` (fall through to the padded `| --- |` default) otherwise, including
+ * when the row is missing or malformed.
+ */
+function detectTableSeparatorStyle(mdSlice: string): 'compact' | null {
+  const sepLine = mdSlice.split('\n')[1]?.trim();
+  return sepLine && !/\s/.test(sepLine) ? 'compact' : null;
+}
+
+/**
  * Stamp the override onto the block element (the CLONE) as transient attributes
  * for the turndown rules to read back. Each axis is stamped ONLY when it differs
  * from the global default — a canonical block gets no attribute, so it serializes
@@ -252,5 +274,8 @@ export function stampStyleOverride(el: Element, style: StyleOverride): void {
   }
   if (style.hr != null) {
     el.setAttribute(HR_STYLE_ATTR, style.hr);
+  }
+  if (style.tableSeparator != null) {
+    el.setAttribute(TABLE_SEP_STYLE_ATTR, style.tableSeparator);
   }
 }

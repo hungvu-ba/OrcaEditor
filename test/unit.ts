@@ -358,6 +358,7 @@ function style(over: Partial<StyleOverride>): StyleOverride {
     em: null,
     strong: null,
     hr: null,
+    tableSeparator: null,
     ...over,
   };
 }

@@ -1467,7 +1467,7 @@ function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityC
   const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
   const palette = cfg.get<ReadingPalette>('readability.palette', 'followTheme');
   return {
-    enabled: cfg.get<boolean>('readability.enabled', true),
+    enabled: cfg.get<boolean>('readability.enabled', false),
     preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
     palette: READING_PALETTES.includes(palette) ? palette : 'followTheme',
     fontFamily: cfg.get<string>('readability.fontFamily', ''),

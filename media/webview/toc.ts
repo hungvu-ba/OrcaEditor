@@ -347,6 +347,13 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       maxLevelInitialized = true;
     }
     const headings = allHeadings.filter((h) => headingLevel(h) <= maxLevel);
+    // Keep a reference to the currently-active heading so that, once the
+    // matching new entry is rebuilt below, activeIndex can be set directly
+    // to it instead of relying on updateActive()'s setActive() call (which
+    // would otherwise see activeIndex freshly reset to -1 and replay the
+    // .active class toggle + scrollLinkIntoView() on every debounced
+    // rebuild while typing, even though the active heading never changed).
+    const prevActiveHeading = activeIndex >= 0 ? entries[activeIndex]?.heading : undefined;
     list.textContent = '';
     entries = [];
     activeIndex = -1;
@@ -442,6 +449,10 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       });
       list.appendChild(link);
       entries.push({ heading, link });
+      if (heading === prevActiveHeading) {
+        activeIndex = entries.length - 1;
+        link.classList.add('active');
+      }
     }
     updateActive();
   }

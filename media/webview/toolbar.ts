@@ -27,11 +27,12 @@ import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
-import { READING_STYLES, type ReadabilityController } from './readability';
+import { type ReadabilityController } from './readability';
 import { attachTooltip, hideTooltip, setTooltip } from './tooltip';
 import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
-import { codeLangDisplayName, codeLangFromClass } from './dom-postprocess';
+import { codeLangDisplayName, codeLangFromClass, postProcessCodeHeaders } from './dom-postprocess';
 import { MD_CODE_LANG_CLASS } from './render';
+import { LANG_SWITCHED_ATTR } from './block-style';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
@@ -348,6 +349,32 @@ const CODE_LANGUAGES: { value: string; label: string; badge?: string }[] = [
   { value: 'sql', label: 'SQL' },
 ];
 
+/**
+ * Alias → canonical token cho 9 ngôn ngữ dropdown (US-4.28): fence do người dùng
+ * gõ/nhập thường dùng token rút gọn (`js`, `ts`, `py`, `sh`...), trong khi
+ * `CODE_LANGUAGES.value` là dạng chuẩn. Chuẩn hoá trước khi so sánh để một block
+ * `language-js` vẫn được đánh dấu ✓ ở hàng JavaScript và chọn lại JavaScript là
+ * no-op (không ghi đè token `js` thành `javascript`, không phát 'edit' thừa).
+ * `xml` cố ý KHÔNG map về `html` — chúng khác ngôn ngữ hljs, để nguyên không ✓.
+ */
+const CANONICAL_LANG: Record<string, string> = {
+  js: 'javascript',
+  ts: 'typescript',
+  py: 'python',
+  sh: 'bash',
+  shell: 'bash',
+  txt: 'plaintext',
+  text: 'plaintext',
+};
+
+function canonicalLang(token: string | null): string {
+  if (!token) {
+    return '';
+  }
+  const t = token.toLowerCase();
+  return CANONICAL_LANG[t] ?? t;
+}
+
 const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = CODE_LANGUAGES.map((c) => ({
   label: c.label,
   badge: c.badge,
@@ -393,53 +420,36 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
- * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 9 bundle
- * preset+palette đã kiểm chứng (US-4.27 chỉnh về đúng 9 combo wireframe + thêm
- * swatch/caption nhóm/tag "Previewing…"; xem `READING_STYLES` trong readability.ts
- * và Requirement - 19
- * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
- * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
- * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
- * addPopoverRow). Chọn hàng qua `setStyle`/`disable` — kéo theo bật/tắt Reading
- * Mode. ctx được gán trong initToolbar trước khi mọi action chạy nên tham
- * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
- *
- * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
- * reset" duy nhất, khác loại với 9 bundle bên dưới (đều là biến thể "bật");
- * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
- * phải cuộn qua hết 9 hàng mới thấy, và tách riêng bằng 1 vạch chia
- * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
- * chọn "style" thứ 11.
+ * Dropdown của Reading Mode split-button — 3 mode phẳng (không nhóm/submenu):
+ * "Standard" (tắt reading style, `disable()`) + 2 bundle "bật" trực tiếp
+ * (`setStyle`). Hover 1 hàng live-preview lên file hiện tại (`previewStyle`);
+ * rời hàng không chọn thì `cancelPreview()` trả lại theme đã commit (wiring
+ * hover ở addPopoverRow). Danh sách bundle đầy đủ vẫn ở `READING_STYLES`
+ * (readability.ts) — dropdown chỉ phơi 2 combo dùng nhiều nhất. ctx được gán
+ * trong initToolbar trước khi mọi action chạy nên tham chiếu an toàn.
  */
-/** US-4.27: caption nhóm dropdown Reading Mode theo preset (wireframe state d). */
-const READING_GROUP_CAPTIONS: Record<string, string> = {
-  comfortable: 'Comfortable Reading',
-  academic: 'Academic Paper',
-  compact: 'Compact',
-  dyslexia: 'Dyslexia-friendly',
-};
-
 const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   {
-    label: 'Follow VS Code (no reading style)',
+    label: 'Standard',
     value: 'off',
     action: () => ctx.readability.disable(),
     onHoverPreview: () => ctx.readability.previewStyle('off'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
   },
-  ...READING_STYLES.map((style, i) => ({
-    label: style.label,
-    badge: style.id === 'comfortable-sepia' ? 'Default' : undefined,
-    value: style.id,
-    action: () => ctx.readability.setStyle(style.id),
-    onHoverPreview: () => ctx.readability.previewStyle(style.id),
+  {
+    label: 'Sepia Comfort',
+    value: 'comfortable-sepia',
+    action: () => ctx.readability.setStyle('comfortable-sepia'),
+    onHoverPreview: () => ctx.readability.previewStyle('comfortable-sepia'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
-    separatorBefore: i === 0,
-    // US-4.27: caption ở hàng ĐẦU mỗi nhóm preset; swatch mọi hàng.
-    groupCaption: i === 0 || style.preset !== READING_STYLES[i - 1].preset ? READING_GROUP_CAPTIONS[style.preset] : undefined,
-    swatch: { palette: style.palette, preset: style.preset },
-  })),
+  },
+  {
+    label: 'Paper Comfort',
+    value: 'comfortable-paper',
+    action: () => ctx.readability.setStyle('comfortable-paper'),
+    onHoverPreview: () => ctx.readability.previewStyle('comfortable-paper'),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+  },
 ];
 
 // Thứ tự control theo wireframe (US-4.24, thay phần thứ tự của US-4.8):
@@ -1964,6 +1974,11 @@ function highlightNewCodeBlocks(): void {
   content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
     hljs.highlightElement(el as HTMLElement);
   });
+  // Bug fix: a toolbar insert only produced a bare <pre><code> — the header bar
+  // (language label = in-place switch menu, Copy, Wrap) was injected only on the
+  // next host render, so it appeared just after an undo. Inject it now (idempotent,
+  // skips blocks that already have a header) so a fresh insert shows it immediately.
+  postProcessCodeHeaders(content, document);
 }
 
 /**
@@ -1974,7 +1989,15 @@ function highlightNewCodeBlocks(): void {
  * khi ngôn ngữ chọn trùng ngôn ngữ hiện tại — caller bỏ qua việc phát 'edit'.
  */
 function setCodeBlockLanguage(code: HTMLElement, lang: string): boolean {
-  if (codeLangFromClass(code) === lang) {
+  // Block có thể đã bị gỡ khỏi DOM nếu một 'update' từ host render lại #content
+  // trong lúc popover còn mở (popover sống trên <body>): thao tác trên node mồ
+  // côi rồi syncNow sẽ serialize block LIVE mới → mất thay đổi. Bỏ qua an toàn.
+  if (!code.isConnected) {
+    return false;
+  }
+  // So khớp qua dạng chuẩn: block `language-js` + chọn JavaScript = no-op (không
+  // đổi token `js`→`javascript`, không phát 'edit' thừa) — xem CANONICAL_LANG.
+  if (canonicalLang(codeLangFromClass(code)) === lang) {
     return false;
   }
   // Gỡ mọi class language-*/hljs cũ (giữ nguyên class khác nếu có), thêm đúng 1
@@ -1985,6 +2008,13 @@ function setCodeBlockLanguage(code: HTMLElement, lang: string): boolean {
     }
   }
   code.classList.add(`language-${lang}`);
+  // Đánh dấu block đã đổi ngôn ngữ: nếu gốc là code THỤT LỀ, style override lúc
+  // serialize (applyBlockStyleOverrides từ blockMap gốc) sẽ ép lại "indented" và
+  // turndown bỏ token ngôn ngữ → switch serialize ra .md y hệt (không 'edit',
+  // nhãn revert). Marker này để applyBlockStyleOverrides bỏ trục code cho block,
+  // cho nó chuyển sang fence mang được ngôn ngữ vừa chọn. (data-* không leak vào
+  // .md — turndown fencedCodeWithLang dựng fence từ đầu, bỏ qua attr của <pre>.)
+  code.parentElement?.setAttribute(LANG_SWITCHED_ATTR, '');
   // hljs v11 đánh dấu phần tử đã tô bằng data-highlighted → gỡ đi và trả nội
   // dung về text thô (bỏ các <span> token cũ) để highlightElement tô lại từ đầu
   // theo ngôn ngữ mới thay vì cảnh báo "already highlighted".
@@ -2035,8 +2065,9 @@ export function openCodeLangSwitcher(labelEl: HTMLElement): void {
       c.value
     );
   }
-  // Dấu ✓ cho ngôn ngữ hiện tại của block (khớp data-dropdown-value).
-  const current = codeLangFromClass(code) ?? '';
+  // Dấu ✓ cho ngôn ngữ hiện tại của block — chuẩn hoá alias (`js`→`javascript`)
+  // để token rút gọn vẫn khớp đúng hàng dropdown (khớp data-dropdown-value).
+  const current = canonicalLang(codeLangFromClass(code));
   popover.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
     row.classList.toggle('selected', row.dataset.dropdownValue === current);
   });

@@ -143,8 +143,8 @@
         },
         "orcaEditor.readability.enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
+          "default": false,
+          "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. When off, newly opened tabs start in Standard (no reading style). This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
         },
         "orcaEditor.readability.preset": {
           "type": "string",

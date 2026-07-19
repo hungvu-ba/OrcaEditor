@@ -18,6 +18,11 @@ import {
   MERMAID_ZOOM_CLASS,
   MERMAID_CHART_CLASS,
   MERMAID_SOURCE_CLASS,
+  MD_CODE_HEADER_CLASS,
+  MD_CODE_LANG_CLASS,
+  MD_CODE_COPY_CLASS,
+  MD_CODE_WRAP_CLASS,
+  MD_CODE_WRAPPED_CLASS,
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   AUTOLINK_PATH_ATTR,
@@ -201,6 +206,121 @@ export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): v
     wrapper.appendChild(toolbar);
     wrapper.appendChild(chart);
     wrapper.appendChild(pre);
+  }
+}
+
+/**
+ * code→display name for the code-block header label. Covers the insert-dropdown
+ * languages (toolbar.ts CODE_BLOCK_DROPDOWN) + common aliases; an unknown token
+ * falls back to its capitalized form, and a fence with no language → "Code".
+ */
+const CODE_LANG_DISPLAY: Record<string, string> = {
+  javascript: 'JavaScript',
+  js: 'JavaScript',
+  typescript: 'TypeScript',
+  ts: 'TypeScript',
+  python: 'Python',
+  py: 'Python',
+  bash: 'Bash',
+  sh: 'Bash',
+  shell: 'Bash',
+  json: 'JSON',
+  html: 'HTML',
+  xml: 'XML',
+  css: 'CSS',
+  sql: 'SQL',
+  plaintext: 'Text',
+  text: 'Text',
+  txt: 'Text',
+};
+
+/** Read the `language-*` class off a <code> (same convention as turndown.ts). */
+export function codeLangFromClass(code: Element): string | null {
+  const cls = Array.from(code.classList).find((c) => c.startsWith('language-'));
+  return cls ? cls.slice('language-'.length) : null;
+}
+
+export function codeLangDisplayName(lang: string | null): string {
+  if (!lang) {
+    return 'Code';
+  }
+  return CODE_LANG_DISPLAY[lang.toLowerCase()] ?? lang.charAt(0).toUpperCase() + lang.slice(1);
+}
+
+/**
+ * Inject a persistent header bar (language label + "Copy" button) as the first
+ * child INSIDE each fenced <pre>, before its <code> (Document Blocks item 8).
+ * Placing it inside <pre> and outside <code> means gutter (top-level
+ * content.children unchanged), drag-drop (top-level child stays <pre>), and
+ * turndown serialize (fencedCodeWithLang reads only <code>) all keep working
+ * with zero change. Header is contenteditable=false so the caret can't enter it.
+ *
+ * Skips mermaid/math source blocks (their <pre> lives inside a wrapper) and is
+ * idempotent (skips a <pre> that already has a header). Must run AFTER
+ * postProcessMermaidDom so mermaid's <pre> is already re-homed and skippable.
+ *
+ * DOM-only (createElement/insertBefore/appendChild — NO .append/innerHTML) so it
+ * runs under Node/domino for round-trip tests too.
+ */
+export function postProcessCodeHeaders(root: ParentNode & Node, doc: Document): void {
+  const codes = Array.from(root.querySelectorAll('pre > code'));
+  for (const code of codes) {
+    const pre = code.parentElement;
+    if (!pre) {
+      continue;
+    }
+    // Skip mermaid/math source (their <pre> was moved inside a wrapper).
+    if (
+      hasAncestor(code, (el) => {
+        const cl = el.classList;
+        return !!cl && (cl.contains(MERMAID_CLASS) || cl.contains(MATH_BLOCK_CLASS));
+      })
+    ) {
+      continue;
+    }
+    // Idempotent: don't double-inject on a re-processed fragment.
+    const prev = code.previousElementSibling;
+    if (prev && prev.classList.contains(MD_CODE_HEADER_CLASS)) {
+      continue;
+    }
+
+    const header = doc.createElement('div');
+    header.className = MD_CODE_HEADER_CLASS;
+    header.setAttribute('contenteditable', 'false');
+
+    const label = doc.createElement('span');
+    label.className = MD_CODE_LANG_CLASS;
+    // US-4.28: the language label doubles as the in-place language switcher —
+    // clicking it opens the same dropdown as the toolbar's code-block button
+    // (wired via a delegated listener in main.ts). Marked as a button affordance;
+    // stays inside the contenteditable=false header so it never places the caret.
+    label.setAttribute('role', 'button');
+    label.setAttribute('aria-haspopup', 'true');
+    label.setAttribute('title', 'Change language');
+    label.textContent = codeLangDisplayName(codeLangFromClass(code));
+
+    // Wrap toggle — every fenced block is word-wrapped by default (MD_CODE_WRAPPED_CLASS
+    // on the <pre>), the button flips it to horizontal scroll. UI-only state, never
+    // serialized (turndown reads only <code>). Delegated click listener lives in main.ts.
+    const wrapBtn = doc.createElement('button');
+    wrapBtn.setAttribute('type', 'button');
+    wrapBtn.className = MD_CODE_WRAP_CLASS;
+    wrapBtn.setAttribute('contenteditable', 'false');
+    wrapBtn.setAttribute('aria-pressed', 'true');
+    wrapBtn.setAttribute('title', 'Toggle word wrap');
+    wrapBtn.textContent = 'Wrap';
+    pre.classList.add(MD_CODE_WRAPPED_CLASS);
+
+    const copyBtn = doc.createElement('button');
+    copyBtn.setAttribute('type', 'button');
+    copyBtn.className = MD_CODE_COPY_CLASS;
+    copyBtn.setAttribute('contenteditable', 'false');
+    copyBtn.textContent = 'Copy';
+
+    header.appendChild(label);
+    header.appendChild(wrapBtn);
+    header.appendChild(copyBtn);
+    pre.insertBefore(header, code);
   }
 }
 

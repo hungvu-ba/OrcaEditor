@@ -12,6 +12,20 @@ body {
   scroll-padding-top: calc(var(--toolbar-height, 48px) + 8px);
 }
 
+/* Neutralize the outer `html { padding: 0 26px }` inherited from markdown.css
+ * (VS Code's page margin). This extension puts the ENTIRE horizontal inset on
+ * `body` (drag-handle reserve + line-number gutter on the left, 26px on the
+ * right) and every #toolbar/#gutter offset is computed against BODY padding
+ * only. The extra 26px on `html` double-insets everything and — because the
+ * toolbar's negative-margin bleed can escape body padding but NOT an ancestor's
+ * (only Zen's position:fixed does) — leaves a visible strip on both sides of
+ * the toolbar. Drop it so body sits flush to the viewport and the toolbar spans
+ * edge-to-edge (matching Zen). */
+html {
+  padding-left: 0;
+  padding-right: 0;
+}
+
 /* US-17.3: reserve a left margin for the drag handle at all times, even when
  * the line-numbers gutter (below) is off — the handle is `position: fixed`
  * (viewport rects, not offsetTop) so it doesn't need body to be a positioned
@@ -389,6 +403,16 @@ body.dd-dragging .dd-handle {
   padding-right: 26px;
   background: var(--toolbar-bg);
   border-bottom: 1px solid var(--toolbar-border);
+}
+
+/* Toolbar flush to the top edge whenever it is visible (Zen off): cancel the
+ * inherited `body { padding-top: 1em }` (markdown.css) that leaves a strip
+ * above the sticky toolbar — invisible in the dark theme (gap color == toolbar
+ * color) but obvious under a reading palette where the toolbar is tinted. Keep
+ * the padding in Zen (toolbar is hidden, the centered text column wants the top
+ * breathing room). */
+body:not(.reading-zen) {
+  padding-top: 0;
 }
 
 #toolbar button {
@@ -2263,8 +2287,15 @@ body.reading-zen.md-line-numbers #toolbar {
  * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
  * tắt đều giữ nguyên. Chỉ áp khi Reading Mode bật (body.reading-mode). Đây là
  * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
+/* Depth-filter theme spec: row height 26px / radius 5px per depth-filter design spec — scoped
+ * to Reading Mode only, default VS Code TOC keeps its original 30px/6px. */
 body.reading-mode .toc-item {
   font-size: var(--reading-ui-font-size, 13px);
+  letter-spacing: var(--reading-ui-letter-spacing, normal);
+  word-spacing: var(--reading-ui-word-spacing, normal);
+  height: 26px;
+  line-height: 26px;
+  border-radius: 5px;
 }
 /* Bug fix: TOC font-family didn't follow the reading preset/free-text font
  * override — #toc-panel is a sibling of #content (appended to document.body,
@@ -2300,6 +2331,17 @@ body.reading-palette-light {
   --toolbar-active-fg: #1c1b18;
   --toolbar-badge-bg: #005fb8;
   --toolbar-badge-fg: #ffffff;
+  --toc-bg: #f7f3ea;
+  --toc-chrome-bg: #f7f3ea;
+  --toc-border: rgba(28, 27, 24, 0.16);
+  --toc-shadow: rgba(20, 30, 50, 0.1);
+  --toc-fg: #1c1b18;
+  --toc-muted: rgba(28, 27, 24, 0.55);
+  --toc-accent: #1a5fb4;
+  --toc-accent-soft: rgba(28, 27, 24, 0.14);
+  --toc-pill-bg: #efe9dc;
+  --toc-pill-border: rgba(28, 27, 24, 0.16);
+  --toc-pill-fg: rgba(28, 27, 24, 0.6);
 }
 body.reading-palette-dark {
   --toolbar-bg: #252526;
@@ -2310,6 +2352,17 @@ body.reading-palette-dark {
   --toolbar-active-fg: #ffffff;
   --toolbar-badge-bg: #4daafc;
   --toolbar-badge-fg: #1e1e1e;
+  --toc-bg: #1e1f22;
+  --toc-chrome-bg: #1e1f22;
+  --toc-border: rgba(230, 225, 213, 0.16);
+  --toc-shadow: rgba(20, 30, 50, 0.4);
+  --toc-fg: #e6e1d5;
+  --toc-muted: rgba(230, 225, 213, 0.55);
+  --toc-accent: #7aa2f7;
+  --toc-accent-soft: rgba(230, 225, 213, 0.18);
+  --toc-pill-bg: #26272b;
+  --toc-pill-border: rgba(230, 225, 213, 0.16);
+  --toc-pill-fg: rgba(230, 225, 213, 0.65);
 }
 body.reading-palette-sepia {
   --toolbar-bg: #ece0c4;
@@ -2320,6 +2373,17 @@ body.reading-palette-sepia {
   --toolbar-active-fg: #3a2c20;
   --toolbar-badge-bg: #8a4b08;
   --toolbar-badge-fg: #fbf3e2;
+  --toc-bg: #f4ecd8;
+  --toc-chrome-bg: #f4ecd8;
+  --toc-border: rgba(90, 60, 20, 0.25);
+  --toc-shadow: rgba(20, 30, 50, 0.14);
+  --toc-fg: #3b2f22;
+  --toc-muted: rgba(59, 47, 34, 0.58);
+  --toc-accent: #8a4b1a;
+  --toc-accent-soft: rgba(90, 60, 20, 0.2);
+  --toc-pill-bg: #ece2c9;
+  --toc-pill-border: rgba(90, 60, 20, 0.25);
+  --toc-pill-fg: rgba(59, 47, 34, 0.62);
 }
 body.reading-palette-paper {
   --toolbar-bg: #f3efe0;
@@ -2330,6 +2394,17 @@ body.reading-palette-paper {
   --toolbar-active-fg: #14140f;
   --toolbar-badge-bg: #1a5fb4;
   --toolbar-badge-fg: #ffffff;
+  --toc-bg: #fffff8;
+  --toc-chrome-bg: #f4f4ea;
+  --toc-border: rgba(0, 0, 0, 0.14);
+  --toc-shadow: rgba(20, 30, 50, 0.16);
+  --toc-fg: #111110;
+  --toc-muted: rgba(0, 0, 0, 0.55);
+  --toc-accent: #2554a0;
+  --toc-accent-soft: rgba(0, 0, 0, 0.07);
+  --toc-pill-bg: #f4f4ea;
+  --toc-pill-border: rgba(0, 0, 0, 0.14);
+  --toc-pill-fg: rgba(0, 0, 0, 0.6);
 }
 body.reading-palette-highContrast {
   --toolbar-bg: #000000;
@@ -2340,6 +2415,17 @@ body.reading-palette-highContrast {
   --toolbar-active-fg: #ffffff;
   --toolbar-badge-bg: #3794ff;
   --toolbar-badge-fg: #000000;
+  --toc-bg: #000000;
+  --toc-chrome-bg: #000000;
+  --toc-border: #6fc3ff;
+  --toc-shadow: rgba(20, 30, 50, 0.6);
+  --toc-fg: #ffffff;
+  --toc-muted: #c5c5c5;
+  --toc-accent: #3794ff;
+  --toc-accent-soft: rgba(55, 148, 255, 0.24);
+  --toc-pill-bg: #000000;
+  --toc-pill-border: #6fc3ff;
+  --toc-pill-fg: #c5c5c5;
 }
 /* #table-toolbar vẫn kế thừa --rp-* như US-19.11 (chỉ #toolbar tách sang
  * --toolbar-* riêng ở trên). */
@@ -2364,10 +2450,14 @@ body[class*='reading-palette-'] #toolbar button[aria-disabled='true']:hover {
   cursor: not-allowed;
   opacity: 0.4;
 }
-/* Popover (dropdown preset/palette, menu tràn) cũng theo palette. */
+/* Popover (dropdown preset/palette, menu tràn) cũng theo palette. --rp-widget-bg/
+ * --rp-tab-active/--rp-widget-shadow default to the shared --rp-bg/--rp-chrome-active
+ * pattern via fallback, so only palettes that define their own (currently just
+ * `paper`, US-19.15) diverge; others are unaffected until they add their own. */
 body[class*='reading-palette-'] .toolbar-popover {
-  background: var(--rp-bg);
+  background: var(--rp-widget-bg, var(--rp-bg));
   border-color: var(--rp-border);
+  box-shadow: 0 4px 16px var(--rp-widget-shadow, rgba(0, 0, 0, 0.3));
 }
 body[class*='reading-palette-'] .toolbar-popover-item {
   color: var(--rp-fg);
@@ -2376,7 +2466,7 @@ body[class*='reading-palette-'] .toolbar-popover-item:hover {
   background: var(--rp-chrome-hover);
 }
 body[class*='reading-palette-'] .toolbar-popover-item.selected {
-  background: var(--rp-chrome-active);
+  background: var(--rp-tab-active, var(--rp-chrome-active));
 }
 
 /* --- US-19.11 (mở rộng): mọi chrome nổi còn lại đi theo reading palette ---
@@ -2387,70 +2477,86 @@ body[class*='reading-palette-'] .toolbar-popover-item.selected {
  * này nên giữ nguyên --vscode-* như cũ. Chỉ đổi màu, không đụng layout.
  * --rp-elev-bg = bề mặt nổi (widget/input) hơi đậm hơn nền để tách lớp. */
 
-/* Table of Contents (panel phải) */
+/* Table of Contents (panel phải) — depth-filter theme spec: card dùng bộ
+ * --toc-* RIÊNG (như --toolbar-* ở US-4.25), KHÔNG kế thừa --rp-* của content, vì highContrast
+ * card (nền đen/chữ trắng) đảo ngược hẳn so với highContrast content (nền
+ * trắng/chữ đen) trong design spec — hai hệ không thể dùng chung token. */
 body[class*='reading-palette-'] #toc-panel {
-  background: var(--rp-bg);
-  border-left-color: var(--rp-border);
-  color: var(--rp-fg);
+  background: var(--toc-bg);
+  border-left-color: var(--toc-border);
+  color: var(--toc-fg);
+  box-shadow: -6px 0 18px var(--toc-shadow);
 }
 body[class*='reading-palette-'] #toc-header {
-  border-bottom-color: var(--rp-border);
+  background: var(--toc-chrome-bg);
+  border-bottom-color: var(--toc-border);
+}
+body[class*='reading-palette-'] .toc-stats-words {
+  color: var(--toc-muted);
 }
 body[class*='reading-palette-'] .toc-item {
-  color: var(--rp-fg);
+  color: var(--toc-fg);
   background: transparent;
 }
 body[class*='reading-palette-'] .toc-item:hover {
-  background: var(--rp-chrome-hover);
+  background: var(--toc-pill-bg);
 }
 body[class*='reading-palette-'] .toc-item.active {
-  color: var(--rp-fg);
-  background: var(--rp-chrome-active);
+  color: var(--toc-fg);
+  background: var(--toc-accent-soft);
 }
 body[class*='reading-palette-'] .toc-item::before {
-  background: var(--rp-link);
+  background: var(--toc-accent);
+}
+/* Depth-filter theme spec: hàng H1 đầu danh sách luôn hiển thị bất kể filter đang chọn mức
+ * nào — đánh dấu bằng chữ đậm + nền accentSoft, độc lập trạng thái active. */
+body[class*='reading-palette-'] .toc-item.toc-level-1:first-child {
+  font-weight: 600;
+  background: var(--toc-accent-soft);
 }
 /* Focus outline (US-19.7 keyboard nav): palette accent instead of VS Code blue. */
 body[class*='reading-palette-'] .toc-item:focus-visible {
-  outline-color: var(--rp-link);
+  outline-color: var(--toc-accent);
 }
 /* Reading-stats ring: track = subtle border, read portion + percent = palette
  * accent (was hardcoded to --vscode-editorWidget-border/--vscode-textLink-
  * foreground/--vscode-foreground → stuck VS Code blue on the ivory/sepia bg). */
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-track {
-  stroke: var(--rp-border);
+  stroke: var(--toc-border);
 }
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-fill {
-  stroke: var(--rp-link);
+  stroke: var(--toc-accent);
 }
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-value {
-  fill: var(--rp-fg);
+  fill: var(--toc-fg);
 }
-/* H1/H2/H3 filter bar (US-10.6): border + pills follow the palette; the active
- * pill uses the accent (--rp-link) + chrome-active bg instead of fixed inputOption-*. */
+/* H1/H2/H3 filter bar (US-10.6, restyled per depth-filter theme spec): border + pills follow the
+ * --toc-* card tokens; inactive pills get an explicit surface fill distinct
+ * from the card background, active pill uses the accent + accentSoft fill. */
 body[class*='reading-palette-'] #toc-filter-bar {
-  border-bottom-color: var(--rp-border);
+  border-bottom-color: var(--toc-border);
 }
 body[class*='reading-palette-'] .toc-depth-btn {
-  border-color: var(--rp-border);
-  color: var(--rp-fg);
+  border-color: var(--toc-pill-border);
+  background: var(--toc-pill-bg);
+  color: var(--toc-pill-fg);
 }
 body[class*='reading-palette-'] .toc-depth-btn:hover {
-  background: var(--rp-chrome-hover);
+  background: var(--toc-accent-soft);
 }
 body[class*='reading-palette-'] .toc-depth-btn.active {
-  border-color: var(--rp-link);
-  background: var(--rp-chrome-active);
-  color: var(--rp-link);
+  border-color: var(--toc-accent);
+  background: var(--toc-accent-soft);
+  color: var(--toc-accent);
 }
 /* Empty-state text + reset-filter link follow the palette. */
 body[class*='reading-palette-'] .toc-empty-reset {
-  color: var(--rp-link);
+  color: var(--toc-accent);
 }
 /* Resize handle: palette accent on hover (hover-only, panel edge). */
 body[class*='reading-palette-'] #toc-resize:hover,
 body[class*='reading-palette-'].toc-resizing #toc-resize {
-  background: var(--rp-link);
+  background: var(--toc-accent);
 }
 
 /* Hộp tìm trong file (Ctrl+F) + input + nút */

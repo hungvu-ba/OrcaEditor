@@ -41,6 +41,16 @@ export const MERMAID_TOGGLE_CLASS = 'md-mermaid-toggle';
 export const MERMAID_ZOOM_CLASS = 'md-mermaid-zoom';
 export const MERMAID_CHART_CLASS = 'md-mermaid-chart';
 export const MERMAID_SOURCE_CLASS = 'md-mermaid-source';
+/** Per-code-block header bar (language label + Copy) injected inside <pre>, before <code> (Document Blocks item 8). */
+export const MD_CODE_HEADER_CLASS = 'md-code-header';
+/** Language-name label inside the code-block header. */
+export const MD_CODE_LANG_CLASS = 'md-code-lang';
+/** "Copy" button inside the code-block header — targeted by the delegated click listener in main.ts. */
+export const MD_CODE_COPY_CLASS = 'md-code-copy';
+/** "Wrap" toggle button inside the code-block header — targeted by the delegated click listener in main.ts. */
+export const MD_CODE_WRAP_CLASS = 'md-code-wrap';
+/** State class on a code-block <pre> whose lines are word-wrapped (default ON). Removing it → horizontal scroll. */
+export const MD_CODE_WRAPPED_CLASS = 'md-code-wrapped';
 /** Attribute gắn lên mỗi block cấp cao nhất, giá trị = số dòng bắt đầu (1-based) trong Markdown gốc. */
 export const LINE_NUMBER_ATTR = 'data-line';
 /** Attribute gắn kèm data-line, giá trị = số dòng kết thúc (1-based, bao gồm) của block trong Markdown gốc. */
