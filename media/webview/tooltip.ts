@@ -31,10 +31,19 @@ export function hideTooltip(): void {
   }
 }
 
+/**
+ * Cập nhật text tooltip cho 1 phần tử đã attachTooltip (đọc lại lúc hover, nên
+ * đổi được động — vd. nút đổi lời giải thích khi bị vô hiệu, US-4.23).
+ */
+export function setTooltip(el: HTMLElement, text: string): void {
+  el.dataset.tooltip = text;
+}
+
 /** Gắn tooltip tự vẽ (mouseenter/focus → hiện, mouseleave/blur → ẩn) cho 1 phần tử. */
 export function attachTooltip(el: HTMLElement, text: string): void {
-  el.addEventListener('mouseenter', () => showTooltip(el, text));
+  setTooltip(el, text);
+  el.addEventListener('mouseenter', () => showTooltip(el, el.dataset.tooltip ?? text));
   el.addEventListener('mouseleave', hideTooltip);
-  el.addEventListener('focus', () => showTooltip(el, text));
+  el.addEventListener('focus', () => showTooltip(el, el.dataset.tooltip ?? text));
   el.addEventListener('blur', hideTooltip);
 }

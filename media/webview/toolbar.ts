@@ -28,7 +28,7 @@ import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
 import { READING_STYLES, type ReadabilityController } from './readability';
-import { attachTooltip, hideTooltip } from './tooltip';
+import { attachTooltip, hideTooltip, setTooltip } from './tooltip';
 import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
 
 export interface ToolbarContext {
@@ -477,6 +477,7 @@ const toolbarItems: ToolbarItem[] = [
     icon: FMT_ICONS.link,
     title: 'Insert link',
     action: insertLink,
+    id: 'fmt-link',
     separatorBefore: true,
     opensAsyncPrompt: true,
   },
@@ -485,6 +486,7 @@ const toolbarItems: ToolbarItem[] = [
     icon: FMT_ICONS.image,
     title: 'Insert image (path)',
     action: insertImage,
+    id: 'fmt-image',
     opensAsyncPrompt: true,
   },
   {
@@ -574,6 +576,15 @@ function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
 }
 
 function invokeItem(item: ToolbarItem): void {
+  // US-4.23: honor the caret-in-code-block disabled state no matter which
+  // surface fired — the plain toolbar button AND its overflow-menu "•••" row
+  // both route through here, so the guard belongs at this choke point (not on
+  // one button's click listener). The real button holds aria-disabled even when
+  // it is hidden into the overflow menu, so getElementById still sees it.
+  if (item.id && document.getElementById(item.id)?.getAttribute('aria-disabled') === 'true') {
+    hideTooltip();
+    return;
+  }
   if (item.hostDelegated) {
     // Undo/Redo: pendingText rides the undo/redo message itself (one atomic
     // host handler) and no sync may run after it — see ToolbarItem.hostDelegated.
@@ -1951,6 +1962,38 @@ function setActive(id: string, active: boolean): void {
   document.getElementById(id)?.classList.toggle('active', active);
 }
 
+// US-4.23: nút bị vô hiệu khi caret nằm trong code block (design state f — chỉ
+// Link/Image). Key theo caret + danh sách id (không phải instance nút cụ thể)
+// nên vẫn là no-op an toàn sau khi Link/Image bị gỡ vào luồng @-popup
+// (US-20.1/20.8): getElementById trả null → bỏ qua.
+const CODE_BLOCK_DISABLED_BUTTONS = [
+  { id: 'fmt-link', name: 'Link' },
+  { id: 'fmt-image', name: 'Image' },
+];
+
+/**
+ * Bật/tắt trạng thái vô hiệu của Link/Image theo việc caret có trong code block
+ * không. Dùng aria-disabled (KHÔNG dùng thuộc tính `disabled` gốc, để nút vẫn
+ * nhận hover → tooltip vẫn hiện lời giải thích, đúng design state f); CSS bắt
+ * theo `[aria-disabled='true']`, click bị chặn ở invokeItem. aria-label giữ
+ * nguyên (lời giải thích chỉ ở tooltip) nên khi bật lại chỉ cần restore từ đó.
+ */
+function setCodeBlockDisabled(inCodeBlock: boolean): void {
+  for (const { id, name } of CODE_BLOCK_DISABLED_BUTTONS) {
+    const btn = document.getElementById(id);
+    if (!btn) {
+      continue;
+    }
+    if (inCodeBlock) {
+      btn.setAttribute('aria-disabled', 'true');
+      setTooltip(btn, `${name} — unavailable inside a code block`);
+    } else {
+      btn.removeAttribute('aria-disabled');
+      setTooltip(btn, btn.getAttribute('aria-label') ?? '');
+    }
+  }
+}
+
 /**
  * Tính lại + gán `.active` cho 8 nút ở trên. Bullet/Numbered dựa theo
  * `getListSelection()` (US-4.2) — CHỈ theo tag `<ul>`/`<ol>`, không loại trừ
@@ -1968,6 +2011,7 @@ function recomputeActiveFormatting(): void {
     for (const id of ACTIVE_SYNC_IDS) {
       setActive(id, false);
     }
+    setCodeBlockDisabled(false);
     return;
   }
 
@@ -1978,6 +2022,12 @@ function recomputeActiveFormatting(): void {
   const anchorEl = closestElement(anchor);
   const inlineCode = anchorEl?.closest('code') ?? null;
   setActive('fmt-inline-code', !!inlineCode && !inlineCode.closest('pre'));
+
+  // Code block = <pre> (US-4.23). Vô hiệu Link/Image khi caret ở trong — xét
+  // CẢ hai đầu selection: kéo chọn từ đoạn văn xuống một <pre> (anchor ngoài,
+  // focus trong) vẫn phải chặn, nếu không createLink sẽ bắc qua ranh code block.
+  const focusInPre = !!closestElement(focus)?.closest('pre');
+  setCodeBlockDisabled(!!anchorEl?.closest('pre') || focusInPre);
 
   const bq = anchorEl?.closest('blockquote') ?? null;
   setActive('fmt-blockquote', !!bq && content.contains(bq));

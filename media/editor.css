@@ -419,6 +419,16 @@ body.dd-dragging .dd-handle {
   border-color: var(--vscode-inputOption-activeBorder, transparent);
 }
 
+/* US-4.23: Link/Image bị vô hiệu khi caret trong code block (design state f) —
+   dim (icon dùng currentColor nên đổi color là đủ), không nền hover, not-allowed.
+   :hover cùng liệt kê để đè rule #toolbar button:hover ở trên. */
+#toolbar button[aria-disabled='true'],
+#toolbar button[aria-disabled='true']:hover {
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.5));
+  background: none;
+  cursor: not-allowed;
+}
+
 #toolbar .toolbar-sep {
   flex-shrink: 0;
   width: 1px;
@@ -2216,6 +2226,15 @@ body[class*='reading-palette-'] #toolbar button.active {
   background: var(--rp-chrome-active);
   color: var(--rp-fg);
   border-color: var(--rp-border);
+}
+/* US-4.23 parity: dưới reading palette không có token disabled riêng và các
+ * rule button/`:hover` ở trên có specificity cao hơn base rule, nên dim bằng
+ * opacity (palette-independent) + đè lại nền hover ở đúng ngữ cảnh palette. */
+body[class*='reading-palette-'] #toolbar button[aria-disabled='true'],
+body[class*='reading-palette-'] #toolbar button[aria-disabled='true']:hover {
+  background: none;
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 /* Popover (dropdown preset/palette, menu tràn) cũng theo palette. */
 body[class*='reading-palette-'] .toolbar-popover {
