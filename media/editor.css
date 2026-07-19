@@ -1344,7 +1344,14 @@ body.toc-open #select-viewport-band {
   --toc-width: 300px;
 }
 
-/* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục. */
+/* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục.
+ * transition ở đây đồng bộ với transition width của #toc-panel (design handoff
+ * Wireframe Handoff/Archived/design_handoff_toc_outline_rail) — nếu không, nội
+ * dung sẽ nhảy khoảng trắng ngay lập tức trong khi panel còn đang trượt. */
+body {
+  transition: padding-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 body.toc-open {
   padding-right: calc(26px + var(--toc-width));
 }
@@ -1357,6 +1364,10 @@ body.toc-open {
  * mode (#toolbar position:fixed, bỏ qua padding của body) KHÔNG co — 2 mode
  * dài toolbar khác nhau khi mở TOC, gây confuse; bỏ hẳn việc co hẹp để cả 2
  * mode nhất quán full-width. */
+#toolbar {
+  transition: margin-right 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 body.toc-open #toolbar {
   margin-right: calc(-26px - var(--toc-width));
   padding-right: calc(26px + var(--toc-width));
@@ -1383,12 +1394,24 @@ body.toc-open #select-overview {
  * trên cùng, cao = toolbarHeight) bị toolbar (full-width, opaque) đè lên,
  * giống title bar nằm trên sidebar — không hở, không cần né chồng lấn theo
  * cách "ai đứng dưới ai" nữa vì giờ LUÔN toolbar thắng ở cả 2 mode. */
+/* Show/hide animation (design handoff: Wireframe Handoff/Archived/
+ * design_handoff_toc_outline_rail — railStyle transition: "width .3s
+ * cubic-bezier(.4,0,.2,1), opacity .22s ease"). Default (closed) state is
+ * width 0 + opacity 0; body.toc-open below drives it to var(--toc-width) + 1.
+ * visibility uses a transition-delay instead of the old `hidden` attribute:
+ * switches to visible immediately on open (delay 0s) but only becomes hidden
+ * once the close animation finishes (delay .3s = the width duration), so the
+ * panel stays focusable/hit-testable while it's still visibly sliding shut,
+ * and isn't reachable by keyboard once fully collapsed. */
 #toc-panel {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  width: var(--toc-width);
+  width: 0;
+  opacity: 0;
+  visibility: hidden;
+  overflow: hidden;
   z-index: 150;
   display: flex;
   flex-direction: column;
@@ -1398,21 +1421,38 @@ body.toc-open #select-overview {
    * over-TOC trick then showed as a visible color seam). Unified so there is
    * no possible mismatch regardless of gap/theme. */
   background: var(--vscode-editor-background, var(--vscode-sideBar-background));
-  border-left: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-left: 1px solid transparent;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
 }
 
-#toc-panel[hidden] {
-  display: none;
+body.toc-open #toc-panel {
+  width: var(--toc-width);
+  opacity: 1;
+  visibility: visible;
+  border-left-color: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
 }
 
-/* Handle kéo đổi rộng panel — nằm sát mép trái, phủ lên border-left. */
+/* Resize-drag lag fix: the open/close slide above eases `width` over 0.3s, but
+ * the resize handle writes --toc-width on every pointermove — with `width` in
+ * the transition list each drag tick eases toward its target, so the panel
+ * visibly chases the cursor. While actively dragging (body.toc-resizing, set by
+ * the resize pointer handler) drop `width` from the transition so the drag is
+ * 1:1; the toggle-driven slide keeps its animation because it isn't dragging. */
+body.toc-resizing #toc-panel {
+  transition: opacity 0.22s ease;
+}
+
+/* Handle kéo đổi rộng panel — nằm sát mép trái, phủ lên border-left. Trọn vẹn
+ * bên trong panel (không âm margin tràn ra ngoài như trước) vì #toc-panel giờ
+ * có overflow: hidden (cần để clip nội dung lúc panel co về width 0 khi đóng)
+ * — âm margin sẽ bị cắt mất phần tràn, thu hẹp vùng bắt chuột kéo. */
 #toc-resize {
   position: absolute;
   top: 0;
   left: 0;
   bottom: 0;
   width: 6px;
-  margin-left: -3px;
   cursor: ew-resize;
   z-index: 1;
   background: transparent;
@@ -1428,6 +1468,17 @@ body.toc-resizing #toc-resize {
 body.toc-resizing {
   cursor: ew-resize;
   user-select: none;
+}
+
+/* During a live resize-drag the content + toolbar must track the panel edge 1:1.
+ * body's padding-right and #toolbar's margin/padding-right both follow
+ * --toc-width and ease over 0.3s (the open/close slide); without dropping that
+ * easing here the editor lags behind the dragged edge and only catches up 0.3s
+ * later. The toggle-driven slide keeps its animation because it isn't dragging.
+ * (Mirrors the same-purpose #toc-panel rule above.) */
+body.toc-resizing,
+body.toc-resizing #toolbar {
+  transition: none;
 }
 
 #toc-header {
@@ -1451,15 +1502,14 @@ body.toc-resizing {
   width: 100%;
 }
 
-/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is
- * 54px in its 272px-wide rail (~0.2 of panel width). This panel is resizable
- * (200-600px, --toc-width) rather than the mockup's fixed rail, so the ring
- * scales with it via the same ratio — clamped so it never shrinks below a
- * legible floor or grows past the hifi's 54px target. */
+/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is a
+ * fixed 54px. It used to scale with --toc-width, but a ring that grows/shrinks
+ * as the panel is resized read as unstable — pinned to the hifi's 54px target
+ * regardless of panel width. */
 #toc-progress-ring {
   flex: none;
-  width: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
-  height: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
+  width: 54px;
+  height: 54px;
 }
 
 /* SVG elements aren't covered by the UA [hidden] { display: none } rule
@@ -1515,26 +1565,39 @@ body.toc-resizing {
 }
 
 /* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
- * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ. */
+ * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ.
+ * 3 nút pill (design handoff: Wireframe Handoff/design_handoff_orca_editor —
+ * depthBtns) thay cho slider liên tục trước đây. */
 #toc-filter-bar {
   flex: none;
+  display: flex;
+  gap: 5px;
   padding: 0 14px 8px;
   border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-#toc-filter-slider {
-  width: 100%;
-  accent-color: var(--vscode-textLink-foreground, #3794ff);
+/* Giống style toggle "active" đã có (.match-option-btn) — inputOption là token
+ * VS Code cho "nút option đang bật", khớp accent/accentSoft của design. */
+.toc-depth-btn {
+  padding: 3px 11px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
   cursor: pointer;
-  outline: none;
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-foreground);
+  transition: background 0.18s, border-color 0.18s, color 0.18s;
 }
 
-.toc-filter-scale {
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  opacity: 0.6;
-  margin-top: 2px;
+.toc-depth-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+.toc-depth-btn.active {
+  border-color: var(--vscode-inputOption-activeBorder, #007fd4);
+  background: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
+  color: var(--vscode-textLink-foreground, #3794ff);
 }
 
 #toc-list {
@@ -1544,54 +1607,134 @@ body.toc-resizing {
   padding: 6px 0;
 }
 
+/* Empty state (design handoff: Rail - TOC (Outline).dc.html). Two cases share
+ * this container but differ by icon shape + trailing affordance: "no match" =
+ * circle-outline icon + a clickable reset link; "headless doc" = rounded-rect
+ * icon + a muted secondary hint. build() (toc.ts) sets the icon/affordance per
+ * case; layout is a centered column here. */
 #toc-empty {
-  padding: 8px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 18px;
+  text-align: center;
+}
+
+.toc-empty-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  opacity: 0.5;
+}
+
+.toc-empty-msg {
   font-size: 12px;
   opacity: 0.6;
 }
 
-/* Card TOC: mỗi mục là một thẻ viền + bo góc, cách nhau bằng margin dọc. Level
- * thể hiện bằng margin-left (thẻ con thụt vào), giữ cắt 1 dòng + ellipsis như cũ. */
+/* No-match: reset filter in place (mock's accent-colored "Show H1–H2–H3"). */
+.toc-empty-reset {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-textLink-foreground, #3794ff);
+}
+
+.toc-empty-reset:hover {
+  text-decoration: underline;
+}
+
+.toc-empty-reset:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Headless: muted secondary hint line. */
+.toc-empty-hint {
+  font-size: 11px;
+  opacity: 0.45;
+}
+
+/* Outline row (design handoff: Wireframe Handoff/Archived/
+ * design_handoff_toc_outline_rail — items[].rowStyle/barStyle). Thay "card"
+ * cũ (viền + nền luôn hiện) bằng hàng phẳng: nền trong suốt lúc rảnh, chỉ mục
+ * active mới có nền tint + thanh accent trái mọc ra (scaleY). Level thể hiện
+ * bằng padding-left theo công thức (level-1)*16 + 16, giữ cắt 1 dòng + ellipsis. */
 .toc-item {
+  /* Block (not flex) so text-overflow:ellipsis applies to the row's own text.
+   * A flex container wraps the text in an anonymous flex item that ellipsis
+   * can't reach → long titles were clipped with no "…". The accent bar is an
+   * absolutely-positioned ::before (out of flow), so flex bought nothing here;
+   * line-height = height keeps the single line vertically centered. */
   display: block;
-  margin: 4px 10px;
-  padding: 5px 10px;
-  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.3));
+  line-height: 30px;
+  position: relative;
+  height: 30px;
+  margin: 0 10px;
+  padding: 0 10px;
   border-radius: 6px;
-  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+  background: transparent;
   color: var(--vscode-foreground);
   text-decoration: none;
   font-size: 13px;
-  line-height: 1.45;
+  font-weight: 450;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+/* Thanh accent trái: mọc ra bằng scaleY khi active (barStyle trong design).
+ * opacity đi kèm scaleY(0) — chỉ riêng scaleY(0) vẫn để lộ một sợi mảnh do
+ * Chromium AA bo góc border-radius ở chiều cao ~0 (thấy rõ khi chụp màn hình). */
+.toc-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--vscode-textLink-foreground, #3794ff);
+  transform: scaleY(0);
+  opacity: 0;
+  transform-origin: center;
+  transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
 /* color + text-decoration reset: the global `a`/`a:hover` rules (markdown.css)
- * otherwise repaint the card text as an underlined link on hover — the TOC text
- * must read as plain text, the accent lives on the card border/background. */
+ * otherwise repaint the row text as an underlined link on hover — the TOC text
+ * must read as plain text, the accent lives on the background tint + left bar. */
 .toc-item:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
-  border-color: var(--vscode-focusBorder, rgba(128, 128, 128, 0.5));
   color: var(--vscode-foreground);
   text-decoration: none;
 }
 
 .toc-item.active {
+  font-weight: 600;
   color: var(--vscode-foreground);
-  border-color: var(--vscode-textLink-foreground, #3794ff);
   background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.12));
 }
 
-/* Thụt lề theo level (chỉ đổi margin-left, giữ margin phải/dọc từ .toc-item). */
-.toc-level-1 { font-weight: 600; }
-.toc-level-2 { margin-left: 22px; }
-.toc-level-3 { margin-left: 34px; }
-.toc-level-4 { margin-left: 46px; }
-.toc-level-5 { margin-left: 58px; }
-.toc-level-6 { margin-left: 70px; opacity: 0.85; }
+.toc-item.active::before {
+  transform: scaleY(1);
+  opacity: 1;
+}
+
+/* Thụt lề theo level (padding-left, giữ margin phải/dọc từ .toc-item). */
+.toc-level-1 { padding-left: 16px; }
+.toc-level-2 { padding-left: 32px; }
+.toc-level-3 { padding-left: 48px; }
+.toc-level-4 { padding-left: 64px; }
+.toc-level-5 { padding-left: 80px; }
+.toc-level-6 { padding-left: 96px; opacity: 0.85; }
 
 /* Toast nhỏ (vd. cảnh báo bảng phân cấp sẽ lưu dạng HTML) */
 #wysiwyg-toast {
@@ -2108,17 +2251,59 @@ body[class*='reading-palette-'] #toc-header {
 }
 body[class*='reading-palette-'] .toc-item {
   color: var(--rp-fg);
-  background: var(--rp-elev-bg);
-  border-color: var(--rp-border);
+  background: transparent;
 }
 body[class*='reading-palette-'] .toc-item:hover {
   background: var(--rp-chrome-hover);
-  border-color: var(--rp-border);
 }
 body[class*='reading-palette-'] .toc-item.active {
   color: var(--rp-fg);
+  background: var(--rp-chrome-active);
+}
+body[class*='reading-palette-'] .toc-item::before {
+  background: var(--rp-link);
+}
+/* Focus outline (US-19.7 keyboard nav): palette accent instead of VS Code blue. */
+body[class*='reading-palette-'] .toc-item:focus-visible {
+  outline-color: var(--rp-link);
+}
+/* Reading-stats ring: track = subtle border, read portion + percent = palette
+ * accent (was hardcoded to --vscode-editorWidget-border/--vscode-textLink-
+ * foreground/--vscode-foreground → stuck VS Code blue on the ivory/sepia bg). */
+body[class*='reading-palette-'] #toc-progress-ring .toc-progress-track {
+  stroke: var(--rp-border);
+}
+body[class*='reading-palette-'] #toc-progress-ring .toc-progress-fill {
+  stroke: var(--rp-link);
+}
+body[class*='reading-palette-'] #toc-progress-ring .toc-progress-value {
+  fill: var(--rp-fg);
+}
+/* H1/H2/H3 filter bar (US-10.6): border + pills follow the palette; the active
+ * pill uses the accent (--rp-link) + chrome-active bg instead of fixed inputOption-*. */
+body[class*='reading-palette-'] #toc-filter-bar {
+  border-bottom-color: var(--rp-border);
+}
+body[class*='reading-palette-'] .toc-depth-btn {
+  border-color: var(--rp-border);
+  color: var(--rp-fg);
+}
+body[class*='reading-palette-'] .toc-depth-btn:hover {
+  background: var(--rp-chrome-hover);
+}
+body[class*='reading-palette-'] .toc-depth-btn.active {
   border-color: var(--rp-link);
   background: var(--rp-chrome-active);
+  color: var(--rp-link);
+}
+/* Empty-state text + reset-filter link follow the palette. */
+body[class*='reading-palette-'] .toc-empty-reset {
+  color: var(--rp-link);
+}
+/* Resize handle: palette accent on hover (hover-only, panel edge). */
+body[class*='reading-palette-'] #toc-resize:hover,
+body[class*='reading-palette-'].toc-resizing #toc-resize {
+  background: var(--rp-link);
 }
 
 /* Hộp tìm trong file (Ctrl+F) + input + nút */
@@ -2284,6 +2469,14 @@ body[class*='reading-palette-'] ::highlight(search-current) {
   outline: 2px solid var(--vscode-focusBorder, #007acc);
   outline-offset: 2px;
   border-radius: 2px;
+}
+/* TOC rows are tab-focusable <a>; give keyboard focus the same deliberate
+ * outline as other chrome instead of the UA default ring. Inset offset keeps
+ * the ring inside the flush row (the design's per-theme focus treatment;
+ * reading-palette override above swaps the color to the palette accent). */
+.toc-item:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -2px;
 }
 
 /* --- US-19.4 Image click-to-zoom ---

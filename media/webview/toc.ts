@@ -24,6 +24,8 @@ export interface TocController {
   toggle(): void;
   /** Panel có đang mở không (để đồng bộ trạng thái nút toolbar). */
   isOpen(): boolean;
+  /** Re-apply the panel width, capped to the current window (call on window resize). */
+  reflowWidth(): void;
 }
 
 interface TocEntry {
@@ -36,6 +38,12 @@ const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
 /** Giới hạn bề rộng panel khi kéo (px). Max còn bị kẹp thêm theo viewport lúc kéo. */
 const TOC_MIN_WIDTH = 200;
 const TOC_MAX_WIDTH = 600;
+/** The effective panel width never exceeds this fraction of window.innerWidth, so
+ *  the panel shrinks proportionally on a narrower tab (down to TOC_MIN_WIDTH,
+ *  after which the narrow-viewport auto-hide in main.ts takes over). */
+const TOC_SHRINK_RATIO = 0.35;
+/** Preferred width when the user hasn't resized (mirrors --toc-width in editor.css). */
+const TOC_DEFAULT_WIDTH = 300;
 
 /** US-10.6: heading-level filter — số heading tối đa (level <= 2) trước khi mặc định thu về H1-only. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
@@ -44,10 +52,9 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 /**
  * US-10.7 reading-progress ring geometry (SVG stroke-dashoffset donut) —
  * matches the design handoff's 54x54 hifi ring (r=24, stroke-width 6,
- * circumference 150.8). The viewBox stays at this fixed size; the rendered
- * size scales down on narrow panels via CSS (#toc-progress-ring, clamp on
- * --toc-width), which uniformly scales the whole vector including the
- * percent text.
+ * circumference 150.8). The viewBox and the rendered size are both a fixed
+ * 54px (#toc-progress-ring in editor.css) — the ring no longer scales with the
+ * panel width, since a resizing ring read as unstable.
  */
 const RING_VIEWBOX_SIZE = 54;
 const RING_CENTER = RING_VIEWBOX_SIZE / 2;
@@ -90,9 +97,11 @@ function createProgressRing(): SVGElement {
 
 export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): TocController {
   // --- Panel bên phải ---
+  // Không dùng thuộc tính `hidden` — show/hide panel giờ chạy bằng transition
+  // CSS (width/opacity/visibility, xem #toc-panel trong editor.css) để có hiệu
+  // ứng trượt mở/đóng theo design handoff thay vì bật/tắt tức thời.
   const panel = document.createElement('aside');
   panel.id = 'toc-panel';
-  panel.hidden = true;
 
   const resizer = document.createElement('div');
   resizer.id = 'toc-resize';
@@ -133,36 +142,48 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
 
   // Thanh lọc riêng (không nhét chung hàng với title trong #toc-header) — full
   // width, nằm dưới #toc-header nên không bị #toolbar (overlap band) che mất.
+  // 3 nút pill H1/H2/H3 (design handoff: Wireframe Handoff/design_handoff_orca_editor
+  // — depthBtns) thay cho slider liên tục trước đây (US-10.6 decision 2026-07-19,
+  // xem Requirement - 10 Document Navigation.md — reverses the 2026-07-16 "native
+  // range slider" call now that the reason for it, avoiding a discrete control
+  // clashing with TOC-drag, no longer applies since TOC-drag was removed entirely).
   const filterBar = document.createElement('div');
   filterBar.id = 'toc-filter-bar';
+  filterBar.setAttribute('role', 'group');
+  filterBar.setAttribute('aria-label', 'Filter heading levels shown in Table of Contents');
 
-  const filterSlider = document.createElement('input');
-  filterSlider.id = 'toc-filter-slider';
-  filterSlider.type = 'range';
-  filterSlider.min = '1';
-  filterSlider.max = '3';
-  filterSlider.step = '1';
-  filterSlider.value = String(maxLevel);
-  filterSlider.setAttribute('aria-label', 'Filter heading levels shown in Table of Contents');
-  filterSlider.addEventListener('input', () => {
-    const level = Number(filterSlider.value);
-    maxLevel = level === 1 || level === 3 ? level : 2;
+  const depthButtons: HTMLButtonElement[] = [];
+
+  function updateDepthButtons(): void {
+    for (const btn of depthButtons) {
+      const active = Number(btn.dataset.level) === maxLevel;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    }
+  }
+
+  // Apply a new depth filter — shared by the depth pills and the empty-state
+  // "Show H1–H2–H3" reset link so both go through one path (persist + rebuild).
+  function setMaxLevel(level: 1 | 2 | 3): void {
+    maxLevel = level;
     maxLevelInitialized = true;
+    updateDepthButtons();
     // merge: giữ tocWidth do resizer ghi.
     vscode?.setState({ ...vscode.getState(), tocMaxLevel: maxLevel });
     build();
-  });
-  filterBar.appendChild(filterSlider);
-
-  // Thang chia mốc H1/H2/H3 để user thấy vị trí đang kéo tương ứng level nào.
-  const filterScale = document.createElement('div');
-  filterScale.className = 'toc-filter-scale';
-  for (const label of ['H1', 'H2', 'H3']) {
-    const tick = document.createElement('span');
-    tick.textContent = label;
-    filterScale.appendChild(tick);
   }
-  filterBar.appendChild(filterScale);
+
+  for (const level of [1, 2, 3] as const) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toc-depth-btn';
+    btn.dataset.level = String(level);
+    btn.textContent = `H${level}`;
+    btn.addEventListener('click', () => setMaxLevel(level));
+    depthButtons.push(btn);
+    filterBar.appendChild(btn);
+  }
+  updateDepthButtons();
 
   const list = document.createElement('nav');
   list.id = 'toc-list';
@@ -174,7 +195,7 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   // --- Bề rộng: khôi phục width đã lưu, cho kéo đổi rộng ---
 
   function clampWidth(px: number): number {
-    const max = Math.min(TOC_MAX_WIDTH, Math.round(window.innerWidth * 0.6));
+    const max = Math.min(TOC_MAX_WIDTH, Math.round(window.innerWidth * TOC_SHRINK_RATIO));
     return Math.max(TOC_MIN_WIDTH, Math.min(max, px));
   }
 
@@ -182,10 +203,21 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
     document.documentElement.style.setProperty('--toc-width', `${px}px`);
   }
 
+  // preferredWidth is the width the user wants (default, or dragged/restored).
+  // The applied width always clamps preferred to a fraction of the window
+  // (reflowWidth), so the panel shrinks proportionally as the window narrows;
+  // preferred is kept intact so it restores exactly when the window grows back.
+  let preferredWidth = TOC_DEFAULT_WIDTH;
   const savedWidth = vscode?.getState()?.tocWidth;
   if (typeof savedWidth === 'number' && savedWidth > 0) {
-    applyWidth(clampWidth(savedWidth));
+    preferredWidth = savedWidth;
   }
+
+  function reflowWidth(): void {
+    applyWidth(clampWidth(preferredWidth));
+  }
+
+  reflowWidth();
 
   resizer.addEventListener('pointerdown', (e) => {
     e.preventDefault();
@@ -204,6 +236,7 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       resizer.removeEventListener('pointermove', onMove);
       resizer.removeEventListener('pointerup', onUp);
       const width = clampWidth(window.innerWidth - ev.clientX);
+      preferredWidth = width;
       // merge: giữ scrollTop do main.ts ghi.
       vscode?.setState({ ...vscode.getState(), tocWidth: width });
     };
@@ -303,13 +336,13 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
     // US-10.6: smart default — only on the FIRST build of a tab with no saved
     // tocMaxLevel (maxLevelInitialized false at that point). Counts against the
     // full unfiltered heading list, not the already-filtered one below, and must
-    // never re-run on later rebuilds (content edits) so the slider never jumps
+    // never re-run on later rebuilds (content edits) so the filter never jumps
     // out from under a value the user set (or implicitly kept).
     if (!maxLevelInitialized) {
       const level12Count = allHeadings.filter((h) => headingLevel(h) <= 2).length;
       if (level12Count > TOC_FILTER_DEFAULT_MAX_COUNT) {
         maxLevel = 1;
-        filterSlider.value = String(maxLevel);
+        updateDepthButtons();
       }
       maxLevelInitialized = true;
     }
@@ -320,7 +353,61 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
     if (headings.length === 0) {
       const empty = document.createElement('div');
       empty.id = 'toc-empty';
-      empty.textContent = allHeadings.length > 0 ? 'No headings match the current filter' : 'No headings yet';
+      // Two cases, distinguished by icon shape (design handoff): "no match" =
+      // the filter hides every heading (circle-outline icon + in-place reset
+      // link); "headless" = the document has no headings at all (rounded-rect
+      // icon + a muted hint).
+      const noMatch = allHeadings.length > 0;
+
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const icon = document.createElementNS(SVG_NS, 'svg');
+      icon.setAttribute('class', 'toc-empty-icon');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('fill', 'none');
+      icon.setAttribute('stroke', 'currentColor');
+      icon.setAttribute('stroke-width', '1.6');
+      icon.setAttribute('aria-hidden', 'true');
+      const shape = document.createElementNS(SVG_NS, noMatch ? 'circle' : 'rect');
+      if (noMatch) {
+        shape.setAttribute('cx', '12');
+        shape.setAttribute('cy', '12');
+        shape.setAttribute('r', '8');
+      } else {
+        shape.setAttribute('x', '4');
+        shape.setAttribute('y', '4');
+        shape.setAttribute('width', '16');
+        shape.setAttribute('height', '16');
+        shape.setAttribute('rx', '3');
+      }
+      icon.appendChild(shape);
+      empty.appendChild(icon);
+
+      const msg = document.createElement('div');
+      msg.className = 'toc-empty-msg';
+      msg.textContent = noMatch ? 'No headings match the current filter' : 'No headings yet';
+      empty.appendChild(msg);
+
+      // Only offer the reset when clearing the filter would actually reveal a
+      // heading — i.e. one exists at a selectable depth (≤3). A document whose
+      // only headings are H4–H6 is no-match at every pill level, so a reset
+      // would be a dead-end; show the message alone there, no false affordance.
+      const canReset = noMatch && allHeadings.some((h) => headingLevel(h) <= 3);
+      if (canReset) {
+        // Reset the filter to show all levels, in place — saves the user
+        // reaching back up to the depth pills (design handoff affordance).
+        const reset = document.createElement('button');
+        reset.type = 'button';
+        reset.className = 'toc-empty-reset';
+        reset.textContent = 'Show H1–H2–H3';
+        reset.addEventListener('click', () => setMaxLevel(3));
+        empty.appendChild(reset);
+      } else if (!noMatch) {
+        const hint = document.createElement('div');
+        hint.className = 'toc-empty-hint';
+        hint.textContent = 'Add a heading (#) to populate.';
+        empty.appendChild(hint);
+      }
+
       list.appendChild(empty);
       return;
     }
@@ -458,7 +545,6 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
 
   function toggle(): void {
     open = !open;
-    panel.hidden = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {
       build();
@@ -470,6 +556,7 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   return {
     isOpen: () => open,
     toggle,
+    reflowWidth,
     refresh(): void {
       if (!open) {
         return;

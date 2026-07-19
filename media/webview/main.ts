@@ -315,6 +315,9 @@ postToHost({ type: 'ready' });
 // (respect their manual choice) until the next time it goes narrow.
 let wasNarrowViewport = isNarrowViewport();
 window.addEventListener('resize', () => {
+  // Shrink the panel proportionally first, so the narrow-viewport check below
+  // reads the reflowed --toc-width (panel shrinks, then auto-hides at the floor).
+  toc.reflowWidth();
   const narrow = isNarrowViewport();
   if (narrow && !wasNarrowViewport && toc.isOpen()) {
     toc.toggle();

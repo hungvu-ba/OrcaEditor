@@ -283,3 +283,10 @@
 | 0.8.0 | 2026-07-18 | Fix (bug General R3 #1): clicking a block/table drag handle now opens the Move menu at the click point, not far below a tall block/section. |
 | 0.8.0 | 2026-07-18 | Fix (bug2): undo after deleting a just-pasted image now restores it — the inverse paste↔delete pair is split so VS Code no longer merges them into one net-zero undo step. |
 | 0.8.0 | 2026-07-19 | Feature: TOC panel header now shows a reading-progress ring, estimated read time, and word count instead of the "Table of Contents" title. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel now slides open/closed (width+opacity) and outline rows use a flat active-tint + growing left accent bar, per the outline-rail design handoff. |
+| 0.8.0 | 2026-07-19 | Feature: TOC heading-level filter changed from a slider to 3 pill buttons (H1/H2/H3), matching the outline-rail design handoff; same filter behavior, control only. |
+| 0.8.0 | 2026-07-19 | Fix + polish: TOC resize-drag no longer lags cursor; ring/filter/focus re-tint under Reading palettes; empty state gains an icon + no-match reset link; `.toc-item` keyboard focus outline. |
+| 0.8.0 | 2026-07-19 | Fix: long TOC heading titles truncate with an ellipsis again — the flat-row `.toc-item` had become `display:flex`, which broke `text-overflow:ellipsis`; reverted to block. |
+| 0.8.0 | 2026-07-19 | Change: TOC reading-progress ring is now a fixed 54px instead of scaling with the panel width — a resizing ring read as unstable. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel width now shrinks proportionally as the editor window narrows (capped to ~35% of the window, floor 200px), and restores the user's preferred width when it grows back. |
+| 0.8.0 | 2026-07-19 | Fix: during TOC resize-drag the editor content + toolbar now track the panel edge 1:1 — their `padding-right`/`margin-right` transition is suppressed while dragging, removing the 0.3s lag. |
