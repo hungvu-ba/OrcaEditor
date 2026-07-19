@@ -24,6 +24,7 @@ import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
 let pass = 0;
 let fail = 0;
@@ -413,6 +414,19 @@ eq('style: "_" in link URL not em evidence', detectBlockStyle('[doc](https://ex.
 eq('style: intraword "_" after non-ASCII letter ignored', detectBlockStyle('chữ_ký here and *em*', 'paragraph').em, null);
 eq('style: escaped backslash before "_" → em "_"', detectBlockStyle('C:\\\\_dir_ here', 'paragraph').em, '_');
 eq('style: backtick-run span strips fully → em null', detectBlockStyle('Use ``x `_foo` y`` here', 'paragraph').em, null);
+
+// ---------------------------------------------------------------------------
+// reading-stats (US-10.7) — word count (CJK char = 1 word), read-time
+// estimate (200 WPM, 0 words → 0 min), hardcoded thousands separator.
+// ---------------------------------------------------------------------------
+
+eq('countWords: mixed non-CJK + CJK → 2 words + 5 chars = 7', countWords('Hello world こんにちは'), 7);
+// Supplementary-plane Han (CJK Extension B, U+20000) is still one word each,
+// not collapsed into a single run — a plain BMP-only regex would miss these.
+eq('countWords: supplementary-plane Han counts per character', countWords(String.fromCodePoint(0x20000, 0x20001, 0x20002)), 3);
+eq('estimateReadMinutes: 0 words → 0 min', estimateReadMinutes(0), 0);
+eq('estimateReadMinutes: 7 words → 1 min (floor never shown for real content)', estimateReadMinutes(7), 1);
+eq('formatCount: hardcoded comma, not toLocaleString', formatCount(1860), '1,860');
 
 // ---------------------------------------------------------------------------
 // Security tripwires (src/provider.ts) — khoá các bất biến từ security review

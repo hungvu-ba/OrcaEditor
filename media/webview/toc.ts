@@ -13,6 +13,8 @@
 import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
 import { showTooltip, hideTooltip } from './tooltip';
+import { getDocHeight } from './match-utils';
+import { extractReadableText, countWords, estimateReadMinutes, formatCount } from './reading-stats';
 import type { VsCodeApi } from './vscode-api';
 
 export interface TocController {
@@ -38,6 +40,54 @@ const TOC_MAX_WIDTH = 600;
 /** US-10.6: heading-level filter — số heading tối đa (level <= 2) trước khi mặc định thu về H1-only. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+/**
+ * US-10.7 reading-progress ring geometry (SVG stroke-dashoffset donut) —
+ * matches the design handoff's 54x54 hifi ring (r=24, stroke-width 6,
+ * circumference 150.8). The viewBox stays at this fixed size; the rendered
+ * size scales down on narrow panels via CSS (#toc-progress-ring, clamp on
+ * --toc-width), which uniformly scales the whole vector including the
+ * percent text.
+ */
+const RING_VIEWBOX_SIZE = 54;
+const RING_CENTER = RING_VIEWBOX_SIZE / 2;
+const RING_RADIUS = 24;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
+
+/** Builds the reading-progress ring: a track circle + a fill circle animated via stroke-dashoffset, plus a centered percent label. */
+function createProgressRing(): SVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.id = 'toc-progress-ring';
+  svg.setAttribute('viewBox', `0 0 ${RING_VIEWBOX_SIZE} ${RING_VIEWBOX_SIZE}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Reading progress: 0%');
+
+  const track = document.createElementNS(SVG_NS, 'circle');
+  track.setAttribute('class', 'toc-progress-track');
+  track.setAttribute('cx', String(RING_CENTER));
+  track.setAttribute('cy', String(RING_CENTER));
+  track.setAttribute('r', String(RING_RADIUS));
+
+  const fill = document.createElementNS(SVG_NS, 'circle');
+  fill.setAttribute('class', 'toc-progress-fill');
+  fill.setAttribute('cx', String(RING_CENTER));
+  fill.setAttribute('cy', String(RING_CENTER));
+  fill.setAttribute('r', String(RING_RADIUS));
+  fill.setAttribute('stroke-dasharray', String(RING_CIRCUMFERENCE));
+  fill.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE));
+
+  const value = document.createElementNS(SVG_NS, 'text');
+  value.setAttribute('class', 'toc-progress-value');
+  value.setAttribute('x', String(RING_CENTER));
+  value.setAttribute('y', String(RING_CENTER + 1));
+  value.textContent = '0%';
+
+  svg.appendChild(track);
+  svg.appendChild(fill);
+  svg.appendChild(value);
+  return svg;
+}
+
 export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): TocController {
   // --- Panel bên phải ---
   const panel = document.createElement('aside');
@@ -52,10 +102,23 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
 
   const header = document.createElement('div');
   header.id = 'toc-header';
-  const title = document.createElement('span');
-  title.id = 'toc-title';
-  title.textContent = 'Table of Contents';
-  header.appendChild(title);
+
+  // US-10.7: reading-stats block replaces the "Table of Contents" title —
+  // progress ring + read-time/word-count text, both recomputed in build().
+  const stats = document.createElement('div');
+  stats.id = 'toc-stats';
+  stats.setAttribute('aria-label', 'Document reading statistics');
+  stats.appendChild(createProgressRing());
+  const statsText = document.createElement('div');
+  statsText.id = 'toc-stats-text';
+  const minutesLine = document.createElement('div');
+  minutesLine.className = 'toc-stats-minutes';
+  const wordsLine = document.createElement('div');
+  wordsLine.className = 'toc-stats-words';
+  statsText.appendChild(minutesLine);
+  statsText.appendChild(wordsLine);
+  stats.appendChild(statsText);
+  header.appendChild(stats);
 
   // --- US-10.6: heading-level filter (1=H1 only, 2=H1–H2, 3=H1–H2–H3) ---
   // maxLevel mặc định = 2; maxLevelInitialized đánh dấu heuristic >20 heading
@@ -180,7 +243,62 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   // Dựng danh sách
   // -------------------------------------------------------------------------
 
+  /**
+   * US-10.7: (re)computes the progress-ring percent from the current scroll
+   * position and shows/hides the ring based on whether the document is
+   * scrollable. Cheap (no getBoundingClientRect) — safe to call from the
+   * rAF-throttled scroll path (scheduleUpdateActive → updateActive) with no
+   * new scroll listener. Re-queries the ring node each call (no stale/detached
+   * reference across a header rebuild).
+   */
+  function updateProgressRing(): void {
+    const ring = header.querySelector<SVGElement>('#toc-progress-ring');
+    if (!ring) {
+      return;
+    }
+    const docHeight = getDocHeight();
+    const scrollable = docHeight > window.innerHeight;
+    ring.toggleAttribute('hidden', !scrollable);
+    if (!scrollable) {
+      return;
+    }
+    const fill = ring.querySelector('.toc-progress-fill');
+    const valueText = ring.querySelector('.toc-progress-value');
+    if (!fill || !valueText) {
+      return;
+    }
+    const maxScroll = docHeight - window.innerHeight;
+    const fraction = maxScroll <= 0 ? 1 : Math.min(1, Math.max(0, window.scrollY / maxScroll));
+    const percent = fraction >= 1 ? 100 : Math.floor(fraction * 100);
+    fill.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE * (1 - percent / 100)));
+    valueText.textContent = `${percent}%`;
+    ring.setAttribute('aria-label', `Reading progress: ${percent}%`);
+  }
+
+  /**
+   * US-10.7: recomputes word count + read time from the current document and
+   * updates the ring's initial value. Runs on the same debounced cadence as
+   * the TOC list rebuild (called from build(), which only runs while open).
+   */
+  function updateReadingStats(): void {
+    const minutesLine = header.querySelector<HTMLElement>('.toc-stats-minutes');
+    const wordsLine = header.querySelector<HTMLElement>('.toc-stats-words');
+    if (!minutesLine || !wordsLine) {
+      return;
+    }
+    const words = countWords(extractReadableText(content));
+    const hasWords = words > 0;
+    minutesLine.hidden = !hasWords;
+    wordsLine.hidden = !hasWords;
+    if (hasWords) {
+      minutesLine.textContent = `${estimateReadMinutes(words)} min read`;
+      wordsLine.textContent = `${formatCount(words)} word${words === 1 ? '' : 's'}`;
+    }
+    updateProgressRing();
+  }
+
   function build(): void {
+    updateReadingStats();
     allHeadings = Array.from(content.querySelectorAll(HEADING_SEL)) as HTMLElement[];
     // US-10.6: smart default — only on the FIRST build of a tab with no saved
     // tocMaxLevel (maxLevelInitialized false at that point). Counts against the
@@ -246,6 +364,9 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   // -------------------------------------------------------------------------
 
   function updateActive(): void {
+    // US-10.7: ring tracks scroll independently of whether the doc has any
+    // headings, so it must update before the entries.length early return.
+    updateProgressRing();
     if (entries.length === 0) {
       return;
     }

@@ -1440,18 +1440,78 @@ body.toc-resizing {
   padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
 }
 
-#toc-title {
-  /* H2 level (markdown.css: h2 { font-size: 1.5em }) — `em` (not a fixed px)
-   * nên vẫn tỉ lệ đúng theo --markdown-font-size nếu user đổi cỡ chữ preview. */
-  font-size: 1.5em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  opacity: 0.8;
+/* US-10.7: reading-stats block (progress ring + read-time/word-count text),
+ * replaces the former #toc-title row. Sits inside #toc-header, which already
+ * reserves the toolbar-height top padding above. */
+#toc-stats {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   min-width: 0;
+  width: 100%;
+}
+
+/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is
+ * 54px in its 272px-wide rail (~0.2 of panel width). This panel is resizable
+ * (200-600px, --toc-width) rather than the mockup's fixed rail, so the ring
+ * scales with it via the same ratio — clamped so it never shrinks below a
+ * legible floor or grows past the hifi's 54px target. */
+#toc-progress-ring {
+  flex: none;
+  width: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
+  height: clamp(28px, calc(var(--toc-width, 300px) * 0.2), 54px);
+}
+
+/* SVG elements aren't covered by the UA [hidden] { display: none } rule
+ * (that rule only targets the HTML namespace) — enforce it explicitly. */
+#toc-progress-ring[hidden] {
+  display: none;
+}
+
+#toc-progress-ring .toc-progress-track {
+  fill: none;
+  stroke: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  stroke-width: 6;
+}
+
+#toc-progress-ring .toc-progress-fill {
+  fill: none;
+  stroke: var(--vscode-textLink-foreground, #3794ff);
+  stroke-width: 6;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset 0.15s linear;
+}
+
+#toc-progress-ring .toc-progress-value {
+  fill: var(--vscode-foreground, #cccccc);
+  font-size: 12px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+#toc-stats-text {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.toc-stats-minutes,
+.toc-stats-words {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toc-stats-minutes {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toc-stats-words {
+  font-size: 12px;
+  opacity: 0.75;
 }
 
 /* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
