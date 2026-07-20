@@ -111,7 +111,7 @@ const externalDrop = initExternalDrop(content, {
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
-// Reading Mode (US-19.x) — controller lái CSS class/var. enabled/preset/palette
+// Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
 const readability = initReadability({
@@ -171,8 +171,8 @@ let blockMap: BlockEntry[] = [];
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
 /**
- * Reference prose-column width = Comfortable Reading — Sepia size: measure 70ch
- * @ 16px font (markdown.css #content.reading-preset-comfortable). ch→px via the
+ * Reference prose-column width = reading measure 70ch
+ * @ 16px font (markdown.css body.reading-mode #content). ch→px via the
  * fixed estimate 1ch ≈ 0.5em → 70 × 0.5 × 16 = 560px. A reference constant,
  * independent of whether Reading Mode is currently on.
  */
@@ -284,7 +284,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'configUpdate': {
-      // Reading Mode/preset/palette KHÔNG áp qua configUpdate dù giờ global
+      // Reading Mode (enabled/mode) KHÔNG áp qua configUpdate dù giờ global
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
@@ -309,7 +309,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'readingModeChanged': {
-      // Bug 0716 #2: enabled/preset/palette vừa đổi ở TAB KHÁC, host broadcast
+      // Bug 0716 #2: enabled/mode vừa đổi ở TAB KHÁC, host broadcast
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
       // onReadingModeChange, tránh vòng lặp).
       readability.applyReadingModeFromHost(msg);
@@ -385,9 +385,6 @@ function renderDocument(markdown: string): void {
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
   blockMap = buildBlockMap(content, markdown, blockMap);
-  // US-19.15: dò ngôn ngữ tài liệu (Việt/khác) để preset Academic Paper chọn font
-  // đúng — chạy sau khi #content đã dựng lại nội dung mới.
-  readability.refreshContentLanguage();
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.

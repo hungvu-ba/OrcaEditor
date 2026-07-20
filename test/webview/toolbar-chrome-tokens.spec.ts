@@ -7,15 +7,12 @@
 import { test, expect } from '@playwright/test';
 import { openEditor } from './_harness';
 
-const PALETTES = ['reading-palette-light', 'reading-palette-dark', 'reading-palette-sepia', 'reading-palette-paper', 'reading-palette-highContrast'];
+const PALETTES = ['reading-mode-sepia', 'reading-mode-paper'];
 
-// Dedicated per-mode toolbar chrome (US-4.25), as resolved rgb().
+// Dedicated per-mode toolbar chrome (US-4.25/US-19.24), as resolved rgb().
 const MODES = [
-  { cls: 'reading-palette-light', bg: 'rgb(243, 243, 243)', badge: 'rgb(0, 95, 184)' },
-  { cls: 'reading-palette-dark', bg: 'rgb(37, 37, 38)', badge: 'rgb(77, 170, 252)' },
-  { cls: 'reading-palette-sepia', bg: 'rgb(236, 224, 196)', badge: 'rgb(138, 75, 8)' },
-  { cls: 'reading-palette-paper', bg: 'rgb(243, 239, 224)', badge: 'rgb(26, 95, 180)' },
-  { cls: 'reading-palette-highContrast', bg: 'rgb(0, 0, 0)', badge: 'rgb(55, 148, 255)' },
+  { cls: 'reading-mode-sepia', bg: 'rgb(236, 224, 196)', badge: 'rgb(138, 75, 8)' },
+  { cls: 'reading-mode-paper', bg: 'rgb(244, 244, 234)', badge: 'rgb(37, 84, 160)' },
 ];
 
 test('each reading mode gives the toolbar its own dedicated chrome bg + accent badge', async ({ page }) => {
@@ -45,7 +42,7 @@ test('each reading mode gives the toolbar its own dedicated chrome bg + accent b
 test('toolbar chrome is distinct from the reading content (sepia): #toolbar bg !== --rp-bg', async ({ page }) => {
   await openEditor(page, '# hi');
   const { toolbarBg, contentBg } = await page.evaluate(() => {
-    document.body.className = 'reading-palette-sepia';
+    document.body.className = 'reading-mode-sepia';
     const toolbarBg = getComputedStyle(document.querySelector('#toolbar')!).backgroundColor;
     // --rp-bg is the content palette bg; the toolbar must NOT merely inherit it.
     const probe = document.createElement('span');

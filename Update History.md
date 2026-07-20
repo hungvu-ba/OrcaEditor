@@ -323,3 +323,5 @@
 | 0.8.0 | 2026-07-20 | Fix: line-gutter left padding now 26px + 56px gutter (offset to 26px) + 16px gap = 98px to heading; off state stays 26px; toolbar bleed margins updated to match. |
 | 0.8.0 | 2026-07-20 | Fix: TOC ring track uses --toc-accent-soft (warm faint ring, not the cool tan --toc-border) and H1/H2/H3 filter is borderless per design (plain muted text, active = soft-fill pill) under named reading palettes. |
 | 0.8.0 | 2026-07-20 | Feature: Reading Mode adds 24px top breathing room below the sticky toolbar (on #content, non-zen) to match the design prototype content-pane spacing. |
+| 0.8.0 | 2026-07-20 | Refactor: collapse the two-axis preset×palette Reading Mode model into one ReadingMode concept (Standard/Sepia/Paper) across types/messages/provider/toolbar/mermaid/CSS/settings; drop unused presets/palettes + Vietnamese font auto-detect (US-19.24). |
+| 0.8.0 | 2026-07-20 | Fix: Sepia TOC panel two-tone — header (--toc-chrome-bg #f4ecd8) was lighter than the list body (--toc-bg #ece0c4), leaving a stray light band behind the progress ring; unified chrome-bg to #ece0c4 so the rail is one uniform cream (matches design + other modes). |

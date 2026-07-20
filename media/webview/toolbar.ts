@@ -286,9 +286,9 @@ export function syncReadingButtons(): void {
   const enabled = ctx.readability.isEnabled();
   document.getElementById('reading-toggle')?.classList.toggle('active', enabled);
   document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
-  // Dấu ✓ hàng bundle đang áp (US-19.18) — 'off' khi tắt hẳn, hoặc không hàng
-  // nào nếu state hiện tại (vd seed tay qua settings.json) không khớp bundle nào.
-  const current = enabled ? (ctx.readability.getStyleId() ?? '') : 'off';
+  // Dấu ✓ hàng mode đang áp (US-19.24) — 'off' khi tắt hẳn (= hàng "Standard"),
+  // ngược lại là mode màu hiện tại (sepia/paper).
+  const current = enabled ? ctx.readability.getMode() : 'off';
   syncDropdownSelection('reading-toggle', current);
 }
 
@@ -420,34 +420,33 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Reading Mode split-button — 3 mode phẳng (không nhóm/submenu):
- * "Standard" (tắt reading style, `disable()`) + 2 bundle "bật" trực tiếp
- * (`setStyle`). Hover 1 hàng live-preview lên file hiện tại (`previewStyle`);
- * rời hàng không chọn thì `cancelPreview()` trả lại theme đã commit (wiring
- * hover ở addPopoverRow). Danh sách bundle đầy đủ vẫn ở `READING_STYLES`
- * (readability.ts) — dropdown chỉ phơi 2 combo dùng nhiều nhất. ctx được gán
- * trong initToolbar trước khi mọi action chạy nên tham chiếu an toàn.
+ * Dropdown của Reading Mode split-button — 3 mode phẳng (US-19.24): "Standard"
+ * (tắt reading style, `disable()`) + "Sepia"/"Paper" (bật trực tiếp,
+ * `setMode`). Hover 1 hàng live-preview lên file hiện tại (`previewMode`); rời
+ * hàng không chọn thì `cancelPreview()` trả lại theme đã commit (wiring hover ở
+ * addPopoverRow). ctx được gán trong initToolbar trước khi mọi action chạy nên
+ * tham chiếu an toàn.
  */
 const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   {
     label: 'Standard',
     value: 'off',
     action: () => ctx.readability.disable(),
-    onHoverPreview: () => ctx.readability.previewStyle('off'),
+    onHoverPreview: () => ctx.readability.previewMode('off'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
   },
   {
     label: 'Sepia Comfort',
-    value: 'comfortable-sepia',
-    action: () => ctx.readability.setStyle('comfortable-sepia'),
-    onHoverPreview: () => ctx.readability.previewStyle('comfortable-sepia'),
+    value: 'sepia',
+    action: () => ctx.readability.setMode('sepia'),
+    onHoverPreview: () => ctx.readability.previewMode('sepia'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
   },
   {
     label: 'Paper Comfort',
-    value: 'comfortable-paper',
-    action: () => ctx.readability.setStyle('comfortable-paper'),
-    onHoverPreview: () => ctx.readability.previewStyle('comfortable-paper'),
+    value: 'paper',
+    action: () => ctx.readability.setMode('paper'),
+    onHoverPreview: () => ctx.readability.previewMode('paper'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
   },
 ];
@@ -594,11 +593,11 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Reading Mode — Standard (pick a reading style from the dropdown)',
     // Clicking the main icon always resets to "Standard" (= top dropdown row,
     // disable() reading style) rather than toggle() restoring the most recently
-    // used preset/palette — users want the main button to reset to Standard, not
+    // used mode — users want the main button to reset to Standard, not
     // reopen the previous reading mode.
     action: () => ctx.readability.disable(),
-    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành các bundle đã
-    // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
+    // US-19.24: dropdown phơi 3 mode (Standard/Sepia/Paper) — không còn
+    // split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
     dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',

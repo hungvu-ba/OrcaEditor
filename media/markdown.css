@@ -641,16 +641,10 @@ ol.contains-task-list {
   padding-left: 1.2em;
 }
 
-/* Named reading presets unify task-list indent with the bullet/ordered list
- * indent above (matrix: "shares var(--reading-list-indent), unified with
- * bullet indent"). Standard/default-preset/reading-mode-off keeps the 1.2em
- * value above unchanged — --reading-list-indent's default-preset value
- * (40px) is a different, deliberately-chosen value from 1.2em, so unifying
- * unconditionally would silently regress Standard's task-list indent. */
-#content.reading-preset-comfortable .contains-task-list,
-#content.reading-preset-compact .contains-task-list,
-#content.reading-preset-dyslexia .contains-task-list,
-#content.reading-preset-academic .contains-task-list {
+/* Reading Mode unifies task-list indent with the bullet/ordered list indent
+ * above (shares var(--reading-list-indent)). Reading-mode-off keeps the 1.2em
+ * value above unchanged. */
+body.reading-mode #content .contains-task-list {
   padding-left: var(--reading-list-indent);
 }
 
@@ -895,68 +889,20 @@ body.reading-mode #content pre {
   font-family: var(--vscode-editor-font-family, 'SF Mono', Monaco, Menlo, Consolas, monospace);
 }
 
-/* Comfortable Reading (mặc định lần đầu): dùng font của VS Code (như Default,
- * bug 0715 #5 — không ép serif nữa), chỉ giãn dòng/thu hẹp cột + tăng nhẹ cỡ chữ
- * cho dễ đọc long-form (16px, quanh mốc đọc sách web). */
-#content.reading-preset-comfortable {
+/* US-19.24 reading typography tokens — ONE set for every reading mode
+ * (Standard/Sepia/Paper all share the comfortable long-form typography: VS Code
+ * font, roomy line-height, ~70ch measure, 16px base). Consumed by the
+ * body.reading-mode #content rules above. */
+body.reading-mode #content {
   --reading-font-size: 16px;
   --reading-line-height: 1.7;
   --reading-font-stack: var(--markdown-font-family);
   --reading-measure: 70ch; /* cột chữ */
   --reading-container: 80ch; /* wide cap ~1.14× cột chữ (bảng/code rộng vừa phải) */
   --reading-measure-frac: 87.5%; /* 70/80 — heading khớp cột <p> (miễn nhiễm font) */
-  /* Content-spacing/style tokens: consumers land in Phase 5; declared here now
-   * so the contract lint sees the full --reading- set and they degrade safely. */
   --reading-list-indent: 1.8em;
   --reading-quote-style: italic;
   --reading-embed-padding: 6px 10px;
-}
-
-/* Default: identical to current behavior (full width, follow theme/font/size of
- * VS Code). font-size/line-height/font-stack are wired to the same --markdown-*
- * vars the :root contract uses, so behavior stays inherit-equivalent while the
- * contract lint sees the full --reading- set. list-indent/quote-style/embed-
- * padding are the Standard baselines (consumers land in Phase 5). */
-#content.reading-preset-default {
-  --reading-font-size: var(--markdown-font-size, 14px);
-  --reading-line-height: var(--markdown-line-height, 22px);
-  --reading-font-stack: var(--markdown-font-family);
-  --reading-measure: none;
-  --reading-container: none;
-  --reading-measure-frac: none; /* full width — heading/hr trải hết như cũ */
-  --reading-list-indent: 40px;
-  --reading-quote-style: italic;
-  --reading-embed-padding: 6px 10px;
-}
-
-/* Compact: rộng hơn, giãn dòng chặt + cỡ chữ nhỏ hơn để nhét nhiều nội dung. */
-#content.reading-preset-compact {
-  --reading-font-size: 13px;
-  --reading-line-height: 1.5;
-  --reading-font-stack: var(--markdown-font-family);
-  --reading-measure: 90ch;
-  --reading-container: 102ch; /* ~1.13× cột chữ */
-  --reading-measure-frac: 88.2%; /* 90/102 */
-  --reading-list-indent: 1.3em;
-  --reading-quote-style: italic;
-  --reading-embed-padding: 4px 8px;
-}
-
-/* Dyslexia-friendly (US-19.6/19.7): font accessibility (dùng nếu máy đã cài,
- * OFL — không bundle ở MVP), cỡ chữ lớn nhất (18px, theo khuyến nghị đọc dễ),
- * tăng letter/word/line-spacing, cột hẹp dễ theo dòng. */
-#content.reading-preset-dyslexia {
-  --reading-font-stack: 'Atkinson Hyperlegible', 'OpenDyslexic', Verdana, Tahoma, sans-serif;
-  --reading-font-size: 18px;
-  --reading-line-height: 1.8;
-  --reading-measure: 65ch;
-  --reading-container: 74ch; /* ~1.14× cột chữ */
-  --reading-measure-frac: 87.8%; /* 65/74 */
-  --reading-list-indent: 2.2em;
-  --reading-quote-style: normal; /* italics hurt dyslexic readability */
-  --reading-embed-padding: 8px 12px;
-  letter-spacing: 0.03em;
-  word-spacing: 0.08em;
 }
 
 /* Literata (bundled, US-19.15): book serif của Google (OFL 1.1) commission cho
@@ -1129,122 +1075,28 @@ body.reading-mode #content pre {
   src: url('fonts/et-book/et-book-bold.woff') format('woff');
 }
 
-/* Academic Paper (US-19.15): look bài luận ai-2027.com — cột chữ hẹp, căn trái
- * (ragged-right), giãn dòng rộng. Font khớp stack Tufte CSS của trang gốc: ET Book
- * (bundled) primary → Palatino family fallback. MẶC ĐỊNH (tài liệu tiếng Anh/không
- * dấu Việt) render bằng ET Book y hệt ai-2027.com. Literata (bundled) đứng cuối
- * làm fallback đảm bảo cho máy thiếu ET Book+Palatino trước khi rơi về serif hệ
- * thống. Ghép với palette `paper` cho nền kem trắng ấm để trọn look. */
-#content.reading-preset-academic {
-  --reading-font-stack: 'et-book', Palatino, 'Palatino Linotype', 'Palatino LT STD',
-    'Book Antiqua', Georgia, 'Literata', 'Times New Roman', serif;
-  /* Cỡ chữ lớn kiểu essay in (ai-2027.com dùng ET Book ~20px) — 19px cho serif
-   * đọc "thảnh thơi" trên cột hẹp 62ch. */
-  --reading-font-size: 19px;
-  --reading-line-height: 1.75;
-  --reading-measure: 62ch;
-  --reading-container: 71ch; /* ~1.15× cột chữ */
-  --reading-measure-frac: 87.3%; /* 62/71 */
-  --reading-list-indent: 1.8em;
-  --reading-quote-style: italic;
-  --reading-embed-padding: 8px 12px;
-}
-/* Tài liệu tiếng Việt (US-19.15: readability.ts dò ký tự đặc trưng VN → gắn
- * `content-lang-vi`): đưa Literata (bundled, subset Vietnamese đủ dấu, đồng nhất
- * mọi OS) LÊN ĐẦU vì Palatino trên nhiều máy thiếu/kém dấu tiếng Việt. Palatino
- * family chỉ còn là fallback. */
-#content.reading-preset-academic.content-lang-vi {
-  --reading-font-stack: 'Literata', Palatino, 'Palatino Linotype', 'Book Antiqua',
-    Georgia, 'Times New Roman', serif;
-}
-/* --- Reading-Mode per-group heading scale (Reading Mode plan gap #3) ---
- * Palette-independent: heading size is a function of the typography preset
- * only (Sepia/Light/Dark/Paper change color, not size). Shared weight / H2
- * border / opacity / letter-spacing come from the base heading rules; each
- * preset overrides font-size + its own accessibility deviations. Values:
- * Reading Mode Typography - Review Notes.md (designer-authored 2026-07-19). */
-#content.reading-preset-comfortable h1 {
+/* --- Reading Mode heading scale (US-19.24) ---
+ * One scale for every reading mode (color modes change color, not size). Shared
+ * weight / H2 border / opacity / letter-spacing come from the base heading
+ * rules; this only overrides font-size. Values: Reading Mode Typography -
+ * Review Notes.md (designer-authored 2026-07-19, comfortable column). */
+body.reading-mode #content h1 {
   font-size: 30px;
 }
-#content.reading-preset-comfortable h2 {
+body.reading-mode #content h2 {
   font-size: 23px;
 }
-#content.reading-preset-comfortable h3 {
+body.reading-mode #content h3 {
   font-size: 19px;
 }
-#content.reading-preset-comfortable h4 {
+body.reading-mode #content h4 {
   font-size: 18px;
 }
-#content.reading-preset-comfortable h5 {
+body.reading-mode #content h5 {
   font-size: 16px;
 }
-#content.reading-preset-comfortable h6 {
+body.reading-mode #content h6 {
   font-size: 14.5px;
-}
-
-#content.reading-preset-academic h1 {
-  font-size: 38px;
-  letter-spacing: 0; /* serif needs no optical tightening at large sizes */
-}
-#content.reading-preset-academic h2 {
-  font-size: 28.5px;
-}
-#content.reading-preset-academic h3 {
-  font-size: 23.75px;
-}
-#content.reading-preset-academic h4 {
-  font-size: 19px;
-}
-#content.reading-preset-academic h5 {
-  font-size: 16.5px;
-}
-#content.reading-preset-academic h6 {
-  font-size: 16px;
-}
-
-#content.reading-preset-compact h1 {
-  font-size: 25px;
-  letter-spacing: -0.2px; /* smaller size needs less correction */
-}
-#content.reading-preset-compact h2 {
-  font-size: 18.5px;
-}
-#content.reading-preset-compact h3 {
-  font-size: 15.5px;
-}
-#content.reading-preset-compact h4 {
-  font-size: 14.5px;
-}
-#content.reading-preset-compact h5 {
-  font-size: 13px;
-  opacity: 0.85; /* raised floor — avoid stacking fade on already-tight type */
-}
-#content.reading-preset-compact h6 {
-  font-size: 12px;
-  opacity: 0.7;
-}
-
-#content.reading-preset-dyslexia h1 {
-  font-size: 36px;
-  letter-spacing: 0; /* BDA: negative tracking hurts dyslexic reading */
-}
-#content.reading-preset-dyslexia h2 {
-  font-size: 27px;
-}
-#content.reading-preset-dyslexia h3 {
-  font-size: 22.5px;
-}
-#content.reading-preset-dyslexia h4 {
-  font-size: 18px;
-}
-#content.reading-preset-dyslexia h5 {
-  font-size: 15.75px;
-  opacity: 0.9; /* accessibility override — avoid low-contrast fade */
-}
-#content.reading-preset-dyslexia h6 {
-  font-size: 15.5px;
-  letter-spacing: 0.04em; /* positive tracking is dyslexia-beneficial */
-  opacity: 0.78;
 }
 
 /* --- US-19.6 Chrome font-size theo preset (TOC + pop-up) ---
@@ -1256,55 +1108,15 @@ body.reading-mode #content pre {
  * (pattern :has đã dùng ở .toolbar-popover-item.selected). Application (font-size
  * thực tế) nằm ở editor.css cùng khối chrome-palette.
  *
- * Named preset ghi đè TẤT CẢ bucket về CÙNG MỘT cỡ (uniform chrome scaling) —
- * giữ UI gọn, nút không phình theo prose. Default preset KHÔNG ghi đè bucket
- * nào → chrome giữ nguyên cỡ native của từng selector (Standard byte-identical). */
-body.reading-mode:has(#content.reading-preset-comfortable) {
+ * US-19.24: one uniform chrome scale for every reading mode (nút không phình
+ * theo prose). Reading-mode-off giữ nguyên cỡ native của từng selector
+ * (Standard byte-identical). Chrome dùng font VS Code như prose nên không cần
+ * hoist --reading-ui-font-family (fallback `inherit` ở editor.css xử lý). */
+body.reading-mode {
   --reading-ui-fs-10: 14px;
   --reading-ui-fs-11: 14px;
   --reading-ui-fs-12: 14px;
   --reading-ui-fs-13: 14px;
-}
-body.reading-mode:has(#content.reading-preset-compact) {
-  --reading-ui-fs-10: 12px;
-  --reading-ui-fs-11: 12px;
-  --reading-ui-fs-12: 12px;
-  --reading-ui-fs-13: 12px;
-}
-body.reading-mode:has(#content.reading-preset-dyslexia) {
-  --reading-ui-fs-10: 15px;
-  --reading-ui-fs-11: 15px;
-  --reading-ui-fs-12: 15px;
-  --reading-ui-fs-13: 15px;
-  --reading-ui-letter-spacing: 0.03em;
-  --reading-ui-word-spacing: 0.08em;
-}
-body.reading-mode:has(#content.reading-preset-academic) {
-  --reading-ui-fs-10: 14px;
-  --reading-ui-fs-11: 14px;
-  --reading-ui-fs-12: 14px;
-  --reading-ui-fs-13: 14px;
-}
-
-/* --- Chrome font-family theo preset (TOC + pop-up) ---
- * Same "chrome lives outside #content, custom properties don't cross the
- * sibling boundary" problem as --reading-ui-fs-N above, but for
- * font-family: presets that set a custom --reading-font-stack need that
- * stack hoisted onto <body> too so the TOC (#toc-panel, appended straight to
- * document.body — see toc.ts) renders in the same font as the reading text.
- * Only presets that actually override the font stack need an entry here;
- * comfortable/compact/default inherit the VS Code font, so chrome already
- * matches without hoisting (fallback `inherit` in editor.css handles them). */
-body.reading-mode:has(#content.reading-preset-dyslexia) {
-  --reading-ui-font-family: 'Atkinson Hyperlegible', 'OpenDyslexic', Verdana, Tahoma, sans-serif;
-}
-body.reading-mode:has(#content.reading-preset-academic) {
-  --reading-ui-font-family: 'et-book', Palatino, 'Palatino Linotype', 'Palatino LT STD',
-    'Book Antiqua', Georgia, 'Literata', 'Times New Roman', serif;
-}
-body.reading-mode:has(#content.reading-preset-academic.content-lang-vi) {
-  --reading-ui-font-family: 'Literata', Palatino, 'Palatino Linotype', 'Book Antiqua',
-    Georgia, 'Times New Roman', serif;
 }
 
 /* --- US-19.5 Reading palettes ---
@@ -1313,198 +1125,123 @@ body.reading-mode:has(#content.reading-preset-academic.content-lang-vi) {
  * #000/#fff tuyền, giảm chói/halation). Syntax highlight (.hljs-*) giữ nguyên
  * màu token — rule `pre code` chỉ đặt màu cho text-node trần, span .hljs-* có
  * rule riêng (thắng kế thừa) nên không bị đè. */
-body[class*='reading-palette-'] {
+body[class*='reading-mode-'] {
   background: var(--rp-bg);
   color: var(--rp-fg);
 }
-body[class*='reading-palette-'] #content {
+body[class*='reading-mode-'] #content {
   color: var(--rp-fg);
 }
-body[class*='reading-palette-'] #content a {
+body[class*='reading-mode-'] #content a {
   color: var(--rp-link);
 }
-body[class*='reading-palette-'] #content a:hover {
+body[class*='reading-mode-'] #content a:hover {
   color: var(--rp-link-hover);
 }
-body[class*='reading-palette-'] #content :not(pre) > code {
+body[class*='reading-mode-'] #content :not(pre) > code {
   background-color: var(--rp-code-bg);
   color: var(--rp-fg);
 }
-body[class*='reading-palette-'] #content pre {
+body[class*='reading-mode-'] #content pre {
   background-color: var(--rp-pre-bg);
   border-color: var(--rp-embed-border);
 }
-body[class*='reading-palette-'] #content pre code {
+body[class*='reading-mode-'] #content pre code {
   color: var(--rp-fg);
 }
 /* Document Blocks item 8 — code-block header colors in reading palettes. The
  * label/Copy text is muted (opacity, not a token — palettes define no muted fg)
  * to match the VS-theme headers' --vscode-descriptionForeground; the separator
  * border keeps full --rp-embed-border strength. */
-body[class*='reading-palette-'] #content .md-code-header {
+body[class*='reading-mode-'] #content .md-code-header {
   border-bottom-color: var(--rp-embed-border);
   color: var(--rp-fg);
 }
-body[class*='reading-palette-'] #content .md-code-lang,
-body[class*='reading-palette-'] #content .md-code-header button.md-code-copy,
-body[class*='reading-palette-'] #content .md-code-header button.md-code-wrap {
+body[class*='reading-mode-'] #content .md-code-lang,
+body[class*='reading-mode-'] #content .md-code-header button.md-code-copy,
+body[class*='reading-mode-'] #content .md-code-header button.md-code-wrap {
   opacity: 0.62;
 }
 /* Document Blocks item 8 — Sepia inline code a touch smaller (0.85em vs 0.9em). */
-body.reading-palette-sepia #content :not(pre) > code {
+body.reading-mode-sepia #content :not(pre) > code {
   font-size: 0.85em;
 }
-body[class*='reading-palette-'] #content blockquote {
+body[class*='reading-mode-'] #content blockquote {
   background: var(--rp-quote-bg);
   border-color: var(--rp-quote-border);
   color: var(--rp-quote-fg);
 }
-body[class*='reading-palette-'] #content th,
-body[class*='reading-palette-'] #sticky-table-header th {
+body[class*='reading-mode-'] #content th,
+body[class*='reading-mode-'] #sticky-table-header th {
   border-color: var(--rp-th-border);
 }
-body[class*='reading-palette-'] #content h1,
-body[class*='reading-palette-'] #content h2,
-body[class*='reading-palette-'] hr,
-body[class*='reading-palette-'] #content table > tbody > tr + tr > td {
+body[class*='reading-mode-'] #content h1,
+body[class*='reading-mode-'] #content h2,
+body[class*='reading-mode-'] hr,
+body[class*='reading-mode-'] #content table > tbody > tr + tr > td {
   border-color: var(--rp-border);
 }
 /* Vùng chọn văn bản (native ::selection): mặc định thừa hưởng selection color của
  * VS Code theme — thường lệch tông (xanh theme tối) trên nền ivory/sepia và có thể
  * kém tương phản. Khi có palette, ép selection theo tint của palette để chữ dưới
  * vùng chọn luôn đọc rõ. */
-body[class*='reading-palette-'] #content ::selection {
+body[class*='reading-mode-'] #content ::selection {
   background: var(--rp-selection-bg);
   color: var(--rp-selection-fg);
 }
-body[class*='reading-palette-'] #content ::-moz-selection {
+body[class*='reading-mode-'] #content ::-moz-selection {
   background: var(--rp-selection-bg);
   color: var(--rp-selection-fg);
 }
 
 /* --- US-19.23 Phase 2: palette-scoped content-color consumers ---
- * All rules below are scoped under body[class*='reading-palette-'] so Standard/
+ * All rules below are scoped under body[class*='reading-mode-'] so Standard/
  * followTheme (no palette class) keeps its VS Code look untouched. */
 /* <mark> (==text==) — palette-tinted highlight. */
-body[class*='reading-palette-'] #content mark {
+body[class*='reading-mode-'] #content mark {
   background: var(--rp-mark-bg);
   color: var(--rp-mark-fg);
 }
 /* Task-list checkbox accent (checked + unchecked). */
-body[class*='reading-palette-'] #content .task-list-item-checkbox {
+body[class*='reading-mode-'] #content .task-list-item-checkbox {
   accent-color: var(--rp-accent);
 }
 /* hljs diff — #content lifts specificity above the base .hljs-addition/-deletion. */
-body[class*='reading-palette-'] #content .hljs-addition {
+body[class*='reading-mode-'] #content .hljs-addition {
   color: var(--rp-diff-add-fg);
   background-color: var(--rp-diff-add-bg);
 }
-body[class*='reading-palette-'] #content .hljs-deletion {
+body[class*='reading-mode-'] #content .hljs-deletion {
   color: var(--rp-diff-del-fg);
   background: var(--rp-diff-del-bg);
 }
 /* List markers — palette color + an explicit disc/circle/square cascade per
  * depth (task lists keep list-style-type:none from the global rule). */
-body[class*='reading-palette-'] #content ::marker {
+body[class*='reading-mode-'] #content ::marker {
   color: var(--rp-marker);
 }
-body[class*='reading-palette-'] #content ul {
+body[class*='reading-mode-'] #content ul {
   list-style-type: disc;
 }
-body[class*='reading-palette-'] #content ul ul {
+body[class*='reading-mode-'] #content ul ul {
   list-style-type: circle;
 }
-body[class*='reading-palette-'] #content ul ul ul {
+body[class*='reading-mode-'] #content ul ul ul {
   list-style-type: square;
 }
-body[class*='reading-palette-'] #content ul ul ul ul {
+body[class*='reading-mode-'] #content ul ul ul ul {
   list-style-type: disc;
 }
-body[class*='reading-palette-'] #content ul ul ul ul ul {
+body[class*='reading-mode-'] #content ul ul ul ul ul {
   list-style-type: circle;
 }
-body[class*='reading-palette-'] #content ul ul ul ul ul ul {
+body[class*='reading-mode-'] #content ul ul ul ul ul ul {
   list-style-type: square;
 }
 
 /* Light: nền ngà ấm, chữ gần-đen. */
-body.reading-palette-light {
-  --rp-bg: #f7f3ea;
-  --rp-fg: #1c1b18;
-  --rp-link: #1a5fb4;
-  --rp-link-hover: #123f7a;
-  --rp-code-bg: rgba(0, 0, 0, 0.06);
-  --rp-pre-bg: #efe9dc;
-  --rp-border: rgba(0, 0, 0, 0.16);
-  --rp-th-border: rgba(0, 0, 0, 0.55);
-  --rp-quote-bg: rgba(0, 0, 0, 0.04);
-  --rp-quote-border: #c9bfa8;
-  --rp-chrome-hover: rgba(0, 0, 0, 0.08);
-  --rp-chrome-active: rgba(0, 0, 0, 0.14);
-  /* Bề mặt nổi (widget/popover/input) — hơi đậm hơn nền để tách lớp. */
-  --rp-elev-bg: #efe9dc;
-  /* Viền cho embedded block (math/mermaid/code/front-matter) — đậm hơn --rp-border
-   * để "card" đọc rõ trên nền ivory (khắc phục border mờ khi dùng --vscode-*). */
-  --rp-embed-border: rgba(0, 0, 0, 0.24);
-  /* Vùng chọn văn bản: tint theo màu link, đủ tương phản với chữ tối. */
-  --rp-selection-bg: rgba(26, 95, 180, 0.22);
-  --rp-selection-fg: var(--rp-fg);
-  --rp-muted: rgba(28, 27, 24, 0.55);
-  --rp-quote-fg: var(--rp-fg);
-  --rp-marker: currentColor;
-  --rp-accent: var(--rp-link);
-  --rp-mark-bg: rgba(255, 197, 61, 0.35);
-  --rp-mark-fg: var(--rp-fg);
-  --rp-diff-add-bg: rgba(46, 125, 50, 0.18);
-  --rp-diff-add-fg: var(--rp-fg);
-  --rp-diff-del-bg: rgba(198, 40, 40, 0.16);
-  --rp-diff-del-fg: var(--rp-fg);
-  --rp-search-bg: rgba(234, 92, 0, 0.85);
-  --rp-search-bg-soft: rgba(255, 197, 61, 0.35);
-  --rp-gutter-bg: transparent;
-  --rp-gutter-num: rgba(28, 27, 24, 0.4);
-  --rp-scrollbar-thumb: rgba(28, 27, 24, 0.28);
-  --rp-scrollbar-track: transparent;
-}
-
-/* Dark: xám đậm, chữ ngà (chống halation). */
-body.reading-palette-dark {
-  --rp-bg: #1e1f22;
-  --rp-fg: #e6e1d5;
-  --rp-link: #7aa2f7;
-  --rp-link-hover: #a5c0ff;
-  --rp-code-bg: rgba(255, 255, 255, 0.07);
-  --rp-pre-bg: #26272b;
-  --rp-border: rgba(255, 255, 255, 0.16);
-  --rp-th-border: rgba(255, 255, 255, 0.55);
-  --rp-quote-bg: rgba(255, 255, 255, 0.05);
-  --rp-quote-border: #4a4b50;
-  --rp-chrome-hover: rgba(255, 255, 255, 0.1);
-  --rp-chrome-active: rgba(255, 255, 255, 0.18);
-  --rp-elev-bg: #26272b;
-  --rp-embed-border: rgba(255, 255, 255, 0.22);
-  --rp-selection-bg: rgba(122, 162, 247, 0.32);
-  --rp-selection-fg: var(--rp-fg);
-  --rp-muted: rgba(230, 225, 213, 0.55);
-  --rp-quote-fg: var(--rp-fg);
-  --rp-marker: currentColor;
-  --rp-accent: var(--rp-link);
-  --rp-mark-bg: rgba(255, 197, 61, 0.28);
-  --rp-mark-fg: var(--rp-bg);
-  --rp-diff-add-bg: rgba(155, 185, 85, 0.22);
-  --rp-diff-add-fg: var(--rp-fg);
-  --rp-diff-del-bg: rgba(255, 110, 110, 0.22);
-  --rp-diff-del-fg: var(--rp-fg);
-  --rp-search-bg: rgba(234, 120, 0, 0.85);
-  --rp-search-bg-soft: rgba(255, 197, 61, 0.28);
-  --rp-gutter-bg: transparent;
-  --rp-gutter-num: rgba(230, 225, 213, 0.4);
-  --rp-scrollbar-thumb: rgba(230, 225, 213, 0.28);
-  --rp-scrollbar-track: transparent;
-}
-
 /* Sepia: warm low-blue paper (US-19.23 control-matrix values). */
-body.reading-palette-sepia {
+body.reading-mode-sepia {
   --rp-bg: #f4ecd8;
   --rp-fg: #5b4636;
   --rp-muted: color-mix(in srgb, var(--rp-fg) 55%, var(--rp-bg));
@@ -1552,7 +1289,7 @@ body.reading-palette-sepia {
 /* Paper (US-19.15): nền kem trắng ấm #fffff8 + chữ gần-đen warm, kiểu trang
  * ai-2027.com/Tufte — sáng hơn `light` (ngà #f7f3ea), tông giấy in. Link nâu-mực
  * cổ điển. Ghép đẹp nhất với preset `academic`. */
-body.reading-palette-paper {
+body.reading-mode-paper {
   --rp-bg: #fffff8;
   --rp-fg: #111110;
   --rp-muted: rgba(0, 0, 0, 0.55);
@@ -1615,50 +1352,12 @@ body.reading-palette-paper {
   --rp-stripe-b: #efeee0;
 }
 
-/* High-contrast (accessibility): tương phản tối đa, viền đậm. */
-body.reading-palette-highContrast {
-  --rp-bg: #ffffff;
-  --rp-fg: #000000;
-  --rp-link: #0000ee;
-  --rp-link-hover: #0000aa;
-  --rp-code-bg: rgba(0, 0, 0, 0.1);
-  --rp-pre-bg: #f0f0f0;
-  --rp-border: #000000;
-  --rp-th-border: #000000;
-  --rp-quote-bg: rgba(0, 0, 0, 0.06);
-  --rp-quote-border: #000000;
-  --rp-chrome-hover: rgba(0, 0, 0, 0.12);
-  --rp-chrome-active: rgba(0, 0, 0, 0.2);
-  --rp-elev-bg: #f0f0f0;
-  --rp-embed-border: #000000;
-  /* HC: vùng chọn đặc, viền đậm để tương phản tối đa. */
-  --rp-selection-bg: #b4d5fe;
-  --rp-selection-fg: #000000;
-  --rp-muted: rgba(0, 0, 0, 0.75);
-  --rp-quote-fg: var(--rp-fg);
-  --rp-marker: currentColor;
-  --rp-accent: var(--rp-link);
-  /* HC: solid opaque marks/diffs/search instead of low-opacity tints, for max contrast. */
-  --rp-mark-bg: #ffeb3b;
-  --rp-mark-fg: #000000;
-  --rp-diff-add-bg: #c8e6c9;
-  --rp-diff-add-fg: #000000;
-  --rp-diff-del-bg: #ffcdd2;
-  --rp-diff-del-fg: #000000;
-  --rp-search-bg: #ff8f00;
-  --rp-search-bg-soft: #ffe082;
-  --rp-gutter-bg: transparent;
-  --rp-gutter-num: #000000;
-  --rp-scrollbar-thumb: #000000;
-  --rp-scrollbar-track: transparent;
-}
-
-/* --- US-19.17 Link style per reading preset (bug 0715 item 7) ---
+/* --- US-19.17 Link style in Reading Mode (bug 0715 item 7) ---
  * Underline is mandatory in Reading Mode (no on/off toggle — always more than
  * one visual signal beyond color, WCAG 1.4.1 / color-blindness). The structural
  * decoration (underline, thickness, offset, weight) is keyed on body.reading-mode
  * so followTheme keeps it. The TINT itself (the color-mix / var(--rp-link)
- * decoration/background colors) is split out to body[class*='reading-palette-']
+ * decoration/background colors) is split out to body[class*='reading-mode-']
  * scope: now that --rp-link resolves at :root (= --vscode-textLink-foreground),
  * an unscoped color-mix(var(--rp-link) …) would tint followTheme links; scoping
  * the tint to palettes keeps followTheme's decoration-color at its currentColor
@@ -1670,34 +1369,8 @@ body.reading-mode #content a {
   text-underline-offset: 0.14em;
   font-weight: 500;
 }
-body[class*='reading-palette-'] #content a {
+body[class*='reading-mode-'] #content a {
   text-decoration-color: color-mix(in srgb, var(--rp-link) 65%, transparent);
-}
-
-/* Dyslexia: thicker underline + light tint background so a link is a clearer
- * visual landmark when scanning — matches this preset's accessibility-first
- * direction. Structural props stay at reading-mode scope; the --rp-link tint
- * (decoration + background) is palette-scoped. */
-body.reading-mode:has(#content.reading-preset-dyslexia) #content a {
-  font-weight: 600;
-  text-decoration-thickness: 2px;
-  border-radius: 2px;
-  box-decoration-break: clone;
-}
-body[class*='reading-palette-']:has(#content.reading-preset-dyslexia) #content a {
-  text-decoration-color: var(--rp-link, currentColor);
-  background-color: color-mix(in srgb, var(--rp-link) 10%, transparent);
-}
-
-/* Academic: drop the bold "web link" color, lean toward ink (mixed with body
- * text) + a wider offset for the taller serif line — print-manuscript tone
- * rather than a prominent digital hyperlink. Offset stays at reading-mode
- * scope; the ink-mixed decoration color is palette-scoped. */
-body.reading-mode:has(#content.reading-preset-academic) #content a {
-  text-underline-offset: 0.22em;
-}
-body[class*='reading-palette-']:has(#content.reading-preset-academic) #content a {
-  text-decoration-color: color-mix(in srgb, var(--rp-link) 55%, var(--rp-fg) 45%);
 }
 
 /* --- US-19.18 follow-up: smooth color transition for palette preview/switch ---

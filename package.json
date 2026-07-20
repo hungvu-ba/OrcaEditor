@@ -144,27 +144,27 @@
         "orcaEditor.readability.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. When off, newly opened tabs start in Standard (no reading style). This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
+          "description": "Turn on Reading Mode: apply the comfortable long-form reading layout (measure/typography). When off, newly opened tabs start in Standard (no reading style). This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
         },
         "orcaEditor.readability.readingMode": {
           "type": "string",
           "enum": [
             "standard",
-            "comfortable-sepia",
-            "comfortable-paper"
+            "sepia",
+            "paper"
           ],
           "enumDescriptions": [
             "Standard: current behavior — full width, follow VS Code theme/font.",
-            "Comfortable Reading — Sepia: ~70ch measure, roomy line-height, warm low-blue sepia palette.",
-            "Comfortable Reading — Paper: ~70ch measure, roomy line-height, bright warm-white printed-page palette."
+            "Sepia: ~70ch measure, roomy line-height, warm low-blue sepia colors.",
+            "Paper: ~70ch measure, roomy line-height, bright warm-white printed-page colors."
           ],
           "default": "standard",
-          "description": "Which Reading Mode style to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a style from the toolbar Reading Mode dropdown applies to the current tab only (not saved back here)."
+          "description": "Which Reading Mode to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a mode from the toolbar Reading Mode dropdown applies to the current tab only (not saved back here)."
         },
         "orcaEditor.readability.fontFamily": {
           "type": "string",
           "default": "",
-          "description": "Optional reading font override applied in Reading Mode. Type the name of a font installed on your machine (nothing is bundled/downloaded). Leave empty to use the preset's default font stack."
+          "description": "Optional reading font override applied in Reading Mode. Type the name of a font installed on your machine (nothing is bundled/downloaded). Leave empty to use the reading mode's default font stack."
         },
         "orcaEditor.readability.zen": {
           "type": "boolean",

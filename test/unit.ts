@@ -25,7 +25,6 @@ import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
-import { READING_STYLES } from '../media/webview/readability';
 
 let pass = 0;
 let fail = 0;
@@ -206,20 +205,11 @@ const fromWebview: WebviewToHost[] = [
   { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
   { type: 'dropFile', requestId: 1, name: 'report.pdf', dataBase64: 'AA==' },
   { type: 'zenChanged', zen: true },
-  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
+  { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
-// US-4.27: READING_STYLES reconciled to the wireframe state (d)'s exactly 9
-// combos (removed academic-sepia/dyslexia-highContrast/compact-highContrast;
-// added compact-light/dyslexia-sepia), ordered by preset group.
-check(
-  'US-4.27: READING_STYLES = 9 wireframe combos in group order',
-  READING_STYLES.map((s) => s.id).join(',') ===
-    ['comfortable-sepia', 'comfortable-light', 'comfortable-dark', 'comfortable-paper', 'academic-paper', 'compact-dark', 'compact-light', 'dyslexia-sepia', 'dyslexia-light'].join(','),
-  `  nhận: ${READING_STYLES.map((s) => s.id).join(',')}`,
-);
 
 const readabilityFixture = {
-  enabled: false, preset: 'comfortable', palette: 'followTheme',
+  enabled: false, mode: 'standard',
   fontFamily: '', zen: false,
 } as const;
 const toWebview: HostToWebview[] = [
@@ -241,7 +231,7 @@ const toWebview: HostToWebview[] = [
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
   { type: 'dropFileResult', requestId: 1, relativePath: 'assets/report.pdf' },
   { type: 'zenChanged', zen: true },
-  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
+  { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
 check('contract: WebviewToHost phủ đủ 13 biến thể', fromWebview.length === 13);
 check('contract: HostToWebview phủ đủ 11 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 11);
@@ -475,8 +465,8 @@ check(
 const readingModeCaseBody =
   providerSrc.match(/case 'readingModeChanged': \{([\s\S]*?)\n        \}/)?.[1] ?? '';
 check(
-  'security S-1: readingModeChanged whitelist preset/palette trước khi lưu',
-  /READING_PRESETS/.test(readingModeCaseBody) && /READING_PALETTES/.test(readingModeCaseBody)
+  'security S-1: readingModeChanged whitelist mode trước khi lưu',
+  /READING_MODES/.test(readingModeCaseBody) && /msg\.mode/.test(readingModeCaseBody)
 );
 
 // Anchor vào ĐỊNH NGHĨA method (không phải chỗ gọi cùng tên đứng trước nó).

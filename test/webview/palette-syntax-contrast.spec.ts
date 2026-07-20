@@ -23,19 +23,19 @@ async function simulateDarkVsCodeTheme(page: import('@playwright/test').Page): P
 test('code-block syntax colors follow a light palette on a dark VS Code theme', async ({ page }) => {
   await simulateDarkVsCodeTheme(page);
   await openEditor(page, '```js\nconst x = 1;\n// a comment\n```\n', {
-    readability: { enabled: true, preset: 'comfortable', palette: 'sepia', fontFamily: '', zen: false },
+    readability: { enabled: true, mode: 'sepia', fontFamily: '', zen: false },
   });
 
-  await expect(page.locator('body')).toHaveClass(/reading-palette-sepia/);
+  await expect(page.locator('body')).toHaveClass(/reading-mode-sepia/);
 
   const keyword = page.locator('#content .hljs-keyword').first();
   const comment = page.locator('#content .hljs-comment').first();
   await keyword.waitFor();
 
-  // Light-theme token colors (readable dark-on-light), NOT the dark defaults
+  // Sepia's own --hl-* tokens (readable warm-on-sepia), NOT the dark defaults
   // (#569cd6 keyword / #57a64a comment) that a dark VS Code theme would leave.
-  await expect(keyword).toHaveCSS('color', 'rgb(0, 0, 255)'); // #00f
-  await expect(comment).toHaveCSS('color', 'rgb(0, 128, 0)'); // #008000
+  await expect(keyword).toHaveCSS('color', 'rgb(138, 75, 8)'); // --hl-keyword #8a4b08
+  await expect(comment).toHaveCSS('color', 'rgb(107, 125, 79)'); // --hl-comment #6b7d4f
 });
 
 test('Mermaid re-renders with the light theme when a light palette is applied', async ({ page }) => {
@@ -51,11 +51,11 @@ test('Mermaid re-renders with the light theme when a light palette is applied', 
   // drives applyReadingModeFromHost → apply() → onStyleApplied → refreshTheme.
   await page.evaluate(() =>
     window.postMessage(
-      { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
+      { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
       '*'
     )
   );
-  await expect(page.locator('body')).toHaveClass(/reading-palette-sepia/);
+  await expect(page.locator('body')).toHaveClass(/reading-mode-sepia/);
 
   // The background lightness flipped dark→light, so the diagram must re-render
   // under mermaid's light theme — its SVG markup differs from the dark one.

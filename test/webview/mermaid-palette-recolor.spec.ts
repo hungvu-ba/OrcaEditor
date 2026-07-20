@@ -9,32 +9,32 @@
 import { test, expect } from '@playwright/test';
 import { openEditor } from './_harness';
 
-test('diagram SVG recolors when the reading palette changes', async ({ page }) => {
+test('diagram SVG recolors when the reading mode changes', async ({ page }) => {
   await openEditor(page, '```mermaid\ngraph TD; A-->B; B-->C\n```\n', {
-    readability: { enabled: true, preset: 'comfortable', palette: 'sepia', fontFamily: '', zen: false },
+    readability: { enabled: true, mode: 'sepia', fontFamily: '', zen: false },
   });
 
   const svg = page.locator('.md-mermaid-chart svg');
   await svg.waitFor();
   const sepiaSvg = await svg.evaluate((el) => el.outerHTML);
 
-  // Switch to Paper — a different light palette (same brightness as sepia, so
+  // Switch to Paper — a different light mode (same brightness as sepia, so
   // the dark/default mermaid theme name alone would NOT change) but with
   // distinct --rp-* colors, exercising the color-signature re-render path.
   await page.evaluate(() =>
     window.postMessage(
-      { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'paper' },
+      { type: 'readingModeChanged', enabled: true, mode: 'paper' },
       '*'
     )
   );
-  await expect(page.locator('body')).toHaveClass(/reading-palette-paper/);
+  await expect(page.locator('body')).toHaveClass(/reading-mode-paper/);
 
   await expect.poll(async () => svg.evaluate((el) => el.outerHTML)).not.toBe(sepiaSvg);
 });
 
-test('mermaid lightbox stays fixed-dark across palette changes (US-19.22)', async ({ page }) => {
+test('mermaid lightbox stays fixed-dark across reading-mode changes (US-19.22)', async ({ page }) => {
   await openEditor(page, '```mermaid\ngraph TD; A-->B\n```\n', {
-    readability: { enabled: true, preset: 'comfortable', palette: 'dark', fontFamily: '', zen: false },
+    readability: { enabled: true, mode: 'sepia', fontFamily: '', zen: false },
   });
 
   await page.locator('.md-mermaid-chart svg').waitFor();
@@ -51,11 +51,11 @@ test('mermaid lightbox stays fixed-dark across palette changes (US-19.22)', asyn
   // picked up any --rp-* palette color.
   await page.evaluate(() =>
     window.postMessage(
-      { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'paper' },
+      { type: 'readingModeChanged', enabled: true, mode: 'paper' },
       '*'
     )
   );
-  await expect(page.locator('body')).toHaveClass(/reading-palette-paper/);
+  await expect(page.locator('body')).toHaveClass(/reading-mode-paper/);
 
   await page.locator('.md-mermaid-zoom').click();
   await expect(lightbox).toBeVisible();

@@ -26,7 +26,7 @@ const DEFAULT_CONFIG: InitConfig = {
   autoOpenToc: false,
   showLineNumbers: false,
   crossFileSearchScope: 'markdown',
-  readability: { enabled: false, preset: 'default', palette: 'followTheme', fontFamily: '', zen: false },
+  readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
 };
 
 /**
@@ -43,7 +43,7 @@ function bakedMarkup(readability: InitConfig['readability']): { bodyClasses: str
   const bodyClasses = [
     ...(stylingActive ? ['reading-mode'] : []),
     ...(readability.zen ? ['reading-zen'] : []),
-    ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
+    ...(stylingActive && readability.mode !== 'standard' ? [`reading-mode-${readability.mode}`] : []),
   ].join(' ');
   const toolbarStyle = readability.zen
     ? 'position:fixed;top:0;left:0;right:0;margin:0;z-index:200;transform:translateY(-100%);pointer-events:none;'

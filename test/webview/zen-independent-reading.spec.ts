@@ -26,7 +26,7 @@ test('entering Zen with Reading Mode OFF does not turn on reading styling', asyn
 
 test('toggling Zen keeps Reading Mode ON when it was already ON', async ({ page }) => {
   await openEditor(page, '# hello', {
-    readability: { enabled: true, preset: 'default', palette: 'followTheme', fontFamily: '', zen: false },
+    readability: { enabled: true, mode: 'standard', fontFamily: '', zen: false },
   });
   await expect(page.locator('body')).toHaveClass(/reading-mode/);
 

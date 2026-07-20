@@ -50,19 +50,16 @@ let renderSeq = 0;
 let lastColorSignature: string | undefined;
 
 /**
- * bug_General #7: nền hiệu dụng của biểu đồ là do READING PALETTE quyết định
- * (nếu đang bật), KHÔNG chỉ theme VS Code. Chỉ palette `dark` là nền tối; mọi
- * palette khác (light/sepia/paper/highContrast) là nền sáng. Không có palette
- * (followTheme) → rơi về theme VS Code như cũ.
+ * bug_General #7: nền hiệu dụng của biểu đồ là do READING MODE quyết định (nếu
+ * đang bật), KHÔNG chỉ theme VS Code. US-19.24: các mode màu (sepia/paper) đều
+ * là nền SÁNG — không còn dark reading mode. Không có mode màu (standard/reading
+ * off) → rơi về theme VS Code như cũ.
  */
 function isDarkBackground(): boolean {
   const cls = document.body.classList;
-  if (cls.contains('reading-palette-dark')) {
-    return true;
-  }
   for (const c of cls) {
-    if (c.startsWith('reading-palette-')) {
-      return false; // palette sáng bất kỳ (chỉ `dark` mới tối, đã bắt ở trên)
+    if (c.startsWith('reading-mode-')) {
+      return false; // mọi reading mode màu (sepia/paper) là nền sáng
     }
   }
   return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
@@ -70,7 +67,7 @@ function isDarkBackground(): boolean {
 
 /**
  * Read the resolved --rp-* color tokens (matrix G2) — the diagram's color
- * source is the READING PALETTE, not the VS Code theme, same as isDarkBackground() above.
+ * source is the READING MODE, not the VS Code theme, same as isDarkBackground() above.
  */
 function readPaletteColors(): { bg: string; fg: string; border: string; accent: string; elevBg: string } {
   const style = getComputedStyle(document.body);

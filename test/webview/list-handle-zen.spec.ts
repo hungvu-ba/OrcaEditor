@@ -9,7 +9,7 @@ import { openEditor } from './_harness';
 import type { InitConfig } from '../../src/shared/messages';
 
 const ZEN: InitConfig['readability'] = {
-  enabled: true, preset: 'default', palette: 'followTheme', fontFamily: '', zen: true,
+  enabled: true, mode: 'standard', fontFamily: '', zen: true,
 };
 
 test('DIAGNOSTIC: multi-level Tab-indented list handle positions in Zen', async ({ page }) => {

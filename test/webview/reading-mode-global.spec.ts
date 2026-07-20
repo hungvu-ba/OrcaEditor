@@ -1,5 +1,5 @@
 /**
- * Bug 0716 #2 (reversal 2026-07-16): Reading Mode (enabled/preset/palette)
+ * Bug 0716 #2 (reversal 2026-07-16): Reading Mode (enabled/mode)
  * must now behave like Zen — a change in one tab broadcasts to every other
  * open tab, not just the one the user clicked in. Simulates two tabs as two
  * Playwright pages in the same browser context: drives a real click on tab
@@ -18,12 +18,15 @@ test('toggling Reading Mode in one tab broadcasts to another open tab', async ({
   await openEditor(pageB, '# world');
 
   await clearPosted(page);
-  await page.locator('#reading-toggle').click();
+  // US-19.24: the main icon resets to Standard (disable); enabling a reading
+  // mode goes through the dropdown (Sepia row → setMode).
+  await page.locator('#reading-toggle ~ .split-caret').click();
+  await page.locator('.toolbar-popover[data-for-id="reading-toggle"] [data-dropdown-value="sepia"]').click();
   await expect(page.locator('#reading-toggle')).toHaveClass(/active/);
   await expect(page.locator('body')).toHaveClass(/reading-mode/);
 
   const posted = await page.evaluate(
-    () => (window as unknown as { __posted: Array<{ type: string; enabled: boolean; preset: string; palette: string }> }).__posted
+    () => (window as unknown as { __posted: Array<{ type: string; enabled: boolean; mode: string }> }).__posted
   );
   const readingModeMsg = posted.find((m) => m.type === 'readingModeChanged');
   expect(readingModeMsg).toMatchObject({ type: 'readingModeChanged', enabled: true });
@@ -48,7 +51,7 @@ test('toggling Reading Mode in one tab broadcasts to another open tab', async ({
 
 test('a redundant broadcast matching current state does not re-render (no-op guard in applyReadingModeFromHost)', async ({ page }) => {
   await openEditor(page, '# hello', {
-    readability: { enabled: true, preset: 'default', palette: 'followTheme', fontFamily: '', zen: false },
+    readability: { enabled: true, mode: 'standard', fontFamily: '', zen: false },
   });
   // Let the init-handshake's own no-anim guard fully settle first (its double-rAF
   // removal of 'reading-no-anim' is itself a body class mutation, unrelated to what
@@ -66,7 +69,7 @@ test('a redundant broadcast matching current state does not re-render (no-op gua
   });
 
   await page.evaluate(() =>
-    window.postMessage({ type: 'readingModeChanged', enabled: true, preset: 'default', palette: 'followTheme' }, '*')
+    window.postMessage({ type: 'readingModeChanged', enabled: true, mode: 'standard' }, '*')
   );
   // Give any (unwanted) mutation a frame to land before asserting its absence.
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
