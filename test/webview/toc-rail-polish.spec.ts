@@ -174,7 +174,7 @@ test('a long heading title is truncated with ellipsis, not clipped flush', async
 test('depth pills and progress ring adopt the palette accent under a reading palette', async ({ page }) => {
   await openToc(page, DOC, { readability: SEPIA });
 
-  const { accent, fg, btnColor, ringStroke } = await page.evaluate(() => {
+  const { accent, btnColor, ringStroke } = await page.evaluate(() => {
     const mk = (v: string) => {
       const p = document.createElement('span');
       p.style.color = v;
@@ -184,12 +184,10 @@ test('depth pills and progress ring adopt the palette accent under a reading pal
       return c;
     };
     const accent = mk('var(--toc-accent)');
-    const fg = mk('var(--toc-fg)');
     const btn = document.querySelector('.toc-depth-btn.active') as HTMLElement;
     const fill = document.querySelector('#toc-progress-ring .toc-progress-fill') as SVGElement;
     return {
       accent,
-      fg,
       btnColor: getComputedStyle(btn).color,
       ringStroke: fill ? getComputedStyle(fill).stroke : '',
     };
@@ -198,8 +196,8 @@ test('depth pills and progress ring adopt the palette accent under a reading pal
   const VSCODE_BLUE = 'rgb(55, 148, 255)'; // #3794ff — the non-palette fallback
   expect(accent).not.toBe('');
   expect(accent).not.toBe(VSCODE_BLUE);
-  // Borderless-filter design (US-19.24): active pill text = --toc-fg on a soft
-  // accent fill; the progress ring fill re-tints to the palette accent.
-  expect(btnColor).toBe(fg);
+  // Borderless-filter design: active pill text = --toc-accent on a --toc-pill-bg
+  // fill; the progress ring fill re-tints to the palette accent.
+  expect(btnColor).toBe(accent);
   expect(ringStroke).toBe(accent);
 });

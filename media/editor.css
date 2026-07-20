@@ -128,9 +128,15 @@ body[class*='reading-mode-'] ::-webkit-scrollbar-thumb:hover {
   cursor: grab;
   font-size: 18px;
   line-height: 1;
-  color: var(--vscode-focusBorder, #007acc);
+  color: var(--rp-accent, var(--vscode-focusBorder, #007acc));
   border-radius: 3px;
   z-index: 20;
+  /* Two-tier hover (Plan/UI/Handler Design Token.md "Handler selection"): dim
+   * by default (tier 1 — row hovered, handle not yet reached), full opacity
+   * only on :hover below (tier 2). No background square behind the glyph in
+   * either tier — only the row itself (.dd-hover-outline) gets a fill. */
+  opacity: 0.45;
+  transition: opacity 0.1s ease;
 }
 
 /* A heading's block handle spans its whole section (bug General #2); keep the grab glyph up at
@@ -145,8 +151,7 @@ body[class*='reading-mode-'] ::-webkit-scrollbar-thumb:hover {
 }
 
 .dd-handle:hover {
-  color: var(--vscode-editorLineNumber-activeForeground, var(--vscode-foreground));
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  opacity: 1;
 }
 
 body.dd-dragging {
@@ -347,18 +352,21 @@ body.dd-dragging .dd-handle {
 
 /* --- Hover-highlight outline (bug 0715 #12) ---
  * Toggled alongside the hover handles (block/li/row/column) so it always
- * tracks exactly what would move on drag. outline (never border) so it never
- * shifts layout. .dd-hover-outline-cell is applied per-cell for column
- * highlighting, with a negative offset so adjacent cell outlines sit inside
- * the table's own borders instead of doubling up outside them. */
+ * tracks exactly what would move on drag — only ever added on tier-2 (handle-
+ * glyph hover / armed-drag / open menu, see drag-drop.ts), never on plain
+ * block hover. Two-tier hover restyle (Plan/UI/Handler Design Token.md
+ * "Handler selection"): color tokens only — a left-only accent bar (box-shadow,
+ * not border, so it never shifts layout) instead of an all-side outline, at
+ * the block's own box (no padding/margin changes, kept exactly as authored).
+ * Driven by --rp-accent (already defined per reading mode in markdown.css)
+ * so it's correctly themed with no reading-mode override needed below.
+ * .dd-hover-outline-cell (per-cell column highlighting) is a separate,
+ * unrelated interaction and keeps its own all-side outline. */
 .dd-hover-outline {
-  outline: 1px solid var(--vscode-focusBorder, #007acc);
-  outline-offset: 1px;
-  border-radius: 2px;
-  /* Low-alpha tint of the same hue as the outline (not a fixed color) so it
-   * stays legible against text in both light and dark themes instead of
-   * washing them out. */
-  background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
+  box-shadow: -3px 0 0 0 var(--rp-accent, var(--vscode-focusBorder, #007acc));
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--rp-accent, var(--vscode-focusBorder, #007acc)) 7%, transparent);
+  transition: box-shadow 0.1s ease, background-color 0.1s ease;
 }
 
 .dd-hover-outline-cell {
@@ -1526,6 +1534,21 @@ body.toc-open #select-viewport-band {
 
 :root {
   --toc-width: 300px;
+  /* Standard baseline for the --toc-* contract (Plan/UI/READING_MODE_CONTROL_MATRIX.md):
+   * every --toc-* consumer below reads through this single token set, same
+   * pattern as content's --rp-*. Standard maps straight to --vscode-*, so it
+   * renders byte-identical to before this token existed; Sepia/Paper override
+   * the whole set below (body.reading-mode-sepia/-paper), no separate
+   * reading-mode-scoped color rules needed anymore. */
+  --toc-bg: var(--vscode-editor-background, var(--vscode-sideBar-background));
+  --toc-chrome-bg: var(--toc-bg);
+  --toc-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  --toc-shadow: transparent;
+  --toc-fg: var(--vscode-foreground);
+  --toc-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.7));
+  --toc-accent: var(--vscode-textLink-foreground, #3794ff);
+  --toc-accent-soft: color-mix(in srgb, var(--toc-accent) 18%, transparent);
+  --toc-pill-bg: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
 }
 
 /* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục.
@@ -1603,9 +1626,13 @@ body.toc-open #select-overview {
    * previously used opposite fallback order, so most themes rendered them in
    * two different shades — any tiny coverage gap in the toolbar's stretch-
    * over-TOC trick then showed as a visible color seam). Unified so there is
-   * no possible mismatch regardless of gap/theme. */
-  background: var(--vscode-editor-background, var(--vscode-sideBar-background));
+   * no possible mismatch regardless of gap/theme. Routed through --toc-bg (see
+   * :root above) so every reading mode — Standard included — shares one
+   * mechanism instead of Standard hardcoding --vscode-* directly. */
+  background: var(--toc-bg);
+  color: var(--toc-fg);
   border-left: 1px solid transparent;
+  box-shadow: -6px 0 18px var(--toc-shadow);
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
 }
 
@@ -1613,7 +1640,7 @@ body.toc-open #toc-panel {
   width: var(--toc-width);
   opacity: 1;
   visibility: visible;
-  border-left-color: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-left-color: var(--toc-border);
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
 }
 
@@ -1644,7 +1671,7 @@ body.toc-resizing #toc-panel {
 
 #toc-resize:hover,
 body.toc-resizing #toc-resize {
-  background: var(--vscode-textLink-foreground, #3794ff);
+  background: var(--toc-accent);
   opacity: 0.4;
 }
 
@@ -1673,6 +1700,10 @@ body.toc-resizing #toolbar {
   /* padding-top chừa dải toolbar (position:sticky, full-width, z-index cao
    * hơn #toc-panel — xem #toolbar) đè lên đỉnh panel, tránh title bị che. */
   padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
+  /* Must resolve to the SAME value as #toc-panel's own background (--toc-bg
+   * === --toc-chrome-bg, see :root above) — otherwise a lighter/darker band
+   * shows behind the progress ring. */
+  background: var(--toc-chrome-bg);
 }
 
 /* US-10.7: reading-stats block (progress ring + read-time/word-count text),
@@ -1702,15 +1733,17 @@ body.toc-resizing #toolbar {
   display: none;
 }
 
+/* Track = a soft accent tint (design: faint ring, not a hard theme border),
+ * fill + percent value = the palette accent — one mechanism for every mode. */
 #toc-progress-ring .toc-progress-track {
   fill: none;
-  stroke: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  stroke: var(--toc-accent-soft);
   stroke-width: 6;
 }
 
 #toc-progress-ring .toc-progress-fill {
   fill: none;
-  stroke: var(--vscode-textLink-foreground, #3794ff);
+  stroke: var(--toc-accent);
   stroke-width: 6;
   stroke-linecap: round;
   transform: rotate(-90deg);
@@ -1719,7 +1752,7 @@ body.toc-resizing #toolbar {
 }
 
 #toc-progress-ring .toc-progress-value {
-  fill: var(--vscode-foreground, #cccccc);
+  fill: var(--toc-fg);
   font-size: 12px;
   font-weight: 700;
   text-anchor: middle;
@@ -1757,31 +1790,37 @@ body.toc-resizing #toolbar {
   display: flex;
   gap: 5px;
   padding: 0 14px 8px;
-  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-bottom: 1px solid var(--toc-border);
 }
 
-/* Giống style toggle "active" đã có (.match-option-btn) — inputOption là token
- * VS Code cho "nút option đang bật", khớp accent/accentSoft của design. */
+/* Borderless-filter design: inactive pills are plain muted text, only the
+ * active depth gets a soft-fill pill — no border on either state. Routed
+ * through --toc-* (see :root above) so Standard and Sepia/Paper share one
+ * mechanism; Standard's --toc-pill-bg/--toc-accent already map to the VS Code
+ * "active option" convention (--vscode-inputOption-active*), so it keeps
+ * looking native. */
 .toc-depth-btn {
   padding: 3px 11px;
   font-size: 11px;
   font-weight: 600;
   border-radius: 6px;
   cursor: pointer;
-  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
-  background: var(--vscode-button-secondaryBackground, transparent);
-  color: var(--vscode-foreground);
+  /* 1px transparent, not `none` — keeps the same box footprint as before this
+   * design (avoids a 2px layout shift), just invisible. */
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--toc-muted);
   transition: background 0.18s, border-color 0.18s, color 0.18s;
 }
 
 .toc-depth-btn:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  background: var(--toc-accent-soft);
 }
 
 .toc-depth-btn.active {
-  border-color: var(--vscode-inputOption-activeBorder, #007fd4);
-  background: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
-  color: var(--vscode-textLink-foreground, #3794ff);
+  border-color: transparent;
+  background: var(--toc-pill-bg);
+  color: var(--toc-accent);
 }
 
 #toc-list {
@@ -1825,7 +1864,7 @@ body.toc-resizing #toolbar {
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  color: var(--vscode-textLink-foreground, #3794ff);
+  color: var(--toc-accent);
 }
 
 .toc-empty-reset:hover {
@@ -1863,7 +1902,9 @@ body.toc-resizing #toolbar {
   padding: 0 10px;
   border-radius: 6px;
   background: transparent;
-  color: var(--vscode-foreground);
+  /* Inactive items read as muted text — only the active item pops via
+   * --toc-accent below (Standard and Sepia/Paper share this one mechanism). */
+  color: var(--toc-muted);
   text-decoration: none;
   font-size: 13px;
   font-weight: 450;
@@ -1885,7 +1926,7 @@ body.toc-resizing #toolbar {
   bottom: 5px;
   width: 3px;
   border-radius: 2px;
-  background: var(--vscode-textLink-foreground, #3794ff);
+  background: var(--toc-accent);
   transform: scaleY(0);
   opacity: 0;
   transform-origin: center;
@@ -1896,15 +1937,15 @@ body.toc-resizing #toolbar {
  * otherwise repaint the row text as an underlined link on hover — the TOC text
  * must read as plain text, the accent lives on the background tint + left bar. */
 .toc-item:hover {
-  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
-  color: var(--vscode-foreground);
+  background: var(--toc-pill-bg);
+  color: var(--toc-muted);
   text-decoration: none;
 }
 
 .toc-item.active {
   font-weight: 600;
-  color: var(--vscode-foreground);
-  background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.12));
+  color: var(--toc-accent);
+  background: var(--toc-pill-bg);
 }
 
 .toc-item.active::before {
@@ -2559,78 +2600,21 @@ body[class*='reading-mode-'] .toolbar-popover-item.selected {
 /* Table of Contents (panel phải) — depth-filter theme spec: card dùng bộ
  * --toc-* RIÊNG (như --toolbar-* ở US-4.25), KHÔNG kế thừa --rp-* của content, vì highContrast
  * card (nền đen/chữ trắng) đảo ngược hẳn so với highContrast content (nền
- * trắng/chữ đen) trong design spec — hai hệ không thể dùng chung token. */
-body[class*='reading-mode-'] #toc-panel {
-  background: var(--toc-bg);
-  border-left-color: var(--toc-border);
-  color: var(--toc-fg);
-  box-shadow: -6px 0 18px var(--toc-shadow);
-}
-body[class*='reading-mode-'] #toc-header {
-  background: var(--toc-chrome-bg);
-  border-bottom-color: var(--toc-border);
-}
-body[class*='reading-mode-'] .toc-stats-words {
-  color: var(--toc-muted);
-}
-body[class*='reading-mode-'] .toc-item {
-  color: var(--toc-muted);
-  background: transparent;
-}
-body[class*='reading-mode-'] .toc-item:hover {
-  background: var(--toc-pill-bg);
-}
-body[class*='reading-mode-'] .toc-item.active {
-  color: var(--toc-accent);
-  background: var(--toc-pill-bg);
-}
-body[class*='reading-mode-'] .toc-item::before {
-  background: var(--toc-accent);
-}
-/* Focus outline (US-19.7 keyboard nav): palette accent instead of VS Code blue. */
+ * trắng/chữ đen) trong design spec — hai hệ không thể dùng chung token.
+ * Every #toc-panel/#toc-header/.toc-item/.toc-depth-btn/#toc-progress-ring/
+ * .toc-empty-reset/#toc-resize color rule now reads var(--toc-*) directly in
+ * its base (non-reading-mode-scoped) declaration — Standard's own --toc-*
+ * baseline (see :root near --toc-width) already renders identically to the
+ * old hardcoded --vscode-* rules, and Sepia/Paper override the same
+ * variables below, so no separate reading-mode-scoped color overrides are
+ * needed here anymore (Plan/UI/READING_MODE_CONTROL_MATRIX.md: one mechanism
+ * for every option, not a parallel rule set per mode). */
+/* Focus outline (US-19.7 keyboard nav): palette accent instead of VS Code's
+ * generic focus-blue — the one .toc-item rule that stays reading-mode-scoped,
+ * since Standard deliberately keeps --vscode-focusBorder (matches every other
+ * chrome focus ring in this file) while a palette swaps it for its own accent. */
 body[class*='reading-mode-'] .toc-item:focus-visible {
   outline-color: var(--toc-accent);
-}
-/* Reading-stats ring: track = a soft accent tint (design: faint warm ring, not
- * the harder --toc-border tan which read cool/off against the cream bg), read
- * portion + percent = palette accent (was hardcoded to VS Code blue). */
-body[class*='reading-mode-'] #toc-progress-ring .toc-progress-track {
-  stroke: var(--toc-accent-soft);
-}
-body[class*='reading-mode-'] #toc-progress-ring .toc-progress-fill {
-  stroke: var(--toc-accent);
-}
-body[class*='reading-mode-'] #toc-progress-ring .toc-progress-value {
-  fill: var(--toc-fg);
-}
-/* H1/H2/H3 filter bar (design: borderless — inactive buttons are plain muted
- * text, only the active depth gets a soft-fill pill, no border on either). Base
- * .toc-depth-btn keeps a 1px border for the VS Code theme; here we neutralize it
- * to transparent (keeps layout stable) so the reading-mode look matches the mock. */
-body[class*='reading-mode-'] #toc-filter-bar {
-  border-bottom-color: var(--toc-border);
-}
-body[class*='reading-mode-'] .toc-depth-btn {
-  border-color: transparent;
-  background: transparent;
-  color: var(--toc-muted);
-}
-body[class*='reading-mode-'] .toc-depth-btn:hover {
-  background: var(--toc-accent-soft);
-}
-body[class*='reading-mode-'] .toc-depth-btn.active {
-  border-color: transparent;
-  background: var(--toc-pill-bg);
-  color: var(--toc-accent);
-}
-/* Empty-state text + reset-filter link follow the palette. */
-body[class*='reading-mode-'] .toc-empty-reset {
-  color: var(--toc-accent);
-}
-/* Resize handle: palette accent on hover (hover-only, panel edge). */
-body[class*='reading-mode-'] #toc-resize:hover,
-body[class*='reading-mode-'].toc-resizing #toc-resize {
-  background: var(--toc-accent);
 }
 
 /* Hộp tìm trong file (Ctrl+F) + input + nút */
@@ -2758,11 +2742,13 @@ body[class*='reading-mode-'] .md-front-matter {
   border-color: var(--rp-embed-border);
 }
 
-/* Drag-and-drop hover outline/ghost: --vscode-focusBorder is always a VS Code
- * accent blue, which clashes with sepia's deliberately low-blue palette and
- * defeats highContrast's pure black/white intent. Route through the same
- * --rp-* set as the toolbar's "active" state / embedded-block cards instead. */
-body[class*='reading-mode-'] .dd-hover-outline,
+/* Drag-and-drop ghost / cell-highlight outline: --vscode-focusBorder is always
+ * a VS Code accent blue, which clashes with sepia's deliberately low-blue
+ * palette and defeats highContrast's pure black/white intent. Route through
+ * the same --rp-* set as the toolbar's "active" state / embedded-block cards
+ * instead. (.dd-hover-outline itself is NOT here — its two-tier restyle above
+ * already derives its color from --rp-accent directly, correct in every
+ * reading mode with no override needed.) */
 body[class*='reading-mode-'] .dd-hover-outline-cell {
   outline-color: var(--rp-border);
   background-color: var(--rp-chrome-active);
