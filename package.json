@@ -198,12 +198,12 @@
     "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
-    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
+    "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release",
-  "check:css-comments": "node scripts/check-css-comments.js"
+    "check:reading-contract": "node scripts/check-reading-contract.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

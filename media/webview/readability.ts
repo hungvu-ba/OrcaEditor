@@ -64,8 +64,8 @@ export interface ReadabilityDeps {
    */
   isPopoverOpen?: () => boolean;
   /**
-   * US-19.19: Zen/Focus mode vừa đổi Ở CHÍNH TAB NÀY (toggleZen/exitZen)
-   * → báo host broadcast sang mọi tab .md khác (Zen global, kênh
+   * US-19.19: Zen/Focus mode vừa đổi Ở CHÍNH TAB NÀY (toggleZen/exitZen/
+   * disable) → báo host broadcast sang mọi tab .md khác (Zen global, kênh
    * riêng — xem onReadingModeChange bên dưới cho enabled/mode, giờ cũng
    * global nhưng là 1 kênh độc lập). KHÔNG gọi khi state.zen
    * đổi vì nhận broadcast từ tab khác (applyZenFromHost) — tránh vòng lặp. Bỏ
@@ -101,7 +101,8 @@ export interface ReadabilityController {
   getMode(): ReadingMode;
   /**
    * Bật/tắt Reading Mode (tab-local) — bật thì giữ nguyên mode đã chọn gần
-   * nhất; tắt thì tương đương chọn hàng "Standard" (xem disable()).
+   * nhất; tắt thì tương đương chọn hàng "Standard" (cũng thoát Zen nếu đang
+   * bật, xem disable()).
    */
   toggle(): void;
   /** Áp 1 reading mode có màu (sepia/paper) — bật Reading Mode nếu đang tắt (tab-local, không persist/broadcast). */
@@ -315,7 +316,9 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
 
   function toggle(): void {
     // Tắt qua nút chính phải mang đúng nghĩa hàng "Standard" trong dropdown —
-    // dùng chung disable() thay vì chỉ lật `enabled`.
+    // dùng chung disable() thay vì chỉ lật `enabled` để cùng lúc thoát Zen (xem
+    // disable()): nếu để nguyên Zen, bấm nút chính xong toolbar lại trượt đi
+    // mất, người dùng tưởng nút hỏng.
     if (state.enabled) {
       disable();
       return;
@@ -338,22 +341,27 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   }
 
   /**
-   * Dòng "Standard" (và nút chính khi đang bật) — reset hẳn về VS Code gốc.
-   * Chỉ đổi `enabled`/`mode`, KHÔNG đụng Zen (bug_General #1: hai toggle độc
-   * lập hoàn toàn — Standard không còn kéo theo thoát Zen).
+   * Dòng "Standard" (và nút chính khi đang bật) — reset hẳn về VS Code
+   * gốc. Ngoài `enabled = false`, cũng thoát Zen: đây là hướng Reading→Zen
+   * (khác bug_General #1 chỉ tách hướng Zen→Reading ở stylingActive()) — chủ
+   * đích để toolbar hiện lại thay vì kẹt ẩn sau khi rời Reading Mode. Reset
+   * luôn reveal (giống toggleZen/exitZen) vì Zen tắt rồi thì cơ chế "arm" của
+   * lần Zen tiếp theo phải bắt đầu lại từ đầu.
    */
   function disable(): void {
     mutateAndNotify(() => {
       state.enabled = false;
+      setZen(false);
+      resetZenReveal();
     });
   }
 
   /**
    * US-19.19: MỌI thay đổi `state.zen` khởi phát TỪ TAB NÀY (toggleZen/
-   * exitZen) phải đi qua đây để báo host broadcast sang các tab .md
+   * exitZen/disable) phải đi qua đây để báo host broadcast sang các tab .md
    * khác (Zen global, kênh riêng — xem notifyReadingModeChange bên dưới cho
    * enabled/mode). Guard "không đổi thì thôi" tránh broadcast
-   * thừa (vd exitZen() gọi khi Zen vốn đã tắt sẵn). KHÔNG dùng
+   * thừa (vd disable() gọi setZen(false) dù Zen vốn đã tắt sẵn). KHÔNG dùng
    * cho applyZenFromHost (nhận broadcast từ tab khác) — hàm đó set thẳng
    * `state.zen`, không gọi lại onZenChange.
    */

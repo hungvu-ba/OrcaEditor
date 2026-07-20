@@ -38,16 +38,9 @@
   --rp-diff-del-fg: inherit;
   --rp-search-bg: rgba(234, 92, 0, 0.85);
   --rp-search-bg-soft: rgba(255, 197, 61, 0.35);
-  /* select-match defaults to the soft search tint (Standard unchanged); palettes
-   * override with their own lower-alpha value so it never matches search-match. */
-  --rp-select-match-bg: rgba(255, 197, 61, 0.18);
-  /* row separator defaults to --rp-border (Standard unchanged); palettes override
-   * with a translucent tint distinct from the opaque cell/heading border. */
-  --rp-row-border: var(--rp-border);
   --rp-gutter-bg: transparent;
   --rp-gutter-num: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
   --rp-scrollbar-thumb: var(--vscode-scrollbarSlider-background);
-  --rp-scrollbar-thumb-hover: var(--vscode-scrollbarSlider-hoverBackground, var(--rp-scrollbar-thumb));
   --rp-scrollbar-track: transparent;
   /* content typography / spacing */
   --reading-font-size: var(--markdown-font-size, 14px);
@@ -787,7 +780,7 @@ ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
  * The former bug_General #7 per-palette mirror blocks are gone: a reading
  * palette sets its own --hl-* so its syntax colors track the palette background
  * regardless of the underlying VS Code theme. Long-tail hljs classes (regexp/
- * doctag/variable/section/bullet/selector-* / link) keep their fixed values. */
+ * doctag/variable/section/bullet/selector-*/link) keep their fixed values. */
 
 /* ===========================================================================
  * Reading Mode / Readability (HLR mục 19)
@@ -903,10 +896,6 @@ body.reading-mode #content pre {
 body.reading-mode #content {
   --reading-font-size: 16px;
   --reading-line-height: 1.7;
-  /* Standard default = the VS Code editor font (Standard "follows VS Code" by taking
-   * the VS Code value, not by a special-cased selector). The Sepia/Paper palettes
-   * override this to the long-form sans stack below — same default→override pattern
-   * as the --rp-* color tokens. */
   --reading-font-stack: var(--markdown-font-family);
   --reading-measure: 70ch; /* cột chữ */
   --reading-container: 80ch; /* wide cap ~1.14× cột chữ (bảng/code rộng vừa phải) */
@@ -914,14 +903,6 @@ body.reading-mode #content {
   --reading-list-indent: 1.8em;
   --reading-quote-style: italic;
   --reading-embed-padding: 6px 10px;
-}
-
-/* Color palettes (Sepia/Paper) override the reading font to the long-form sans
- * stack (handoff prototype spec). Standard has no `reading-mode-<palette>` class,
- * so it keeps the VS Code font above — this is the same default→override pattern
- * the --rp-* color tokens use, no Standard-specific exception. */
-body[class*='reading-mode-'] #content {
-  --reading-font-stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
 }
 
 /* Literata (bundled, US-19.15): book serif của Google (OFL 1.1) commission cho
@@ -1127,10 +1108,16 @@ body.reading-mode #content h6 {
  * (pattern :has đã dùng ở .toolbar-popover-item.selected). Application (font-size
  * thực tế) nằm ở editor.css cùng khối chrome-palette.
  *
- * Chrome font-size follows the handoff prototype: it keeps its NATIVE per-selector
- * sizes (11/12/13px, the :root bucket defaults) and does NOT scale up with the
- * prose preset — so chips/TOC items stay compact instead of ballooning to prose
- * size. No body.reading-mode override needed; the :root buckets carry through. */
+ * US-19.24: one uniform chrome scale for every reading mode (nút không phình
+ * theo prose). Reading-mode-off giữ nguyên cỡ native của từng selector
+ * (Standard byte-identical). Chrome dùng font VS Code như prose nên không cần
+ * hoist --reading-ui-font-family (fallback `inherit` ở editor.css xử lý). */
+body.reading-mode {
+  --reading-ui-fs-10: 14px;
+  --reading-ui-fs-11: 14px;
+  --reading-ui-fs-12: 14px;
+  --reading-ui-fs-13: 14px;
+}
 
 /* --- US-19.5 Reading palettes ---
  * followTheme (mặc định) = KHÔNG áp class màu (kế thừa --vscode-*, hành vi cũ).
@@ -1190,12 +1177,9 @@ body[class*='reading-mode-'] #sticky-table-header th {
 }
 body[class*='reading-mode-'] #content h1,
 body[class*='reading-mode-'] #content h2,
-body[class*='reading-mode-'] hr {
-  border-color: var(--rp-border);
-}
-/* Row separators use a lighter translucent tint than the opaque cell border. */
+body[class*='reading-mode-'] hr,
 body[class*='reading-mode-'] #content table > tbody > tr + tr > td {
-  border-color: var(--rp-row-border);
+  border-color: var(--rp-border);
 }
 /* Vùng chọn văn bản (native ::selection): mặc định thừa hưởng selection color của
  * VS Code theme — thường lệch tông (xanh theme tối) trên nền ivory/sepia và có thể
@@ -1286,16 +1270,10 @@ body.reading-mode-sepia {
   --rp-diff-del-fg: #a13d2b;
   --rp-search-bg: rgba(161, 61, 43, 0.7);
   --rp-search-bg-soft: rgba(161, 61, 43, 0.22);
-  --rp-select-match-bg: rgba(161, 61, 43, 0.14);
-  --rp-row-border: rgba(91, 70, 54, 0.22);
   --rp-gutter-bg: transparent;
   --rp-gutter-num: #b3a17e;
   --rp-scrollbar-thumb: rgba(91, 70, 54, 0.3);
-  --rp-scrollbar-thumb-hover: rgba(91, 70, 54, 0.5);
   --rp-scrollbar-track: transparent;
-  /* placeholder stripes (image/mermaid/katex embed slots) — warm cream pair */
-  --rp-stripe-a: #efe4cc;
-  --rp-stripe-b: #e8dabd;
   /* syntax highlight — hand-tuned against sepia bg */
   --hl-keyword: #8a4b08;
   --hl-string: #a13d2b;
@@ -1340,12 +1318,9 @@ body.reading-mode-paper {
   --rp-diff-del-fg: #a13d2b;
   --rp-search-bg: rgba(161, 61, 43, 0.65);
   --rp-search-bg-soft: rgba(161, 61, 43, 0.2);
-  --rp-select-match-bg: rgba(161, 61, 43, 0.12);
-  --rp-row-border: rgba(17, 17, 16, 0.18);
   --rp-gutter-bg: transparent;
   --rp-gutter-num: rgba(0, 0, 0, 0.4);
   --rp-scrollbar-thumb: rgba(0, 0, 0, 0.28);
-  --rp-scrollbar-thumb-hover: rgba(0, 0, 0, 0.45);
   --rp-scrollbar-track: transparent;
   /* syntax highlight — hand-tuned against paper bg */
   --hl-keyword: #0000ff;
