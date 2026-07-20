@@ -100,17 +100,17 @@ body[class*='reading-mode-'] #line-gutter {
   border-right: 1px solid var(--rp-border);
 }
 body[class*='reading-mode-'] {
-  scrollbar-color: color-mix(in srgb, var(--rp-fg) 32%, var(--rp-bg)) var(--rp-bg);
+  scrollbar-color: var(--rp-scrollbar-thumb) var(--rp-scrollbar-track);
   scrollbar-width: thin;
 }
 body[class*='reading-mode-'] ::-webkit-scrollbar {
   background: var(--rp-bg);
 }
 body[class*='reading-mode-'] ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--rp-fg) 32%, var(--rp-bg));
+  background: var(--rp-scrollbar-thumb);
 }
 body[class*='reading-mode-'] ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--rp-fg) 50%, var(--rp-bg));
+  background: var(--rp-scrollbar-thumb-hover);
 }
 
 /* --- Drag & drop block reorder (HLR section 17, US-17.3) --- */
@@ -1389,7 +1389,8 @@ th:empty::after {
 
 /* US-19.23 Phase 2: palette-scoped search/select highlight backgrounds. Scoped
  * under body[class*='reading-mode-'] so Standard/followTheme keeps the fixed
- * yellow/orange find colors above. select-match reuses --rp-search-bg-soft. */
+ * yellow/orange find colors above. select-match uses its own --rp-select-match-bg
+ * (a touch lighter than search-match so the two never read as the same tint). */
 body[class*='reading-mode-'] ::highlight(search-match) {
   background-color: var(--rp-search-bg-soft);
 }
@@ -1397,7 +1398,7 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   background-color: var(--rp-search-bg);
 }
 body[class*='reading-mode-'] ::highlight(select-match) {
-  background-color: var(--rp-search-bg-soft);
+  background-color: var(--rp-select-match-bg);
 }
 
 /* --- Thước tổng quan bên phải: vị trí mọi match --- */
@@ -2573,24 +2574,18 @@ body[class*='reading-mode-'] .toc-stats-words {
   color: var(--toc-muted);
 }
 body[class*='reading-mode-'] .toc-item {
-  color: var(--toc-fg);
+  color: var(--toc-muted);
   background: transparent;
 }
 body[class*='reading-mode-'] .toc-item:hover {
   background: var(--toc-pill-bg);
 }
 body[class*='reading-mode-'] .toc-item.active {
-  color: var(--toc-fg);
-  background: var(--toc-accent-soft);
+  color: var(--toc-accent);
+  background: var(--toc-pill-bg);
 }
 body[class*='reading-mode-'] .toc-item::before {
   background: var(--toc-accent);
-}
-/* Depth-filter theme spec: hàng H1 đầu danh sách luôn hiển thị bất kể filter đang chọn mức
- * nào — đánh dấu bằng chữ đậm + nền accentSoft, độc lập trạng thái active. */
-body[class*='reading-mode-'] .toc-item.toc-level-1:first-child {
-  font-weight: 600;
-  background: var(--toc-accent-soft);
 }
 /* Focus outline (US-19.7 keyboard nav): palette accent instead of VS Code blue. */
 body[class*='reading-mode-'] .toc-item:focus-visible {
@@ -2625,8 +2620,8 @@ body[class*='reading-mode-'] .toc-depth-btn:hover {
 }
 body[class*='reading-mode-'] .toc-depth-btn.active {
   border-color: transparent;
-  background: var(--toc-accent-soft);
-  color: var(--toc-fg);
+  background: var(--toc-pill-bg);
+  color: var(--toc-accent);
 }
 /* Empty-state text + reset-filter link follow the palette. */
 body[class*='reading-mode-'] .toc-empty-reset {
