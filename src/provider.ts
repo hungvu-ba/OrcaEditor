@@ -8,8 +8,7 @@ import type {
   CrossFileSearchScope,
   HostToWebview,
   ReadabilityConfig,
-  ReadingPalette,
-  ReadingPreset,
+  ReadingMode,
   WebviewToHost,
 } from './shared/messages';
 import {
@@ -105,9 +104,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
 
   /**
-   * US-19.19: Zen/Focus mode giờ là trạng thái GLOBAL (khác enabled/preset/
-   * palette — vẫn per-tab, US-19.18) — bật/tắt ở 1 tab lan sang MỌI tab .md
-   * đang mở. `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
+   * US-19.19: Zen/Focus mode là trạng thái GLOBAL — bật/tắt ở 1 tab lan sang
+   * MỌI tab .md đang mở (cùng mô hình `globalReadingMode` bên dưới, kênh riêng).
+   * `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
    * theo `orcaEditor.readability.zen` như cũ. Chỉ sống trong bộ nhớ process
    * (KHÔNG ghi persist Settings — Zen là "phiên tập trung" tạm thời, không
    * nên tự động bật lại mỗi khi mở lại VS Code); tắt/mở lại VS Code thì về
@@ -117,14 +116,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /**
    * Bug 0716 #2 (reversal 2026-07-16): cùng mô hình `globalZen` ở trên nhưng
-   * cho bundle enabled/preset/palette — trước đó (bug 0715 mục 4, US-19.17–
-   * 19.20) 3 field này cố tình per-tab, session-only; user giờ đổi ý muốn
-   * global giống hệt Zen. `undefined` = chưa tab nào đổi trong phiên này →
-   * seed tab mới theo `orcaEditor.readability.*` như cũ. `fontFamily` KHÔNG
-   * nằm trong bundle này — không có UI toggle runtime nên vẫn seed theo
-   * setting mỗi tab, không đổi.
+   * cho enabled/mode (US-19.24) — global giống hệt Zen. `undefined` = chưa tab
+   * nào đổi trong phiên này → seed tab mới theo `orcaEditor.readability.*` như
+   * cũ. `fontFamily` KHÔNG nằm trong bundle này — không có UI toggle runtime
+   * nên vẫn seed theo setting mỗi tab, không đổi.
    */
-  private globalReadingMode: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette } | undefined;
+  private globalReadingMode: { enabled: boolean; mode: ReadingMode } | undefined;
 
   /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
@@ -159,9 +156,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     this.broadcastToOtherPanels(exclude, { type: 'zenChanged', zen });
   }
 
-  /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho bundle enabled/preset/palette. */
+  /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho enabled/mode (US-19.24). */
   private broadcastReadingMode(
-    state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette },
+    state: { enabled: boolean; mode: ReadingMode },
     exclude: vscode.WebviewPanel
   ): void {
     this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
@@ -303,8 +300,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
-      // KHÔNG gửi enabled/preset/palette/zen qua configUpdate: dù cả 2 bundle
-      // giờ đều global-in-memory (zen: US-19.19; enabled/preset/palette: bug
+      // KHÔNG gửi enabled/mode/zen qua configUpdate: dù cả 2 bundle
+      // giờ đều global-in-memory (zen: US-19.19; enabled/mode: bug
       // 0716 #2, đảo ngược per-tab cũ của bug 0715 mục 4), mỗi bundle đã có
       // kênh broadcast runtime riêng của chính nó (xem case 'zenChanged' /
       // case 'readingModeChanged'). Kênh configUpdate này CHỈ phát khi user
@@ -487,17 +484,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'readingModeChanged': {
-          // Bug 0716 #2: enabled/preset/palette giờ global (đảo ngược per-tab
-          // cũ, cùng mô hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi
-          // phát cho mọi panel .md khác đang mở.
-          // S-1: whitelist preset/palette trước khi lưu — message từ webview có
-          // thể bị giả giá trị ngoài enum, mà globalReadingMode được nội suy vào
-          // class attribute của getHtml cho panel mở sau (cùng ràng buộc mà
+          // Bug 0716 #2: enabled/mode giờ global (đảo ngược per-tab cũ, cùng mô
+          // hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi phát cho mọi
+          // panel .md khác đang mở.
+          // S-1: whitelist mode trước khi lưu — message từ webview có thể bị giả
+          // giá trị ngoài enum, mà globalReadingMode được nội suy vào class
+          // attribute của getHtml cho panel mở sau (cùng ràng buộc mà
           // readReadabilityConfig áp cho đường settings). Giá trị lạ → mặc định.
           this.globalReadingMode = {
             enabled: msg.enabled,
-            preset: READING_PRESETS.includes(msg.preset) ? msg.preset : 'comfortable',
-            palette: READING_PALETTES.includes(msg.palette) ? msg.palette : 'followTheme',
+            mode: READING_MODES.includes(msg.mode) ? msg.mode : 'standard',
           };
           this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
@@ -1401,22 +1397,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Bug 0715 (US-19.9): class trạng thái đọc phải có mặt NGAY từ first paint
     // — nếu chờ message 'init' mới áp (readability.applyFromHost) thì toolbar
     // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
-    // giật vì toolbar rời flow. Giá trị preset/palette luôn được whitelist
-    // trước khi tới đây — đường settings qua readReadabilityConfig, đường
-    // message qua handler 'readingModeChanged' (S-1) — nên an toàn để nội suy
-    // vào attribute.
-    // bug_General #1: reading styling (reading-mode/preset/palette) gate CHỈ
-    // theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở readability.ts).
-    // `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo `zen`.
+    // giật vì toolbar rời flow. Giá trị mode luôn được whitelist trước khi tới
+    // đây — đường settings qua readReadabilityConfig, đường message qua handler
+    // 'readingModeChanged' (S-1) — nên an toàn để nội suy vào attribute.
+    // bug_General #1: reading styling (reading-mode/reading-mode-<mode>) gate
+    // CHỈ theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở
+    // readability.ts). `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo
+    // `zen`.
     const stylingActive = readability.enabled;
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),
-      // US-19.18: palette giờ gate theo stylingActive giống preset (không còn
-      // là lớp GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
-      ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
+      // US-19.24: mode màu (sepia/paper) thêm class `reading-mode-<mode>`;
+      // `standard` = follow theme, không thêm class màu. Gate theo stylingActive.
+      ...(stylingActive && readability.mode !== 'standard' ? [`reading-mode-${readability.mode}`] : []),
     ].join(' ');
-    const contentClasses = stylingActive ? `reading-preset-${readability.preset}` : '';
+    const contentClasses = '';
     // Bug 0716 #1: class `reading-zen` ở trên chỉ ẨN toolbar khi editor.css
     // (external stylesheet) đã load/parse xong. Nếu file CSS này apply SAU
     // khi toolbar đã kịp paint ở trạng thái mặc định (không transform), trình
@@ -1457,19 +1453,18 @@ function getNonce(): string {
   return crypto.randomBytes(16).toString('base64');
 }
 
-/** Giá trị hợp lệ của preset/palette — settings.json có thể chứa chuỗi tùy ý,
- * phải whitelist trước khi nội suy vào class attribute của HTML (getHtml). */
-const READING_PRESETS: readonly ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
-const READING_PALETTES: readonly ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
+/** US-19.24: các reading mode hợp lệ — whitelist dùng cho CẢ đường settings.json
+ * (`orcaEditor.readability.readingMode`) LẪN message 'readingModeChanged' từ
+ * webview (runtime, untrusted) trước khi nội suy vào class attribute của HTML
+ * (getHtml). Giá trị lạ → 'standard'. */
+const READING_MODES: readonly ReadingMode[] = ['standard', 'sepia', 'paper'];
 
 /** Đọc trạng thái Reading Mode (US-19.x) từ config `orcaEditor.readability.*`. */
 function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
-  const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
-  const palette = cfg.get<ReadingPalette>('readability.palette', 'followTheme');
+  const readingMode = cfg.get<string>('readability.readingMode', 'standard') as ReadingMode;
   return {
-    enabled: cfg.get<boolean>('readability.enabled', true),
-    preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
-    palette: READING_PALETTES.includes(palette) ? palette : 'followTheme',
+    enabled: cfg.get<boolean>('readability.enabled', false),
+    mode: READING_MODES.includes(readingMode) ? readingMode : 'standard',
     fontFamily: cfg.get<string>('readability.fontFamily', ''),
     zen: cfg.get<boolean>('readability.zen', false),
   };

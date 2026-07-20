@@ -37,7 +37,7 @@ function readToolbarTransitions(page: import('@playwright/test').Page): Promise<
 test('cold-opening with Zen already ON does not animate the toolbar', async ({ page }) => {
   await watchToolbarTransitions(page);
   await openEditor(page, 'hello world', {
-    readability: { enabled: false, preset: 'default', palette: 'followTheme', fontFamily: '', zen: true },
+    readability: { enabled: false, mode: 'standard', fontFamily: '', zen: true },
   });
 
   // Baked at first paint — must already be hidden (a real translateY matrix,
@@ -48,7 +48,7 @@ test('cold-opening with Zen already ON does not animate the toolbar', async ({ p
 
 test('exiting Zen after a cold-open reveals the toolbar again (inline seed must not stick)', async ({ page }) => {
   await openEditor(page, 'hello world', {
-    readability: { enabled: false, preset: 'default', palette: 'followTheme', fontFamily: '', zen: true },
+    readability: { enabled: false, mode: 'standard', fontFamily: '', zen: true },
   });
   // Wait for the init-handshake to fully settle: applyFromHost()'s no-anim guard lifts, and (the
   // fix under test) the inline style getHtml() baked onto #toolbar is cleared once JS/CSS classes
@@ -67,7 +67,7 @@ test('exiting Zen after a cold-open reveals the toolbar again (inline seed must 
 test('a live cross-tab Zen toggle after init still animates the toolbar normally', async ({ page }) => {
   await watchToolbarTransitions(page);
   await openEditor(page, 'hello world', {
-    readability: { enabled: false, preset: 'default', palette: 'followTheme', fontFamily: '', zen: false },
+    readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
   });
   // Wait for the init-handshake's no-anim guard to lift (double rAF after applyFromHost) before
   // toggling, so this only asserts on the steady-state cross-tab path, not the cold-open seed.

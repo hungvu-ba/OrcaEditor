@@ -17,9 +17,14 @@ import {
   normalizeMarkdown,
   postProcessMathDom,
   postProcessMermaidDom,
+  postProcessCodeHeaders,
   postProcessRelativePathLinks,
   prepareDomForSerialize,
   AUTOLINK_PATH_ATTR,
+  MD_CODE_COPY_CLASS,
+  MD_CODE_LANG_CLASS,
+  MD_CODE_WRAP_CLASS,
+  MD_CODE_WRAPPED_CLASS,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
@@ -30,7 +35,7 @@ import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
-import { detectBlockStyle, stampStyleOverride } from './block-style';
+import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
 import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
@@ -39,7 +44,14 @@ import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
 import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
-import { initToolbar, syncTocButton, syncReadingButtons, toggleInlineCode, isPopoverOpen } from './toolbar';
+import {
+  initToolbar,
+  syncTocButton,
+  syncReadingButtons,
+  toggleInlineCode,
+  isPopoverOpen,
+  openCodeLangSwitcher,
+} from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
@@ -99,7 +111,7 @@ const externalDrop = initExternalDrop(content, {
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
-// Reading Mode (US-19.x) — controller lái CSS class/var. enabled/preset/palette
+// Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
 const readability = initReadability({
@@ -159,8 +171,8 @@ let blockMap: BlockEntry[] = [];
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
 /**
- * Reference prose-column width = Comfortable Reading — Sepia size: measure 70ch
- * @ 16px font (markdown.css #content.reading-preset-comfortable). ch→px via the
+ * Reference prose-column width = reading measure 70ch
+ * @ 16px font (markdown.css body.reading-mode #content). ch→px via the
  * fixed estimate 1ch ≈ 0.5em → 70 × 0.5 × 16 = 560px. A reference constant,
  * independent of whether Reading Mode is currently on.
  */
@@ -272,7 +284,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'configUpdate': {
-      // Reading Mode/preset/palette KHÔNG áp qua configUpdate dù giờ global
+      // Reading Mode (enabled/mode) KHÔNG áp qua configUpdate dù giờ global
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
@@ -297,7 +309,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'readingModeChanged': {
-      // Bug 0716 #2: enabled/preset/palette vừa đổi ở TAB KHÁC, host broadcast
+      // Bug 0716 #2: enabled/mode vừa đổi ở TAB KHÁC, host broadcast
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
       // onReadingModeChange, tránh vòng lặp).
       readability.applyReadingModeFromHost(msg);
@@ -315,6 +327,9 @@ postToHost({ type: 'ready' });
 // (respect their manual choice) until the next time it goes narrow.
 let wasNarrowViewport = isNarrowViewport();
 window.addEventListener('resize', () => {
+  // Shrink the panel proportionally first, so the narrow-viewport check below
+  // reads the reflowed --toc-width (panel shrinks, then auto-hides at the floor).
+  toc.reflowWidth();
   const narrow = isNarrowViewport();
   if (narrow && !wasNarrowViewport && toc.isOpen()) {
     toc.toggle();
@@ -353,6 +368,7 @@ function renderDocument(markdown: string): void {
   content.innerHTML = html;
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
+  postProcessCodeHeaders(content, document);
   postProcessRelativePathLinks(content, document);
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
@@ -369,9 +385,6 @@ function renderDocument(markdown: string): void {
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
   blockMap = buildBlockMap(content, markdown, blockMap);
-  // US-19.15: dò ngôn ngữ tài liệu (Việt/khác) để preset Academic Paper chọn font
-  // đúng — chạy sau khi #content đã dựng lại nội dung mới.
-  readability.refreshContentLanguage();
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
@@ -680,7 +693,15 @@ function applyBlockStyleOverrides(clone: HTMLElement): void {
     if (!el) {
       continue;
     }
-    stampStyleOverride(el, detectBlockStyle(entry.mdSlice, entry.type));
+    const style = detectBlockStyle(entry.mdSlice, entry.type);
+    // US-4.28: a block whose language the user switched in place must not be
+    // re-forced back to its ORIGINAL indented syntax — indented code can't carry
+    // a language, so turndown would drop the pick. Drop the code axis so it
+    // serializes as a fence (only indented needs this; tilde fences keep a lang).
+    if (el.hasAttribute(LANG_SWITCHED_ATTR) && (style.code === 'indented' || style.code === 'indented-tab')) {
+      style.code = null;
+    }
+    stampStyleOverride(el, style);
   }
 }
 
@@ -866,6 +887,74 @@ content.addEventListener('cut', (e) => {
   }
 });
 
+// Document Blocks item 8: per-code-block "Copy" button. One delegated listener
+// for every header injected by postProcessCodeHeaders — copies the block's raw
+// code (trailing newline trimmed) and briefly flips the label to "Copied".
+content.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_COPY_CLASS) as HTMLElement | null;
+  if (!btn) {
+    return;
+  }
+  const code = btn.closest('pre')?.querySelector('code');
+  if (!code) {
+    return;
+  }
+  const text = (code.textContent ?? '').replace(/\n$/, '');
+  if (!navigator.clipboard) {
+    return; // No Clipboard API in this context — nothing to do (avoid a sync throw).
+  }
+  navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      btn.textContent = 'Copied';
+      window.setTimeout(() => {
+        btn.textContent = 'Copy';
+      }, 1200);
+    })
+    .catch(() => {
+      /* No clipboard-write permission — leave the button unchanged. */
+    });
+});
+
+// US-4.28: keep the caret/selection in #content when the language label is
+// clicked — like every real toolbar trigger (wireTriggerButton in toolbar.ts),
+// preventDefault on mousedown so clicking the label doesn't blur/collapse the
+// selection (else a follow-up keyboard undo may not target the editor).
+content.addEventListener('mousedown', (e) => {
+  if ((e.target as HTMLElement)?.closest?.('.' + MD_CODE_LANG_CLASS)) {
+    e.preventDefault();
+  }
+});
+
+// Per-code-block word-wrap toggle. One delegated listener for every "Wrap"
+// button injected by postProcessCodeHeaders — toggles MD_CODE_WRAPPED_CLASS on
+// the block's <pre> (default ON) and keeps aria-pressed in sync. UI-only state,
+// never serialized (turndown reads only <code>), so no 'edit' is emitted.
+content.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_WRAP_CLASS) as HTMLElement | null;
+  if (!btn) {
+    return;
+  }
+  const pre = btn.closest('pre');
+  if (!pre) {
+    return;
+  }
+  const wrapped = pre.classList.toggle(MD_CODE_WRAPPED_CLASS);
+  btn.setAttribute('aria-pressed', String(wrapped));
+});
+
+// US-4.28: in-place language switcher. One delegated listener for every code
+// header's language label injected by postProcessCodeHeaders — clicking it opens
+// the same 9-language dropdown as the toolbar's code-block button and rewrites
+// the block's language in place (see openCodeLangSwitcher in toolbar.ts).
+content.addEventListener('click', (e) => {
+  const label = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_LANG_CLASS) as HTMLElement | null;
+  if (!label) {
+    return;
+  }
+  openCodeLangSwitcher(label);
+});
+
 /**
  * Fallback cho Cmd/Ctrl+X (giống pasteFromClipboardApi cho Cmd/Ctrl+V): iframe
  * webview lồng nhau của VS Code custom editor không phải lúc nào cũng bắn sự
@@ -999,6 +1088,7 @@ function renderPasteHtml(text: string): string {
   tmp.innerHTML = html;
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
+  postProcessCodeHeaders(tmp, document);
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;
   }

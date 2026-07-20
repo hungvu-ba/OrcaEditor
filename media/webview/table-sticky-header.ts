@@ -71,7 +71,7 @@ export function initStickyTableHeader(
    * Dựng lại clone thead cho `table`: khóa bề rộng từng cột theo bề rộng cột
    * THẬT đang render (table-layout:fixed) để header dính khớp cột thân bảng kể
    * cả khi scroll ngang. Đặt ngoài #content nên chỉ hưởng style `th`/`table`
-   * chung (CSS #sticky-table-header bù màu nền/viền theo theme + palette).
+   * chung (CSS #sticky-table-header bù màu nền/viền theo theme + reading mode).
    */
   function buildClone(table: HTMLTableElement): void {
     const thead = table.tHead!;

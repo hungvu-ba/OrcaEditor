@@ -23,6 +23,16 @@ Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't
 - **Chat replies**: state the answer or what you did. No preamble, no filler, no restating the request.
 - **User stories (US)**: one clear who/what/why + tight acceptance criteria. Cut anything a reader can infer.
 
+## Mandatory Rule: Todo List
+
+Maintain a todo list (TodoWrite) for any task that is multi-step, spans multiple files, or has a verifiable success criterion. Update it as you go: exactly one item `in_progress`, mark `completed` immediately on finish.
+
+**Skip the todo list** when the request is a single trivial action or a conversational reply — a one-line answer, a single-file read, one obvious edit, a yes/no or factual question. Don't create a one-item list to restate a trivial task.
+
+Rule of thumb: 3+ distinct steps or 2+ files → todo list. Otherwise just do it.
+
+**Granularity**: one item = one independently-verifiable outcome. Split a todo that bundles multiple such outcomes (e.g. separate test suites, compile, docs) into one item per pass/fail result. Stop splitting at the file/command/outcome level; don't decompose into editor micro-steps.
+
 ## Mandatory Rule: Working Principles
 
 ### 1. Think before coding

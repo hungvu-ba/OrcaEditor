@@ -24,6 +24,7 @@ import {
   EM_STYLE_ATTR,
   STRONG_STYLE_ATTR,
   HR_STYLE_ATTR,
+  TABLE_SEP_STYLE_ATTR,
 } from './block-style';
 
 export function createTurndown(): TurndownService {
@@ -117,6 +118,38 @@ export function createTurndown(): TurndownService {
     replacement: (content, node) => {
       const safe = content.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
       return cellPrefix(node as HTMLElement) + safe + ' |';
+    },
+  });
+
+  // --- US-18.5: table separator (border) row honoring its ORIGINAL spacing
+  //     (`|---|---|`, no inner spaces) when the table is stamped 'compact'
+  //     from mdSlice; supersedes turndown-plugin-gfm's tableRow rule, whose
+  //     cell() helper unconditionally pads every border cell — the actual
+  //     cause of untouched tables getting rewritten. Content cells
+  //     (tableCellPipeEscape above) are untouched; no mark → unchanged padded
+  //     output (Golden Rule). ---
+  td.addRule('tableRowBorderStyle', {
+    filter: 'tr',
+    replacement: (content, node) => {
+      const tr = node as HTMLElement;
+      let borderCells = '';
+      if (isHeadingRow(tr)) {
+        const table = getAncestor(tr, (el) => el.nodeName === 'TABLE');
+        const compact = table?.getAttribute(TABLE_SEP_STYLE_ATTR) === 'compact';
+        const alignMap: Record<string, string> = { left: ':--', right: '--:', center: ':-:' };
+        for (let i = 0; i < tr.childNodes.length; i++) {
+          const cellEl = tr.childNodes[i] as HTMLElement;
+          let border = '---';
+          const align = (cellEl.getAttribute?.('align') || '').toLowerCase();
+          if (align) {
+            border = alignMap[align] ?? border;
+          }
+          borderCells += compact
+            ? (i === 0 ? '|' : '') + border + '|'
+            : (i === 0 ? '| ' : ' ') + border + ' |';
+        }
+      }
+      return '\n' + content + (borderCells ? '\n' + borderCells : '');
     },
   });
 
@@ -557,6 +590,7 @@ const TRANSIENT_ATTRS = [
   EM_STYLE_ATTR,
   STRONG_STYLE_ATTR,
   HR_STYLE_ATTR,
+  TABLE_SEP_STYLE_ATTR,
 ];
 
 function safeOuterHtml(el: HTMLElement): string {
@@ -629,6 +663,31 @@ function cellPrefix(cell: HTMLElement): string {
     return '| ';
   }
   return Array.prototype.indexOf.call(parent.childNodes, cell) === 0 ? '| ' : ' ';
+}
+
+/**
+ * A <tr> is the heading row when its parent is a THEAD, or it's the first
+ * child of the TABLE/first TBODY and every cell is a TH — mirrors
+ * turndown-plugin-gfm's isHeadingRow exactly, needed here because that
+ * plugin's own tableRow rule is superseded by 'tableRowBorderStyle' above.
+ */
+function isHeadingRow(tr: HTMLElement): boolean {
+  const parent = tr.parentNode as HTMLElement | null;
+  if (!parent) {
+    return false;
+  }
+  if (parent.nodeName === 'THEAD') {
+    return true;
+  }
+  const isFirstTbody =
+    parent.nodeName === 'TBODY' &&
+    (!parent.previousElementSibling ||
+      (parent.previousElementSibling.nodeName === 'THEAD' &&
+        /^\s*$/.test(parent.previousElementSibling.textContent ?? '')));
+  if (parent.firstChild !== tr || (parent.nodeName !== 'TABLE' && !isFirstTbody)) {
+    return false;
+  }
+  return Array.prototype.every.call(tr.childNodes, (n: Node) => (n as Element).nodeName === 'TH');
 }
 
 function blockLike(el: HTMLElement): boolean {

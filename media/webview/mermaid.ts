@@ -23,10 +23,11 @@ export interface MermaidController {
   /** Dựng lại mọi biểu đồ Mermaid hiện có trong #content — gọi sau mỗi renderDocument. */
   renderAll(): void;
   /**
-   * bug_General #7: reading palette vừa đổi → nếu nền hiệu dụng lật sáng↔tối thì
-   * dựng lại mọi biểu đồ theo theme mới (default/dark). No-op khi độ sáng nền
-   * không đổi (cache theo theme vẫn hợp lệ) — rẻ, tránh nháy khi chỉ đổi
-   * preset/typography.
+   * bug_General #7 / matrix G2: reading palette just changed → if the
+   * theme+color signature (--rp-*) changed (background flipped light↔dark, or
+   * same brightness but a different-colored palette), re-render every
+   * diagram with the new theme/colors. No-op when the signature is unchanged
+   * (cache is still valid) — cheap, avoids a flash when only preset/typography changed.
    */
   refreshTheme(): void;
 }
@@ -42,37 +43,82 @@ const svgCache = new Map<string, string>();
 // đè lên đợt render mới hơn.
 let renderSeq = 0;
 
-// Theme (default/dark) đã initialize lần gần nhất. mermaid.initialize là global
-// nên chỉ gọi lại khi theme đổi (bug_General #7). undefined = chưa init.
-let lastTheme: 'default' | 'dark' | undefined;
+// Theme+color signature (resolved --rp-*) of the last mermaid.initialize call.
+// mermaid.initialize is global, so only call it again when the signature
+// changes (bug_General #7, matrix G2): theme flips light↔dark, OR same
+// brightness but a different-colored palette (e.g. sepia → paper). undefined = not yet init'd.
+let lastColorSignature: string | undefined;
 
 /**
- * bug_General #7: nền hiệu dụng của biểu đồ là do READING PALETTE quyết định
- * (nếu đang bật), KHÔNG chỉ theme VS Code. Chỉ palette `dark` là nền tối; mọi
- * palette khác (light/sepia/paper/highContrast) là nền sáng. Không có palette
- * (followTheme) → rơi về theme VS Code như cũ.
+ * bug_General #7: nền hiệu dụng của biểu đồ là do READING MODE quyết định (nếu
+ * đang bật), KHÔNG chỉ theme VS Code. US-19.24: các mode màu (sepia/paper) đều
+ * là nền SÁNG — không còn dark reading mode. Không có mode màu (standard/reading
+ * off) → rơi về theme VS Code như cũ.
  */
 function isDarkBackground(): boolean {
   const cls = document.body.classList;
-  if (cls.contains('reading-palette-dark')) {
-    return true;
-  }
   for (const c of cls) {
-    if (c.startsWith('reading-palette-')) {
-      return false; // palette sáng bất kỳ (chỉ `dark` mới tối, đã bắt ở trên)
+    if (c.startsWith('reading-mode-')) {
+      return false; // mọi reading mode màu (sepia/paper) là nền sáng
     }
   }
   return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
 }
 
-/** Đảm bảo mermaid đang dùng theme khớp nền hiệu dụng; re-init khi đổi. Trả theme hiện dùng. */
-function ensureTheme(): 'default' | 'dark' {
+/**
+ * Read the resolved --rp-* color tokens (matrix G2) — the diagram's color
+ * source is the READING MODE, not the VS Code theme, same as isDarkBackground() above.
+ */
+function readPaletteColors(): { bg: string; fg: string; border: string; accent: string; elevBg: string } {
+  const style = getComputedStyle(document.body);
+  return {
+    bg: style.getPropertyValue('--rp-bg').trim(),
+    fg: style.getPropertyValue('--rp-fg').trim(),
+    border: style.getPropertyValue('--rp-border').trim(),
+    accent: style.getPropertyValue('--rp-accent').trim(),
+    elevBg: style.getPropertyValue('--rp-elev-bg').trim(),
+  };
+}
+
+/** Unique signature for the current theme + --rp-* color set — used as the cache/comparison key. */
+function computeColorSignature(): {
+  theme: 'default' | 'dark';
+  colors: ReturnType<typeof readPaletteColors>;
+  signature: string;
+} {
   const theme: 'default' | 'dark' = isDarkBackground() ? 'dark' : 'default';
-  if (theme !== lastTheme) {
-    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme });
-    lastTheme = theme;
+  const colors = readPaletteColors();
+  const signature = `${theme}|${colors.bg}|${colors.fg}|${colors.border}|${colors.accent}|${colors.elevBg}`;
+  return { theme, colors, signature };
+}
+
+/**
+ * Ensure mermaid is using the theme + themeVariables that match the current
+ * --rp-*; re-init when they change (theme flips light↔dark OR same brightness
+ * but a different-colored palette — e.g. sepia → paper). Returns the current
+ * color signature, used as the cache key.
+ */
+function ensureTheme(): string {
+  const { theme, colors, signature } = computeColorSignature();
+  if (signature !== lastColorSignature) {
+    // getComputedStyle can hand back "" when a --rp-* chain bottoms out on an
+    // unset host variable (e.g. --vscode-editor-background missing outside a
+    // real VS Code webview) — mermaid.render throws on an empty color string,
+    // so only override themeVariables it actually resolved to a real value;
+    // otherwise let mermaid keep its own theme default for that slot.
+    const themeVariables: Record<string, string> = {};
+    if (colors.bg) themeVariables.background = colors.bg;
+    if (colors.elevBg) themeVariables.primaryColor = colors.elevBg;
+    if (colors.border) themeVariables.primaryBorderColor = colors.border;
+    if (colors.accent) themeVariables.lineColor = colors.accent;
+    if (colors.fg) themeVariables.textColor = colors.fg;
+    if (colors.border) themeVariables.nodeBorder = colors.border;
+    if (colors.elevBg) themeVariables.clusterBkg = colors.elevBg;
+
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme, themeVariables });
+    lastColorSignature = signature;
   }
-  return theme;
+  return signature;
 }
 
 /** Hash chuỗi đơn giản (djb2) — không cần dependency ngoài. */
@@ -137,10 +183,10 @@ export function initMermaid(content: HTMLElement): MermaidController {
   return {
     renderAll,
     refreshTheme(): void {
-      // Chỉ dựng lại khi độ sáng nền thực sự lật — nếu không, SVG trong cache
-      // (khoá theo theme) vẫn đúng, khỏi đụng DOM.
-      const theme: 'default' | 'dark' = isDarkBackground() ? 'dark' : 'default';
-      if (theme !== lastTheme) {
+      // Only re-render when the --rp-* color signature actually changed (theme
+      // flips light↔dark OR same brightness but a different-colored palette) —
+      // otherwise the cached SVG (keyed by signature) is still correct, skip touching the DOM.
+      if (computeColorSignature().signature !== lastColorSignature) {
         renderAll();
       }
     },
@@ -161,12 +207,13 @@ async function renderDiagram(
   // để nó trở thành đợt mới nhất và các kết quả cũ đang chờ bị coi là stale.
   const seq = opts.seq ?? ++renderSeq;
 
-  // Đảm bảo theme khớp nền hiệu dụng và khoá cache theo theme (bug_General #7):
-  // cùng source nhưng khác theme phải là 2 SVG khác nhau.
-  const theme = ensureTheme();
+  // Ensure theme + --rp-* colors match the effective background and key the
+  // cache by color signature (bug_General #7, matrix G2): same source but a
+  // different theme/palette must be 2 different SVGs.
+  const colorSignature = ensureTheme();
 
-  // Cache hit: source + theme không đổi → tái dùng SVG cũ, khỏi gọi mermaid.render.
-  const key = `${theme}:${hashSource(source)}`;
+  // Cache hit: source + color signature unchanged → reuse the existing SVG instead of re-calling mermaid.render.
+  const key = `${colorSignature}:${hashSource(source)}`;
   const cached = svgCache.get(key);
   if (cached !== undefined) {
     chart.innerHTML = cached;
@@ -180,11 +227,12 @@ async function renderDiagram(
     if (!wrapper.isConnected || seq !== renderSeq) {
       return; // tài liệu đã render lại / có đợt render mới hơn — bỏ kết quả cũ, tránh ghi đè
     }
-    // Chỉ cache SVG sau khi thắng seq guard (bug_General #7 review): theme là 1
-    // biến GLOBAL của mermaid, mà render bất đồng bộ. Nếu cache trước guard, một
-    // đợt cũ (đã bị đợt mới có theme khác chen ngang) có thể lưu SVG lệch theme
-    // dưới khoá `theme:hash` của nó → lần sau cache hit trả về biểu đồ sai theme.
-    // Đợt đã qua guard chắc chắn là mới nhất nên SVG khớp theme của khoá.
+    // Only cache the SVG after passing the seq guard (bug_General #7 review):
+    // theme/colors are a GLOBAL mermaid variable, and render is async. Caching
+    // before the guard could let a stale pass (already pre-empted by a newer
+    // pass with different colors) store an SVG under the wrong
+    // `signature:hash` key → a later cache hit would then return the wrong colors.
+    // A pass that clears the guard is guaranteed the newest, so its SVG matches its key's signature.
     svgCache.set(key, svg);
     chart.innerHTML = svg;
     chart.classList.remove(ERROR_CLASS);

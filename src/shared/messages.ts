@@ -19,32 +19,27 @@ export interface FileSuggestion {
 export type CrossFileSearchScope = 'markdown' | 'allFiles';
 
 /**
- * Preset đọc (US-19.1) — mỗi preset gói measure + line-height + font.
- * `academic` (US-19.15) = look bài luận serif kiểu ai-2027.com (cột hẹp, serif
- * cổ điển, giãn dòng rộng); ghép đẹp nhất với palette `paper`.
+ * Reading Mode (US-19.24) — MỘT khái niệm duy nhất thay cho 2 trục preset×palette
+ * cũ (US-19.18/19.21/4.27, đã supersede). Mỗi mode tự gói cả typography lẫn màu:
+ * - `standard` = follow VS Code theme (reading off/neutral), không rò màu.
+ * - `sepia` = typography đọc + màu sepia ấm low-blue.
+ * - `paper` = typography đọc + nền kem trắng ấm #fffff8 kiểu ai-2027.com.
  */
-export type ReadingPreset = 'comfortable' | 'default' | 'compact' | 'dyslexia' | 'academic';
+export type ReadingMode = 'standard' | 'sepia' | 'paper';
 
 /**
- * Bảng màu đọc (US-19.5) — `followTheme` = kế thừa theme VS Code (mặc định).
- * `paper` (US-19.15) = nền kem trắng ấm #fffff8 + chữ gần-đen kiểu ai-2027.com.
- */
-export type ReadingPalette = 'followTheme' | 'light' | 'dark' | 'sepia' | 'highContrast' | 'paper';
-
-/**
- * Trạng thái Reading Mode (US-19.1/19.5/19.6/19.9). Host dùng để gửi giá trị
+ * Trạng thái Reading Mode (US-19.1/19.6/19.9/19.24). Host dùng để gửi giá trị
  * seed ban đầu (đọc từ `orcaEditor.readability.*` + global override nếu có,
- * xem `resolveReadability`) trong 'init'. `enabled`/`preset`/`palette` giờ
- * global-in-memory ở host (bug 0716 #2, đảo ngược per-tab cũ của bug 0715 mục
- * 4) — đổi ở 1 tab lan sang mọi tab .md đang mở qua message
- * `readingModeChanged`, cùng mô hình `zen` (US-19.19, kênh `zenChanged`)
- * nhưng độc lập. `fontFamily` KHÔNG nằm trong 2 bundle global này — vẫn chỉ
- * seed 1 lần từ config, không persist ngược. Không đụng nội dung `.md`.
+ * xem `resolveReadability`) trong 'init'. `enabled`/`mode` giờ global-in-memory
+ * ở host (bug 0716 #2, đảo ngược per-tab cũ của bug 0715 mục 4) — đổi ở 1 tab
+ * lan sang mọi tab .md đang mở qua message `readingModeChanged`, cùng mô hình
+ * `zen` (US-19.19, kênh `zenChanged`) nhưng độc lập. `fontFamily` KHÔNG nằm
+ * trong bundle global này — vẫn chỉ seed 1 lần từ config, không persist ngược.
+ * Không đụng nội dung `.md`.
  */
 export interface ReadabilityConfig {
   enabled: boolean;
-  preset: ReadingPreset;
-  palette: ReadingPalette;
+  mode: ReadingMode;
   fontFamily: string;
   zen: boolean;
 }
@@ -129,12 +124,11 @@ export interface AssetSaveResult {
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
 export type ZenChangedMessage = { type: 'zenChanged'; zen: boolean };
 
-/** Reading-mode bundle change — same shape in both directions (webview↔host). */
+/** Reading-mode change — same shape in both directions (webview↔host). */
 export type ReadingModeChangedMessage = {
   type: 'readingModeChanged';
   enabled: boolean;
-  preset: ReadingPreset;
-  palette: ReadingPalette;
+  mode: ReadingMode;
 };
 
 /** Message webview → host (discriminated theo `type`). */
@@ -172,12 +166,12 @@ export type WebviewToHost =
   /**
    * US-19.19: Zen/Focus mode vừa đổi ở TAB NÀY — host giữ lại làm state
    * global-in-memory (KHÔNG persist Settings) rồi phát cho MỌI panel .md
-   * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Khác
-   * preset/palette/enabled (vẫn per-tab, session-only — US-19.18).
+   * khác đang mở (trừ chính panel gửi, đã tự apply cục bộ rồi). Kênh riêng,
+   * độc lập với `readingModeChanged` (enabled/mode).
    */
   | ZenChangedMessage
   /**
-   * Bug 0716 #2 (reversal 2026-07-16): enabled/preset/palette vừa đổi Ở CHÍNH
+   * Bug 0716 #2 (reversal 2026-07-16): enabled/mode vừa đổi Ở CHÍNH
    * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
    * cùng mô hình như zenChanged) rồi phát cho MỌI panel .md khác đang mở.
    * fontFamily KHÔNG nằm trong bundle này — không có UI toggle runtime, vẫn

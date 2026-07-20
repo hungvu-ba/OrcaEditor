@@ -449,6 +449,65 @@ runner.check(
   );
 }
 
+// Same leak check for the table-separator axis specifically: a complex table
+// (nested list forces HTML fallback) stamped 'compact' must not leak
+// data-md-table-sep-style into the saved .md output.
+{
+  const out = serializeHtml(
+    '<table data-md-table-sep-style="compact"><tbody><tr>' +
+      '<td><ul><li>x</li><li>y</li></ul></td></tr></tbody></table>'
+  );
+  runner.check(
+    'complex table HTML output carries no transient table-separator attribute',
+    out.includes('<table') && !out.includes('data-md-table-sep-style'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// US-18.5 — table separator-row spacing axis
+// ---------------------------------------------------------------------------
+
+// I/O row "edit elsewhere": a compact-separator table stays byte-identical
+// when another block in the same file is re-serialized.
+{
+  const md = '| A | B |\n|---|---|\n| 1 | 2 |\n\nSome body text.\n';
+  const out = serializeWithBlockMap(md);
+  runner.check('table: compact separator untouched → byte-identical', out === md, `  out = ${JSON.stringify(out)}`);
+}
+
+// Golden Rule: a file already using the padded default stays byte-identical.
+{
+  const md = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+  const out = serializeWithBlockMap(md);
+  runner.check('table: golden — padded separator is byte-identical', out === md, `  out = ${JSON.stringify(out)}`);
+}
+
+// I/O row "new table (toolbar)": no mdSlice/attr → current padded default.
+runner.check(
+  'table: new table (no override) → padded default',
+  serializeHtml('<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>')
+    .includes('| --- | --- |'),
+  `  out = ${JSON.stringify(
+    serializeHtml('<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>')
+  )}`
+);
+
+// Rule-level: compact mark + column alignment keeps the compact wrapping
+// with the correct alignment token, no inner spaces.
+{
+  const out = serializeHtml(
+    '<table data-md-table-sep-style="compact"><thead><tr><th>A</th>' +
+      '<th align="center" style="text-align: center;">B</th></tr></thead>' +
+      '<tbody><tr><td>1</td><td align="center" style="text-align: center;">2</td></tr></tbody></table>'
+  );
+  runner.check(
+    'table: compact mark + alignment → "|:-:|" with no inner spaces',
+    out.includes('|---|:-:|') && !out.includes('| --- |') && !out.includes('| :-: |'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // US-18.4b — new global defaults + Golden Rule
 // ---------------------------------------------------------------------------

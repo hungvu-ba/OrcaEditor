@@ -27,9 +27,12 @@ import { insertTable } from './table';
 import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
-import { READING_STYLES, type ReadabilityController } from './readability';
-import { attachTooltip, hideTooltip } from './tooltip';
+import { type ReadabilityController } from './readability';
+import { attachTooltip, hideTooltip, setTooltip } from './tooltip';
 import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
+import { codeLangDisplayName, codeLangFromClass, postProcessCodeHeaders } from './dom-postprocess';
+import { MD_CODE_LANG_CLASS } from './render';
+import { LANG_SWITCHED_ATTR } from './block-style';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
@@ -207,8 +210,12 @@ interface ToolbarDropdownEntry {
    */
   onHoverPreview?: () => void;
   onHoverCancel?: () => void;
-  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi 10 bundle bên dưới). */
+  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi các bundle bên dưới). */
   separatorBefore?: boolean;
+  /** US-4.27: caption nhóm (đậm, mờ) render NGAY TRƯỚC hàng này (vd "Comfortable Reading"). */
+  groupCaption?: string;
+  /** US-4.27: dữ liệu vẽ swatch 14×14 xem trước style (nền palette + "A" màu chữ + font preset). */
+  swatch?: { palette: string; preset: string };
 }
 
 interface ToolbarItem {
@@ -222,6 +229,13 @@ interface ToolbarItem {
   id?: string;
   /** Đẩy nút (và mọi nút sau nó) sang mép phải toolbar — nhóm tiện ích. */
   alignRight?: boolean;
+  /**
+   * Thứ tự thu vào menu tràn "•••" khi toolbar hẹp (US-4.24): số NHỎ = thu
+   * TRƯỚC. Nút KHÔNG có field này thì không bao giờ thu (pinned) — kể cả nút ở
+   * nhóm `alignRight`. Tách hẳn khỏi vị trí trong mảng vì tập nút luôn-hiện của
+   * wireframe không liền mạch (Link/Image phải sống lâu hơn Table/Rule dù đứng sau).
+   */
+  collapsePriority?: number;
   /**
    * true nếu action tự mở popup nhập liệu bất đồng bộ (chèn liên kết/ảnh).
    * Popup tự focus vào ô nhập và tự restore selection khi đóng (xem prompt.ts) —
@@ -272,9 +286,9 @@ export function syncReadingButtons(): void {
   const enabled = ctx.readability.isEnabled();
   document.getElementById('reading-toggle')?.classList.toggle('active', enabled);
   document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
-  // Dấu ✓ hàng bundle đang áp (US-19.18) — 'off' khi tắt hẳn, hoặc không hàng
-  // nào nếu state hiện tại (vd seed tay qua settings.json) không khớp bundle nào.
-  const current = enabled ? (ctx.readability.getStyleId() ?? '') : 'off';
+  // Dấu ✓ hàng mode đang áp (US-19.24) — 'off' khi tắt hẳn (= hàng "Standard"),
+  // ngược lại là mode màu hiện tại (sepia/paper).
+  const current = enabled ? ctx.readability.getMode() : 'off';
   syncDropdownSelection('reading-toggle', current);
 }
 
@@ -317,17 +331,55 @@ const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
  * chung `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo
  * vùng chọn (US-4.4) giữ nguyên cho cả 9 ngôn ngữ, chỉ khác class `language-*`.
  */
-const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
-  { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
-  { label: 'JavaScript', badge: 'Common', action: () => insertCodeBlock('javascript') },
-  { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
-  { label: 'Python', action: () => insertCodeBlock('python') },
-  { label: 'Bash', action: () => insertCodeBlock('bash') },
-  { label: 'JSON', action: () => insertCodeBlock('json') },
-  { label: 'HTML', action: () => insertCodeBlock('html') },
-  { label: 'CSS', action: () => insertCodeBlock('css') },
-  { label: 'SQL', action: () => insertCodeBlock('sql') },
+/**
+ * Nguồn duy nhất cho danh sách 9 ngôn ngữ code — dùng chung cho cả nút chèn
+ * (CODE_BLOCK_DROPDOWN, US-4.10) và bộ đổi ngôn ngữ tại chỗ (openCodeLangSwitcher,
+ * US-4.28). `value` là token `language-*` ghi vào `<code>` (turndown đọc đúng
+ * token này ra fence). Sửa danh sách 1 chỗ → cả hai đồng bộ.
+ */
+const CODE_LANGUAGES: { value: string; label: string; badge?: string }[] = [
+  { value: 'plaintext', label: 'Plain text' },
+  { value: 'javascript', label: 'JavaScript', badge: 'Common' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'python', label: 'Python' },
+  { value: 'bash', label: 'Bash' },
+  { value: 'json', label: 'JSON' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'sql', label: 'SQL' },
 ];
+
+/**
+ * Alias → canonical token cho 9 ngôn ngữ dropdown (US-4.28): fence do người dùng
+ * gõ/nhập thường dùng token rút gọn (`js`, `ts`, `py`, `sh`...), trong khi
+ * `CODE_LANGUAGES.value` là dạng chuẩn. Chuẩn hoá trước khi so sánh để một block
+ * `language-js` vẫn được đánh dấu ✓ ở hàng JavaScript và chọn lại JavaScript là
+ * no-op (không ghi đè token `js` thành `javascript`, không phát 'edit' thừa).
+ * `xml` cố ý KHÔNG map về `html` — chúng khác ngôn ngữ hljs, để nguyên không ✓.
+ */
+const CANONICAL_LANG: Record<string, string> = {
+  js: 'javascript',
+  ts: 'typescript',
+  py: 'python',
+  sh: 'bash',
+  shell: 'bash',
+  txt: 'plaintext',
+  text: 'plaintext',
+};
+
+function canonicalLang(token: string | null): string {
+  if (!token) {
+    return '';
+  }
+  const t = token.toLowerCase();
+  return CANONICAL_LANG[t] ?? t;
+}
+
+const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = CODE_LANGUAGES.map((c) => ({
+  label: c.label,
+  badge: c.badge,
+  action: () => insertCodeBlock(c.value),
+}));
 
 /**
  * Dropdown của Math split-button (US-4.11) — Inline (mặc định của mặt chính)
@@ -368,56 +420,81 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
- * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 10 bundle
- * preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp,
- * xem `READING_STYLES` trong readability.ts và Requirement - 19
- * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
- * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
- * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
- * addPopoverRow). Chọn hàng qua `setStyle`/`disable` — kéo theo bật/tắt Reading
- * Mode. ctx được gán trong initToolbar trước khi mọi action chạy nên tham
- * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
- *
- * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
- * reset" duy nhất, khác loại với 10 bundle bên dưới (đều là biến thể "bật");
- * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
- * phải cuộn qua hết 10 hàng mới thấy, và tách riêng bằng 1 vạch chia
- * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
- * chọn "style" thứ 11.
+ * Dropdown của Reading Mode split-button — 3 mode phẳng (US-19.24): "Standard"
+ * (tắt reading style, `disable()`) + "Sepia"/"Paper" (bật trực tiếp,
+ * `setMode`). Hover 1 hàng live-preview lên file hiện tại (`previewMode`); rời
+ * hàng không chọn thì `cancelPreview()` trả lại theme đã commit (wiring hover ở
+ * addPopoverRow). ctx được gán trong initToolbar trước khi mọi action chạy nên
+ * tham chiếu an toàn.
  */
 const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   {
-    label: 'Follow VS Code (no reading style)',
+    label: 'Standard',
     value: 'off',
     action: () => ctx.readability.disable(),
-    onHoverPreview: () => ctx.readability.previewStyle('off'),
+    onHoverPreview: () => ctx.readability.previewMode('off'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
   },
-  ...READING_STYLES.map((style, i) => ({
-    label: style.label,
-    badge: style.id === 'comfortable-sepia' ? 'Default' : undefined,
-    value: style.id,
-    action: () => ctx.readability.setStyle(style.id),
-    onHoverPreview: () => ctx.readability.previewStyle(style.id),
+  {
+    label: 'Sepia Comfort',
+    value: 'sepia',
+    action: () => ctx.readability.setMode('sepia'),
+    onHoverPreview: () => ctx.readability.previewMode('sepia'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
-    separatorBefore: i === 0,
-  })),
+  },
+  {
+    label: 'Paper Comfort',
+    value: 'paper',
+    action: () => ctx.readability.setMode('paper'),
+    onHoverPreview: () => ctx.readability.previewMode('paper'),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+  },
 ];
 
-// Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
-// Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
-// code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
-// chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
-// chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
+// Thứ tự control theo wireframe (US-4.24, thay phần thứ tự của US-4.8):
+// Undo/Redo → B/I/S/Inline code/Clear formatting → Heading → Bullet/Numbered/
+// Task/Blockquote → Table/Rule → Link/Image → Code block → Math → Mermaid →
+// [nhóm phải: Reading Mode, Zen, Outline].
+// `collapsePriority` (nhỏ = thu vào menu "•••" trước) điều khiển thứ tự thu gọn
+// khi toolbar hẹp — KHÔNG suy ra từ vị trí mảng, vì tập nút luôn-hiện (Undo/Redo/
+// B/I/Heading/Bullet/Numbered/Link/Image + Reading Mode/Outline) không liền mạch
+// (US-4.24 thay cơ chế thu-theo-vị-trí-mảng của US-4.7). Nút KHÔNG có
+// collapsePriority thì không bao giờ thu (pinned), kể cả khi nằm ở nhóm phải.
+// INVARIANT separator: mỗi `separatorBefore` "thuộc về" item MỞ nhóm; khi item
+// đó thu thì sep thu cùng. Để không bị sep mồ côi/lơ lửng, item mở nhóm phải
+// hoặc PINNED, hoặc là item có collapsePriority LỚN NHẤT nhóm (thu SAU cùng).
+// Hiện chỉ nhóm Table/Rule có leader collapsible (Table=5 > Rule=4 ✓). Nếu sau
+// này đổi priority/thêm item, giữ nguyên bất biến này.
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold' },
+  // Undo/redo in this extension is TextDocument-based (one single stack, see
+  // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
+  // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
+  // execCommand('undo') here would skip those changes and desync the stacks.
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true },
   { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
   {
     label: 'S',
     title: 'Strikethrough (⌘⇧X)',
     action: () => document.execCommand('strikeThrough'),
     id: 'fmt-strike',
+    collapsePriority: 10,
+  },
+  {
+    label: '</>',
+    title: 'Inline code (⌘E)',
+    action: toggleInlineCode,
+    id: 'fmt-inline-code',
+    collapsePriority: 9,
+  },
+  {
+    label: '⌫',
+    icon: FMT_ICONS.eraser,
+    title: 'Clear formatting',
+    action: () => document.execCommand('removeFormat'),
+    id: 'fmt-clear',
+    collapsePriority: 8,
   },
   {
     label: DEFAULT_HEADING.toUpperCase(),
@@ -428,19 +505,6 @@ const toolbarItems: ToolbarItem[] = [
     separatorBefore: true,
     id: 'fmt-heading',
   },
-  {
-    label: '⌫',
-    icon: FMT_ICONS.eraser,
-    title: 'Clear formatting',
-    action: () => document.execCommand('removeFormat'),
-    separatorBefore: true,
-  },
-  // Undo/redo in this extension is TextDocument-based (one single stack, see
-  // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
-  // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
-  // execCommand('undo') here would skip those changes and desync the stacks.
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true },
   {
     label: '•',
     icon: FMT_ICONS.ul,
@@ -456,27 +520,30 @@ const toolbarItems: ToolbarItem[] = [
     action: setNumberedList,
     id: 'fmt-numbered',
   },
-  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task' },
+  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task', collapsePriority: 7 },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
     title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
-    separatorBefore: true,
     id: 'fmt-blockquote',
+    collapsePriority: 6,
   },
-  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
+  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable, id: 'fmt-table', separatorBefore: true, collapsePriority: 5 },
   {
     label: '—',
     icon: FMT_ICONS.hr,
     title: 'Horizontal rule',
     action: () => document.execCommand('insertHTML', false, '<hr><p><br></p>'),
+    id: 'fmt-hr',
+    collapsePriority: 4,
   },
   {
     label: '🔗',
     icon: FMT_ICONS.link,
     title: 'Insert link',
     action: insertLink,
+    id: 'fmt-link',
     separatorBefore: true,
     opensAsyncPrompt: true,
   },
@@ -485,14 +552,8 @@ const toolbarItems: ToolbarItem[] = [
     icon: FMT_ICONS.image,
     title: 'Insert image (path)',
     action: insertImage,
+    id: 'fmt-image',
     opensAsyncPrompt: true,
-  },
-  {
-    label: '</>',
-    title: 'Inline code (⌘E)',
-    action: toggleInlineCode,
-    separatorBefore: true,
-    id: 'fmt-inline-code',
   },
   {
     label: '{ }',
@@ -501,6 +562,9 @@ const toolbarItems: ToolbarItem[] = [
     action: () => insertCodeBlock('javascript'),
     dropdown: CODE_BLOCK_DROPDOWN,
     dropdownTitle: 'Choose code language',
+    id: 'fmt-codeblock',
+    separatorBefore: true,
+    collapsePriority: 3,
   },
   {
     label: '∑',
@@ -508,6 +572,9 @@ const toolbarItems: ToolbarItem[] = [
     action: insertInlineMath,
     dropdown: MATH_DROPDOWN,
     dropdownTitle: 'Choose math type',
+    id: 'fmt-math',
+    separatorBefore: true,
+    collapsePriority: 2,
   },
   {
     label: '⎇',
@@ -516,14 +583,21 @@ const toolbarItems: ToolbarItem[] = [
     action: insertMermaidFlowchart,
     dropdown: MERMAID_DROPDOWN,
     dropdownTitle: 'Choose diagram type',
+    id: 'fmt-mermaid',
+    separatorBefore: true,
+    collapsePriority: 1,
   },
   {
     label: 'Read',
     icon: READING_ICON,
-    title: 'Reading Mode (comfortable reading layout)',
-    action: () => ctx.readability.toggle(),
-    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành 10 bundle đã
-    // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
+    title: 'Reading Mode — Standard (pick a reading style from the dropdown)',
+    // Clicking the main icon always resets to "Standard" (= top dropdown row,
+    // disable() reading style) rather than toggle() restoring the most recently
+    // used mode — users want the main button to reset to Standard, not
+    // reopen the previous reading mode.
+    action: () => ctx.readability.disable(),
+    // US-19.24: dropdown phơi 3 mode (Standard/Sepia/Paper) — không còn
+    // split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
     dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',
@@ -535,6 +609,7 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Focus Mode (hide chrome, center text — Esc to exit)',
     action: () => ctx.readability.toggleZen(),
     id: 'zen-toggle',
+    collapsePriority: 11,
   },
   {
     label: '☰',
@@ -574,6 +649,15 @@ function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
 }
 
 function invokeItem(item: ToolbarItem): void {
+  // US-4.23: honor the caret-in-code-block disabled state no matter which
+  // surface fired — the plain toolbar button AND its overflow-menu "•••" row
+  // both route through here, so the guard belongs at this choke point (not on
+  // one button's click listener). The real button holds aria-disabled even when
+  // it is hidden into the overflow menu, so getElementById still sees it.
+  if (item.id && document.getElementById(item.id)?.getAttribute('aria-disabled') === 'true') {
+    hideTooltip();
+    return;
+  }
   if (item.hostDelegated) {
     // Undo/Redo: pendingText rides the undo/redo message itself (one atomic
     // host handler) and no sync may run after it — see ToolbarItem.hostDelegated.
@@ -645,6 +729,21 @@ function buildPopover(extraClassName?: string): HTMLDivElement {
  * mà user KHÔNG chọn (Escape/click ra ngoài), tránh kẹt theme preview (US-19.18).
  */
 let activeHoverCancel: (() => void) | undefined;
+/**
+ * US-4.27: timer debounce của hover-preview ở CẤP MODULE (chỉ 1 hàng hover tại
+ * một thời điểm) — để closePopover() huỷ được nó. Trước đây timer là closure
+ * per-row, chỉ mouseleave của chính hàng đó huỷ; đóng popover bằng Escape/click
+ * ngoài TRONG cửa sổ debounce (chuột chưa rời hàng → không có mouseleave) khiến
+ * timer vẫn bắn sau khi popover đã đóng → áp preview "mồ côi" (theme kẹt) + tag
+ * .is-previewing stale. Giữ ở module + clear khi đóng vá cả 2.
+ */
+let hoverPreviewTimer: ReturnType<typeof setTimeout> | undefined;
+function clearHoverPreviewTimer(): void {
+  if (hoverPreviewTimer !== undefined) {
+    clearTimeout(hoverPreviewTimer);
+    hoverPreviewTimer = undefined;
+  }
+}
 
 /** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
 function addPopoverRow(
@@ -655,7 +754,8 @@ function addPopoverRow(
   onClick: () => void,
   value?: string,
   onHoverPreview?: () => void,
-  onHoverCancel?: () => void
+  onHoverCancel?: () => void,
+  swatch?: { palette: string; preset: string }
 ): void {
   const row = document.createElement('button');
   row.type = 'button';
@@ -668,6 +768,15 @@ function addPopoverRow(
     iconSpan.className = 'toolbar-popover-icon';
     iconSpan.innerHTML = icon;
     row.appendChild(iconSpan);
+  }
+  if (swatch) {
+    // US-4.27: swatch xem trước style — nền/chữ/font do CSS map theo data-*.
+    const sw = document.createElement('span');
+    sw.className = 'toolbar-popover-swatch';
+    sw.dataset.palette = swatch.palette;
+    sw.dataset.preset = swatch.preset;
+    sw.textContent = 'A';
+    row.appendChild(sw);
   }
   const labelSpan = document.createElement('span');
   labelSpan.className = 'toolbar-popover-label';
@@ -682,28 +791,38 @@ function addPopoverRow(
   row.addEventListener('mousedown', (e) => e.preventDefault());
   row.addEventListener('click', onClick);
   if (onHoverPreview && onHoverCancel) {
+    // US-4.27: tag "Previewing…" hiện trên hàng đang preview (CSS ẩn khi thiếu
+    // .is-previewing). Chỉ hàng có hover-preview mới có tag.
+    const previewingTag = document.createElement('span');
+    previewingTag.className = 'toolbar-popover-previewing';
+    previewingTag.textContent = 'Previewing…';
+    row.appendChild(previewingTag);
     // US-19.18 follow-up (bug report "theme apply quá nhanh gây choáng"): trễ
     // READING_PREVIEW_DEBOUNCE_MS trước khi THẬT SỰ áp preview — rê chuột lướt
     // qua nhiều hàng liên tục (không dừng ở hàng nào) sẽ không kích hoạt lần
     // preview nào cả, chỉ hàng con trỏ dừng đủ lâu mới đổi theme. mouseleave
     // luôn huỷ timer + revert ngay lập tức (không debounce chiều huỷ) nên rời
     // hàng luôn phản hồi tức thì dù preview đã kịp áp hay chưa.
-    let previewTimer: ReturnType<typeof setTimeout> | undefined;
     row.addEventListener('mouseenter', () => {
       activeHoverCancel = onHoverCancel;
-      previewTimer = setTimeout(() => {
-        previewTimer = undefined;
+      clearHoverPreviewTimer(); // huỷ debounce đang chờ của hàng trước (nếu có)
+      hoverPreviewTimer = setTimeout(() => {
+        hoverPreviewTimer = undefined;
+        // US-4.27: tag "Previewing…" bám đúng 1 hàng — gỡ khỏi các hàng khác
+        // rồi gắn hàng này, đồng thời với lúc preview THẬT SỰ áp.
+        for (const r of popoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+          r.classList.remove('is-previewing');
+        }
+        row.classList.add('is-previewing');
         onHoverPreview();
       }, READING_PREVIEW_DEBOUNCE_MS);
     });
     row.addEventListener('mouseleave', () => {
-      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce
-      // của CHÍNH hàng này nếu nó chưa kịp bắn, để rời hàng trước khi preview
-      // áp thì không áp preview đó nữa (giữ nguyên preview trước đó, nếu có).
-      if (previewTimer !== undefined) {
-        clearTimeout(previewTimer);
-        previewTimer = undefined;
-      }
+      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce nếu
+      // nó chưa kịp bắn, để rời hàng trước khi preview áp thì không áp nữa (giữ
+      // nguyên preview trước đó, nếu có).
+      clearHoverPreviewTimer();
+      row.classList.remove('is-previewing');
     });
   }
   popoverEl.appendChild(row);
@@ -715,16 +834,16 @@ function addPopoverRow(
  * bằng inline style tại thời điểm mở — bắt buộc phải là INLINE trên CHÍNH
  * từng hàng (không phải custom property đặt trên popoverEl) vì rule cỡ chữ
  * (editor.css US-19.6) gate theo SỰ CÓ MẶT của class `body.reading-mode`:
- * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-font-
- * size, 12px); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi
- * body → rule này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên
- * chỉ đóng băng custom property không đủ — phải khoá thẳng `font-size` trên
- * từng hàng, thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự
- * đổi cỡ chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể
- * không bao giờ nhận được click — bắt bằng Playwright).
+ * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-fs-
+ * 12); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi body → rule
+ * này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên chỉ đóng
+ * băng custom property không đủ — phải khoá thẳng `font-size` trên từng hàng,
+ * thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự đổi cỡ
+ * chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể không bao
+ * giờ nhận được click — bắt bằng Playwright).
  */
 function freezePopoverRowSize(popoverEl: HTMLElement): void {
-  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-font-size').trim() || '12px';
+  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-fs-12').trim() || '12px';
   popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
     row.style.fontSize = uiFontSize;
   });
@@ -752,9 +871,17 @@ function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
 }
 
 function closePopover(): void {
+  // US-4.27: huỷ debounce hover-preview đang chờ — nếu không, đóng bằng Escape
+  // TRONG cửa sổ debounce (chuột chưa rời hàng) để timer bắn sau khi popover đã
+  // đóng → áp preview mồ côi (theme kẹt) + tag stale.
+  clearHoverPreviewTimer();
   if (openPopoverEl) {
     openPopoverEl.style.display = 'none';
     unfreezePopoverRowSize(openPopoverEl);
+    // US-4.27: đóng popover → gỡ tag "Previewing…" kẻo còn kẹt lần mở sau.
+    for (const r of openPopoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+      r.classList.remove('is-previewing');
+    }
   }
   openPopoverEl = undefined;
   openPopoverTrigger = undefined;
@@ -792,6 +919,8 @@ interface CollapsibleEntry {
   btn: HTMLElement;
   /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
   sep: HTMLSpanElement | null;
+  /** Thứ tự thu (nhỏ = thu trước) — copy từ item.collapsePriority (US-4.24). */
+  priority: number;
 }
 
 let toolbarElRef: HTMLElement | undefined;
@@ -880,6 +1009,13 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       sep.className = 'toolbar-popover-sep';
       popover.appendChild(sep);
     }
+    if (entry.groupCaption) {
+      // US-4.27: caption nhóm (không tương tác) trước hàng đầu mỗi nhóm.
+      const caption = document.createElement('div');
+      caption.className = 'toolbar-popover-caption';
+      caption.textContent = entry.groupCaption;
+      popover.appendChild(caption);
+    }
     addPopoverRow(
       popover,
       entry.icon,
@@ -891,7 +1027,8 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       },
       entry.value,
       entry.onHoverPreview,
-      entry.onHoverCancel
+      entry.onHoverCancel,
+      entry.swatch
     );
   }
   main.addEventListener('click', () => invokeItem(item));
@@ -939,8 +1076,11 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     const el = item.dropdown ? buildSplitButtonEl(item) : buildPlainButtonEl(item);
     toolbarEl.appendChild(el);
 
-    if (!inPinnedGroup) {
-      collapsibleEntries.push({ item, btn: el, sep });
+    // US-4.24: collapsibility do `collapsePriority` quyết định, KHÔNG do vị trí
+    // so với nhóm alignRight nữa — nên Zen (nằm SAU Reading Mode alignRight) vẫn
+    // thu được, còn Link/Image (đứng trước) vẫn pinned.
+    if (item.collapsePriority !== undefined) {
+      collapsibleEntries.push({ item, btn: el, sep, priority: item.collapsePriority });
     }
   }
 
@@ -1067,19 +1207,24 @@ function recalcOverflow(): void {
   }
 
   moreBtn.style.display = '';
-  const hidden: CollapsibleEntry[] = [];
-  for (let i = collapsibleEntries.length - 1; i >= 0; i--) {
+  // US-4.24: thu theo `priority` TĂNG DẦN (nhỏ = thu trước), không theo vị trí
+  // mảng. Khi rộng ra sẽ hiện lại theo chiều ngược (priority lớn hiện lại trước)
+  // — chỉ cần dừng ngay khi vừa đủ chỗ.
+  const hiddenSet = new Set<CollapsibleEntry>();
+  const byPriority = [...collapsibleEntries].sort((a, b) => a.priority - b.priority);
+  for (const entry of byPriority) {
     if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
       break;
     }
-    const entry = collapsibleEntries[i];
     entry.btn.style.display = 'none';
     if (entry.sep) {
       entry.sep.style.display = 'none';
     }
-    hidden.unshift(entry);
+    hiddenSet.add(entry);
   }
-  rebuildOverflowMenu(hidden);
+  // Menu liệt kê theo thứ tự hiển thị trên toolbar (collapsibleEntries đã theo
+  // đúng thứ tự mảng), không theo thứ tự bị thu.
+  rebuildOverflowMenu(collapsibleEntries.filter((e) => hiddenSet.has(e)));
 }
 
 /**
@@ -1832,6 +1977,104 @@ function highlightNewCodeBlocks(): void {
   content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
     hljs.highlightElement(el as HTMLElement);
   });
+  // Bug fix: a toolbar insert only produced a bare <pre><code> — the header bar
+  // (language label = in-place switch menu, Copy, Wrap) was injected only on the
+  // next host render, so it appeared just after an undo. Inject it now (idempotent,
+  // skips blocks that already have a header) so a fresh insert shows it immediately.
+  postProcessCodeHeaders(content, document);
+}
+
+/**
+ * US-4.28: đổi ngôn ngữ của MỘT code block đã có. Ghi lại đúng 1 class
+ * `language-<lang>` trên `<code>` (turndown.ts `fencedCodeWithLang` đọc đúng
+ * class này ra fence info-string), reset token hljs cũ về text thô rồi tô sáng
+ * lại theo ngôn ngữ mới, và cập nhật nhãn trên header. Trả về `false` (no-op)
+ * khi ngôn ngữ chọn trùng ngôn ngữ hiện tại — caller bỏ qua việc phát 'edit'.
+ */
+function setCodeBlockLanguage(code: HTMLElement, lang: string): boolean {
+  // Block có thể đã bị gỡ khỏi DOM nếu một 'update' từ host render lại #content
+  // trong lúc popover còn mở (popover sống trên <body>): thao tác trên node mồ
+  // côi rồi syncNow sẽ serialize block LIVE mới → mất thay đổi. Bỏ qua an toàn.
+  if (!code.isConnected) {
+    return false;
+  }
+  // So khớp qua dạng chuẩn: block `language-js` + chọn JavaScript = no-op (không
+  // đổi token `js`→`javascript`, không phát 'edit' thừa) — xem CANONICAL_LANG.
+  if (canonicalLang(codeLangFromClass(code)) === lang) {
+    return false;
+  }
+  // Gỡ mọi class language-*/hljs cũ (giữ nguyên class khác nếu có), thêm đúng 1
+  // language mới. Iterate qua bản sao vì classList là live-list.
+  for (const c of Array.from(code.classList)) {
+    if (c.startsWith('language-') || c === 'hljs' || c.startsWith('hljs-')) {
+      code.classList.remove(c);
+    }
+  }
+  code.classList.add(`language-${lang}`);
+  // Đánh dấu block đã đổi ngôn ngữ: nếu gốc là code THỤT LỀ, style override lúc
+  // serialize (applyBlockStyleOverrides từ blockMap gốc) sẽ ép lại "indented" và
+  // turndown bỏ token ngôn ngữ → switch serialize ra .md y hệt (không 'edit',
+  // nhãn revert). Marker này để applyBlockStyleOverrides bỏ trục code cho block,
+  // cho nó chuyển sang fence mang được ngôn ngữ vừa chọn. (data-* không leak vào
+  // .md — turndown fencedCodeWithLang dựng fence từ đầu, bỏ qua attr của <pre>.)
+  code.parentElement?.setAttribute(LANG_SWITCHED_ATTR, '');
+  // hljs v11 đánh dấu phần tử đã tô bằng data-highlighted → gỡ đi và trả nội
+  // dung về text thô (bỏ các <span> token cũ) để highlightElement tô lại từ đầu
+  // theo ngôn ngữ mới thay vì cảnh báo "already highlighted".
+  code.removeAttribute('data-highlighted');
+  const rawText = code.textContent ?? '';
+  code.textContent = rawText;
+  hljs.highlightElement(code);
+  const label = code.parentElement?.querySelector<HTMLElement>(`.${MD_CODE_LANG_CLASS}`);
+  if (label) {
+    label.textContent = codeLangDisplayName(lang);
+  }
+  return true;
+}
+
+/** Popover dùng lại cho bộ đổi ngôn ngữ tại chỗ — dựng 1 lần, mở lại nhiều block. */
+let codeLangPopover: HTMLDivElement | undefined;
+
+/**
+ * US-4.28: mở dropdown 9 ngôn ngữ (đúng danh sách US-4.10) neo theo nhãn ngôn
+ * ngữ `labelEl` trên header của một code block, đánh dấu ✓ ngôn ngữ hiện tại;
+ * chọn 1 hàng → đổi ngôn ngữ block đó tại chỗ rồi phát 'edit' (bỏ qua nếu trùng).
+ * Gọi từ listener delegated ở main.ts. Không đụng selection nên caret không lọt
+ * vào block (header vốn contenteditable=false), không kích hoạt state US-4.23.
+ */
+export function openCodeLangSwitcher(labelEl: HTMLElement): void {
+  const code = labelEl.closest('pre')?.querySelector<HTMLElement>(':scope > code');
+  if (!code) {
+    return;
+  }
+  if (!codeLangPopover) {
+    codeLangPopover = buildPopover('code-lang-popover');
+  }
+  const popover = codeLangPopover;
+  // Dựng lại hàng mỗi lần mở để closure bám đúng `<code>` đang thao tác.
+  popover.replaceChildren();
+  for (const c of CODE_LANGUAGES) {
+    addPopoverRow(
+      popover,
+      undefined,
+      c.label,
+      c.badge,
+      () => {
+        closePopover();
+        if (setCodeBlockLanguage(code, c.value)) {
+          ctx.syncNow();
+        }
+      },
+      c.value
+    );
+  }
+  // Dấu ✓ cho ngôn ngữ hiện tại của block — chuẩn hoá alias (`js`→`javascript`)
+  // để token rút gọn vẫn khớp đúng hàng dropdown (khớp data-dropdown-value).
+  const current = canonicalLang(codeLangFromClass(code));
+  popover.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.dropdownValue === current);
+  });
+  togglePopover(labelEl, popover);
 }
 
 function insertLink(): void {
@@ -1951,6 +2194,38 @@ function setActive(id: string, active: boolean): void {
   document.getElementById(id)?.classList.toggle('active', active);
 }
 
+// US-4.23: nút bị vô hiệu khi caret nằm trong code block (design state f — chỉ
+// Link/Image). Key theo caret + danh sách id (không phải instance nút cụ thể)
+// nên vẫn là no-op an toàn sau khi Link/Image bị gỡ vào luồng @-popup
+// (US-20.1/20.8): getElementById trả null → bỏ qua.
+const CODE_BLOCK_DISABLED_BUTTONS = [
+  { id: 'fmt-link', name: 'Link' },
+  { id: 'fmt-image', name: 'Image' },
+];
+
+/**
+ * Bật/tắt trạng thái vô hiệu của Link/Image theo việc caret có trong code block
+ * không. Dùng aria-disabled (KHÔNG dùng thuộc tính `disabled` gốc, để nút vẫn
+ * nhận hover → tooltip vẫn hiện lời giải thích, đúng design state f); CSS bắt
+ * theo `[aria-disabled='true']`, click bị chặn ở invokeItem. aria-label giữ
+ * nguyên (lời giải thích chỉ ở tooltip) nên khi bật lại chỉ cần restore từ đó.
+ */
+function setCodeBlockDisabled(inCodeBlock: boolean): void {
+  for (const { id, name } of CODE_BLOCK_DISABLED_BUTTONS) {
+    const btn = document.getElementById(id);
+    if (!btn) {
+      continue;
+    }
+    if (inCodeBlock) {
+      btn.setAttribute('aria-disabled', 'true');
+      setTooltip(btn, `${name} — unavailable inside a code block`);
+    } else {
+      btn.removeAttribute('aria-disabled');
+      setTooltip(btn, btn.getAttribute('aria-label') ?? '');
+    }
+  }
+}
+
 /**
  * Tính lại + gán `.active` cho 8 nút ở trên. Bullet/Numbered dựa theo
  * `getListSelection()` (US-4.2) — CHỈ theo tag `<ul>`/`<ol>`, không loại trừ
@@ -1968,6 +2243,7 @@ function recomputeActiveFormatting(): void {
     for (const id of ACTIVE_SYNC_IDS) {
       setActive(id, false);
     }
+    setCodeBlockDisabled(false);
     return;
   }
 
@@ -1978,6 +2254,12 @@ function recomputeActiveFormatting(): void {
   const anchorEl = closestElement(anchor);
   const inlineCode = anchorEl?.closest('code') ?? null;
   setActive('fmt-inline-code', !!inlineCode && !inlineCode.closest('pre'));
+
+  // Code block = <pre> (US-4.23). Vô hiệu Link/Image khi caret ở trong — xét
+  // CẢ hai đầu selection: kéo chọn từ đoạn văn xuống một <pre> (anchor ngoài,
+  // focus trong) vẫn phải chặn, nếu không createLink sẽ bắc qua ranh code block.
+  const focusInPre = !!closestElement(focus)?.closest('pre');
+  setCodeBlockDisabled(!!anchorEl?.closest('pre') || focusInPre);
 
   const bq = anchorEl?.closest('blockquote') ?? null;
   setActive('fmt-blockquote', !!bq && content.contains(bq));
