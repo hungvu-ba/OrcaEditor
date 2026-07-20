@@ -591,8 +591,12 @@ const toolbarItems: ToolbarItem[] = [
   {
     label: 'Read',
     icon: READING_ICON,
-    title: 'Reading Mode (comfortable reading layout)',
-    action: () => ctx.readability.toggle(),
+    title: 'Reading Mode — Standard (pick a reading style from the dropdown)',
+    // Clicking the main icon always resets to "Standard" (= top dropdown row,
+    // disable() reading style) rather than toggle() restoring the most recently
+    // used preset/palette — users want the main button to reset to Standard, not
+    // reopen the previous reading mode.
+    action: () => ctx.readability.disable(),
     // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành các bundle đã
     // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
@@ -831,16 +835,16 @@ function addPopoverRow(
  * bằng inline style tại thời điểm mở — bắt buộc phải là INLINE trên CHÍNH
  * từng hàng (không phải custom property đặt trên popoverEl) vì rule cỡ chữ
  * (editor.css US-19.6) gate theo SỰ CÓ MẶT của class `body.reading-mode`:
- * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-font-
- * size, 12px); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi
- * body → rule này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên
- * chỉ đóng băng custom property không đủ — phải khoá thẳng `font-size` trên
- * từng hàng, thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự
- * đổi cỡ chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể
- * không bao giờ nhận được click — bắt bằng Playwright).
+ * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-fs-
+ * 12); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi body → rule
+ * này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên chỉ đóng
+ * băng custom property không đủ — phải khoá thẳng `font-size` trên từng hàng,
+ * thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự đổi cỡ
+ * chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể không bao
+ * giờ nhận được click — bắt bằng Playwright).
  */
 function freezePopoverRowSize(popoverEl: HTMLElement): void {
-  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-font-size').trim() || '12px';
+  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-fs-12').trim() || '12px';
   popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
     row.style.fontSize = uiFontSize;
   });

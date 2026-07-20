@@ -1457,19 +1457,30 @@ function getNonce(): string {
   return crypto.randomBytes(16).toString('base64');
 }
 
-/** Giá trị hợp lệ của preset/palette — settings.json có thể chứa chuỗi tùy ý,
- * phải whitelist trước khi nội suy vào class attribute của HTML (getHtml). */
+/** Giá trị hợp lệ của preset/palette — dùng để whitelist message 'readingModeChanged'
+ * từ webview (runtime, per-tab bundle) trước khi nội suy vào class attribute của
+ * HTML (getHtml). Settings.json giờ không còn 2 field preset/palette rời — xem
+ * READING_MODES bên dưới. */
 const READING_PRESETS: readonly ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
 const READING_PALETTES: readonly ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
 
+/** Danh sách reading mode phẳng phơi ra settings.json (`orcaEditor.readability.readingMode`)
+ * — thay cho 2 field preset/palette rời trước đây, để không ai lắp được tổ hợp
+ * preset×palette tùy ý chưa có màu/kiểm chứng (chỉ 3 mode đã có bảng màu đầy đủ). */
+const READING_MODES: Readonly<Record<string, { preset: ReadingPreset; palette: ReadingPalette }>> = {
+  standard: { preset: 'default', palette: 'followTheme' },
+  'comfortable-sepia': { preset: 'comfortable', palette: 'sepia' },
+  'comfortable-paper': { preset: 'comfortable', palette: 'paper' },
+};
+
 /** Đọc trạng thái Reading Mode (US-19.x) từ config `orcaEditor.readability.*`. */
 function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
-  const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
-  const palette = cfg.get<ReadingPalette>('readability.palette', 'followTheme');
+  const readingMode = cfg.get<string>('readability.readingMode', 'standard');
+  const resolved = READING_MODES[readingMode] ?? READING_MODES.standard;
   return {
     enabled: cfg.get<boolean>('readability.enabled', false),
-    preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
-    palette: READING_PALETTES.includes(palette) ? palette : 'followTheme',
+    preset: resolved.preset,
+    palette: resolved.palette,
     fontFamily: cfg.get<string>('readability.fontFamily', ''),
     zen: cfg.get<boolean>('readability.zen', false),
   };

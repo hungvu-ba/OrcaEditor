@@ -216,10 +216,10 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
    * GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
    *
    * Preview đổi preset (kể cả tắt hẳn `reading-mode` khi preview "Follow VS
-   * Code") kéo theo `--reading-ui-font-size` (per preset, editor.css US-19.6)
-   * — biến cũng điều khiển cỡ chữ của CHÍNH `.toolbar-popover-item` — đổi
-   * theo, tự làm dropdown đang mở vỡ hình ngay lúc hover (hàng dưới dịch
-   * chuyển khỏi con trỏ). Fix ở toolbar.ts: `openPopover()` khoá cứng
+   * Code") kéo theo `--reading-ui-fs-N` (per preset, editor.css US-19.6) —
+   * bucket `--reading-ui-fs-12` cũng điều khiển cỡ chữ của CHÍNH
+   * `.toolbar-popover-item` — đổi theo, tự làm dropdown đang mở vỡ hình ngay
+   * lúc hover (hàng dưới dịch chuyển khỏi con trỏ). Fix ở toolbar.ts: `openPopover()` khoá cứng
    * `font-size` bằng inline style trực tiếp trên TỪNG hàng khi mở (không chỉ
    * đóng băng custom property — rule còn gate theo sự có mặt của class
    * `reading-mode` nên riêng biến không đủ), nên preview ở đây cứ đổi class
@@ -247,7 +247,7 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
       // see toc.ts) so an inline custom property scoped to #content never
       // reaches it. Hoist the same override onto <body> too so the TOC (and
       // any other chrome outside #content) follows the user's free-text font,
-      // mirroring the --reading-ui-font-size/--reading-ui-font-family hoisting
+      // mirroring the --reading-ui-fs-N/--reading-ui-font-family hoisting
       // pattern already used for preset font-size and palette color.
       body.style.setProperty('--reading-font-override', state.fontFamily);
     } else {

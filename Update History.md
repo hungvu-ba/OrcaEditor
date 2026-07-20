@@ -312,3 +312,14 @@
 | 0.8.0 | 2026-07-20 | Feature: each code block header gets a "Wrap" toggle; blocks word-wrap by default and can switch to horizontal scroll per block (UI-only, not serialized). |
 | 0.8.0 | 2026-07-20 | Fix: right-align the Wrap/Copy buttons in the code block header (the language label's margin shorthand was overriding the intended push). |
 | 0.8.0 | 2026-07-20 | Fix: H1 headings render their bottom underline again (regression from heading typography update that dropped the border rule for H1). |
+| 0.8.0 | 2026-07-20 | Feature: establish :root Reading-Mode token contract (--rp-/--reading-/--reading-ui-*) with VS Code Standard values; strip inline fallbacks from safe consumers (US-19.23 Phase 0). |
+| 0.8.0 | 2026-07-20 | Fix: clicking the Reading Mode icon now resets to Standard instead of reopening the last-used reading style. |
+| 0.8.0 | 2026-07-20 | Feature: complete the --rp-* color contract in every reading-palette block (marker/accent/mark/diff/search/gutter/scrollbar tokens) (US-19.23 Phase 1). |
+| 0.8.0 | 2026-07-20 | Feature: palette-scoped Sepia/Paper color contract — exact --rp-* values, --hl-* syntax tokens, mark/checkbox/diff/marker/gutter/scrollbar/search consumers, chrome hue; Standard/followTheme untouched (US-19.23 Phase 1b/2/3). |
+| 0.8.0 | 2026-07-20 | Fix: chrome text (TOC, prompt-box, math popover, search, toast) now uses per-size --reading-ui-fs-* buckets, fixing a silent 1px regression; embedded chrome scales via em (US-19.23). |
+| 0.8.0 | 2026-07-20 | Feature: wire --reading-list-indent/--reading-quote-style/--reading-embed-padding to bullet/ordered lists, blockquote, front matter; task-list indent unified with bullet indent only under named presets (US-4.28). |
+| 0.8.0 | 2026-07-20 | Fix: left padding restored to 26px (was silently 20px) and line-gutter total offset to 82px (26 + 56px gutter), matching design; toolbar bleed margins updated to match. |
+| 0.8.0 | 2026-07-20 | Feature: Mermaid diagrams now recolor from the active reading palette's --rp-* tokens via themeVariables; lightbox stays fixed-dark (US-19.23 Phase 4). |
+| 0.8.0 | 2026-07-20 | Fix: line-gutter left padding now 26px + 56px gutter (offset to 26px) + 16px gap = 98px to heading; off state stays 26px; toolbar bleed margins updated to match. |
+| 0.8.0 | 2026-07-20 | Fix: TOC ring track uses --toc-accent-soft (warm faint ring, not the cool tan --toc-border) and H1/H2/H3 filter is borderless per design (plain muted text, active = soft-fill pill) under named reading palettes. |
+| 0.8.0 | 2026-07-20 | Feature: Reading Mode adds 24px top breathing room below the sticky toolbar (on #content, non-zen) to match the design prototype content-pane spacing. |

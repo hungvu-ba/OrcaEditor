@@ -146,45 +146,20 @@
           "default": false,
           "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. When off, newly opened tabs start in Standard (no reading style). This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
         },
-        "orcaEditor.readability.preset": {
+        "orcaEditor.readability.readingMode": {
           "type": "string",
           "enum": [
-            "comfortable",
-            "default",
-            "compact",
-            "dyslexia",
-            "academic"
+            "standard",
+            "comfortable-sepia",
+            "comfortable-paper"
           ],
           "enumDescriptions": [
-            "Comfortable Reading: ~70ch measure, roomy line-height, serif reading font.",
-            "Default: current behavior — full width, follow VS Code theme/font.",
-            "Compact: ~90ch measure, tighter spacing to fit more on screen.",
-            "Dyslexia-friendly: accessibility font (Atkinson Hyperlegible / OpenDyslexic if installed) with increased letter/word/line spacing.",
-            "Academic Paper: narrow ~62ch column, classic book serif, roomy line-height — an essay/paper look (ai-2027.com style). Best paired with the Paper palette."
+            "Standard: current behavior — full width, follow VS Code theme/font.",
+            "Comfortable Reading — Sepia: ~70ch measure, roomy line-height, warm low-blue sepia palette.",
+            "Comfortable Reading — Paper: ~70ch measure, roomy line-height, bright warm-white printed-page palette."
           ],
-          "default": "comfortable",
-          "description": "Which reading preset to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a preset from the caret dropdown on the toolbar Reading Mode button applies to the current tab only (not saved back here)."
-        },
-        "orcaEditor.readability.palette": {
-          "type": "string",
-          "enum": [
-            "followTheme",
-            "light",
-            "dark",
-            "sepia",
-            "highContrast",
-            "paper"
-          ],
-          "enumDescriptions": [
-            "Follow the VS Code theme colors (current behavior).",
-            "Warm ivory background with near-black text (reduced glare/halation).",
-            "Deep grey background with ivory text (reduced halation).",
-            "Warm low-blue sepia — easy on the eyes at night.",
-            "Maximum-contrast palette for accessibility.",
-            "Paper: bright warm-white (#fffff8) background with near-black text — a printed-page look (ai-2027.com style). Best paired with the Academic Paper preset."
-          ],
-          "default": "followTheme",
-          "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
+          "default": "standard",
+          "description": "Which Reading Mode style to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a style from the toolbar Reading Mode dropdown applies to the current tab only (not saved back here)."
         },
         "orcaEditor.readability.fontFamily": {
           "type": "string",
@@ -227,7 +202,8 @@
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
-    "release": "./build.sh release"
+    "release": "./build.sh release",
+    "check:reading-contract": "node scripts/check-reading-contract.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

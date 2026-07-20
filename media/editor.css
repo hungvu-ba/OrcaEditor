@@ -31,14 +31,15 @@ html {
  * (viewport rects, not offsetTop) so it doesn't need body to be a positioned
  * ancestor, just the empty space to sit in. #toolbar compensates with a
  * matching negative margin so it stays full-width. body.md-line-numbers below
- * overrides this with its own (larger) padding-left when both are active. */
+ * adds the gutter's own 56px plus a 16px gap on top of this
+ * (26 + 56 + 16 = 98) when both are active. */
 body {
-  padding-left: 20px;
+  padding-left: 26px;
 }
 
 #toolbar {
-  margin-left: -20px;
-  padding-left: 20px;
+  margin-left: -26px;
+  padding-left: 26px;
 }
 
 /* --- Vùng soạn thảo --- */
@@ -58,18 +59,20 @@ body {
  * Chỉ dành chỗ (padding-left) khi tính năng bật, tránh lệch layout khi tắt. */
 body.md-line-numbers {
   position: relative;
-  padding-left: 66px;
+  padding-left: 98px;
 }
 
 body.md-line-numbers #toolbar {
-  margin-left: -66px;
-  padding-left: 66px;
+  margin-left: -98px;
+  padding-left: 98px;
 }
 
+/* Gutter sits after the 26px container padding: 26px offset + 56px width, then a
+ * 16px gap before the content (padding-left: 98px above). */
 #line-gutter {
   position: absolute;
   top: 0;
-  left: 0;
+  left: 26px;
   width: 56px;
   pointer-events: none;
   user-select: none;
@@ -85,6 +88,29 @@ body.md-line-numbers #toolbar {
   text-align: right;
   color: var(--vscode-editorLineNumber-foreground, rgba(128, 128, 128, 0.6));
   white-space: nowrap;
+}
+
+/* US-19.23 Phase 2: palette-scoped gutter + scrollbar. Scoped under
+ * body[class*='reading-palette-'] so Standard/followTheme is untouched. */
+body[class*='reading-palette-'] .md-line-number {
+  color: var(--rp-gutter-num);
+}
+body[class*='reading-palette-'] #line-gutter {
+  background: var(--rp-bg);
+  border-right: 1px solid var(--rp-border);
+}
+body[class*='reading-palette-'] {
+  scrollbar-color: color-mix(in srgb, var(--rp-fg) 32%, var(--rp-bg)) var(--rp-bg);
+  scrollbar-width: thin;
+}
+body[class*='reading-palette-'] ::-webkit-scrollbar {
+  background: var(--rp-bg);
+}
+body[class*='reading-palette-'] ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--rp-fg) 32%, var(--rp-bg));
+}
+body[class*='reading-palette-'] ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--rp-fg) 50%, var(--rp-bg));
 }
 
 /* --- Drag & drop block reorder (HLR section 17, US-17.3) --- */
@@ -413,6 +439,15 @@ body.dd-dragging .dd-handle {
  * breathing room). */
 body:not(.reading-zen) {
   padding-top: 0;
+}
+
+/* Reading Mode: 24px breathing room below the sticky toolbar before the first
+ * block (matches the prototype content-pane `padding-top:24px`). Placed on
+ * #content — not body — so it doesn't reintroduce the strip above the sticky
+ * toolbar that `body{padding-top:0}` above removes. Zen keeps the toolbar hidden
+ * and gets its own top inset, so scope this to non-zen. */
+body.reading-mode:not(.reading-zen) #content {
+  padding-top: 24px;
 }
 
 #toolbar button {
@@ -897,7 +932,7 @@ body:not(.reading-zen) {
 /* --- Front matter (không chỉnh sửa được, gấp gọn) --- */
 .md-front-matter {
   margin: 0 0 16px;
-  padding: 6px 10px;
+  padding: var(--reading-embed-padding);
   border: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.4));
   border-radius: 4px;
   opacity: 0.75;
@@ -905,7 +940,10 @@ body:not(.reading-zen) {
 }
 
 .md-front-matter .md-front-matter-label {
-  font-size: 10px;
+  /* em, not px: scales with #content's --reading-font-size (embedded-block
+   * chrome, not a --reading-ui-* bucket — see US-19.6 note further below).
+   * 0.714286em × 14px Standard base ≈ 10px (unchanged). */
+  font-size: 0.714286em;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   opacity: 0.7;
@@ -948,7 +986,9 @@ body:not(.reading-zen) {
 
 .md-math-toggle {
   font-family: inherit;
-  font-size: 11px;
+  /* em relative to #content (embedded-block chrome, not a --reading-ui-*
+   * bucket). 0.785714em × 14px Standard base ≈ 11px (unchanged). */
+  font-size: 0.785714em;
   line-height: 1;
   padding: 3px 8px;
   border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
@@ -969,7 +1009,8 @@ body:not(.reading-zen) {
 }
 
 .md-math-inline .md-math-toggle {
-  font-size: 9px;
+  /* em relative to #content. 0.642857em × 14px Standard base ≈ 9px (unchanged). */
+  font-size: 0.642857em;
   padding: 0 4px;
   margin-left: 2px;
   vertical-align: super;
@@ -1095,7 +1136,9 @@ body:not(.reading-zen) {
 .md-mermaid-toggle,
 .md-mermaid-zoom {
   font-family: inherit;
-  font-size: 11px;
+  /* em relative to #content (embedded-block chrome, not a --reading-ui-*
+   * bucket). 0.785714em × 14px Standard base ≈ 11px (unchanged). */
+  font-size: 0.785714em;
   line-height: 1;
   padding: 3px 8px;
   border: 1px solid transparent;
@@ -1342,6 +1385,19 @@ th:empty::after {
  * đang mở song song với popover tìm kiếm chéo file. */
 ::highlight(select-match) {
   background-color: rgba(255, 197, 61, 0.18); /* vàng nhạt hơn search-match — tránh trùng màu khi Find box đang mở cùng lúc */
+}
+
+/* US-19.23 Phase 2: palette-scoped search/select highlight backgrounds. Scoped
+ * under body[class*='reading-palette-'] so Standard/followTheme keeps the fixed
+ * yellow/orange find colors above. select-match reuses --rp-search-bg-soft. */
+body[class*='reading-palette-'] ::highlight(search-match) {
+  background-color: var(--rp-search-bg-soft);
+}
+body[class*='reading-palette-'] ::highlight(search-current) {
+  background-color: var(--rp-search-bg);
+}
+body[class*='reading-palette-'] ::highlight(select-match) {
+  background-color: var(--rp-search-bg-soft);
 }
 
 /* --- Thước tổng quan bên phải: vị trí mọi match --- */
@@ -2283,16 +2339,17 @@ body.reading-zen.md-line-numbers #toolbar {
 }
 
 /* --- US-19.6: chrome (TOC + pop-up) phóng cỡ chữ theo preset ---
- * Đọc biến --reading-ui-font-size (định nghĩa per-preset ở markdown.css). Fallback
- * = cỡ gốc từng phần tử nên preset Default (không đặt biến) và mọi lúc Reading Mode
- * tắt đều giữ nguyên. Chỉ áp khi Reading Mode bật (body.reading-mode). Đây là
- * trục CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
+ * Mỗi selector đọc bucket --reading-ui-fs-N khớp với cỡ NATIVE của chính nó
+ * (bucket khai báo ở markdown.css :root = đúng px gốc, xem comment ở đó) — nên
+ * preset Default (không ghi đè bucket nào) và mọi lúc Reading Mode tắt đều giữ
+ * nguyên cỡ cũ. Chỉ áp khi Reading Mode bật (body.reading-mode). Đây là trục
+ * CỠ CHỮ, độc lập với trục MÀU (reading-palette) bên dưới. */
 /* Depth-filter theme spec: row height 26px / radius 5px per depth-filter design spec — scoped
  * to Reading Mode only, default VS Code TOC keeps its original 30px/6px. */
 body.reading-mode .toc-item {
-  font-size: var(--reading-ui-font-size, 13px);
-  letter-spacing: var(--reading-ui-letter-spacing, normal);
-  word-spacing: var(--reading-ui-word-spacing, normal);
+  font-size: var(--reading-ui-fs-13);
+  letter-spacing: var(--reading-ui-letter-spacing);
+  word-spacing: var(--reading-ui-word-spacing);
   height: 26px;
   line-height: 26px;
   border-radius: 5px;
@@ -2304,17 +2361,101 @@ body.reading-mode .toc-item {
  * <body>; --reading-ui-font-family (markdown.css) covers the per-preset stack. */
 body.reading-mode #toc-panel,
 body.reading-mode .toc-item {
-  font-family: var(--reading-font-override, var(--reading-ui-font-family, inherit));
+  font-family: var(--reading-font-override, var(--reading-ui-font-family));
+}
+body.reading-mode #toc-progress-ring .toc-progress-value {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .toc-stats-minutes {
+  font-size: var(--reading-ui-fs-13);
+}
+body.reading-mode .toc-stats-words {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .toc-depth-btn {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .toc-empty-msg {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .toc-empty-reset {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .toc-empty-hint {
+  font-size: var(--reading-ui-fs-11);
 }
 body.reading-mode .toolbar-popover-item {
-  font-size: var(--reading-ui-font-size, 12px);
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .prompt-box {
+  font-size: var(--reading-ui-fs-13);
 }
 body.reading-mode .prompt-box input,
 body.reading-mode .prompt-suggestion {
-  font-size: var(--reading-ui-font-size, 13px);
+  font-size: var(--reading-ui-fs-13);
+}
+body.reading-mode .prompt-suggestion-dir {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .prompt-buttons button {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .md-math-edit-popover {
+  font-size: var(--reading-ui-fs-13);
+}
+body.reading-mode .md-math-cheat-label {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .md-math-cheat-snippet {
+  font-size: var(--reading-ui-fs-10);
+}
+body.reading-mode .md-math-edit-buttons button {
+  font-size: var(--reading-ui-fs-12);
 }
 body.reading-mode #search-input {
-  font-size: var(--reading-ui-font-size, 13px);
+  font-size: var(--reading-ui-fs-13);
+}
+body.reading-mode #search-count {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode #search-fallback-note {
+  font-size: var(--reading-ui-fs-10);
+}
+body.reading-mode .match-option-btn {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .cross-file-search-popover {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .cross-file-search-count {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .cross-file-search-scope {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .cross-file-search-file {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .cross-file-search-path {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .cross-file-search-badge {
+  font-size: var(--reading-ui-fs-10);
+}
+body.reading-mode .cross-file-search-overflow {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .cross-file-search-match {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .cross-file-search-empty {
+  font-size: var(--reading-ui-fs-12);
+}
+body.reading-mode .cross-file-search-more {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode #wysiwyg-toast {
+  font-size: var(--reading-ui-fs-12);
 }
 
 /* --- US-4.25: mỗi reading mode có bộ --toolbar-* RIÊNG (hue chrome độc lập theo
@@ -2368,33 +2509,33 @@ body.reading-palette-sepia {
   --toolbar-bg: #ece0c4;
   --toolbar-fg: #5b4636;
   --toolbar-border: #d9c9a6;
-  --toolbar-hover-bg: rgba(90, 70, 54, 0.1);
-  --toolbar-active-bg: rgba(90, 70, 54, 0.16);
-  --toolbar-active-fg: #3a2c20;
+  --toolbar-hover-bg: rgba(91, 70, 54, 0.08);
+  --toolbar-active-bg: rgba(138, 75, 8, 0.16);
+  --toolbar-active-fg: #8a4b08;
   --toolbar-badge-bg: #8a4b08;
   --toolbar-badge-fg: #fbf3e2;
-  --toc-bg: #f4ecd8;
+  --toc-bg: #ece0c4;
   --toc-chrome-bg: #f4ecd8;
-  --toc-border: rgba(90, 60, 20, 0.25);
+  --toc-border: #d9c9a6;
   --toc-shadow: rgba(20, 30, 50, 0.14);
-  --toc-fg: #3b2f22;
-  --toc-muted: rgba(59, 47, 34, 0.58);
-  --toc-accent: #8a4b1a;
+  --toc-fg: #5b4636;
+  --toc-muted: #8a7a63;
+  --toc-accent: #8a4b08;
   --toc-accent-soft: rgba(90, 60, 20, 0.2);
-  --toc-pill-bg: #ece2c9;
+  --toc-pill-bg: rgba(138, 75, 8, 0.14);
   --toc-pill-border: rgba(90, 60, 20, 0.25);
   --toc-pill-fg: rgba(59, 47, 34, 0.62);
 }
 body.reading-palette-paper {
-  --toolbar-bg: #f3efe0;
-  --toolbar-fg: #2b2b26;
-  --toolbar-border: #e0d9c4;
-  --toolbar-hover-bg: rgba(43, 43, 38, 0.07);
-  --toolbar-active-bg: rgba(43, 43, 38, 0.12);
-  --toolbar-active-fg: #14140f;
-  --toolbar-badge-bg: #1a5fb4;
-  --toolbar-badge-fg: #ffffff;
-  --toc-bg: #fffff8;
+  --toolbar-bg: #f4f4ea;
+  --toolbar-fg: #111110;
+  --toolbar-border: rgba(0, 0, 0, 0.14);
+  --toolbar-hover-bg: rgba(0, 0, 0, 0.06);
+  --toolbar-active-bg: rgba(37, 84, 160, 0.12);
+  --toolbar-active-fg: #2554a0;
+  --toolbar-badge-bg: #2554a0;
+  --toolbar-badge-fg: #fffff8;
+  --toc-bg: #f4f4ea;
   --toc-chrome-bg: #f4f4ea;
   --toc-border: rgba(0, 0, 0, 0.14);
   --toc-shadow: rgba(20, 30, 50, 0.16);
@@ -2402,7 +2543,7 @@ body.reading-palette-paper {
   --toc-muted: rgba(0, 0, 0, 0.55);
   --toc-accent: #2554a0;
   --toc-accent-soft: rgba(0, 0, 0, 0.07);
-  --toc-pill-bg: #f4f4ea;
+  --toc-pill-bg: rgba(37, 84, 160, 0.1);
   --toc-pill-border: rgba(0, 0, 0, 0.14);
   --toc-pill-fg: rgba(0, 0, 0, 0.6);
 }
@@ -2518,11 +2659,11 @@ body[class*='reading-palette-'] .toc-item.toc-level-1:first-child {
 body[class*='reading-palette-'] .toc-item:focus-visible {
   outline-color: var(--toc-accent);
 }
-/* Reading-stats ring: track = subtle border, read portion + percent = palette
- * accent (was hardcoded to --vscode-editorWidget-border/--vscode-textLink-
- * foreground/--vscode-foreground → stuck VS Code blue on the ivory/sepia bg). */
+/* Reading-stats ring: track = a soft accent tint (design: faint warm ring, not
+ * the harder --toc-border tan which read cool/off against the cream bg), read
+ * portion + percent = palette accent (was hardcoded to VS Code blue). */
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-track {
-  stroke: var(--toc-border);
+  stroke: var(--toc-accent-soft);
 }
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-fill {
   stroke: var(--toc-accent);
@@ -2530,24 +2671,25 @@ body[class*='reading-palette-'] #toc-progress-ring .toc-progress-fill {
 body[class*='reading-palette-'] #toc-progress-ring .toc-progress-value {
   fill: var(--toc-fg);
 }
-/* H1/H2/H3 filter bar (US-10.6, restyled per depth-filter theme spec): border + pills follow the
- * --toc-* card tokens; inactive pills get an explicit surface fill distinct
- * from the card background, active pill uses the accent + accentSoft fill. */
+/* H1/H2/H3 filter bar (design: borderless — inactive buttons are plain muted
+ * text, only the active depth gets a soft-fill pill, no border on either). Base
+ * .toc-depth-btn keeps a 1px border for the VS Code theme; here we neutralize it
+ * to transparent (keeps layout stable) so the reading-mode look matches the mock. */
 body[class*='reading-palette-'] #toc-filter-bar {
   border-bottom-color: var(--toc-border);
 }
 body[class*='reading-palette-'] .toc-depth-btn {
-  border-color: var(--toc-pill-border);
-  background: var(--toc-pill-bg);
-  color: var(--toc-pill-fg);
+  border-color: transparent;
+  background: transparent;
+  color: var(--toc-muted);
 }
 body[class*='reading-palette-'] .toc-depth-btn:hover {
   background: var(--toc-accent-soft);
 }
 body[class*='reading-palette-'] .toc-depth-btn.active {
-  border-color: var(--toc-accent);
+  border-color: transparent;
   background: var(--toc-accent-soft);
-  color: var(--toc-accent);
+  color: var(--toc-fg);
 }
 /* Empty-state text + reset-filter link follow the palette. */
 body[class*='reading-palette-'] .toc-empty-reset {
