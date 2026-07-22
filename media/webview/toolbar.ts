@@ -214,6 +214,14 @@ interface ToolbarDropdownEntry {
   groupCaption?: string;
   /** US-4.27: dữ liệu vẽ swatch 14×14 xem trước style (nền palette + "A" màu chữ + font preset). */
   swatch?: { palette: string; preset: string };
+  /**
+   * true nếu hàng chỉ đổi HIỂN THỊ (Reading Mode: Standard/Sepia/Paper), không
+   * đụng markdown — như ToolbarItem.viewOnly, để invokeAction BỎ QUA syncNow sau
+   * action. Nếu không, syncNow serialize lại DOM và post 'edit' làm file dirty
+   * dù nội dung không đổi, mỗi khi bản render lệch byte so với text trên đĩa
+   * (drift chuẩn hoá vốn nằm im tới lần sửa thật — vd bullet "* " → "*   ").
+   */
+  viewOnly?: boolean;
 }
 
 interface ToolbarItem {
@@ -253,6 +261,15 @@ interface ToolbarItem {
    * normalization) — re-applying just-undone content and killing the redo stack.
    */
   hostDelegated?: boolean;
+  /**
+   * true nếu nút chỉ đổi HIỂN THỊ (Reading Mode / Focus / Table of Contents),
+   * không mutate markdown — invokeAction BỎ QUA syncNow sau action (vẫn giữ
+   * flushPendingSync để không mất phần gõ đang chờ). Cùng lớp lỗi mà chú thích
+   * `hostDelegated` ở trên phòng: syncNow sau một action không-đổi-nội-dung vẫn
+   * serialize lại DOM và, nếu bản render lệch byte so với text trên đĩa (drift
+   * chuẩn hoá còn ngủ — vd "* " → "*   "), post 'edit' làm file dirty oan.
+   */
+  viewOnly?: boolean;
   /**
    * Có mặt → render thành split-button (mặt chính + caret) thay vì nút đơn
    * (US-4.9/4.10/4.11). `action` vẫn là hành vi mặt chính (mặc định); caret mở
@@ -499,6 +516,7 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
     action: () => ctx.readability.disable(),
     onHoverPreview: () => ctx.readability.previewMode('off'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
+    viewOnly: true,
   },
   {
     label: 'Sepia Comfort',
@@ -506,6 +524,7 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
     action: () => ctx.readability.setMode('sepia'),
     onHoverPreview: () => ctx.readability.previewMode('sepia'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
+    viewOnly: true,
   },
   {
     label: 'Paper Comfort',
@@ -513,6 +532,7 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
     action: () => ctx.readability.setMode('paper'),
     onHoverPreview: () => ctx.readability.previewMode('paper'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
+    viewOnly: true,
   },
 ];
 
@@ -675,6 +695,8 @@ const toolbarItems: ToolbarItem[] = [
     dropdown: READING_DROPDOWN,
     dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
     alignRight: true,
     // Nhóm phải thu SAU cùng (20–22). Reading giữ priority CAO NHẤT (22) vì nó
     // mang cờ alignRight/`toolbar-push-right` (margin-left:auto) — là mỏ neo đẩy
@@ -687,6 +709,8 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Focus Mode (hide chrome, center text — Esc to exit)',
     action: () => ctx.readability.toggleZen(),
     id: 'zen-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
     collapsePriority: 20,
   },
   {
@@ -698,6 +722,8 @@ const toolbarItems: ToolbarItem[] = [
       updateTocButton();
     },
     id: 'toc-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
     collapsePriority: 21,
   },
 ];
@@ -711,7 +737,7 @@ const toolbarItems: ToolbarItem[] = [
  * (only the default action is listed, see ToolbarItem.dropdown doc).
  * Host-delegated items (Undo/Redo) never come through here — see invokeItem.
  */
-function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
+function invokeAction(action: () => void, opensAsyncPrompt?: boolean, viewOnly?: boolean): void {
   hideTooltip();
   // Undo chronology (bug 0717): commit typing still waiting on the 250ms sync
   // debounce BEFORE the action mutates the DOM — once mutated, the pending
@@ -721,6 +747,14 @@ function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
   action();
   if (!opensAsyncPrompt) {
     content.focus();
+  }
+  // View-only actions (Reading Mode / Focus / TOC) change presentation only,
+  // never the markdown — skip the post-action syncNow. Otherwise syncNow
+  // serializes the DOM and, whenever the freshly-loaded render drifts byte-wise
+  // from the on-disk text (a dormant normalization diff, e.g. "* " → "*   "),
+  // posts a spurious 'edit' that dirties the file with no content change.
+  if (viewOnly) {
+    return;
   }
   // Sync immediately (not debounced) so the action is its own undo unit too:
   // typing that follows the click can never coalesce into the same 'edit'.
@@ -745,7 +779,7 @@ function invokeItem(item: ToolbarItem): void {
     content.focus();
     return;
   }
-  invokeAction(item.action, item.opensAsyncPrompt);
+  invokeAction(item.action, item.opensAsyncPrompt, item.viewOnly);
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,7 +1136,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       entry.badge,
       () => {
         closePopover();
-        invokeAction(entry.action, item.opensAsyncPrompt);
+        invokeAction(entry.action, item.opensAsyncPrompt, entry.viewOnly);
       },
       entry.value,
       entry.onHoverPreview,
