@@ -8,28 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
--   `@` Reference trigger: mention popup for files and headings with scope tabs, ghost-text Tab-accept, and selection-aware link insert (US-20.1/20.6/20.7). Toolbar Insert Link/Image now open this popup instead of modal dialogs (US-20.8).
--   `/` Define trigger: location-sensitive block/inline inserts reusing toolbar actions, plus a configurable insert-today's-date setting (US-20.2), and `/add reference` building a merge-preserving `## References` section (US-20.5).
--   `/` Execute trigger: run Reading Mode / Zen / TOC as real contributed commands via a validated, document-scoped host round-trip (US-20.3).
--   Entity system: declare entities (`caption::NS_ID`) as styled pills (US-21.1), a workspace-wide entity index with fuzzy id/title search (US-21.2), `@`-mention Entities scope with namespace browse/drill-down (US-21.2), entity dot-drill (`UC01.`) scoped popups (US-21.3), and entity mentions that insert the entity's full human name with a clean `#UC01` href fragment.
--   Broken-reference detection: always-visible warning marker, hover tooltip, "Search again" quick-correct popover for both file/heading links (US-20.9) and entity references (US-21.3), plus a toolbar broken-reference count badge that jumps to the nearest broken ref (US-21.3).
--   `orcaEditor.triggerActions.mode` setting (simple / advanced, default advanced) gating `@`/`/` trigger visibility (US-21.5).
--   Smart paste: inserting inline text next to a word now adds a space gap so pasted text no longer glues onto its neighbor.
--   Entity-link navigation scrolls to and flashes the target `caption::` declaration, resolved via the entity index or a whole-document text search.
+-   Type `@` to mention a file or heading: pick from a searchable popup, press Tab to accept the suggestion, and drop in a ready-made link. Selecting text first turns it into the link. The Insert Link and Insert Image buttons now use this same quick popup.
+-   Type `/` to insert anything without leaving the keyboard — headings, lists, quotes, code, tables, math, Mermaid diagrams, today's date, or a `References` section — offering only what fits where your cursor is.
+-   Type `/` to run actions too: toggle Reading Mode, Focus Mode, or the outline directly from the editor.
+-   Define and cross-link entities (use cases, requirements, etc.): tag any text as a named entity, then mention it anywhere with `@` — search by id or title, browse by namespace, or drill into a specific one. A mention inserts the entity's full name and links straight to where it's defined.
+-   Broken links and mentions are flagged as you write, with a warning marker, a hover explanation, and a one-click "Search again" to fix the target. A toolbar badge counts them and jumps you to the next one.
+-   New setting to switch between Simple and Advanced editing, controlling whether the `@` and `/` shortcuts appear.
+-   Pasting text next to a word now keeps a space between them, so words no longer run together.
 
 ### Changed
 
--   Reading Mode consolidated from the two-axis preset×palette model into three flat modes — Standard, Sepia Comfort, Paper Comfort — each with a complete per-palette token contract (`--rp-*` / `--reading-*` / `--toc-*`); other bundles remain reachable via settings (US-19.23/19.24).
--   Toolbar overflow priority reworked: left formatting controls collapse into `•••` first, the right cluster (Reading/Focus/Outline) collapses last, and `•••` / `⋮` never collapse.
--   Thematic breaks (`---`) render one step stronger than the H1/H2 underline via a dedicated `--rp-hr-border` token.
--   Trigger popups filter through a real focused `<input>` (native caret + IME) instead of reading the editor DOM.
+-   Reading Mode simplified to three clear choices — Standard, Sepia Comfort, and Paper Comfort — so switching reading styles is one obvious pick instead of juggling separate preset and palette menus.
+-   The toolbar now collapses formatting buttons first when space is tight, keeping Reading, Focus, and the outline within reach the longest.
+-   Horizontal rules (`---`) now stand out a little more clearly from heading underlines.
 
 ### Fixed
 
--   Switching Reading Mode / Focus / TOC no longer marks the file dirty (view-only actions skip the content sync).
--   `@`/`/` trigger popups filter correctly under a Vietnamese IME, no longer leak filter text or the committing Enter into the editor, and flip above the caret when there is no room below.
--   Broken-link tooltip no longer vanishes across the anchor→tooltip gap, keeping "Search again" clickable; relative links resolve workspace-root-first.
--   Mermaid zoom lightbox opens fit-to-viewport instead of tiny native size.
+-   Turning Reading Mode, Focus, or the outline on/off no longer marks the file as unsaved.
+-   The `@` and `/` popups now type correctly with a Vietnamese IME, never leak what you typed into the document, and open upward when there's no room below.
+-   The broken-link tooltip stays put long enough to click "Search again", and relative links resolve more reliably.
+-   Zooming a Mermaid diagram now opens it fit-to-screen instead of tiny.
 
 ## \[0.8.0\] - 2026-07-17
 
