@@ -22,6 +22,10 @@
  *    document.execCommand('createLink', ...) trên Selection sống, domino
  *    (DOM giả lập Node dùng trong test) không cài execCommand/Selection thật.
  *
+ * Req 20 US-20.2 (trigger-slash.ts's runTriggerInsertDate — "insert today's
+ * date"): also DOM-outcome, plain text via execCommand('insertText') is
+ * exactly the same shape as any typed literal text landing in a <p>.
+ *
  * Chạy riêng: npm run test:roundtrip:toolbar-insert
  */
 import { Runner, serializeHtml, renderer } from './_lib';
@@ -214,6 +218,69 @@ const domCases: DomCase[] = [
     html: `<p><img src="${escapeAttr(encodeLinkPath('images/pic.png'))}" alt="" width="640"></p>`,
     expect: (md) => md.includes('width="640"') && md.includes('src="images/pic.png"'),
   },
+
+  // ---------------------------------------------------------------------
+  // 7. Req 20 US-20.2 (trigger-slash.ts's runTriggerInsertDate) — "insert
+  //    today's date" applies `document.execCommand('insertText', ...)`: plain
+  //    text landing in a <p>, same as any other typed text. DOM shape is the
+  //    resulting <p> after that insertText (no live execCommand needed here —
+  //    inserting a known literal text NODE is exactly what insertText does).
+  // ---------------------------------------------------------------------
+  {
+    name: "Insert today's date, default format YYYY-MM-DD → plain digits, no markdown ambiguity",
+    html: '<p>Today is 2026-07-21</p>',
+    expect: (md) => md.trim() === 'Today is 2026-07-21',
+  },
+  {
+    name: "Insert today's date, custom format with slashes (DD/MM/YYYY) → '/' is not markdown-significant",
+    html: '<p>21/07/2026</p>',
+    expect: (md) => md.trim() === '21/07/2026',
+  },
+  {
+    // A user-configured dateFormat is a free string (orcaEditor.trigger.dateFormat)
+    // and could, in principle, contain markdown-sensitive characters — the
+    // inserted text is a literal DOM text node either way, so turndown must
+    // escape it exactly like any other typed literal asterisk (existing
+    // escaping behavior, not something this feature adds) so re-opening the
+    // file never reinterprets it as bold.
+    name: "Insert today's date, a format string containing '*' → turndown escapes it so a literal '**2026**' text node never re-parses as <strong>",
+    html: '<p>**2026**</p>',
+    expect: (md) => md.includes('2026') && !/<strong>|<b>/.test(renderer.render(md).html),
+  },
+
+  // ---------------------------------------------------------------------
+  // 8b. Req 20 US-20.1/US-20.6 (`@` Reference + `](` alt-trigger): trigger-at.ts's
+  //     runAtInsertLink() (collapsed-caret / bracket branch) builds the SAME DOM
+  //     shape as insertLink()'s collapsed branch —
+  //     `<a href="${escapeAttr(href)}">${escapeHtml(display)}</a>` — so an
+  //     @-inserted file/heading mention must serialize to a stable markdown
+  //     link. (The active-selection branch uses execCommand('createLink') on a
+  //     live Selection — not representable under domino, same exclusion as
+  //     insertLink()'s createLink branch noted at the top of this file.)
+  // ---------------------------------------------------------------------
+  {
+    // Real `@` file pick: href = the relative path (with dir), display = the
+    // basename (FileSuggestion.name) — so display ≠ href and it stays a real
+    // `[name](path)` link (not collapsed to a bare autolinked path).
+    name: '@ file mention → <a href="docs/alpha.md">alpha.md</a> serialize thành [alpha.md](docs/alpha.md)',
+    html: '<p>see <a href="docs/alpha.md">alpha.md</a> here</p>',
+    expect: (md) => md.includes('[alpha.md](docs/alpha.md)'),
+  },
+  {
+    name: '@ heading mention → <a href="#my-heading">My Heading</a> serialize thành link fragment #',
+    html: '<p>jump to <a href="#my-heading">My Heading</a></p>',
+    expect: (md) => md.includes('[My Heading](#my-heading)'),
+  },
+  {
+    name: '@ file mention, path có dấu cách (encodeLinkPath) → link ổn định qua render→serialize lần 2',
+    html: `<p><a href="${escapeAttr(encodeLinkPath('my docs/note one.md'))}">note one.md</a></p>`,
+    expect: (md) => md.includes('[note one.md](') && md.includes(encodeLinkPath('my docs/note one.md')),
+  },
+  {
+    name: '](-inserted link giữ nguyên display text (bracket branch) → [See this](target.md)',
+    html: '<p><a href="target.md">See this</a></p>',
+    expect: (md) => md.includes('[See this](target.md)'),
+  },
 ];
 
 for (const c of domCases) {
@@ -238,7 +305,7 @@ for (const c of domCases) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Math templates (toolbar.ts MATH_DROPDOWN/insertInlineMath) — chèn qua
+// 8. Math templates (toolbar.ts MATH_DROPDOWN/insertInlineMath) — chèn qua
 //    ctx.insertMarkdown(text), tức là literal markdown thật (không phải DOM
 //    mô phỏng) → dùng checkRoundtrip (render → serialize → render → so sánh)
 //    qua runner.roundtrip(). Hằng số copy nguyên văn từ toolbar.ts:
@@ -250,7 +317,7 @@ runner.roundtrip('Math inline template (toolbar MATH_DROPDOWN) round-trip ổn �
 runner.roundtrip('Math block template (toolbar MATH_DROPDOWN) round-trip ổn định', `$$${MATH_FORMULA}$$`);
 
 // ---------------------------------------------------------------------------
-// 8. Mermaid templates (toolbar.ts MERMAID_*_TEMPLATE) — cùng cơ chế
+// 9. Mermaid templates (toolbar.ts MERMAID_*_TEMPLATE) — cùng cơ chế
 //    ctx.insertMarkdown(text) như math ở trên, literal markdown thật.
 //    4 hằng số copy nguyên văn từ toolbar.ts.
 // ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ import {
 } from './constants';
 import { buildMatchOptionToggles } from './match-options';
 import { makeDraggable } from './dom-utils';
+import { registerEscapeHandler, ESCAPE_PRIORITY } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 import type { CrossFileMatchGroup, CrossFileSearchScope, WebviewToHost } from '../../src/shared/messages';
 import type { MatchOptions } from '../../src/shared/text-match';
@@ -624,12 +625,20 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   // duyệt xoá text) — coi như "không phải ý định search" giống copy/cut ở
   // trên (đã chốt C3): cũng phải huỷ debounce timer đang chờ, không chỉ ẩn
   // icon đã hiện, nếu không icon có thể tự bật lại 750ms sau đó.
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      dismiss();
-      return;
-    }
+  document.addEventListener('keydown', () => {
     cancelPendingIcon();
+  });
+
+  // Escape → dismiss, routed through the shared Escape stack (Req 20 US-20.4).
+  // Reports active only when the icon or popover is visible; otherwise returns
+  // false so Escape falls through (parity with the previous unconditional
+  // cancelPendingIcon path — nothing was visible to dismiss anyway).
+  registerEscapeHandler(ESCAPE_PRIORITY.CROSS_FILE, () => {
+    if (icon.hidden && popover.hidden) {
+      return false;
+    }
+    dismiss();
+    return true;
   });
 
   // Ctrl/Cmd+Shift+F: kích hoạt tìm kiếm trực tiếp trên selection hiện tại

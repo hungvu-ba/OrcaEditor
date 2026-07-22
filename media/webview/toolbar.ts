@@ -6,12 +6,12 @@ import hljs from 'highlight.js/lib/common';
 import {
   addCheckbox,
   closestElement,
-  encodeLinkPath,
   escapeAttr,
   escapeHtml,
   findTaskCheckbox,
-  isAbsoluteUrl,
+  scrollBehavior,
   svgIcon,
+  warningTriangleIcon,
   type DomHelpers,
 } from './dom-utils';
 import {
@@ -24,7 +24,6 @@ import {
   computeUnwrapListRange,
 } from './list-ops';
 import { insertTable } from './table';
-import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
 import { type ReadabilityController } from './readability';
@@ -48,7 +47,6 @@ export interface ToolbarContext {
   toc: TocController;
   /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
   readability: ReadabilityController;
-  promptInput: PromptController['promptInput'];
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
   insertMarkdown: (text: string) => void;
 }
@@ -237,10 +235,11 @@ interface ToolbarItem {
    */
   collapsePriority?: number;
   /**
-   * true nếu action tự mở popup nhập liệu bất đồng bộ (chèn liên kết/ảnh).
-   * Popup tự focus vào ô nhập và tự restore selection khi đóng (xem prompt.ts) —
-   * nếu vẫn để click handler gọi content.focus() ngay, nó sẽ cướp focus khỏi ô
-   * nhập trong lúc selection đang rỗng, khiến caret nhảy về đầu file.
+   * true nếu action tự mở một trigger-popup bất đồng bộ thay vì mutate tại
+   * chỗ (chèn liên kết/ảnh — US-20.8, xem trigger-at.ts's openFromToolbar).
+   * Popup tự quản lý focus/selection lúc mở lẫn lúc đóng — nếu vẫn để click
+   * handler gọi content.focus() ngay, nó sẽ cướp focus khỏi popup trong lúc
+   * selection đang rỗng, khiến caret nhảy về đầu file.
    */
   opensAsyncPrompt?: boolean;
   /**
@@ -274,6 +273,72 @@ function updateTocButton(): void {
 /** Gọi từ ngoài (main.ts) sau khi tự mở mục lục theo cấu hình lúc khởi tạo. */
 export function syncTocButton(): void {
   updateTocButton();
+}
+
+// ---------------------------------------------------------------------------
+// Broken-reference count badge (Req 21 US-21.3) — right-pinned toolbar group.
+// Built generically over `HTMLAnchorElement[]` (broken-ref.ts's `list()`) so
+// a later Sprint E task's entity-reference markers extend the SAME badge for
+// free, without touching this module again.
+// ---------------------------------------------------------------------------
+let brokenRefBadgeEl: HTMLButtonElement | undefined;
+let brokenRefCountEl: HTMLSpanElement | undefined;
+let getBrokenRefs: (() => HTMLAnchorElement[]) | undefined;
+
+/**
+ * Called once from main.ts right after `broken-ref.ts`'s controller is
+ * created — a separate setup call (not a field on `ToolbarContext`/
+ * `initToolbar`'s args) because `initToolbar()` runs BEFORE broken-ref.ts is
+ * constructed in main.ts's init order; the badge is simply appended as the
+ * toolbar's last child, so call order relative to `initToolbar` doesn't
+ * matter either way.
+ */
+export function initBrokenRefBadge(getList: () => HTMLAnchorElement[]): void {
+  getBrokenRefs = getList;
+  if (!toolbarElRef || brokenRefBadgeEl) {
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'broken-ref-badge';
+  btn.hidden = true; // hidden entirely at count 0 (wireframe spec)
+  btn.innerHTML = warningTriangleIcon(11);
+  const count = document.createElement('span');
+  btn.appendChild(count);
+  wireTriggerButton(btn, 'Jump to nearest broken reference');
+  btn.addEventListener('click', jumpToNearestBrokenRef);
+  toolbarElRef.appendChild(btn);
+  brokenRefBadgeEl = btn;
+  brokenRefCountEl = count;
+}
+
+/** Gọi từ main.ts mỗi khi broken-ref.ts quét lại (onChange) — cập nhật số đếm + ẩn/hiện. */
+export function syncBrokenRefBadge(): void {
+  if (!brokenRefBadgeEl || !brokenRefCountEl || !getBrokenRefs) {
+    return;
+  }
+  const refs = getBrokenRefs();
+  brokenRefBadgeEl.hidden = refs.length === 0;
+  brokenRefCountEl.textContent = String(refs.length);
+}
+
+/** True when `anchor` comes strictly after `caret` in document order (Node.compareDocumentPosition semantics). */
+function isAfterCaret(anchor: Node, caret: Node): boolean {
+  return !!(caret.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+/** Jump the caret to the nearest broken reference AFTER the current caret position, wrapping to the first past the last. Read-only navigation (like toc.ts's scrollToHeading) — not a content mutation, so no invokeAction/syncNow. */
+function jumpToNearestBrokenRef(): void {
+  const refs = getBrokenRefs?.() ?? [];
+  if (refs.length === 0) {
+    return;
+  }
+  const sel = window.getSelection();
+  const caret = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
+  const target = (caret && refs.find((a) => isAfterCaret(a, caret))) || refs[0];
+  hideTooltip();
+  target.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
+  ctx.dom.placeCaretIn(target);
 }
 
 /**
@@ -454,26 +519,30 @@ const READING_DROPDOWN: ToolbarDropdownEntry[] = [
 // Thứ tự control theo wireframe (US-4.24, thay phần thứ tự của US-4.8):
 // Undo/Redo → B/I/S/Inline code/Clear formatting → Heading → Bullet/Numbered/
 // Task/Blockquote → Table/Rule → Link/Image → Code block → Math → Mermaid →
-// [nhóm phải: Reading Mode, Zen, Outline].
+// [nhóm phải: Reading Mode, Focus, Outline].
 // `collapsePriority` (nhỏ = thu vào menu "•••" trước) điều khiển thứ tự thu gọn
-// khi toolbar hẹp — KHÔNG suy ra từ vị trí mảng, vì tập nút luôn-hiện (Undo/Redo/
-// B/I/Heading/Bullet/Numbered/Link/Image + Reading Mode/Outline) không liền mạch
-// (US-4.24 thay cơ chế thu-theo-vị-trí-mảng của US-4.7). Nút KHÔNG có
-// collapsePriority thì không bao giờ thu (pinned), kể cả khi nằm ở nhóm phải.
+// khi toolbar hẹp — KHÔNG suy ra từ vị trí mảng, vì thứ tự thu ≠ thứ tự hiển thị.
+// CHỦ TRƯƠNG ẩn (theo yêu cầu): các nút ĐỊNH DẠNG bên trái (kể cả Undo/Heading/
+// Bold/Link...) thu TRƯỚC (priority 1–19); nhóm tiện ích PHẢI (Focus/Outline/
+// Reading) thu SAU CÙNG (priority 20–22). Chỉ hai nút "•••" (menu tràn) và "⋮"
+// (More options) là KHÔNG có collapsePriority → không bao giờ thu, luôn-hiện; nhờ
+// vậy mọi nút khác đã vào menu trước khi toolbar chật tới mức đụng chúng, nên
+// không còn bị cắt/đè (bỏ cơ chế pinned-clip cũ của US-4.24).
 // INVARIANT separator: mỗi `separatorBefore` "thuộc về" item MỞ nhóm; khi item
-// đó thu thì sep thu cùng. Để không bị sep mồ côi/lơ lửng, item mở nhóm phải
-// hoặc PINNED, hoặc là item có collapsePriority LỚN NHẤT nhóm (thu SAU cùng).
-// Hiện chỉ nhóm Table/Rule có leader collapsible (Table=5 > Rule=4 ✓). Nếu sau
-// này đổi priority/thêm item, giữ nguyên bất biến này.
+// đó thu thì sep thu cùng. Để không bị sep mồ côi, item mở nhóm phải là item có
+// collapsePriority LỚN NHẤT trong nhóm (thu SAU cùng): Bold=12 (nhóm B/I/S/code/
+// clear), Bullet=14 (Bullet/Numbered/Task/Quote), Table=5 (Table/Rule), Link=16
+// (Link/Image); các nhóm 1-item (Heading/Code/Math/Mermaid) đương nhiên đạt.
+// Nếu sau này đổi priority/thêm item, giữ nguyên bất biến này.
 const toolbarItems: ToolbarItem[] = [
   // Undo/redo in this extension is TextDocument-based (one single stack, see
   // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
   // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
   // execCommand('undo') here would skip those changes and desync the stacks.
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true },
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
+  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
   {
     label: 'S',
     title: 'Strikethrough (⌘⇧X)',
@@ -504,6 +573,7 @@ const toolbarItems: ToolbarItem[] = [
     dropdownTitle: 'Choose heading level',
     separatorBefore: true,
     id: 'fmt-heading',
+    collapsePriority: 17,
   },
   {
     label: '•',
@@ -512,6 +582,7 @@ const toolbarItems: ToolbarItem[] = [
     action: setBulletList,
     separatorBefore: true,
     id: 'fmt-bullet',
+    collapsePriority: 14,
   },
   {
     label: '1.',
@@ -519,6 +590,7 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Numbered list',
     action: setNumberedList,
     id: 'fmt-numbered',
+    collapsePriority: 13,
   },
   { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task', collapsePriority: 7 },
   {
@@ -546,14 +618,16 @@ const toolbarItems: ToolbarItem[] = [
     id: 'fmt-link',
     separatorBefore: true,
     opensAsyncPrompt: true,
+    collapsePriority: 16,
   },
   {
     label: '🖼',
     icon: FMT_ICONS.image,
-    title: 'Insert image (path)',
+    title: 'Insert image',
     action: insertImage,
     id: 'fmt-image',
     opensAsyncPrompt: true,
+    collapsePriority: 15,
   },
   {
     label: '{ }',
@@ -602,6 +676,10 @@ const toolbarItems: ToolbarItem[] = [
     dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',
     alignRight: true,
+    // Nhóm phải thu SAU cùng (20–22). Reading giữ priority CAO NHẤT (22) vì nó
+    // mang cờ alignRight/`toolbar-push-right` (margin-left:auto) — là mỏ neo đẩy
+    // cả nhóm sang phải, nên phải là nút cuối cùng của nhóm còn hiển thị.
+    collapsePriority: 22,
   },
   {
     label: 'Focus',
@@ -609,7 +687,7 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Focus Mode (hide chrome, center text — Esc to exit)',
     action: () => ctx.readability.toggleZen(),
     id: 'zen-toggle',
-    collapsePriority: 11,
+    collapsePriority: 20,
   },
   {
     label: '☰',
@@ -620,6 +698,7 @@ const toolbarItems: ToolbarItem[] = [
       updateTocButton();
     },
     id: 'toc-toggle',
+    collapsePriority: 21,
   },
 ];
 
@@ -1124,6 +1203,11 @@ function createMoreButton(): HTMLButtonElement {
 function createMoreOptionsButton(): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.type = 'button';
+  // Kebab KHÔNG bao giờ thu gọn (không có collapsePriority, ngoài toolbarItems):
+  // nó cùng nút "•••" là hai phần tử luôn-hiện duy nhất, nên mọi nút khác đã thu
+  // hết vào menu trước khi toolbar chật tới mức đụng kebab → nó là icon "ẩn CUỐI
+  // cùng". Class chỉ để CSS/test chọn được nút (kebab vốn không có id).
+  btn.className = 'toolbar-more-options';
   btn.innerHTML = MORE_OPTIONS_ICON;
   wireTriggerButton(btn, 'More options');
 
@@ -2077,60 +2161,31 @@ export function openCodeLangSwitcher(labelEl: HTMLElement): void {
   togglePopover(labelEl, popover);
 }
 
-function insertLink(): void {
-  const selectedText = window.getSelection()?.toString().trim() ?? '';
-  ctx.promptInput(
-    'Link URL:',
-    'https://… or type a file name in the project',
-    (url, displayText) => {
-      if (!url) {
-        return;
-      }
-      // The callback runs AFTER invokeAction's flush already happened — edits
-      // scheduled while the prompt was open must not coalesce with the insert.
-      ctx.flushPendingSync();
-      const sel = window.getSelection();
-      if (sel && !sel.isCollapsed) {
-        document.execCommand('createLink', false, url);
-      } else {
-        // encodeLinkPath CHỈ áp cho path tương đối (không có scheme) — URL
-        // tuyệt đối giữ nguyên, encode sẽ phá "://" và query string "?a=1&b=2"
-        // (bug đã xác nhận qua test/roundtrip/toolbar-insert.ts: path tương
-        // đối có dấu cách không encode làm markdown đổi hình dạng ở lần
-        // render→serialize thứ 2, xem insertImage() bên dưới).
-        const href = isAbsoluteUrl(url) ? url : encodeLinkPath(url);
-        document.execCommand(
-          'insertHTML',
-          false,
-          `<a href="${escapeAttr(href)}">${escapeHtml(displayText ?? url)}</a>`
-        );
-      }
-      // syncNow, not scheduleSync: the prompt callback runs AFTER invokeAction
-      // already returned, so its post-action sync bracketed nothing — a
-      // debounced sync here would let typing within 250ms coalesce with the
-      // inserted link into one undo unit (bug 0717's chronology defect).
-      ctx.syncNow();
-    },
-    { fileSearchQuery: selectedText }
-  );
+/**
+ * Req 20 US-20.8 — the `@` trigger-popup opener installed by trigger-at.ts
+ * (main.ts wires it in via initToolbarTriggerAt, AFTER trigger-at.ts is
+ * constructed — same deferred-wiring reason as initBrokenRefBadge: initToolbar
+ * runs before trigger-at.ts exists in main.ts's init order).
+ */
+let openAtTriggerFromToolbar: ((imageMode: boolean) => void) | undefined;
+
+/** Call once from main.ts right after trigger-at.ts's controller is built. */
+export function initToolbarTriggerAt(openFromToolbar: (imageMode: boolean) => void): void {
+  openAtTriggerFromToolbar = openFromToolbar;
 }
 
+/**
+ * US-20.8: the old prompt.ts modal is gone — Link places the caret (or keeps
+ * the current selection) and hands off to the SAME `@` trigger-popup real
+ * typing opens (trigger-at.ts's openFromToolbar), no parallel implementation.
+ */
+function insertLink(): void {
+  openAtTriggerFromToolbar?.(false);
+}
+
+/** US-20.8: Image button — same `@` popup, image-mode (commits a bare `<img>`, see runAtInsertImage). */
 function insertImage(): void {
-  ctx.promptInput('Image path (relative or URL):', '', (src) => {
-    if (!src) {
-      return;
-    }
-    // Same flush-before reason as insertLink()'s callback.
-    ctx.flushPendingSync();
-    // Cùng lý do với insertLink() ở trên: chỉ encode path tương đối, giữ
-    // nguyên URL tuyệt đối — trước đây KHÔNG encode gì cả (khác paste-image.ts
-    // insertImageAt, vốn luôn encode vì relPath luôn là path tương đối), khiến
-    // path có dấu cách không ổn định qua lần render→serialize thứ 2.
-    const href = isAbsoluteUrl(src) ? src : encodeLinkPath(src);
-    document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
-    // syncNow, not scheduleSync — same undo-chronology reason as insertLink().
-    ctx.syncNow();
-  });
+  openAtTriggerFromToolbar?.(true);
 }
 
 export function toggleInlineCode(): void {
@@ -2164,6 +2219,231 @@ export function toggleInlineCode(): void {
     range.insertNode(code);
   }
   sel.removeAllRanges();
+}
+
+/**
+ * Req 20 US-20.2 — the `/` Define popup's group-1 block-level item ids. Each
+ * maps to the SAME underlying insert function the toolbar button already
+ * calls (formatHeading/setBulletList/setNumberedList/toggleBlockquote/
+ * insertTable/insertCodeBlock/insertMermaidFlowchart/ctx.insertMarkdown/
+ * ctx.toc.toggle) — no parallel implementation.
+ */
+export type TriggerDefineBlockId =
+  | 'heading-1'
+  | 'heading-2'
+  | 'heading-3'
+  | 'heading-4'
+  | 'heading-5'
+  | 'heading-6'
+  | 'bullet'
+  | 'numbered'
+  | 'blockquote'
+  | 'table'
+  | 'code-block'
+  | 'mermaid'
+  | 'math-block'
+  | 'hr'
+  | 'toc';
+
+function runTriggerBlockAction(id: TriggerDefineBlockId): void {
+  switch (id) {
+    case 'heading-1':
+    case 'heading-2':
+    case 'heading-3':
+    case 'heading-4':
+    case 'heading-5':
+    case 'heading-6':
+      formatHeading(id.replace('heading-', 'h'));
+      return;
+    case 'bullet':
+      setBulletList();
+      return;
+    case 'numbered':
+      setNumberedList();
+      return;
+    case 'blockquote':
+      toggleBlockquote();
+      return;
+    case 'table':
+      insertTable();
+      return;
+    case 'code-block':
+      insertCodeBlock('javascript');
+      return;
+    case 'mermaid':
+      insertMermaidFlowchart();
+      return;
+    case 'math-block':
+      ctx.insertMarkdown(`$$${MATH_FORMULA}$$`);
+      return;
+    case 'hr':
+      document.execCommand('insertHTML', false, '<hr><p><br></p>');
+      return;
+    case 'toc':
+      // No standalone "insert a TOC block into the document" feature exists —
+      // this reuses the existing sidebar TOC panel toggle (fmt id 'toc-toggle').
+      ctx.toc.toggle();
+      return;
+  }
+}
+
+/**
+ * Shared preamble for every `@`/`/` trigger commit (US-20.1/20.2/20.3): delete
+ * the trigger+filter run (a clone of `deleteRange`, so the caller's own Range
+ * is left untouched), collapse there, and — since a block-level pick can leave
+ * a paragraph with zero children — append a `<br>` caret host (same safeguard
+ * as input-rules.ts's stripMarkerBeforeCaret). Sets the collapsed result as
+ * the live selection so the caller's own insert/action reads the right caret.
+ */
+function collapseSelectionAfterTriggerDelete(deleteRange: Range): void {
+  const range = deleteRange.cloneRange();
+  range.deleteContents();
+  range.collapse(true);
+  const block = closestElement(range.startContainer);
+  if (block && !block.firstChild) {
+    block.appendChild(document.createElement('br'));
+  }
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+/**
+ * Req 20 US-20.2 — run a `/` Define group-1/group-2 insert for the trigger
+ * popup: delete the `/`+filter run first, then the toolbar action, bracketed
+ * by flushPendingSync/syncNow (same contract as invokeAction) so the whole
+ * delete+insert lands in ONE host-side undo unit.
+ */
+export function runTriggerDefineInsert(id: TriggerDefineBlockId, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  runTriggerBlockAction(id);
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.2 — insert today's date at the caret (already collapsed after
+ * the `/`+filter run is deleted by the same contract as runTriggerDefineInsert).
+ * `text` is the already-formatted date string (trigger-slash.ts resolves the
+ * configurable `orcaEditor.trigger.dateFormat` deterministically before calling).
+ */
+export function runTriggerInsertDate(text: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  // Insert the date as a plain text node via the live Range rather than
+  // execCommand('insertText'): Chromium's insertText mangles an ASCII space
+  // sitting immediately before the caret (it treats the now-trailing space as
+  // collapsible and drops it), so `Today is /date` → date would lose the space
+  // between "is" and the date. A direct text-node insert preserves the
+  // surrounding text byte-for-byte.
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.3 — an Execute-group command item leaves no textual trace: just
+ * delete the `/`+filter run (single, self-contained undo step, same bracketing
+ * as runTriggerDefineInsert) and settle the caret. Called BEFORE the
+ * `executeCommand` message is dispatched, so a command that rebuilds the view
+ * (Reading Mode/Zen) never fires against a still-open popup or a stale anchor.
+ */
+export function runTriggerDeleteOnly(deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.1 — collapsed-caret branch: delete the `@`+filter run (same
+ * preamble as runTriggerDefineInsert), then insert a brand-new `<a>` with both
+ * display text and href from scratch — mirrors insertLink()'s collapsed
+ * branch (`insertHTML`, `escapeAttr`/`escapeHtml`) exactly, no parallel
+ * implementation.
+ */
+export function runAtInsertLink(href: string, displayText: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  document.execCommand('insertHTML', false, `<a href="${escapeAttr(href)}">${escapeHtml(displayText)}</a>`);
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 21 US-21.4 — `/relate` commit: delete the `/`+filter run (same preamble
+ * as runTriggerDefineInsert), then insert the literal "Refers to: " prefix
+ * followed by a real markdown link to the picked entity — one-way, single-
+ * file, no reverse line (US-21.4). Same delete+insertHTML shape as
+ * runAtInsertLink, extended with the fixed prefix text so the whole write
+ * lands as one host-side undo unit; never touches the target file.
+ */
+export function runTriggerInsertRelateLink(href: string, displayText: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  // Insert the "Refers to: " prefix + link via the live Range (a text node
+  // followed by a real <a>) rather than execCommand('insertHTML'): insertHTML
+  // collapses an ASCII space sitting immediately before the caret exactly as
+  // insertText does (see runTriggerInsertDate), so a mid-paragraph
+  // `More text. /relate` commit would lose the space before "Refers to:". A
+  // direct node insert preserves the surrounding text byte-for-byte.
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    const link = document.createElement('a');
+    link.setAttribute('href', href);
+    link.textContent = displayText;
+    range.insertNode(link);
+    range.insertNode(document.createTextNode('Refers to: '));
+    range.setStartAfter(link);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.8 — Image toolbar button's `@`-popup commit: delete the
+ * trigger run (or the original selection it was invoked on) and insert a bare
+ * `<img>`, mirroring the deleted insertImage() modal exactly (`alt=""`, no
+ * alt-text UX invented). `href` arrives already-encoded (trigger-at.ts's
+ * targetsById runs `encodeLinkPath` once when building the Files group — same
+ * contract runAtInsertLink relies on), so no second encode pass here.
+ */
+export function runAtInsertImage(href: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
+  content.focus();
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.1 — active-selection branch: `@` was intercepted at keydown so
+ * it never touched the document; the ORIGINAL selection is restored here and
+ * only its `href` is set (`createLink`, display text untouched) — mirrors
+ * insertLink()'s non-collapsed branch exactly.
+ */
+export function runAtSetHrefOnSelection(href: string, selectionRange: Range): void {
+  ctx.flushPendingSync();
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(selectionRange);
+  document.execCommand('createLink', false, href);
+  content.focus();
+  ctx.syncNow();
 }
 
 // ---------------------------------------------------------------------------

@@ -20,9 +20,12 @@ import {
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
-import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
+import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
+import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
+import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
@@ -212,20 +215,21 @@ const readabilityFixture = {
   enabled: false, mode: 'standard',
   fontFamily: '', zen: false,
 } as const;
+const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' };
 const toWebview: HostToWebview[] = [
-  { type: 'init', text: 'x', config: {
+  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture,
+    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
   } },
-  { type: 'init', text: 'x', config: {
+  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture,
+    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
-  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true },
+  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced' },
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
   { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
@@ -548,6 +552,140 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   // must not be draggable below the H1 (would nest under it). scope ends at the H1 (level 1 < 2).
   const g = headingSiblingGaps([2, 1], 0);
   check('sibling: top H2 before an H1 is immovable (scope ends at the H1)', g.scopeEndGap === 1 && JSON.stringify(g.siblingStarts) === '[0]' && g.moveDownGap === null, JSON.stringify(g));
+}
+
+// ---------------------------------------------------------------------------
+// EntityIndex (Req 21 US-21.2) — host-side workspace entity index. Pure module
+// (no 'vscode' import) so it bundles into this node harness like text-utils.
+// ---------------------------------------------------------------------------
+
+// caption:: parse — namespace = leading letters, id = remainder.
+{
+  const rows: IndexedEntity[] = parseEntities('file:///a.md', '## Login flow\n\ncaption::UC01\n');
+  eq('entity: caption parses namespace/id/title', rows, [
+    { namespace: 'UC', id: '01', file: 'file:///a.md', line: 2, title: 'Login flow' },
+  ]);
+}
+
+// id match (both full id and partial) + title match — proves id-OR-title query.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '## Login flow\n\ncaption::UC01\n' }]);
+  check('entity: query by full id UC01', idx.query('UC01').length === 1);
+  check('entity: query by partial id 01', idx.query('01').length === 1);
+  check('entity: query by title token "login"', idx.query('login').length === 1);
+  check('entity: query by full title "Login flow"', idx.query('Login flow').length === 1);
+  check('entity: non-matching query returns nothing', idx.query('zzz').length === 0);
+  const q = idx.query('UC01')[0];
+  check('entity: namespace parsed as UC, id 01', q.namespace === 'UC' && q.id === '01');
+}
+
+// Empty/malformed declarations are refused (US-21.1 empty-id).
+{
+  const rows = parseEntities('file:///m.md', 'caption::\ncaption::UC02\ncaption::123\n');
+  eq('entity: empty id + no-namespace declarations skipped', rows.map((r) => r.namespace + r.id), ['UC02']);
+}
+
+// nearestEnclosingHeading — nesting, fence-immunity, above-any-heading.
+{
+  const lines = '# Top\n\n## Mid\n\ncaption::UC01\n\n### Deep\ncaption::UC02\n'.split('\n');
+  eq('entity: nearest heading picks the immediately-enclosing ## Mid', nearestEnclosingHeading(lines, 4), 'Mid');
+  eq('entity: nearest heading updates to ### Deep further down', nearestEnclosingHeading(lines, 7), 'Deep');
+}
+{
+  const lines = '# Real\n\n```\n# NotAHeading\n```\ncaption::UC01\n'.split('\n');
+  eq('entity: a "#"-looking line inside a fence is not a heading', nearestEnclosingHeading(lines, 5), 'Real');
+}
+{
+  const lines = 'caption::UC01\n\n# Later\n'.split('\n');
+  eq('entity: caption above any heading -> empty title', nearestEnclosingHeading(lines, 0), '');
+}
+
+// caption inside a fence is not indexed.
+{
+  const rows = parseEntities('file:///f.md', '# H\n\n```\ncaption::UC99\n```\ncaption::UC01\n');
+  eq('entity: caption inside a fence is skipped', rows.map((r) => r.id), ['01']);
+}
+
+// Incremental update — onFileChanged replaces just that file's rows.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '# H\ncaption::UC01\n' }]);
+  check('entity: initial row present', idx.query('UC01').length === 1);
+  idx.onFileChanged('file:///a.md', '# H\ncaption::UC02\n');
+  check('entity: old row gone after incremental update', idx.query('UC01').length === 0);
+  check('entity: new row present after incremental update', idx.query('UC02').length === 1);
+  idx.onFileChanged('file:///a.md', ''); // deleted / emptied file drops its rows.
+  check('entity: emptied file drops all its rows', idx.query('UC02').length === 0);
+}
+
+// Indexing state — isReady() false before build, true after.
+{
+  const idx = new EntityIndex();
+  check('entity: fresh index is not ready (indexing state)', idx.isReady() === false);
+  idx.build([]);
+  check('entity: index is ready after build', idx.isReady() === true);
+}
+
+// namespaces() — count-desc sort + case-insensitive fold to first-seen casing.
+{
+  const idx = new EntityIndex();
+  idx.build([
+    { uri: 'file:///a.md', text: 'caption::UC01\ncaption::UC02\ncaption::BR01\n' },
+    { uri: 'file:///b.md', text: 'caption::uc03\n' }, // case variant of UC.
+  ]);
+  const ns = idx.namespaces();
+  eq('entity: namespaces fold case-insensitively, sort by count desc', ns, [
+    { name: 'UC', count: 3 },
+    { name: 'BR', count: 1 },
+  ]);
+}
+
+// namespace filter narrows case-insensitively.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::UC01\ncaption::BR01\n' }]);
+  check('entity: namespace filter narrows (case-insensitive)', idx.query('', { namespace: 'uc' }).length === 1);
+  check('entity: empty query returns all when no namespace filter', idx.query('').length === 2);
+}
+
+// lookup() — EXACT id resolver for broken-reference existence (Req 21 US-21.3).
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::UC01\ncaption::BR02\n' }]);
+  check('entity: lookup exact id hits', idx.lookup('UC01').length === 1);
+  check('entity: lookup namespace is case-insensitive', idx.lookup('uc01').length === 1);
+  check('entity: lookup id is case-sensitive / exact (no fuzzy)', idx.lookup('UC0').length === 0);
+  check('entity: lookup empty id half returns none', idx.lookup('UC').length === 0);
+  check('entity: lookup unknown id returns none', idx.lookup('XX99').length === 0);
+}
+
+// canonicalEntityId — ns folded to lower, id kept; invalid tokens rejected.
+{
+  eq('occurrence: canonical folds ns to lower', canonicalEntityId('UC01'), 'uc01');
+  check('occurrence: canonical rejects all-letters (empty id)', canonicalEntityId('readme') === null);
+  check('occurrence: canonical rejects no-letter-prefix', canonicalEntityId('01') === null);
+}
+
+// scanEntityOccurrences — reference links only, fence-aware, canonical ids.
+{
+  const occ = scanEntityOccurrences('See [UC01](#UC01) and [again](other.md#uc01).\n\n[x](https://a.com)\n');
+  eq('occurrence: entity-ref links found (canonical), non-entity links skipped', occ, [
+    { id: 'uc01', line: 0 },
+    { id: 'uc01', line: 0 },
+  ]);
+  const fenced = scanEntityOccurrences('```\n[UC01](#UC01)\n```\n[BR02](#BR02)\n');
+  eq('occurrence: links inside a fence are skipped', fenced, [{ id: 'br02', line: 3 }]);
+}
+
+// truncateDisplay — Bug 11: cap @ result label/detail at 20 chars + ellipsis.
+{
+  check('truncate: short text unchanged', truncateDisplay('BR02') === 'BR02');
+  check('truncate: exactly 20 chars unchanged', truncateDisplay('a'.repeat(20)) === 'a'.repeat(20));
+  eq('truncate: >20 chars → 20 chars + ellipsis', truncateDisplay('Requirement: 21. Structured Entity Reference System'), 'Requirement: 21. Str…');
+  check('truncate: result length is 20 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(20) + '…');
+  check('truncate: empty string unchanged', truncateDisplay('') === '');
+  check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(30)) === '😀'.repeat(20) + '…');
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

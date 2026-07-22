@@ -19,7 +19,11 @@ import {
   postProcessMermaidDom,
   postProcessCodeHeaders,
   postProcessRelativePathLinks,
+  postProcessCaptions,
+  postProcessEntityRefs,
+  postProcessEmptyLinks,
   prepareDomForSerialize,
+  CAPTION_CLASS,
   AUTOLINK_PATH_ATTR,
   MD_CODE_COPY_CLASS,
   MD_CODE_LANG_CLASS,
@@ -30,6 +34,9 @@ import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
+import { initBrokenRef, slugifyHeadingText } from './broken-ref';
+import { initQuickCorrect } from './quick-correct';
+import { initCaptionEdit } from './caption-edit';
 import { initMermaid } from './mermaid';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
@@ -39,7 +46,6 @@ import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './bloc
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
 import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
-import { initPrompt } from './prompt';
 import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
 import { initReadability } from './readability';
@@ -51,12 +57,21 @@ import {
   toggleInlineCode,
   isPopoverOpen,
   openCodeLangSwitcher,
+  initBrokenRefBadge,
+  syncBrokenRefBadge,
+  initToolbarTriggerAt,
 } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
+import { hasInputOwner } from './input-ownership';
+import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
+import { initTriggerSlash } from './trigger-slash';
+import { initTriggerAt } from './trigger-at';
+import { initEntityScope } from './entity-scope';
 import type { VsCodeApi } from './vscode-api';
-import type { HostToWebview, InitConfig, WebviewToHost } from '../../src/shared/messages';
+import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
+import { normalizeHrefKey } from '../../src/references-section';
 import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -98,7 +113,6 @@ const dragDrop = initDragDrop(content, {
     ensureTrailingParagraph();
   },
 });
-const prompt = initPrompt(vscode, dom);
 const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
 // US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
 // its save+insert flow) and insertMarkdownAtCaret (hoisted function, declared below).
@@ -138,10 +152,83 @@ initToolbar(content, toolbarEl, {
   dom,
   toc,
   readability,
-  promptInput: prompt.promptInput,
   insertMarkdown: insertMarkdownAtCaret,
 });
 initInputRules(content, { scheduleSync, dom });
+
+// Req 20 US-20.1/20.2/20.3: ONE shared trigger-popup shell — created LAZILY on
+// first open(). Both the `@` (trigger-at) and `/` (trigger-slash) triggers plug
+// their own dataSource into this SAME single instance, which is what gives "only
+// one overlay active at a time" for free (open() tears down any previous session
+// before opening, see trigger-popup.ts). It must NOT be built eagerly at init:
+// initTriggerPopup() appends a `.trigger-popup` card to the body, and a standing
+// hidden card at startup shadows the debug-driven card the shell spec drives —
+// the exact foundation bug. `isOpen()` therefore never forces construction (it
+// answers false until something has actually opened the popup).
+let sharedTriggerPopup: TriggerPopupController | undefined;
+const triggerPopup: TriggerPopupController = {
+  open: (args) => {
+    if (!sharedTriggerPopup) {
+      sharedTriggerPopup = initTriggerPopup({ content });
+    }
+    sharedTriggerPopup.open(args);
+  },
+  updateQuery: (q) => sharedTriggerPopup?.updateQuery(q),
+  isOpen: () => sharedTriggerPopup?.isOpen() ?? false,
+  close: () => sharedTriggerPopup?.close(),
+  showGhost: (text, afterRange) => sharedTriggerPopup?.showGhost(text, afterRange),
+  hideGhost: () => sharedTriggerPopup?.hideGhost(),
+};
+const triggerSlash = initTriggerSlash(content, triggerPopup, postToHost);
+const triggerAt = initTriggerAt(content, triggerPopup, postToHost);
+// Req 20 US-20.8: toolbar Link/Image buttons invoke trigger-at.ts's popup —
+// wired here (not a field on initToolbar's args) because initToolbar runs
+// BEFORE triggerAt exists in this init order (same reason as initBrokenRefBadge).
+initToolbarTriggerAt(triggerAt.openFromToolbar);
+
+// Req 21 US-21.3: `UC01.` dot-drill (current-document scope) + entity-ref
+// hover parent-context — own `input`/hover wiring, independent of trigger-at's
+// `@` detection (fires on '.' typed right after an already-inserted entity
+// reference, not on '@').
+const entityScope = initEntityScope(content, triggerPopup);
+content.addEventListener('input', (e) => entityScope.onInput(e as InputEvent));
+content.addEventListener('mouseover', (e) => entityScope.onMouseOver(e), true);
+content.addEventListener('mouseout', (e) => entityScope.onMouseOut(e), true);
+
+// Req 20 US-20.9 / Req 21 US-21.3: broken-reference marker (file/heading links
+// only for now) + its "Search again" quick-correct popover. quickCorrect is
+// created first; its onFixed callback references brokenRef (assigned right
+// after) — safe because both callbacks only ever run later, from a user
+// interaction, well after this synchronous init block has finished.
+const quickCorrect = initQuickCorrect(vscode, content, () => {
+  scheduleSync();
+  brokenRef.refresh();
+});
+const brokenRef = initBrokenRef({
+  content,
+  vscode,
+  onSearchAgain: (anchor) => quickCorrect.open(anchor),
+  // Req 21 US-21.3: "Fix all" — one pick applied to every same-id occurrence in this file.
+  onFixAll: (anchor) => quickCorrect.open(anchor, { fixAll: true }),
+  // Req 21 US-21.3: right-pinned toolbar count badge, recomputed live from
+  // every recompute pass (current document only).
+  onChange: () => syncBrokenRefBadge(),
+});
+initBrokenRefBadge(() => brokenRef.list());
+
+// bug_General Mention Declare #6: click a declaration pill (.md-caption, a
+// non-editable atom) to edit its value via an anchored popover with duplicate
+// validation. onEdited persists the rewritten token to the document.
+const captionEdit = initCaptionEdit(vscode, () => {
+  scheduleSync();
+});
+content.addEventListener('click', (e) => {
+  const badge = (e.target as Element | null)?.closest?.(`.${CAPTION_CLASS}`);
+  if (badge) {
+    e.preventDefault();
+    captionEdit.open(badge as HTMLElement);
+  }
+});
 
 /**
  * Đồng bộ chiều cao toolbar (sticky, top:0) vào CSS var `--toolbar-height` để
@@ -219,6 +306,18 @@ function shouldAutoOpenToc(flag: boolean | undefined): boolean {
  */
 let lastAutoOpenToc: boolean | undefined;
 
+/**
+ * Req 21 US-21.5 — propagate `orcaEditor.triggerActions.mode` to both trigger
+ * modules (seed at 'init', live-updated on 'configUpdate') and mirror it onto
+ * `body[data-trigger-mode]` — an observable hook for tests/future CSS, gating
+ * visibility only, never restyling/hiding already-written content.
+ */
+function applyTriggerMode(mode: TriggerMode): void {
+  document.body.dataset.triggerMode = mode;
+  triggerSlash.setTriggerMode(mode);
+  triggerAt.setTriggerMode(mode);
+}
+
 window.addEventListener('message', (event) => {
   const msg = event.data as HostToWebview;
   switch (msg.type) {
@@ -232,6 +331,16 @@ window.addEventListener('message', (event) => {
       if (cfg.readability) {
         readability.applyFromHost(cfg.readability);
       }
+      // Req 20 US-20.2/20.3: seed the `/` trigger popup — docUri is echoed back
+      // on 'executeCommand' so the host can verify this document is still the
+      // target (see triggerSlash.setDocUri).
+      triggerSlash.setDocUri(msg.docUri);
+      triggerSlash.setConfig(cfg.trigger);
+      // Req 21 US-21.2: the `@` popup's Entities scope also needs docUri, to
+      // relativize a picked entity's declaring-file href client-side.
+      triggerAt.setDocUri(msg.docUri);
+      // Req 21 US-21.5: also seed the `@` popup's gate.
+      applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       renderDocument(msg.text ?? '');
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
@@ -262,7 +371,31 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'fileSearchResult': {
-      prompt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      // quick-correct.ts and trigger-at.ts (Req 20 US-20.1 `@` Files scope)
+      // share the SAME 'searchFiles'/'fileSearchResult' channel (each keeps
+      // its own requestId sequence — ignores this if it isn't the one it's
+      // waiting for), so no new host message shape.
+      quickCorrect.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      triggerAt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      break;
+    }
+    case 'namespaceListResult': {
+      // Req 21 US-21.1's Declare-entity flow (triggerSlash) and Req 21 US-21.2's
+      // `@` Entities scope (triggerAt) share the SAME 'namespaceList'/
+      // 'namespaceListResult' channel (each keeps its own requestId sequence —
+      // ignores this if it isn't the one it's waiting for), same pattern as
+      // 'fileSearchResult' above.
+      triggerSlash.notifyNamespaceListResult(msg.requestId, msg.ready, msg.namespaces);
+      triggerAt.notifyNamespaceListResult(msg.requestId, msg.ready, msg.namespaces);
+      break;
+    }
+    case 'entityResult': {
+      // Same sharing as 'namespaceListResult' above, for 'entitySearch' — now
+      // also the broken-entity quick-correct's Entities scope (Req 21 US-21.3).
+      triggerSlash.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      triggerAt.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      quickCorrect.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      captionEdit.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
       break;
     }
     case 'pasteImageResult': {
@@ -275,6 +408,14 @@ window.addEventListener('message', (event) => {
     }
     case 'crossFileSearch:result': {
       crossFileSearch.notifyResult(msg.requestId, msg.groups, msg.truncated, msg.usedFallback);
+      break;
+    }
+    case 'targetsExistResult': {
+      brokenRef.notifyResult(msg.requestId, msg.docVersion, msg.results);
+      break;
+    }
+    case 'entitiesExistResult': {
+      brokenRef.notifyEntitiesResult(msg.requestId, msg.docVersion, msg.results);
       break;
     }
     case 'scrollToPosition': {
@@ -300,6 +441,10 @@ window.addEventListener('message', (event) => {
         syncTocButton();
       }
       lastAutoOpenToc = msg.autoOpenToc;
+      // Req 21 US-21.5: live-toggle the trigger-actions visibility gate — the
+      // one trigger.* field that changes at runtime (dateFormat/executeCommands
+      // stay init-only, unchanged behavior).
+      applyTriggerMode(msg.triggerMode);
       break;
     }
     case 'zenChanged': {
@@ -313,6 +458,23 @@ window.addEventListener('message', (event) => {
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
       // onReadingModeChange, tránh vòng lặp).
       readability.applyReadingModeFromHost(msg);
+      break;
+    }
+    case 'runCommand': {
+      // Req 20 US-20.3: the `/` popup's Execute group, after the host validated
+      // and ran vscode.commands.executeCommand — reuse the SAME local actions
+      // the toolbar buttons already call (no parallel implementation).
+      // toggle()/toggleZen() report back via onReadingModeChange/onZenChange
+      // (postToHost above) exactly as when driven from the toolbar, so other
+      // open tabs stay in sync.
+      if (msg.command === 'toggleReadingMode') {
+        readability.toggle();
+      } else if (msg.command === 'toggleZen') {
+        readability.toggleZen();
+      } else if (msg.command === 'openToc') {
+        toc.toggle();
+        syncTocButton();
+      }
       break;
     }
   }
@@ -370,6 +532,9 @@ function renderDocument(markdown: string): void {
   postProcessMermaidDom(content, document);
   postProcessCodeHeaders(content, document);
   postProcessRelativePathLinks(content, document);
+  postProcessCaptions(content, document);
+  postProcessEntityRefs(content);
+  postProcessEmptyLinks(content);
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
@@ -393,8 +558,14 @@ function renderDocument(markdown: string): void {
   selectHighlight.refresh();
   // Vị trí icon/selection cũ không còn hợp lệ sau khi DOM đổi — ẩn icon/đóng popover.
   crossFileSearch.refresh();
+  // The @// trigger popup anchors into #content just rebuilt — close it (no-op when
+  // not open) so its orphaned card and the `trigger-popup-open` caret-suppression
+  // class can't linger with the editor caret hidden (bug General: Mention Declare 3 & 4).
+  triggerPopup.close();
   // Heading có thể đã đổi — dựng lại mục lục nếu panel đang mở.
   toc.refresh();
+  // Req 20 US-20.9: anchors/headings just rebuilt — re-scan for broken references.
+  brokenRef.refresh();
   // Bảng vừa dựng lại — bỏ cache header dính cũ, tính lại theo DOM mới.
   stickyTableHeader.refresh();
   // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
@@ -595,6 +766,9 @@ function scheduleSync(): void {
   // for BOTH keyboard edits and toolbar actions. (renderDocument refreshes on
   // its own for host-driven re-renders, which don't go through scheduleSync.)
   toc.refresh();
+  // Same reasoning as toc.refresh() above — a link's href/text or a heading's
+  // text may have just changed (Req 20 US-20.9).
+  brokenRef.refresh();
 }
 
 // Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
@@ -1127,6 +1301,13 @@ content.addEventListener('click', (e) => {
   if (anchor) {
     e.preventDefault();
     e.stopPropagation();
+    // US-20.5: a plain click on a `## References` entry is navigation, not
+    // link-open — broken (⚠️) → jump to first body occurrence; healthy → open
+    // its target. Cmd/Ctrl+Click on a References entry still opens normally.
+    if (!e.metaKey && !e.ctrlKey && referencesSectionAnchors().has(anchor)) {
+      navigateReferenceEntry(anchor);
+      return;
+    }
     if (e.metaKey || e.ctrlKey) {
       openLink(anchor.getAttribute('href') ?? '');
     }
@@ -1166,16 +1347,68 @@ function scrollToAnchor(fragment: string): void {
   const decoded = decodeURIComponent(fragment).toLowerCase();
   const headings = content.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (const h of Array.from(headings)) {
-    const slug = (h.textContent ?? '')
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, '-')
-      .replace(/[^\p{L}\p{N}-]/gu, '');
-    if (slug === decoded) {
+    // Same slugify rule broken-ref.ts uses to resolve a #heading link's
+    // existence (Req 20 US-20.9) — shared so the two never drift apart.
+    if (slugifyHeadingText(h.textContent ?? '') === decoded) {
       h.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       return;
     }
   }
+}
+
+/**
+ * US-20.5: anchors inside the rendered `## References` section — the run of
+ * sibling blocks from the References `<h2>` up to the next H1/H2. Returned as a
+ * Set so a clicked anchor can be classified as a References entry AND so the
+ * first-body-occurrence search can SKIP them (a broken entry must never
+ * navigate to itself).
+ */
+function referencesSectionAnchors(): Set<HTMLAnchorElement> {
+  const anchors = new Set<HTMLAnchorElement>();
+  const h2 = Array.from(content.children).find(
+    (child) => child.tagName === 'H2' && /^references$/i.test((child.textContent ?? '').trim())
+  );
+  if (!h2) {
+    return anchors;
+  }
+  for (let sib = h2.nextElementSibling; sib; sib = sib.nextElementSibling) {
+    if (sib.tagName === 'H1' || sib.tagName === 'H2') {
+      break;
+    }
+    for (const a of Array.from(sib.querySelectorAll('a[href]'))) {
+      anchors.add(a as HTMLAnchorElement);
+    }
+  }
+  return anchors;
+}
+
+/**
+ * US-20.5: handle a plain click on a References-section entry. A broken (`⚠️`)
+ * entry scrolls to + flashes the FIRST body occurrence of the same link and
+ * opens the quick-correct fix surface there (the entry itself is only a
+ * listing — the real fix is in the body); a healthy entry opens its target
+ * file via the normal open flow (no line-jump). Resolves US-20.5's open
+ * question for both cases.
+ */
+function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
+  const li = anchor.closest('li');
+  const broken = (li?.textContent ?? '').trimStart().startsWith('⚠️');
+  if (!broken) {
+    openLink(anchor.getAttribute('href') ?? '');
+    return;
+  }
+  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '');
+  const sectionAnchors = referencesSectionAnchors();
+  const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
+    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '') === key
+  );
+  if (!bodyAnchor) {
+    return;
+  }
+  bodyAnchor.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  bodyAnchor.classList.add('ref-nav-flash');
+  setTimeout(() => bodyAnchor.classList.remove('ref-nav-flash'), 1200);
+  quickCorrect.open(bodyAnchor);
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1460,11 @@ function jumpHeading(dir: 1 | -1): void {
 }
 
 content.addEventListener('keydown', (e) => {
+  // Req 20 US-20.2: while a trigger overlay owns the keyboard, the editor's
+  // shortcut/undo/redo/arrow handling must not fire — the overlay handles the key.
+  if (hasInputOwner()) {
+    return;
+  }
   const mod = e.metaKey || e.ctrlKey;
   // US-19.7: Alt+Shift+↑/↓ nhảy giữa heading (không cần Ctrl/Cmd).
   if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {

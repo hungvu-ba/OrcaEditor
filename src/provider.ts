@@ -6,11 +6,18 @@ import type {
   CrossFileMatch,
   CrossFileMatchGroup,
   CrossFileSearchScope,
+  EntityExistResult,
+  EntitySuggestion,
   HostToWebview,
+  NamespaceSummary,
   ReadabilityConfig,
   ReadingMode,
+  TargetExistsResult,
+  TriggerMode,
   WebviewToHost,
 } from './shared/messages';
+import { EntityIndex } from './entity-index';
+import { canonicalEntityId, scanEntityOccurrences } from './occurrence-scan';
 import {
   classifyLink,
   computeMinimalEdit,
@@ -21,6 +28,7 @@ import {
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
+import { planReferences, renderReferences, type RefCandidate } from './references-section';
 
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
 const UNDO_SETTLE_MS = 200;
@@ -66,6 +74,11 @@ function sourceLineCol(text: string, offset: number): { line: number; col: numbe
   return { line, col: end - lineStart };
 }
 
+/** Req 21 US-21.2: does this uri point at a markdown file the entity index tracks? */
+function isMarkdownUri(uri: vscode.Uri): boolean {
+  return /\.(md|markdown)$/i.test(uri.path);
+}
+
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
@@ -82,14 +95,194 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   public static readonly viewType = 'orcaEditor.editor';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
-    return vscode.window.registerCustomEditorProvider(
+    const provider = new MarkdownWysiwygProvider(context);
+    const providerDisposable = vscode.window.registerCustomEditorProvider(
       MarkdownWysiwygProvider.viewType,
-      new MarkdownWysiwygProvider(context),
+      provider,
       {
         webviewOptions: { retainContextWhenHidden: true },
         supportsMultipleEditorsPerDocument: true,
       }
     );
+    // Req 20 US-20.3: real contributed commands (package.json's `commands` +
+    // the dedicated `orcaEditorExecuteCommands` membership list) — the SAME
+    // handler runs whether invoked from the Command Palette or from the `/`
+    // popup's Execute group (webview → 'executeCommand' → this →
+    // vscode.commands.executeCommand(id), see case 'executeCommand' above).
+    const commandDisposables = [
+      vscode.commands.registerCommand('orcaEditor.toggleReadingMode', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleReadingMode' })
+      ),
+      vscode.commands.registerCommand('orcaEditor.toggleZen', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleZen' })
+      ),
+      vscode.commands.registerCommand('orcaEditor.openToc', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'openToc' })
+      ),
+    ];
+    // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
+    // declarations) live. Provider-level (not per-panel) so it covers every
+    // markdown doc, open or not:
+    //  - onDidChangeTextDocument: open/unsaved buffers, re-parse on each edit.
+    //  - FileSystemWatcher: on-disk changes to files with no open editor
+    //    (change/create -> re-read + re-parse; delete -> drop that file's rows).
+    // The initial full scan is kicked off fire-and-forget so it never blocks
+    // activation (isReady() stays false until it finishes — the "indexing" state).
+    const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (isMarkdownUri(e.document.uri)) {
+        provider.entityIndex.onFileChanged(e.document.uri.toString(), e.document.getText());
+      }
+    });
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
+    const reindex = (uri: vscode.Uri): void => void provider.reindexFile(uri);
+    const watcherSubs = [
+      watcher.onDidChange(reindex),
+      watcher.onDidCreate(reindex),
+      watcher.onDidDelete((uri) => provider.entityIndex.onFileChanged(uri.toString(), '')),
+      watcher,
+    ];
+    // Req 21 US-21.3: session-only occurrence cache — every markdown file the
+    // user actually opens gets a low-priority background scan for its entity
+    // references, backing "Fix all"'s `+N other occurrence(s)` count (never a
+    // proactive crawl, never persisted).
+    const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => provider.scheduleOccurrenceScan(doc));
+    void provider.buildEntityIndex();
+    return vscode.Disposable.from(providerDisposable, ...commandDisposables, docChangeSub, docOpenSub, ...watcherSubs);
+  }
+
+  /** Req 21 US-21.2: the live workspace entity index (`caption::` declarations). */
+  public readonly entityIndex = new EntityIndex();
+
+  /**
+   * Req 21 US-21.3: session-only entity-reference occurrence cache, keyed by
+   * canonical full id (ns.toLowerCase()+id) → the sites that reference it. Grows
+   * only from files opened this session (never persisted, dies with the session
+   * — same rejection as US-21.2's index persistence). Backs "Fix all"'s `+N
+   * other occurrence(s)` count, NOT any correctness guarantee.
+   */
+  private occurrenceCache = new Map<string, { file: string; line: number }[]>();
+
+  /**
+   * Req 21 US-21.3: re-scan one just-opened markdown document for entity
+   * references and refresh its rows in the occurrence cache. Runs on a
+   * `setTimeout(0)` so it never blocks the open/render (AC: after render, never
+   * blocks typing). Removes the file's prior rows from every bucket first so a
+   * re-open is idempotent (not double-counted).
+   */
+  private scheduleOccurrenceScan(doc: vscode.TextDocument): void {
+    if (!isMarkdownUri(doc.uri)) {
+      return;
+    }
+    const fileKey = doc.uri.toString();
+    const text = doc.getText();
+    setTimeout(() => {
+      for (const rows of this.occurrenceCache.values()) {
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i].file === fileKey) {
+            rows.splice(i, 1);
+          }
+        }
+      }
+      for (const { id, line } of scanEntityOccurrences(text)) {
+        const bucket = this.occurrenceCache.get(id);
+        if (bucket) {
+          bucket.push({ file: fileKey, line });
+        } else {
+          this.occurrenceCache.set(id, [{ file: fileKey, line }]);
+        }
+      }
+    }, 0);
+  }
+
+  /** Cap on files scanned by the initial entity-index build. */
+  private static readonly ENTITY_INDEX_MAX_FILES = 5000;
+
+  /**
+   * Req 21 US-21.2: read one markdown file's text, preferring an open buffer
+   * (catches unsaved edits) and falling back to disk — same source-of-truth
+   * order as crossFileSearch.
+   */
+  private async readMarkdownText(uri: vscode.Uri): Promise<string> {
+    const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+    if (openDoc) {
+      return openDoc.getText();
+    }
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    return new TextDecoder().decode(bytes);
+  }
+
+  /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
+  private async reindexFile(uri: vscode.Uri): Promise<void> {
+    try {
+      this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+    }
+  }
+
+  /**
+   * Req 21 US-21.2: initial non-blocking full build of the entity index —
+   * findFiles all markdown, read each (skipping+logging any single failing
+   * file), yielding between files so activation isn't blocked, then build().
+   */
+  public async buildEntityIndex(): Promise<void> {
+    let uris: readonly vscode.Uri[];
+    try {
+      uris = await vscode.workspace.findFiles(
+        '**/*.{md,markdown}',
+        MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
+        MarkdownWysiwygProvider.ENTITY_INDEX_MAX_FILES
+      );
+    } catch (err) {
+      MarkdownWysiwygProvider.log('entityIndex: findFiles failed', err);
+      uris = [];
+    }
+    const entries: { uri: string; text: string }[] = [];
+    for (const uri of uris) {
+      try {
+        entries.push({ uri: uri.toString(), text: await this.readMarkdownText(uri) });
+      } catch (err) {
+        // One unreadable file must not abort the whole build — skip + log.
+        MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+      }
+      // Yield so a large workspace scan doesn't monopolize the event loop.
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    this.entityIndex.build(entries);
+  }
+
+  /**
+   * Req 20 US-20.3: the currently focused Orca Editor panel, if any — target
+   * for a command with no document context of its own (Command Palette
+   * invocation) or the same panel that just asked to run it (`/` Execute).
+   */
+  private activePanel: vscode.WebviewPanel | undefined;
+
+  /** Post `message` to the focused panel only; a no-op if none is focused. */
+  public postToActivePanel(message: HostToWebview): void {
+    void this.activePanel?.webview.postMessage(message);
+  }
+
+  /** Req 20 US-20.3 membership list: ids from `contributes.orcaEditorExecuteCommands`. */
+  private triggerExecuteCommandIds(): string[] {
+    return (this.context.extension.packageJSON.contributes?.orcaEditorExecuteCommands as string[] | undefined) ?? [];
+  }
+
+  /**
+   * Req 20 US-20.3: resolve each membership id's label from `contributes.
+   * commands`'s own `title` — single source of truth, no duplicated string in
+   * webview code. An id with no matching `commands` entry is skipped (defensive
+   * only; every id on the membership list is expected to also be a real
+   * contributed command, per the AC).
+   */
+  private triggerExecuteCommands(): { id: string; label: string }[] {
+    const commands = (this.context.extension.packageJSON.contributes?.commands as
+      | { command: string; title: string }[]
+      | undefined) ?? [];
+    const titleById = new Map(commands.map((c) => [c.command, c.title]));
+    return this.triggerExecuteCommandIds()
+      .map((id) => ({ id, label: titleById.get(id) }))
+      .filter((c): c is { id: string; label: string } => c.label !== undefined);
   }
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -196,6 +389,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const docUriStr = document.uri.toString();
 
+    // Req 21 US-21.3: seed the occurrence cache for this document — a custom
+    // editor open does not always surface as onDidOpenTextDocument.
+    this.scheduleOccurrenceScan(document);
+
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
     // Bug 0716 #1: lookup-or-create + add() đều dời vào case 'ready' bên dưới
@@ -243,6 +440,20 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
      * để phá coalescing (xem applyEditBreakingCoalesce).
      */
     let prevEditBeforeText: string | undefined;
+    /**
+     * Req 20 US-20.9: in-flight `checkTargetsExist` batch, if any — a new
+     * request (the webview re-scanning after a fresh doc-version) cancels the
+     * previous one so a slow/stale `fs.stat` batch never races a newer reply.
+     */
+    let existCheckTokenSource: vscode.CancellationTokenSource | undefined;
+    /** Req 21 US-21.3: in-flight `checkEntitiesExist` batch — same cancel-the-previous discipline as `existCheckTokenSource`. */
+    let entityExistCheckTokenSource: vscode.CancellationTokenSource | undefined;
+    /**
+     * Req 20 US-20.5: guards against overlapping `/add reference` runs — while
+     * one run's `fs.stat` batch + merge write is in flight, a second invocation
+     * is ignored so two edits never race (AC "No overlapping runs").
+     */
+    let addReferenceInFlight = false;
 
     // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
@@ -311,6 +522,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
         showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+        // US-21.5: triggerActions.mode is the one trigger.* setting that DOES
+        // need live propagation (visibility gate, not just a seed) — dateFormat/
+        // executeCommands stay init-only, unchanged behavior.
+        triggerMode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
       });
     });
 
@@ -341,6 +556,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({
             type: 'init',
             text: document.getText(),
+            docUri: docUriStr,
             ...(reveal ? { reveal } : {}),
             config: {
               breaks: cfg.get<boolean>('breaks', false),
@@ -356,6 +572,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               readability: this.resolveReadability(wysiwygCfg),
+              trigger: {
+                dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
+                executeCommands: this.triggerExecuteCommands(),
+                mode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
+              },
             },
           });
           break;
@@ -498,6 +719,127 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
         }
+        case 'executeCommand': {
+          // Req 20 US-20.3: never an arbitrary-command execution surface —
+          // validate against the same membership list sent in InitConfig, and
+          // only run it if this document is still the one the message came for
+          // (a message arriving after a tab switch must never fire against the
+          // wrong document).
+          if (
+            this.triggerExecuteCommandIds().includes(msg.commandId) &&
+            msg.docUri === docUriStr
+          ) {
+            await vscode.commands.executeCommand(msg.commandId);
+          }
+          break;
+        }
+        case 'checkTargetsExist': {
+          existCheckTokenSource?.cancel();
+          existCheckTokenSource?.dispose();
+          const tokenSource = new vscode.CancellationTokenSource();
+          existCheckTokenSource = tokenSource;
+          const results = await this.checkTargetsExist(document, msg.targets, tokenSource.token);
+          // Cancelled by a newer request while the fs.stat batch was in flight
+          // — its reply is stale, discard rather than posting it.
+          if (!tokenSource.token.isCancellationRequested) {
+            void postToWebview({
+              type: 'targetsExistResult',
+              requestId: msg.requestId,
+              docVersion: msg.docVersion,
+              results,
+            });
+          }
+          break;
+        }
+        case 'checkEntitiesExist': {
+          entityExistCheckTokenSource?.cancel();
+          entityExistCheckTokenSource?.dispose();
+          const tokenSource = new vscode.CancellationTokenSource();
+          entityExistCheckTokenSource = tokenSource;
+          const results = await this.checkEntitiesExist(document, msg.ids, tokenSource.token);
+          if (!tokenSource.token.isCancellationRequested) {
+            void postToWebview({
+              type: 'entitiesExistResult',
+              requestId: msg.requestId,
+              docVersion: msg.docVersion,
+              results,
+            });
+          }
+          break;
+        }
+        case 'addReference': {
+          // Req 20 US-20.5: build/update the `## References` section as ONE
+          // ordinary document edit (saves/undoes like any insert).
+          if (msg.docUri !== docUriStr) {
+            break; // message arrived after a tab switch — never edit the wrong document.
+          }
+          if (document.uri.scheme !== 'file' || document.isUntitled) {
+            // No base directory to resolve relative hrefs against (AC "Skip un-resolvable documents").
+            void vscode.window.showInformationMessage('Add reference needs a saved file.');
+            break;
+          }
+          if (addReferenceInFlight) {
+            break; // AC "No overlapping runs".
+          }
+          addReferenceInFlight = true;
+          try {
+            // Let the trigger-text delete edit commit first, then read the text.
+            await editChain;
+            const text = document.getText();
+            const plan = planReferences(text);
+            if (plan.candidates.length === 0) {
+              void vscode.window.showInformationMessage('No new references to add.');
+              break;
+            }
+            const brokenKeys = await this.checkTargetsMissing(document, plan.candidates);
+            const newText = renderReferences(text, plan, brokenKeys);
+            if (newText === null) {
+              break;
+            }
+            editChain = editChain.then(() => this.applyMinimalEdit(document, newText).then(() => undefined));
+            await editChain;
+          } finally {
+            addReferenceInFlight = false;
+          }
+          break;
+        }
+        case 'entitySearch': {
+          // Req 21 US-21.2: entity search, mirroring searchFiles ->
+          // fileSearchResult's requestId echo. `ready` carries the indexing
+          // state so the popup never reads an empty result as "nothing exists".
+          const entities: EntitySuggestion[] = this.entityIndex.query(msg.query, { namespace: msg.namespace });
+          void postToWebview({
+            type: 'entityResult',
+            requestId: msg.requestId,
+            ready: this.entityIndex.isReady(),
+            entities,
+          });
+          break;
+        }
+        case 'namespaceList': {
+          // Req 21 US-21.2: namespace browse list (with counts).
+          const namespaces: NamespaceSummary[] = this.entityIndex.namespaces();
+          void postToWebview({
+            type: 'namespaceListResult',
+            requestId: msg.requestId,
+            ready: this.entityIndex.isReady(),
+            namespaces,
+          });
+          break;
+        }
+      }
+    });
+
+    // Req 20 US-20.3: track the focused Orca Editor panel so a globally
+    // registered command (invoked from the Command Palette, with no document/
+    // panel context of its own) has a well-defined target for a per-panel
+    // action (openToc). Reading/Zen stay global broadcasts (unaffected).
+    if (webviewPanel.active) {
+      this.activePanel = webviewPanel;
+    }
+    const viewStateSubscription = webviewPanel.onDidChangeViewState((e) => {
+      if (e.webviewPanel.active) {
+        this.activePanel = e.webviewPanel;
       }
     });
 
@@ -510,6 +852,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       saveSubscription.dispose();
       configSubscription.dispose();
       messageSubscription.dispose();
+      viewStateSubscription.dispose();
+      existCheckTokenSource?.dispose();
+      if (this.activePanel === webviewPanel) {
+        this.activePanel = undefined;
+      }
 
       // C6b: gỡ panel khỏi registry để tránh rò rỉ / nhắm 'scrollToPosition'
       // vào 1 panel đã đóng.
@@ -1329,6 +1676,116 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * tồn tại (broken link) → realpath ném lỗi → fallback về path đã chuẩn hóa
    * (vẫn chặn được traversal qua ../..).
    */
+  /**
+   * Req 20 US-20.9: existence check for a batch of broken-reference candidate
+   * targets (file/heading links only — same-document `#heading`-only anchors
+   * never reach here, resolved by the webview's own TOC heading index). Each
+   * `target` is the raw file-part of an href (webview already stripped any
+   * `#fragment` — cross-file `path.md#heading` is file-level existence only,
+   * per the Broken Reference plan). Read-only: `fs.stat` via `workspace.fs`,
+   * same allowed-roots guard as `openLink` (never leaks existence of a path
+   * outside the document/workspace). Bails out early once `token` is
+   * cancelled (superseded by a newer request) — the caller discards a
+   * cancelled batch's result rather than posting it.
+   */
+  private async checkTargetsExist(
+    document: vscode.TextDocument,
+    targets: readonly string[],
+    token: vscode.CancellationToken
+  ): Promise<TargetExistsResult[]> {
+    const results: TargetExistsResult[] = [];
+    for (const target of targets) {
+      if (token.isCancellationRequested) {
+        break;
+      }
+      let exists = false;
+      try {
+        const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(target));
+        if (await this.isInsideAllowedRoots(document, uri)) {
+          await vscode.workspace.fs.stat(uri);
+          exists = true;
+        }
+      } catch {
+        exists = false;
+      }
+      results.push({ target, exists });
+    }
+    return results;
+  }
+
+  /**
+   * Req 21 US-21.3: which of `ids` (full entity tokens namespace+id) resolve to
+   * a live declaration. `exists` is true only when the index has a row for that
+   * id AND at least one of its declaration files passes the allowed-roots guard
+   * and a live `fs.stat` (index freshness is NOT truth — a stale row whose file
+   * was deleted/renamed reports broken). `occurrences` is the session cache's
+   * count for that id (best-effort). Bails early on cancellation, same as
+   * `checkTargetsExist`.
+   */
+  private async checkEntitiesExist(
+    document: vscode.TextDocument,
+    ids: readonly string[],
+    token: vscode.CancellationToken
+  ): Promise<EntityExistResult[]> {
+    const results: EntityExistResult[] = [];
+    for (const id of ids) {
+      if (token.isCancellationRequested) {
+        break;
+      }
+      const rows = this.entityIndex.lookup(id);
+      let exists = false;
+      for (const row of rows) {
+        try {
+          const uri = vscode.Uri.parse(row.file);
+          // Same allowed-roots guard as checkTargetsExist — never leak existence
+          // of a declaration file outside the current document/workspace roots.
+          if (await this.isInsideAllowedRoots(document, uri)) {
+            await vscode.workspace.fs.stat(uri);
+            exists = true;
+            break;
+          }
+        } catch {
+          // stat failed / file gone for this row — try the next declaration row.
+        }
+      }
+      const canonical = canonicalEntityId(id);
+      const occurrences = canonical !== null ? this.occurrenceCache.get(canonical)?.length ?? 0 : 0;
+      results.push({ id, exists, occurrences });
+    }
+    return results;
+  }
+
+  /**
+   * Req 20 US-20.5: which of `candidates` are MISSING — `fs.stat` throws
+   * `FileNotFound`. Unlike `checkTargetsExist` (used for the always-visible
+   * inline marker, where any failure means "no mark"), a stat failure for any
+   * OTHER reason (permission/IO) is treated as *unknown* and NOT reported
+   * missing, so the appended entry never gets a false `⚠️` (AC "never a false
+   * ⚠️"). A target outside the allowed roots is likewise not marked. Returns the
+   * set of missing candidates' `key`s.
+   */
+  private async checkTargetsMissing(
+    document: vscode.TextDocument,
+    candidates: readonly RefCandidate[]
+  ): Promise<Set<string>> {
+    const missing = new Set<string>();
+    for (const candidate of candidates) {
+      const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(candidate.fileSegment));
+      if (!(await this.isInsideAllowedRoots(document, uri))) {
+        continue; // unknown / out of scope — do not mark.
+      }
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch (err) {
+        if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
+          missing.add(candidate.key);
+        }
+        // Any other error → unknown → no mark.
+      }
+    }
+    return missing;
+  }
+
   private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
     const roots = [
       vscode.Uri.joinPath(document.uri, '..'),

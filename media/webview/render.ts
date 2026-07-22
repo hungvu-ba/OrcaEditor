@@ -64,6 +64,47 @@ export const LINE_NUMBER_END_ATTR = 'data-line-end';
  */
 export const AUTOLINK_PATH_ATTR = 'data-autolink-path';
 
+/**
+ * Attribute on an `<a>` produced from an empty-text link `[](url)` — markdown-it
+ * renders such a link as an empty anchor, so in a list it shows as a blank bullet
+ * (bug_General #15). postProcessEmptyLinks fills the anchor with the decoded
+ * target file name as DISPLAY text and stores the ORIGINAL href here; turndown's
+ * `emptyLink` rule serializes back to `[](href)` from it → the .md is unchanged
+ * (display-only, byte-faithful — same discipline as AUTOLINK_PATH_ATTR).
+ */
+export const EMPTY_LINK_ATTR = 'data-empty-link';
+
+/**
+ * Req 21 US-21.1: solid-pill badge wrapping a literal `caption::NS_ID` entity
+ * declaration (postProcessCaptions in dom-postprocess.ts). Styled ONLY via
+ * --rp-entity-accent (Reading Mode owns the entity accent — Teal base, T0.4;
+ * no swatch picker in v1).
+ */
+export const CAPTION_CLASS = 'md-caption';
+
+/**
+ * Req 21 US-21.1 (bug_General Mention Declare #5): child spans inside a
+ * CAPTION_CLASS badge. The badge's text is split so the internal `caption::`
+ * prefix can be hidden (PREFIX) while the namespace (NS) and value/id (ID) show
+ * as `NS value` — WITHOUT changing `badge.textContent` (still `caption::NS_ID`),
+ * so turndown round-trips byte-identical. The visible gap between NS and ID is
+ * CSS margin on ID, never a real space character.
+ */
+export const CAPTION_PREFIX_CLASS = 'md-caption-prefix';
+export const CAPTION_NS_CLASS = 'md-caption-ns';
+export const CAPTION_ID_CLASS = 'md-caption-id';
+
+/**
+ * Req 21 US-21.3: stamped on an `<a>` whose href resolves to an entity
+ * declaration (postProcessEntityRefs in dom-postprocess.ts) — a REFERENCE to an
+ * entity, not its declaration site. bug_General Mention Declare #2 (PO decision
+ * 2026-07-22): a reference renders as a NORMAL hyperlink (no pill), so this
+ * class carries no base style — it is only a JS/selector hook (entity-scope
+ * hover + `.` drill, broken-ref detection) and the anchor for the broken-state
+ * rule in markdown.css.
+ */
+export const ENTITY_REF_CLASS = 'md-entity-ref';
+
 /** [dòng bắt đầu, dòng kết thúc] (1-based, bao gồm) của một block trong Markdown gốc. */
 export interface LineRange {
   start: number;

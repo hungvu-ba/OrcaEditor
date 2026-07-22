@@ -19,13 +19,17 @@ const EXPECTED_ORDER = [
   'reading-toggle', 'zen-toggle', 'toc-toggle',
 ];
 
-// collapsePriority per id (smaller = collapses first). Pinned ids are absent.
+// collapsePriority per id (smaller = collapses first). Every id'd control is now
+// collapsible: left formatting collapses FIRST (1–19), the right utility cluster
+// LAST (Focus 20, Outline 21, Reading 22). Only "•••" (.toolbar-more) and the ⋮
+// kebab (.toolbar-more-options) never collapse — they have no id and are absent.
 const PRIORITY: Record<string, number> = {
   'fmt-mermaid': 1, 'fmt-math': 2, 'fmt-codeblock': 3, 'fmt-hr': 4, 'fmt-table': 5,
   'fmt-blockquote': 6, 'fmt-task': 7, 'fmt-clear': 8, 'fmt-inline-code': 9,
-  'fmt-strike': 10, 'zen-toggle': 11,
+  'fmt-strike': 10, 'fmt-italic': 11, 'fmt-bold': 12, 'fmt-numbered': 13,
+  'fmt-bullet': 14, 'fmt-image': 15, 'fmt-link': 16, 'fmt-heading': 17,
+  'fmt-redo': 18, 'fmt-undo': 19, 'zen-toggle': 20, 'toc-toggle': 21, 'reading-toggle': 22,
 };
-const PINNED = ['fmt-undo', 'fmt-redo', 'fmt-bold', 'fmt-italic', 'fmt-heading', 'fmt-bullet', 'fmt-numbered', 'fmt-link', 'fmt-image', 'reading-toggle', 'toc-toggle'];
 
 test('controls appear in the wireframe order at rest', async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 800 });
@@ -43,16 +47,60 @@ test('controls appear in the wireframe order at rest', async ({ page }) => {
   expect(ids).toEqual(EXPECTED_ORDER);
 });
 
-test('a very narrow toolbar collapses every collapsible (incl. Zen) into "•••" and keeps pinned controls', async ({ page }) => {
-  await page.setViewportSize({ width: 340, height: 800 });
+test('an extremely narrow toolbar collapses EVERY control into "•••", leaving only "•••" and the ⋮ kebab', async ({ page }) => {
+  // 200px: even the right utility cluster (Reading/Focus/Outline) has collapsed.
+  // The only always-visible controls are "•••" (overflow menu) and the ⋮ kebab.
+  await page.setViewportSize({ width: 200, height: 800 });
   await openEditor(page, '# hi');
 
   await expect(page.locator('.toolbar-more')).toBeVisible();
+  await expect(page.locator('.toolbar-more-options')).toBeVisible();
   for (const id of Object.keys(PRIORITY)) {
     await expect(page.locator(`#${id}`)).toBeHidden();
   }
-  for (const id of PINNED) {
+});
+
+test('the right utility cluster (Reading/Focus/Outline) survives longer than the left formatting controls', async ({ page }) => {
+  // At a mid-narrow width the left formatting buttons collapse first while the
+  // higher-priority right cluster stays visible — the requested hide order.
+  await page.setViewportSize({ width: 400, height: 800 });
+  await openEditor(page, '# hi');
+
+  await expect(page.locator('.toolbar-more')).toBeVisible();
+  // A low-priority left formatting control is gone...
+  await expect(page.locator('#fmt-mermaid')).toBeHidden();
+  await expect(page.locator('#fmt-bold')).toBeHidden();
+  // ...while the whole right cluster + kebab remain.
+  for (const id of ['reading-toggle', 'zen-toggle', 'toc-toggle']) {
     await expect(page.locator(`#${id}`)).toBeVisible();
+  }
+  await expect(page.locator('.toolbar-more-options')).toBeVisible();
+});
+
+test('the ⋮ kebab stays inside the visible toolbar band at every width (hidden last)', async ({ page }) => {
+  await openEditor(page, '# hi');
+
+  // The kebab (createMoreOptionsButton) is the .toolbar-more-options button. It
+  // is the last DOM child, so without the sticky pin it is the FIRST thing the
+  // toolbar's overflow:hidden clips off the right edge. Assert it never leaves
+  // the toolbar's content-box band, even when the right cluster overflows.
+  for (const width of [1400, 340, 220]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const tb = document.getElementById('toolbar')!;
+          const kebab = tb.querySelector('.toolbar-more-options') as HTMLElement;
+          const tbr = tb.getBoundingClientRect();
+          const kr = kebab.getBoundingClientRect();
+          const cs = getComputedStyle(tb);
+          const padL = parseFloat(cs.paddingLeft);
+          const padR = parseFloat(cs.paddingRight);
+          // In-band: within the toolbar content box (inside its horizontal padding).
+          return kr.width > 0 && kr.left >= tbr.left + padL - 1 && kr.right <= tbr.right - padR + 1;
+        }),
+      )
+      .toBe(true);
   }
 });
 

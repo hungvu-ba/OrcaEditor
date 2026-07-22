@@ -103,3 +103,9 @@ export const READING_PREVIEW_DEBOUNCE_MS = 120;
  * trước trong cửa sổ này thắng; đường còn lại coi như đã được xử lý, bỏ qua.
  */
 export const PASTE_IMAGE_DEDUPE_MS = 500;
+
+/** Trễ trước khi quét lại broken-reference marker sau khi tài liệu render lại (broken-ref.ts, Req 20 US-20.9). */
+export const BROKEN_REF_RECOMPUTE_DEBOUNCE_MS = 400;
+
+/** Trễ giữa các phím gõ vào ô tìm "Search again" trước khi hỏi host tìm file lại (quick-correct.ts). */
+export const QUICK_CORRECT_SEARCH_DEBOUNCE_MS = 200;

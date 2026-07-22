@@ -73,6 +73,43 @@ const listOpsDebugConfig = {
   sourcemap: true,
 };
 
+/**
+ * Test-only bundle exposing escape-stack.ts's exports (registerEscapeHandler/
+ * ESCAPE_PRIORITY) as window.EscapeStackDebug — lets
+ * test/webview/escape-stack-priority.spec.ts register fake handlers at arbitrary
+ * priorities and dispatch a real Escape deterministically. Only built with
+ * --test, so it never ships in the production dist/webview bundle.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const escapeStackDebugConfig = {
+  entryPoints: ['media/webview/escape-stack-debug.ts'],
+  bundle: true,
+  outfile: 'dist/webview/escape-stack-debug.js',
+  format: 'iife',
+  globalName: 'EscapeStackDebug',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: true,
+};
+
+/**
+ * Test-only bundle exposing trigger-popup.ts's initTriggerPopup as
+ * window.TriggerPopupDebug — lets test/webview/trigger-popup-shell.spec.ts
+ * construct a controller with a fake dataSource and drive open/updateQuery/close
+ * directly (no real @// trigger caller exists yet). Only built with --test.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const triggerPopupDebugConfig = {
+  entryPoints: ['media/webview/trigger-popup-debug.ts'],
+  bundle: true,
+  outfile: 'dist/webview/trigger-popup-debug.js',
+  format: 'iife',
+  globalName: 'TriggerPopupDebug',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: true,
+};
+
 /** @type {import('esbuild').BuildOptions} */
 const unitTestConfig = {
   entryPoints: ['test/unit.ts'],
@@ -130,7 +167,14 @@ function copyAssets() {
 async function main() {
   copyAssets();
   const configs = [extensionConfig, webviewConfig];
-  if (buildTest) configs.push(testConfig, unitTestConfig, listOpsDebugConfig);
+  if (buildTest)
+    configs.push(
+      testConfig,
+      unitTestConfig,
+      listOpsDebugConfig,
+      escapeStackDebugConfig,
+      triggerPopupDebugConfig
+    );
   if (watch) {
     const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
     await Promise.all(contexts.map((c) => c.watch()));

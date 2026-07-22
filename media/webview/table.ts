@@ -8,6 +8,7 @@ import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } f
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { isValidSiblingGap } from './sibling-move';
+import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -1127,25 +1128,27 @@ function onTdMouseUp(): void {
   tdResetState();
 }
 
-function onTdKeyDown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    tdCleanupVisuals();
-    tdResetState();
-  }
-}
+// Escape-stack registration: only present while a table drag is armed/live, so
+// the handler is always active → returns true (cancel/Esc).
+let tdEscDisposable: Disposable | undefined;
 
 // The mousemove/mouseup/keydown trio every table drag arms, and the reset path
 // tears down — identical across armRowDrag/armColDrag and tdResetState.
 function attachDragListeners(): void {
   document.addEventListener('mousemove', onTdMouseMove);
   document.addEventListener('mouseup', onTdMouseUp);
-  document.addEventListener('keydown', onTdKeyDown);
+  tdEscDisposable = registerEscapeHandler(ESCAPE_PRIORITY.DRAG, () => {
+    tdCleanupVisuals();
+    tdResetState();
+    return true;
+  });
 }
 
 function detachDragListeners(): void {
   document.removeEventListener('mousemove', onTdMouseMove);
   document.removeEventListener('mouseup', onTdMouseUp);
-  document.removeEventListener('keydown', onTdKeyDown);
+  tdEscDisposable?.dispose();
+  tdEscDisposable = undefined;
 }
 
 function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number): void {

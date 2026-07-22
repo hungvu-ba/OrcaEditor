@@ -149,8 +149,47 @@ export function openLightbox(content: LightboxContent): void {
     stage.appendChild(img);
   } else {
     stage.innerHTML = content.svg;
+    const svg = stage.querySelector('svg');
+    if (svg) {
+      fitSvgToViewport(svg);
+    }
   }
 
   applyTransform();
   overlay.style.display = 'flex';
+}
+
+/**
+ * Mermaid renders its SVG with an inline `style="max-width: <intrinsic>px"` and
+ * no fixed width/height, so dropped into the lightbox it shows at its (small)
+ * native size — the CSS `max-width: 92vw` never wins against that inline cap.
+ * Read the diagram's aspect ratio and size the SVG to fill the viewport (minus
+ * the 24px stage padding), so the diagram opens already fit-to-screen and the
+ * user rarely needs to zoom manually.
+ */
+function fitSvgToViewport(svg: SVGElement): void {
+  const vb = svg.getAttribute('viewBox');
+  let intrinsicW = 0;
+  let intrinsicH = 0;
+  if (vb) {
+    const parts = vb.split(/[\s,]+/).map(Number);
+    intrinsicW = parts[2];
+    intrinsicH = parts[3];
+  }
+  if (!intrinsicW || !intrinsicH) {
+    intrinsicW = parseFloat(svg.getAttribute('width') || '') || 0;
+    intrinsicH = parseFloat(svg.getAttribute('height') || '') || 0;
+  }
+  // The inline max-width cap must go regardless, or the diagram can't grow.
+  svg.style.maxWidth = 'none';
+  svg.style.maxHeight = 'none';
+  if (!intrinsicW || !intrinsicH) {
+    return; // no usable aspect ratio — leave the CSS defaults to handle it
+  }
+  const padding = 48; // 24px each side (see #md-lightbox-stage[data-kind='svg'])
+  const availW = window.innerWidth * 0.92 - padding;
+  const availH = window.innerHeight * 0.92 - padding;
+  const fit = Math.min(availW / intrinsicW, availH / intrinsicH);
+  svg.style.width = `${Math.round(intrinsicW * fit)}px`;
+  svg.style.height = `${Math.round(intrinsicH * fit)}px`;
 }

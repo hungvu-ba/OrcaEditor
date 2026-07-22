@@ -53,6 +53,13 @@ body {
   outline: none;
 }
 
+/* While a @// trigger popup owns typing, hide the editor's own caret so the
+ * only visible caret is the popup query row's (see .trigger-popup-query-caret).
+ * Toggled by trigger-popup.ts open()/close(). */
+body.trigger-popup-open #content {
+  caret-color: transparent;
+}
+
 /* --- Gutter số dòng (giống raw text editor) ---
  * body cần position:relative để offsetTop của các block trong #content (và
  * của #line-gutter, đặt absolute) cùng chung một hệ toạ độ (offsetParent).
@@ -556,6 +563,41 @@ body.reading-mode:not(.reading-zen) #content {
   flex-shrink: 0;
 }
 
+/*
+ * Broken-reference count badge (Req 21 US-21.3) — fully-rounded pill at the
+ * right edge of the toolbar's button row, copied from .cross-file-search-badge's
+ * shape (padding/radius) but recolored via the warning tokens (T0.4) per the
+ * wireframe, not --vscode-badge-*. Hidden entirely at count 0 (toolbar.ts sets
+ * `hidden`, not just visually collapsed).
+ */
+#toolbar .broken-ref-badge {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: auto;
+  margin-left: 6px;
+  padding: 2px 9px;
+  border-radius: 10px;
+  border: 1px solid var(--rp-warning-border);
+  background: var(--rp-warning-bg);
+  color: var(--rp-warning);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* Same reason as .trigger-popup[hidden] / .cross-file-search-popover[hidden]: the
+ * author rule's specificity above beats the UA stylesheet's `[hidden]{display:none}`,
+ * so hiding needs its own explicit rule — "hidden entirely at count 0" (US-21.3). */
+#toolbar .broken-ref-badge[hidden] {
+  display: none;
+}
+
+.vscode-high-contrast #toolbar .broken-ref-badge {
+  border-color: var(--rp-warning);
+}
+
 /* --- Popover dùng chung: menu tràn (US-4.7), dropdown split-button
  * (Heading/Code block/Math — US-4.9–4.11), "more options" (US-4.14). Xem
  * buildPopover()/openPopover()/closePopover() trong toolbar.ts — chỉ MỘT
@@ -823,118 +865,6 @@ body.reading-mode:not(.reading-zen) #content {
   height: 14px;
   margin: 0 3px;
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
-}
-
-/* --- Popup nhập liệu (link, ảnh) --- */
-.prompt-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding-top: 15vh;
-  background: rgba(0, 0, 0, 0.25);
-}
-
-/* Kéo được từ bất kỳ đâu trên box (bug report 2026-07-14, mục 6) — trừ input/
- * nút/danh sách gợi ý (xem DRAG_IGNORE_SELECTOR, dom-utils.ts), nên chỉ cần
- * cursor:grab trên chính box; các phần tử tương tác bên trong tự override lại
- * cursor của chúng (input → text, button → pointer). */
-.prompt-box {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 320px;
-  padding: 12px 14px;
-  border-radius: 6px;
-  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  color: var(--vscode-foreground);
-  font-size: 13px;
-  cursor: grab;
-}
-
-.prompt-box.dragging {
-  cursor: grabbing;
-}
-
-.prompt-box label {
-  cursor: inherit;
-}
-
-.prompt-box input {
-  cursor: text;
-  font-family: inherit;
-  font-size: 13px;
-  padding: 4px 6px;
-  color: var(--vscode-input-foreground);
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
-}
-
-/* Danh sách file gợi ý trong popup chèn link */
-.prompt-suggestions {
-  display: flex;
-  flex-direction: column;
-  max-height: 240px;
-  max-width: 480px;
-  overflow-y: auto;
-  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
-  border-radius: 3px;
-}
-
-.prompt-suggestion {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 4px 8px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.prompt-suggestion:hover {
-  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
-}
-
-.prompt-suggestion.active {
-  background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.25));
-  color: var(--vscode-list-activeSelectionForeground, inherit);
-}
-
-.prompt-suggestion-name {
-  flex: none;
-}
-
-.prompt-suggestion-dir {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 11px;
-  opacity: 0.65;
-}
-
-.prompt-buttons {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.prompt-buttons button {
-  font-family: inherit;
-  font-size: 12px;
-  padding: 4px 12px;
-  border: none;
-  border-radius: 2px;
-  cursor: pointer;
-  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-}
-
-.prompt-buttons button:last-child {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
 }
 
 /* --- Front matter (không chỉnh sửa được, gấp gọn) --- */
@@ -2039,9 +1969,8 @@ body.toc-resizing #toolbar {
   outline-offset: 2px;
 }
 
-/* Popover kết quả — nổi dưới/cạnh icon, trên icon (490) nhưng dưới
- * .prompt-overlay (1000). Cùng khuôn "card" với .prompt-box /
- * .toolbar-overflow-menu: nền editorWidget, viền + đổ bóng. */
+/* Popover kết quả — nổi dưới/cạnh icon, trên icon (490). Cùng khuôn "card"
+ * với .toolbar-overflow-menu: nền editorWidget, viền + đổ bóng. */
 .cross-file-search-popover {
   position: fixed;
   z-index: 490;
@@ -2063,7 +1992,7 @@ body.toc-resizing #toolbar {
   font-size: 12px;
   /* Kéo được từ bất kỳ đâu trên popover trừ vùng tương tác (US-17.1, dùng
    * chung makeDraggable() — xem DRAG_IGNORE_SELECTOR, dom-utils.ts), cùng
-   * pattern .prompt-box/.md-math-edit-popover. */
+   * pattern .md-math-edit-popover. */
   cursor: grab;
 }
 
@@ -2429,19 +2358,6 @@ body.reading-mode .toc-empty-hint {
 body.reading-mode .toolbar-popover-item {
   font-size: var(--reading-ui-fs-12);
 }
-body.reading-mode .prompt-box {
-  font-size: var(--reading-ui-fs-13);
-}
-body.reading-mode .prompt-box input,
-body.reading-mode .prompt-suggestion {
-  font-size: var(--reading-ui-fs-13);
-}
-body.reading-mode .prompt-suggestion-dir {
-  font-size: var(--reading-ui-fs-11);
-}
-body.reading-mode .prompt-buttons button {
-  font-size: var(--reading-ui-fs-12);
-}
 body.reading-mode .md-math-edit-popover {
   font-size: var(--reading-ui-fs-13);
 }
@@ -2641,28 +2557,16 @@ body[class*='reading-mode-'] .match-option-btn.active {
   border-color: var(--rp-border);
 }
 
-/* Popup chèn link/ảnh (.prompt-*), popup sửa TeX (.md-math-edit-popover) */
-body[class*='reading-mode-'] .prompt-box,
+/* Popup sửa TeX (.md-math-edit-popover) */
 body[class*='reading-mode-'] .md-math-edit-popover {
   background: var(--rp-elev-bg);
   border-color: var(--rp-border);
   color: var(--rp-fg);
 }
-body[class*='reading-mode-'] .prompt-box input,
 body[class*='reading-mode-'] .md-math-edit-input {
   background: var(--rp-bg);
   color: var(--rp-fg);
   border-color: var(--rp-border);
-}
-body[class*='reading-mode-'] .prompt-suggestions {
-  border-color: var(--rp-border);
-}
-body[class*='reading-mode-'] .prompt-suggestion:hover {
-  background: var(--rp-chrome-hover);
-}
-body[class*='reading-mode-'] .prompt-suggestion.active {
-  background: var(--rp-chrome-active);
-  color: var(--rp-fg);
 }
 
 /* Tìm chéo file: icon nổi + popover kết quả */
@@ -2860,4 +2764,447 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   background: rgba(0, 0, 0, 0.4);
   border-radius: 4px;
   pointer-events: none;
+}
+
+/* -------------------------------------------------------------------------
+ * Trigger popup shell (Req 20 US-20.1/20.2) — the shared @/slash quick-action
+ * card. Chrome is driven ONLY by the Reading Mode token contract so it
+ * restyles per Reading Mode option: card surface = --rp-bg/--rp-fg/--rp-border,
+ * axis marker + active scope pill accent = --rp-accent, font sizing from the
+ * --reading-ui-fs-* chrome buckets. No hardcoded hex, no direct --vscode-*.
+ * ------------------------------------------------------------------------- */
+.trigger-popup {
+  position: fixed;
+  z-index: 490;
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-width: calc(100vw - 8px);
+  max-height: min(60vh, 420px);
+  overflow: hidden;
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border: 1px solid var(--rp-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  font-size: var(--reading-ui-fs-13);
+  font-family: var(--reading-ui-font-family);
+}
+
+.trigger-popup[hidden] {
+  display: none;
+}
+
+.trigger-popup-query {
+  flex: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rp-border);
+  color: var(--rp-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Axis marker (@ or /) at the head of the query row — carries the trigger accent. */
+.trigger-popup-query-axis {
+  color: var(--rp-accent);
+  font-weight: 600;
+}
+
+.trigger-popup-query-text {
+  color: var(--rp-fg);
+}
+
+/* Blinking caret so the user sees the query row is where typing filters
+ * (the editor's own caret is hidden while open, see body.trigger-popup-open). */
+.trigger-popup-query-caret {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--rp-fg);
+  animation: trigger-popup-caret-blink 1s step-end infinite;
+}
+
+@keyframes trigger-popup-caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trigger-popup-query-caret {
+    animation: none;
+  }
+}
+
+/* Axis marker: the active scope pill carries the trigger accent (--rp-accent). */
+.trigger-popup-scope {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rp-border);
+}
+
+.trigger-popup-pill {
+  padding: 1px 8px;
+  border: 1px solid var(--rp-border);
+  border-radius: 999px;
+  font-size: var(--reading-ui-fs-11);
+}
+
+.trigger-popup-pill-active {
+  color: var(--rp-bg);
+  background: var(--rp-accent);
+  border-color: var(--rp-accent);
+}
+
+.trigger-popup-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.trigger-popup-group-label {
+  padding: 4px 10px 2px;
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.trigger-popup-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.trigger-popup-item:hover,
+.trigger-popup-item-active {
+  background: color-mix(in srgb, var(--rp-fg) 10%, var(--rp-bg));
+}
+
+/* "No matches" — non-interactive, shown instead of any group when every offered
+ * group resolves empty (Req 20 US-20.2). */
+.trigger-popup-empty {
+  padding: 6px 10px;
+  color: var(--rp-muted);
+}
+
+.trigger-popup-item-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trigger-popup-item-detail {
+  flex: none;
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-muted);
+}
+
+.trigger-popup-item-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: var(--reading-ui-fs-10);
+  color: var(--rp-bg);
+  background: var(--rp-accent);
+}
+
+/* Req 21 US-21.1: an inert row (invalid/duplicate "confirm" state) — dimmed,
+ * Enter/click do nothing (trigger-popup.ts). Two classes so it outranks the
+ * plain hover/active tint rule above regardless of source order. */
+.trigger-popup-item-disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.trigger-popup-item-disabled.trigger-popup-item-active,
+.trigger-popup-item-disabled:hover {
+  background: transparent;
+}
+
+/* Req 21 US-21.2: Entities-scope result rows get the entity tint (the softer
+ * reference tint, not the solid declaration-pill fill) — Reading Mode tokens
+ * only, no hardcoded hex. Own rule (not folded into the plain hover rule
+ * above) so the tint survives hover/active. */
+.trigger-popup-item-tint-entity {
+  background: var(--rp-entity-ref-bg);
+}
+
+.trigger-popup-item-tint-entity:hover,
+.trigger-popup-item-tint-entity.trigger-popup-item-active {
+  background: color-mix(in srgb, var(--rp-entity-accent) 18%, var(--rp-entity-ref-bg));
+}
+
+/* Req 21 US-21.1: inline error line under a disabled row (e.g. "already
+ * declared in <file>") — warning tokens (T0.4), never a hardcoded hex. */
+.trigger-popup-item-error {
+  padding: 0 10px 4px;
+  margin-top: -2px;
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-warning);
+}
+
+/* Non-interactive "+N more — keep typing to narrow" overflow footnote. */
+.trigger-popup-more {
+  padding: 4px 10px;
+  border-top: 1px solid var(--rp-border);
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-muted);
+  cursor: default;
+}
+
+/* Req 20 US-20.7: "+N more — switch scope" is a real scope-switch affordance
+ * (not an inert footnote) when the group provides `onMore`. */
+.trigger-popup-more-active {
+  cursor: pointer;
+}
+
+.trigger-popup-more-active:hover {
+  color: var(--rp-fg);
+}
+
+.trigger-popup-hint {
+  flex: none;
+  padding: 5px 10px;
+  border-top: 1px solid var(--rp-border);
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-muted);
+}
+
+/* Ghost-text fast path (US-20.6): inline completion remainder + a Tab keycap. */
+.trigger-popup-ghost {
+  position: absolute;
+  color: var(--rp-muted);
+  pointer-events: none;
+}
+
+.trigger-popup-ghost[hidden] {
+  display: none;
+}
+
+.trigger-popup-keycap {
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--rp-border);
+  border-radius: 3px;
+  font-size: var(--reading-ui-fs-10);
+  color: var(--rp-muted);
+}
+
+/*
+ * Broken-reference hover tooltip (Req 20 US-20.9) — a rich multi-part popover
+ * (title/description/divider/action), NOT tooltip.ts's plain-text one. Chrome
+ * follows the same --rp-* / --reading-ui-* contract as .trigger-popup; only the
+ * title/icon/action-link accents borrow the warning tokens (T0.4).
+ */
+.broken-ref-tooltip {
+  position: fixed;
+  z-index: 495;
+  width: 280px;
+  max-width: calc(100vw - 8px);
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border: 1px solid var(--rp-border);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+  font-size: var(--reading-ui-fs-12);
+  font-family: var(--reading-ui-font-family);
+  line-height: 1.5;
+}
+
+.broken-ref-tooltip[hidden] {
+  display: none;
+}
+
+.broken-ref-tooltip-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--rp-warning);
+}
+
+.broken-ref-tooltip-desc {
+  margin-top: 3px;
+  color: var(--rp-muted);
+}
+
+.broken-ref-tooltip-divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--rp-border);
+}
+
+.broken-ref-tooltip-action {
+  display: block;
+  color: var(--rp-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.broken-ref-tooltip-action[hidden] {
+  display: none;
+}
+
+.vscode-high-contrast .broken-ref-tooltip {
+  border-width: 2px;
+}
+
+.vscode-high-contrast .broken-ref-tooltip-title {
+  font-weight: 700;
+}
+
+.vscode-high-contrast .broken-ref-tooltip-action {
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+/*
+ * "Search again →" quick-correct popover (Req 20 US-20.9) — same anchor-and-
+ * clamp card pattern as .trigger-popup/.cross-file-search-popover.
+ */
+.quick-correct-popover {
+  position: fixed;
+  z-index: 496;
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  max-width: calc(100vw - 8px);
+  max-height: min(50vh, 320px);
+  border-radius: 6px;
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border: 1px solid var(--rp-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  font-size: var(--reading-ui-fs-13);
+  font-family: var(--reading-ui-font-family);
+  overflow: hidden;
+}
+
+.quick-correct-popover[hidden] {
+  display: none;
+}
+
+.quick-correct-input {
+  flex: none;
+  margin: 8px;
+  padding: 4px 6px;
+  color: var(--rp-fg);
+  background: var(--rp-bg);
+  border: 1px solid var(--rp-border);
+  border-radius: 2px;
+  font: inherit;
+}
+
+.quick-correct-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+
+.quick-correct-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quick-correct-item:hover {
+  background: color-mix(in srgb, var(--rp-fg) 10%, var(--rp-bg));
+}
+
+.quick-correct-item-name {
+  flex: none;
+}
+
+.quick-correct-item-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-muted);
+}
+
+.quick-correct-empty {
+  padding: 6px 10px;
+  color: var(--rp-muted);
+}
+
+/* bug_General Mention Declare #6: click-to-edit popover for a declaration pill
+ * (caption-edit.ts). Same anchored-card chrome as .quick-correct-popover, kept
+ * a separate rule set (per-module duplication precedent). */
+.caption-edit-popover {
+  position: fixed;
+  z-index: 496;
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  max-width: calc(100vw - 8px);
+  border-radius: 6px;
+  background: var(--rp-bg);
+  color: var(--rp-fg);
+  border: 1px solid var(--rp-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  font-size: var(--reading-ui-fs-13);
+  font-family: var(--reading-ui-font-family);
+}
+
+.caption-edit-popover[hidden] {
+  display: none;
+}
+
+.caption-edit-input {
+  margin: 8px 8px 4px;
+  padding: 4px 6px;
+  color: var(--rp-fg);
+  background: var(--rp-bg);
+  border: 1px solid var(--rp-border);
+  border-radius: 2px;
+  font: inherit;
+}
+
+.caption-edit-error {
+  margin: 0 8px 4px;
+  font-size: var(--reading-ui-fs-11);
+  color: var(--rp-warning);
+}
+
+.caption-edit-error[hidden] {
+  display: none;
+}
+
+.caption-edit-confirm {
+  margin: 0 8px 8px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 2px;
+  background: var(--rp-entity-accent);
+  color: var(--rp-bg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.caption-edit-confirm:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

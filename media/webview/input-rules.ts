@@ -9,6 +9,7 @@
  * đó) nhưng bullet/số/task list vẫn gõ được — xem applyCellListInputRule.
  */
 import { addCheckbox, closestElement, emptyParagraph, type DomHelpers } from './dom-utils';
+import { hasInputOwner } from './input-ownership';
 
 export interface InputRulesContext {
   scheduleSync: () => void;
@@ -23,6 +24,11 @@ export function initInputRules(contentEl: HTMLElement, context: InputRulesContex
   ctx = context;
 
   content.addEventListener('keydown', (e) => {
+    // Req 20 US-20.2: while a trigger overlay owns the keyboard, editor input
+    // rules must not fire — the overlay handles the key.
+    if (hasInputOwner()) {
+      return;
+    }
     // Bỏ qua khi đang gõ tiếng Việt (IME) hoặc có phím bổ trợ.
     if (e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) {
       return;

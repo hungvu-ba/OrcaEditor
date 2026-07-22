@@ -36,6 +36,7 @@
  * US-19.24: dropdown Reading Mode trên toolbar liệt kê 3 mode — "Standard"
  * (tắt hẳn Reading Mode, follow theme) + "Sepia"/"Paper" (setMode).
  */
+import { registerEscapeHandler, ESCAPE_PRIORITY } from './escape-stack';
 import type {
   ReadabilityConfig,
   ReadingMode,
@@ -211,10 +212,14 @@ export function initReadability(deps: ReadabilityDeps): ReadabilityController {
   }
 
   // Zen: thoát bằng Esc; hé lộ lại toolbar khi rê chuột sát mép trên (US-19.9).
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.zen) {
-      exitZen();
+  // Routed through the shared Escape stack (Req 20 US-20.4): active only while
+  // Zen is on, otherwise returns false so Escape falls through.
+  registerEscapeHandler(ESCAPE_PRIORITY.ZEN, () => {
+    if (!state.zen) {
+      return false;
     }
+    exitZen();
+    return true;
   });
   // Bug 0715 mục 4: nút Focus nằm ngay trên toolbar → bấm xong con trỏ vẫn ở dải
   // trên, khiến toolbar hé lộ lại ngay dù user chỉ muốn rê xuống đọc. Cơ chế

@@ -42,7 +42,27 @@
         "title": "Open Orca MD Editor to the Side",
         "category": "Markdown",
         "icon": "$(open-preview)"
+      },
+      {
+        "command": "orcaEditor.toggleReadingMode",
+        "title": "Toggle Reading Mode",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.toggleZen",
+        "title": "Toggle Focus Mode",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.openToc",
+        "title": "Show/Hide Table of Contents",
+        "category": "Orca MD Editor"
       }
+    ],
+    "orcaEditorExecuteCommands": [
+      "orcaEditor.toggleReadingMode",
+      "orcaEditor.toggleZen",
+      "orcaEditor.openToc"
     ],
     "menus": {
       "commandPalette": [
@@ -170,6 +190,24 @@
           "type": "boolean",
           "default": false,
           "description": "Focus Mode: hide the toolbar and line-number gutter and center the text column. This is the starting default for newly opened tabs; the Focus button on the toolbar applies only to the current tab for the session (not saved back here). Press Esc to exit."
+        },
+        "orcaEditor.trigger.dateFormat": {
+          "type": "string",
+          "default": "YYYY-MM-DD",
+          "description": "Format used by the `/` trigger popup's \"Insert today's date\" item. Supported tokens: YYYY, MM, DD, HH, mm, ss."
+        },
+        "orcaEditor.triggerActions.mode": {
+          "type": "string",
+          "enum": [
+            "simple",
+            "advanced"
+          ],
+          "enumDescriptions": [
+            "Hide entity-related trigger actions (the @ Entities scope, /declare, /relate).",
+            "Show every trigger action, including entity-related ones."
+          ],
+          "default": "advanced",
+          "description": "Which trigger actions the @ and / popups offer. Advanced adds entity-related actions (Req 21) on top of the base set; Simple hides them. Only gates visibility — never restyles or removes already-written content."
         }
       }
     }
@@ -196,6 +234,9 @@
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
     "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
+    "test:roundtrip:caption-insert": "node esbuild.js --test && node dist/test/roundtrip/caption-insert.js",
+    "test:roundtrip:entity-ref": "node esbuild.js --test && node dist/test/roundtrip/entity-ref.js",
+    "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
