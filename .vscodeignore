@@ -27,3 +27,12 @@ Update History.md
 build.sh
 eslint.config.mjs
 .DS_Store
+.code-review-graph/**
+.mcp.json
+.jscpd.json
+playwright.config.ts
+scripts/**
+Local Test/**
+Wireframe Handoff/**
+FEATURES_0.9.0.md
+*.vsix
