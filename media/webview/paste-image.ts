@@ -8,7 +8,15 @@
  * ngay lúc dán và restoreSelection() trước khi chèn — caret có thể đã đổi chỗ
  * trong lúc chờ (xem pattern tương tự trong prompt.ts cho tìm file async).
  */
-import { encodeLinkPath, escapeAttr, saveSelection, showToast, type DomHelpers } from './dom-utils';
+import {
+  dataUrlToBase64,
+  encodeLinkPath,
+  escapeAttr,
+  readAsDataUrl,
+  saveSelection,
+  showToast,
+  type DomHelpers,
+} from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
 import { PASTE_IMAGE_DEDUPE_MS } from './constants';
 
@@ -58,27 +66,7 @@ export function initPasteImage(
   }
 
   /**
-   * Reads a blob as a `data:` URL. Used instead of `URL.createObjectURL`
-   * (which produces a `blob:` URL) because the webview's CSP `img-src` only
-   * allows `${webview.cspSource}` and `data:` — no `blob:` — so any `<img>`
-   * pointed at a blob: URL silently fails to load (see provider.ts `getHtml`
-   * CSP). That was the actual bug behind "pasted images always render at
-   * full physical-pixel size, never get a `width` attribute": `measureWidth`
-   * used to build a blob: URL, `probe.decode()` always rejected against CSP,
-   * and the catch silently fell back to "no width" — every single paste, not
-   * just an occasional race.
-   */
-  function readAsDataUrl(blob: Blob): Promise<string> {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-      reader.onerror = () => resolve('');
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  /**
-   * Đo kích thước tự nhiên của ảnh (qua data: URL, xem readAsDataUrl ở trên),
+   * Đo kích thước tự nhiên của ảnh (qua data: URL, xem readAsDataUrl trong dom-utils.ts),
    * trả về độ rộng hiển thị mong muốn (đã chia devicePixelRatio: screenshot
    * chụp trên màn retina có số pixel vật lý gấp đôi kích thước "nhìn thấy",
    * nếu để nguyên sẽ hiện to gấp đôi kích thước lúc chụp). `await`-able bằng
@@ -125,7 +113,7 @@ export function initPasteImage(
     const requestId = ++seq;
     pending.set(requestId, { range: explicit ? explicit.range : saveSelection(), fillCell: explicit?.fillCell });
     const dataUrl = await readAsDataUrl(blob);
-    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    const base64 = dataUrlToBase64(dataUrl);
     if (!base64) {
       pending.delete(requestId);
       return;

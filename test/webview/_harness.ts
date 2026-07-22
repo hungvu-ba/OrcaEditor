@@ -26,8 +26,12 @@ const DEFAULT_CONFIG: InitConfig = {
   autoOpenToc: false,
   showLineNumbers: false,
   crossFileSearchScope: 'markdown',
-  readability: { enabled: false, preset: 'default', palette: 'followTheme', fontFamily: '', zen: false },
+  readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
+  trigger: { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' },
 };
+
+/** Default docUri echoed back to the harness's fake acquireVsCodeApi (Req 20 US-20.3). */
+export const DEFAULT_DOC_URI = 'file:///harness.md';
 
 /**
  * Bug 0716 #1: cold-open baking. Mirrors provider.ts's getHtml() — the real
@@ -38,11 +42,12 @@ const DEFAULT_CONFIG: InitConfig = {
  * exercise a different (already-JS-guarded) code path than the real bug.
  */
 function bakedMarkup(readability: InitConfig['readability']): { bodyClasses: string; toolbarStyle: string } {
-  const stylingActive = readability.enabled || readability.zen;
+  // bug_General #1: reading styling gates on `enabled` only; Zen is independent.
+  const stylingActive = readability.enabled;
   const bodyClasses = [
     ...(stylingActive ? ['reading-mode'] : []),
     ...(readability.zen ? ['reading-zen'] : []),
-    ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
+    ...(stylingActive && readability.mode !== 'standard' ? [`reading-mode-${readability.mode}`] : []),
   ].join(' ');
   const toolbarStyle = readability.zen
     ? 'position:fixed;top:0;left:0;right:0;margin:0;z-index:200;transform:translateY(-100%);pointer-events:none;'
@@ -80,6 +85,20 @@ function harnessHtml(readability: InitConfig['readability']): string {
   <div id="line-gutter" aria-hidden="true"></div>
   <div id="content" role="main" aria-label="Document content" contenteditable="true" spellcheck="false"></div>
   <script src="./main.js"></script>
+  <!-- HLR 22 Phase 1: test-only bundle exposing list-ops.ts's pure functions +
+       commitListOp/commitListOpDirect on window.ListOpsDebug, so
+       list-ops-primitive.spec.ts can drive them directly without wiring into
+       any real call site (Phase 2). -->
+  <script src="./list-ops-debug.js"></script>
+  <!-- Req 20 US-20.4: test-only bundle exposing escape-stack.ts's
+       registerEscapeHandler/ESCAPE_PRIORITY on window.EscapeStackDebug, so
+       escape-stack-priority.spec.ts can register fake handlers and dispatch a
+       real Escape deterministically. -->
+  <script src="./escape-stack-debug.js"></script>
+  <!-- Req 20 US-20.1/20.2: test-only bundle exposing trigger-popup.ts's
+       initTriggerPopup on window.TriggerPopupDebug, so trigger-popup-shell.spec.ts
+       can drive the shell with a fake dataSource (no real @// trigger yet). -->
+  <script src="./trigger-popup-debug.js"></script>
 </body>
 </html>`;
 }
@@ -97,10 +116,26 @@ export async function openEditor(page: Page, markdown: string, configOverrides: 
   ensureHarnessFile(config.readability);
   await page.goto('file://' + HARNESS_FILE);
   await page.evaluate(
-    ({ text, cfg }) => window.postMessage({ type: 'init', text, config: cfg }, '*'),
-    { text: markdown, cfg: config }
+    ({ text, cfg, docUri }) => window.postMessage({ type: 'init', text, docUri, config: cfg }, '*'),
+    { text: markdown, cfg: config, docUri: DEFAULT_DOC_URI }
   );
   await page.locator('#content').waitFor();
+}
+
+/**
+ * Type into the trigger popup's focused query <input> (T0.1 focused-input model).
+ * Types per-keystroke via pressSequentially so the input's own `input` event
+ * fires for each char (that event is what drives runQuery / filtering).
+ */
+export async function typePopupQuery(page: Page, text: string): Promise<void> {
+  const input = page.locator('.trigger-popup-query-input');
+  await input.click();
+  await input.pressSequentially(text);
+}
+
+/** Read the current value of the trigger popup's query input (for assertions). */
+export async function popupQueryValue(page: Page): Promise<string> {
+  return page.locator('.trigger-popup-query-input').inputValue();
 }
 
 /** Clear recorded host messages — call right before the action under test so waitForEdit only sees fresh messages. */

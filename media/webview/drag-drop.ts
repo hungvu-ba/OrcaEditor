@@ -2,16 +2,17 @@
  * Drag & drop reorder for top-level blocks (US-17.3) and list items
  * (US-17.5, M3) — HLR section 17.
  *
- * Undo mechanism (F1, spike decision): a move never mutates the DOM directly
- * (appendChild/insertBefore/remove) — that would desync the browser's native
- * undo stack the same way raw DOM surgery does for
- * fixOrphanNestedListItems/replaceBlockTag (main.ts / dom-utils.ts). Instead,
- * exactly like those two, a move selects a single Range spanning every
- * top-level block between the old and new position (inclusive) and replaces
- * it with ONE `execCommand('insertHTML', ...)` call carrying the same blocks
- * in their new order. One Range + one execCommand call = one native undo
- * step, regardless of how far the block travels or how many blocks a
- * section-move carries along.
+ * Undo mechanism: a move commits through sibling-move.ts's Range APIs
+ * (applyBlockMove / applyLiReparentMove — Range.deleteContents()+insertNode()),
+ * not appendChild/insertBefore and not execCommand. Undo/redo is delegated
+ * entirely to VS Code's TextDocument (main.ts / provider.ts replace
+ * #content.innerHTML wholesale on every undo/redo), so the scheduleSync() after
+ * a move records it as ONE TextDocument edit = one Ctrl+Z step, regardless of
+ * how far the block travels or how many blocks a section-move carries along.
+ * There is no native browser undo stack to keep in sync — the historical
+ * `execCommand('insertHTML', ...)` approach (one *native* undo step per move)
+ * is gone; raw Range surgery + a single host edit is the convention here, the
+ * same one replaceBlockTag / commitListOpDirect (dom-utils / list-ops.ts) use.
  *
  * DOM stays the source of truth (architecture note in the code plan): the
  * live #content DOM is read fresh on every drag start, nothing is cached
@@ -21,17 +22,17 @@
  * which is exactly what readSrcRange() (already shared with block-map.ts and
  * gutter.ts) tells us, filtered straight off content.children.
  *
- * Note (US-17.7, M6): the "never mutates the DOM directly" rule above no
- * longer holds universally — `finishLiMove`'s cross-level move runs a direct
- * `normalizeListDom(content)` cleanup pass on the live DOM after the Range
- * move. Safe now because undo/redo is fully TextDocument-based (main.ts /
- * provider.ts replace #content.innerHTML wholesale on every undo/redo), so
- * there is no native browser undo stack left to desync.
+ * Note (US-17.7, M6): `finishLiMove`'s cross-level move additionally runs a
+ * `normalizeListDom(content)` cleanup pass directly on the live DOM after the
+ * Range move — fine under the TextDocument-undo model above (one host edit, no
+ * native stack to desync).
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
 import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
 import { normalizeListDom } from './dom-serialize-prep';
+import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
+import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -39,6 +40,10 @@ export interface DragDropDeps {
   scheduleSync: () => void;
   dom: DomHelpers;
   lineGutter: LineGutter;
+  /** Re-establish #content's caret-host invariants (trailing typable <p>, caret spots around
+   * atoms/hr) after a direct DOM mutation whose host echo is suppressed so renderDocument won't
+   * re-run — used by deleteSelectedBlock (bug General #1) to keep the doc editable after a delete. */
+  ensureCaretHost: () => void;
 }
 
 export interface DragDropController {
@@ -89,7 +94,7 @@ const AUTOSCROLL_SPEED_PX = 16;
 const AUTOSCROLL_INTERVAL_MS = 16;
 const HANDLE_GLYPH = '⠿'; // ⠿
 
-function headingLevel(el: Element): number | null {
+export function headingLevel(el: Element): number | null {
   const m = HEADING_RE.exec(el.tagName);
   return m ? Number(m[1]) : null;
 }
@@ -123,6 +128,77 @@ export function computeHeadingSectionSpan(startEl: HTMLElement, blocks: HTMLElem
   return span;
 }
 
+export interface HeadingSiblingGaps {
+  /** Start index of every same-level, same-parent sibling section (including the moved heading's own). */
+  siblingStarts: number[];
+  /** Gap index at the end of the parent's scope (`levels.length` when the parent is the document root). */
+  scopeEndGap: number;
+  /** Gap to move the heading up one sibling (largest valid gap before its own start), or null when it is the first sibling. */
+  moveUpGap: number | null;
+  /** Gap to move the heading down one sibling (smallest valid gap after its own section), or null when it is the last sibling. */
+  moveDownGap: number | null;
+}
+
+/**
+ * Pure outline math for the same-level/same-parent heading move restriction (bug_General #2
+ * follow-up): given each block's heading level (`null` for non-heading blocks) and the index of
+ * the heading being moved, return the sibling-section boundaries its move/drag may target. The
+ * heading's PARENT is the nearest preceding heading with a level `< L` (or the document root when
+ * none); the parent's scope ends at the next heading of level `≤ parentLevel`; SIBLINGS are the
+ * level-`L` headings that are direct children of that same parent. The parent's scope ends at the
+ * first following heading of level `< L`, so a heading can never be moved past a shallower heading
+ * and nest under it. Level changes are out of scope here — that is Tab/Shift+Tab's job.
+ * DOM-free so it is unit-testable on plain level arrays.
+ */
+export function headingSiblingGaps(levels: Array<number | null>, idx: number): HeadingSiblingGaps {
+  const L = levels[idx];
+  if (L === null) {
+    // Not a heading — caller should never restrict; return a trivial "own position only" result.
+    return { siblingStarts: [idx], scopeEndGap: idx + 1, moveUpGap: null, moveDownGap: null };
+  }
+  // Parent = nearest preceding heading of level < L (its index bounds the sibling scan below);
+  // the document root when none, i.e. parentIdx = -1.
+  let parentIdx = -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    const lv = levels[i];
+    if (lv !== null && lv < L) {
+      parentIdx = i;
+      break;
+    }
+  }
+  // Scope ends at the first heading of level < L (whether it is a shallower/parent-level heading
+  // that leaves the section, OR a heading of level between parentLevel and L that would start a
+  // subsection the moved heading must not be dragged into/past). Using `< L` — not `≤ parentLevel`
+  // — is what stops e.g. an H3 (under an H1) from being moved BELOW a following H2 and nesting
+  // under it. Within [parentIdx+1, scopeEndGap) there is then no heading of level < L at all, so
+  // every level-L heading in that range is a direct sibling — no per-candidate parent re-check.
+  let scopeEndGap = levels.length;
+  for (let j = idx + 1; j < levels.length; j++) {
+    const lv = levels[j];
+    if (lv !== null && lv < L) {
+      scopeEndGap = j;
+      break;
+    }
+  }
+  const siblingStarts: number[] = [];
+  for (let k = parentIdx + 1; k < scopeEndGap; k++) {
+    if (levels[k] === L) {
+      siblingStarts.push(k);
+    }
+  }
+  // The moved heading's own section runs from its start up to the next sibling start (or scope end).
+  const ownPos = siblingStarts.indexOf(idx);
+  const ownEnd = ownPos + 1 < siblingStarts.length ? siblingStarts[ownPos + 1] : scopeEndGap;
+  const moveUpGap = ownPos > 0 ? siblingStarts[ownPos - 1] : null;
+  // Move down = past the next sibling's whole section = the sibling-start after `ownEnd`, or scope end.
+  let moveDownGap: number | null = null;
+  if (ownEnd < scopeEndGap) {
+    const afterNext = siblingStarts.find((s) => s > ownEnd);
+    moveDownGap = afterNext ?? scopeEndGap;
+  }
+  return { siblingStarts, scopeEndGap, moveUpGap, moveDownGap };
+}
+
 /** Top-level children of `content` with a real markdown source range — excludes the trailing caret-trap <p> (same filter as block-map.ts). Exported for reuse (TOC-drag, US-17.7/M5). */
 export function draggableTopLevelBlocks(content: HTMLElement): HTMLElement[] {
   return (Array.from(content.children) as HTMLElement[]).filter((el) => readSrcRange(el) !== null);
@@ -131,6 +207,12 @@ export function draggableTopLevelBlocks(content: HTMLElement): HTMLElement[] {
 export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDropController {
   function draggableBlocks(): HTMLElement[] {
     return draggableTopLevelBlocks(content);
+  }
+
+  /** Heading level per block (`null` for non-heading) — the DOM→levels adapter feeding the pure
+   * `headingSiblingGaps` outline math (bug_General #2 follow-up). */
+  function blockLevels(blocks: HTMLElement[]): Array<number | null> {
+    return blocks.map((b) => headingLevel(b));
   }
 
   /** Gap index g means "insert before blocks[g]" (g === blocks.length means "insert at the end"). */
@@ -182,20 +264,61 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     return null;
   }
 
+  /** The blocks a drag starting on `block` would actually move — a heading's whole section
+   * (computeHeadingSectionSpan), else just the block itself. Single source of truth for both
+   * the handle's span rect (positionHandle) and the hover-preview outline, so the grab
+   * affordance always matches what a real drag carries (bug General #2). */
+  function blockOutlineSpan(block: HTMLElement): HTMLElement[] {
+    if (headingLevel(block) === null) {
+      return [block];
+    }
+    // A stale/detached heading (e.g. cleared after a host-driven re-render) is not in the live
+    // top-level list, so computeHeadingSectionSpan would scan from index 0 and return the wrong
+    // blocks — fall back to [block] so a clear only ever touches the block itself, never wrong
+    // live siblings (matches the harmlessness of the old single-node `classList.remove`).
+    const blocks = draggableBlocks();
+    return blocks.includes(block) ? computeHeadingSectionSpan(block, blocks) : [block];
+  }
+
+  function addBlockSpanOutline(block: HTMLElement | null): void {
+    if (!block) {
+      return;
+    }
+    for (const el of blockOutlineSpan(block)) {
+      el.classList.add('dd-hover-outline');
+    }
+  }
+
+  function removeBlockSpanOutline(block: HTMLElement | null): void {
+    if (!block) {
+      return;
+    }
+    for (const el of blockOutlineSpan(block)) {
+      el.classList.remove('dd-hover-outline');
+    }
+  }
+
   /** Hit column spans the block's own full height and sits flush (zero gap) against the
    * block's own left edge — `right` (not `left`) anchoring guarantees the flush fit
    * regardless of the icon's CSS width, and removes the dead zone a moving cursor used
-   * to cross before reaching the old fixed tiny-icon offset (bug 0716 #4). */
+   * to cross before reaching the old fixed tiny-icon offset (bug 0716 #4). A heading's handle
+   * spans its WHOLE section (heading + the content a drag carries), not just the heading's own
+   * box (bug General #2), and top-aligns its glyph via `dd-handle--section` so the grab icon
+   * stays at the heading row instead of floating in the middle of a tall section. */
   function positionHandle(block: HTMLElement | null): void {
     if (!block) {
       handleEl.style.display = 'none';
+      handleEl.classList.remove('dd-handle--section');
       return;
     }
-    const blockRect = block.getBoundingClientRect();
+    const span = blockOutlineSpan(block);
+    const firstRect = span[0].getBoundingClientRect();
+    const bottom = span[span.length - 1].getBoundingClientRect().bottom;
     handleEl.style.display = 'flex';
-    handleEl.style.top = `${blockRect.top}px`;
-    handleEl.style.height = `${blockRect.height}px`;
-    handleEl.style.right = `${window.innerWidth - blockRect.left - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
+    handleEl.classList.toggle('dd-handle--section', span.length > 1);
+    handleEl.style.top = `${firstRect.top}px`;
+    handleEl.style.height = `${bottom - firstRect.top}px`;
+    handleEl.style.right = `${window.innerWidth - firstRect.left - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
   }
 
   // ---------------------------------------------------------------------
@@ -292,9 +415,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // to the click-to-menu path) — clear it here, when the menu actually goes away,
     // instead of `resetState()` clearing it the instant the menu opens.
     if (menuTargetBlock) {
-      menuTargetBlock.classList.remove('dd-hover-outline');
+      removeBlockSpanOutline(menuTargetBlock);
       menuTargetBlock = null;
     }
+    // Release the scroll freeze taken in openMenu (bug General R2 #3) — ref-counted, so a stray
+    // close while nothing is locked is a safe no-op.
+    unlockPageScroll();
   }
 
   function moveBlockToGap(block: HTMLElement, gap: number): void {
@@ -326,17 +452,56 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // leave a selection behind — restore the caret explicitly (bug 0716 round 3), same
     // pattern as finishBlockMove's drag path, or the menu-triggered move drops focus
     // out of #content entirely (closeMenu already removed the clicked button from the DOM).
-    if (movedEl) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
-    }
+    deps.dom.placeCaretIn(movedEl);
     deps.lineGutter.refreshFromDom();
     deps.scheduleSync();
+    // Bug #1 (mở rộng): "Move up/Move down" từ menu dời block nhưng chuột đứng yên
+    // (không có mousemove đảm bảo sau click) — tay cầm position:fixed sẽ đứng lại ở
+    // vị trí cũ. refresh() ẩn/đặt lại toàn bộ handle, tự hiện lại khi di chuột.
+    refresh();
+  }
+
+  /**
+   * Bug General #1: Delete/Backspace on a handle-selected block removes the whole block.
+   * DOM removal via Range (selectNode + deleteContents, the module's Range-based convention)
+   * + scheduleSync() — the host commits it as one TextDocument edit, so Ctrl+Z restores it;
+   * no native undo stack to desync. Caret goes to the previous top-level block, or the next
+   * one when the deleted block was first.
+   */
+  function deleteSelectedBlock(block: HTMLElement): void {
+    const blocks = draggableBlocks();
+    const idx = blocks.indexOf(block);
+    closeMenu();
+    // Stale/detached target (e.g. a host-driven re-render between the click and the keypress) —
+    // nothing left to delete; bail before selectNode() throws on a parent-less node.
+    if (idx < 0) {
+      return;
+    }
+    // Capture caret neighbours BEFORE the delete (prefer the previous block, else the next).
+    const prev = blocks[idx - 1] ?? null;
+    const next = blocks[idx + 1] ?? null;
+    const range = document.createRange();
+    range.selectNode(block);
+    range.deleteContents();
+    // Re-establish the caret-host invariants renderDocument guarantees (a trailing typable <p>,
+    // caret spots around atoms/hr). The host suppresses this delete's echo, so renderDocument
+    // won't re-run — without this a plain single-paragraph doc is left with no caret host at all.
+    deps.ensureCaretHost();
+    // An atom block (mermaid/math) is contenteditable=false, so step off it onto the typable <p>
+    // ensureCaretHost just placed beside it; fall back to the last child for an emptied doc.
+    let caretTarget: Element | null = prev ?? next;
+    if (caretTarget && isAtomBlock(caretTarget)) {
+      caretTarget = caretTarget.nextElementSibling ?? caretTarget.previousElementSibling;
+    }
+    if (!caretTarget || !content.contains(caretTarget)) {
+      caretTarget = content.lastElementChild;
+    }
+    deps.dom.placeCaretIn(caretTarget);
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    // Handles are position:fixed and only recompute on mousemove — drop/reset all handle
+    // state so a stale one doesn't linger over the now-removed block (mirrors moveBlockToGap).
+    refresh();
   }
 
   function addMenuItem(label: string, disabled: boolean, onClick: () => void): void {
@@ -354,7 +519,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     menuPopupEl.appendChild(item);
   }
 
-  function openMenu(block: HTMLElement): void {
+  function openMenu(block: HTMLElement, anchorX: number, anchorY: number): void {
     closeMenu();
     const blocks = draggableBlocks();
     const idx = blocks.indexOf(block);
@@ -364,11 +529,29 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     const span = computeHeadingSectionSpan(block, blocks);
     const spanEndIdx = idx + span.length - 1;
 
-    addMenuItem('Move up', idx === 0, () => moveBlockToGap(block, idx - 1));
-    addMenuItem('Move down', spanEndIdx >= blocks.length - 1, () => moveBlockToGap(block, spanEndIdx + 2));
+    // A HEADING is restricted to same-level siblings under its own parent (bug_General #2
+    // follow-up): Move Up/Down step between sibling sections and "Move to…" lists only those
+    // siblings. Any non-heading block keeps the original ±1-gap / all-headings behavior.
+    const isHeading = headingLevel(block) !== null;
+    const sib = isHeading ? headingSiblingGaps(blockLevels(blocks), idx) : null;
 
-    const headings = blocks.filter((b) => headingLevel(b) !== null && !span.includes(b));
-    if (headings.length > 0) {
+    if (sib) {
+      addMenuItem('Move up', sib.moveUpGap === null, () => moveBlockToGap(block, sib.moveUpGap!));
+      addMenuItem('Move down', sib.moveDownGap === null, () => moveBlockToGap(block, sib.moveDownGap!));
+    } else {
+      addMenuItem('Move up', idx === 0, () => moveBlockToGap(block, idx - 1));
+      addMenuItem('Move down', spanEndIdx >= blocks.length - 1, () => moveBlockToGap(block, spanEndIdx + 2));
+    }
+
+    // "Move to…" targets: sibling headings only (heading), else every other heading (unchanged).
+    const targets: Array<{ heading: HTMLElement; gap: number }> = sib
+      ? sib.siblingStarts
+          .filter((s) => s !== idx)
+          .map((s) => ({ heading: blocks[s], gap: sib.siblingStarts.find((x) => x > s) ?? sib.scopeEndGap }))
+      : blocks
+          .filter((b) => headingLevel(b) !== null && !span.includes(b))
+          .map((h) => ({ heading: h, gap: blocks.indexOf(h) + 1 }));
+    if (targets.length > 0) {
       const sep = document.createElement('div');
       sep.className = 'dd-menu-sep';
       menuPopupEl.appendChild(sep);
@@ -376,29 +559,33 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       label.className = 'dd-menu-label';
       label.textContent = 'Move to…';
       menuPopupEl.appendChild(label);
-      for (const h of headings) {
-        const gapIdx = blocks.indexOf(h) + 1; // just after this heading's own line
-        const text = (h.textContent ?? '').trim() || '(untitled)';
-        addMenuItem(text, false, () => moveBlockToGap(block, gapIdx));
+      for (const t of targets) {
+        const text = (t.heading.textContent ?? '').trim() || '(untitled)';
+        // For a heading, "Move to <the sibling directly above me>" resolves to this heading's own
+        // position — a self-drop moveBlockToGap would silently reject. Disable it instead of
+        // showing a live-but-dead item (blind review F2); the non-heading path is left unchanged.
+        const disabled = sib ? !isValidSiblingGap(t.gap, idx, spanEndIdx) : false;
+        addMenuItem(text, disabled, () => moveBlockToGap(block, t.gap));
       }
     }
 
-    // Anchor to the icon's own vertical center, not the hit column's bottom edge — the
-    // hit column now spans the whole block's height (bug 0716 #4), so for a tall block
-    // `rect.bottom` would place the menu far below where the (vertically centered) icon
-    // and the user's click actually were. A table's own menu is opened via tableHandleEl
-    // (armDrag(hoveredTableBlock, ...) always originates there, never handleEl, which stays
-    // hidden the whole time), so anchor to whichever handle actually triggered this menu —
-    // otherwise the popup renders at handleEl's stale zero-rect position (bug 0716 round 2,
-    // #1 follow-up: confirmed live, popup appeared at the viewport's top-left corner).
-    const anchorEl = block.tagName === 'TABLE' ? tableHandleEl : handleEl;
-    const rect = anchorEl.getBoundingClientRect();
     menuPopupEl.style.display = 'block';
-    menuPopupEl.style.top = `${rect.top + rect.height / 2}px`;
-    menuPopupEl.style.left = `${rect.right + 4}px`;
+    // Anchor the popup at the handle click point (bug General R3 #1) rather than the whole block's
+    // rect — a tall block/section used to open the menu far below where the handle was clicked. A
+    // zero-size rect at (anchorX, anchorY) makes the shared helper open it like a context menu at
+    // the cursor, keeping its flip-above and viewport/`#toolbar` clamps.
+    positionMenuClearOf(menuPopupEl, new DOMRect(anchorX, anchorY, 0, 0));
+    // Freeze page scroll while the menu is open so the fixed popup can't drift off its anchor
+    // (bug General R2 #3); released in closeMenu.
+    lockPageScroll();
 
+    // Track the block by reference only (bug General R2 #1) — no native text selection; the
+    // `.dd-hover-outline` outline is the "selected" cue and the Delete/Backspace handler keys
+    // off `menuTargetBlock`, so atom blocks / tables still delete cleanly as whole elements.
     menuTargetBlock = block;
-    block.classList.add('dd-hover-outline');
+    // Outline the whole section a "Move" would carry (bug General #2), reusing the span already
+    // computed above — matches the section-spanning handle so the menu targets what it says.
+    span.forEach((el) => el.classList.add('dd-hover-outline'));
   }
 
   document.addEventListener('mousedown', (e) => {
@@ -407,9 +594,31 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && isMenuOpen()) {
-      closeMenu();
+    if (!isMenuOpen()) {
+      return;
     }
+    if (e.key === 'Escape') {
+      closeMenu();
+      return;
+    }
+    // With a handle menu open its block is the tracked target (bug General #1/R2 #1 — outline
+    // only, no text selection) — Delete/Backspace removes the whole block. preventDefault so any
+    // native delete at whatever caret happens to be focused never runs alongside it.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && menuTargetBlock) {
+      e.preventDefault();
+      deleteSelectedBlock(menuTargetBlock);
+      return;
+    }
+    // A bare modifier keydown is the start of a combo (e.g. Ctrl+Z), not an action on its own —
+    // leave the menu open so the combo's final key below decides, instead of closing on the
+    // modifier alone.
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
+      return;
+    }
+    // Any other key (arrow, typing, a shortcut's final key) ends the selected-block mode: close
+    // the menu so a later Delete/Backspace can't wipe a block the caret has since moved off of.
+    // The key itself is left to act normally (no preventDefault).
+    closeMenu();
   });
 
   // ---------------------------------------------------------------------
@@ -440,7 +649,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (block === hoveredBlock) {
       return;
     }
-    hoveredBlock?.classList.remove('dd-hover-outline');
+    // Keep the menu target's section outlined while its menu is open (bug General #2 follow-up,
+    // mirrors resetState's `hoveredBlock !== menuTargetBlock` guard) — otherwise ordinary mouse
+    // movement over another block would strip the whole highlighted section out from under the
+    // still-open menu.
+    if (hoveredBlock !== menuTargetBlock) {
+      removeBlockSpanOutline(hoveredBlock);
+    }
     hoveredBlock = block;
   }
 
@@ -760,6 +975,10 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   let dragSpan: HTMLElement[] = [];
   let currentGap = 0;
   let currentGapValid = false;
+  /** For a HEADING drag, the sibling-section gaps its section may be dropped at (same level, same
+   * parent scope — bug_General #2 follow-up); the drop-line snaps/clamps to these. `null` for a
+   * non-heading drag, which stays fully unrestricted (today's behavior). */
+  let dragValidGaps: number[] | null = null;
   /** Block armed via `armDrag` (mousedown on the block handle) — read back in `onDocMouseUp`'s
    * non-dragging branch to open the handle menu when the click never crossed the drag
    * threshold (bug 0716 #5: merges the removed kebab button into the handle click). */
@@ -826,7 +1045,20 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   function updateBlockDropLine(clientY: number): void {
     const spanStartIdx = dragBlocks.indexOf(dragSpan[0]);
     const spanEndIdx = spanStartIdx + dragSpan.length - 1;
-    const gap = gapAt(dragBlocks, clientY);
+    let gap = gapAt(dragBlocks, clientY);
+    if (dragValidGaps) {
+      // Heading drag: snap the raw gap to the nearest allowed sibling boundary so the section
+      // can only reorder among same-level siblings and never leaves its parent scope
+      // (bug_General #2 follow-up). Only gaps that are also a real move (not self) count.
+      const movable = dragValidGaps.filter((g) => isValidSiblingGap(g, spanStartIdx, spanEndIdx));
+      if (movable.length === 0) {
+        currentGap = gap;
+        currentGapValid = false;
+        dropLineEl.style.display = 'none';
+        return;
+      }
+      gap = movable.reduce((best, g) => (Math.abs(g - gap) < Math.abs(best - gap) ? g : best), movable[0]);
+    }
     currentGap = gap;
     currentGapValid = isValidSiblingGap(gap, spanStartIdx, spanEndIdx);
     if (!currentGapValid) {
@@ -1100,6 +1332,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     dragBlocks = [];
     dragSpan = [];
     currentGapValid = false;
+    dragValidGaps = null;
     liDragged = null;
     liRootListEl = null;
     liFlatEntries = [];
@@ -1118,22 +1351,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (hoveredTableBlock !== menuTargetBlock) {
       setHighlightedTableBlock(null);
     }
-    document.removeEventListener('mousemove', onDocMouseMove);
-    document.removeEventListener('mouseup', onDocMouseUp);
-    document.removeEventListener('keydown', onDocKeyDown);
+    detachDragListeners();
   }
 
   function finishBlockMove(): void {
     const movedEl = performMove(dragSpan, dragBlocks, currentGap);
-    if (movedEl) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
-    }
+    deps.dom.placeCaretIn(movedEl);
   }
 
   /**
@@ -1169,13 +1392,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // moving the caret away from where the user actually dropped.
     normalizeListDom(content);
     if (movedEl && content.contains(movedEl)) {
-      const r = document.createRange();
-      r.selectNodeContents(movedEl);
-      r.collapse(true);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(r);
-      content.focus();
+      deps.dom.placeCaretIn(movedEl);
     }
   }
 
@@ -1235,18 +1452,35 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       // drag-only (spec: no new li/row/col menu).
       cleanupVisuals();
       if (armedBlock) {
-        openMenu(armedBlock);
+        // startX/startY still hold this click's handle-mousedown point (reset happens below in
+        // resetState) — anchor the menu there so it opens at the cursor (bug General R3 #1).
+        openMenu(armedBlock, startX, startY);
       }
     }
     resetState();
   }
 
-  function onDocKeyDown(e: KeyboardEvent): void {
-    // Cancel/Esc (F6): drop never touched the DOM before mouseup, so cancelling is pure visual cleanup.
-    if (e.key === 'Escape') {
+  // Escape-stack registration: only present while a drag is armed/live, so the
+  // handler is always active → returns true (cancel/Esc, F6). The drop never
+  // touched the DOM before mouseup, so cancelling is pure visual cleanup.
+  let escDisposable: Disposable | undefined;
+
+  /** Bộ 3 listener document (mousemove/mouseup/keydown) dùng chung cho cả block-drag và li-drag — gắn khi arm, gỡ khi kết thúc. */
+  function attachDragListeners(): void {
+    document.addEventListener('mousemove', onDocMouseMove);
+    document.addEventListener('mouseup', onDocMouseUp);
+    escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.DRAG, () => {
       cleanupVisuals();
       resetState();
-    }
+      return true;
+    });
+  }
+
+  function detachDragListeners(): void {
+    document.removeEventListener('mousemove', onDocMouseMove);
+    document.removeEventListener('mouseup', onDocMouseUp);
+    escDisposable?.dispose();
+    escDisposable = undefined;
   }
 
   function armDrag(block: HTMLElement, clientX: number, clientY: number): void {
@@ -1255,12 +1489,29 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     startX = clientX;
     startY = clientY;
     dragBlocks = draggableBlocks();
+    const blockIdx = dragBlocks.indexOf(block);
+    if (blockIdx < 0) {
+      // Stale/detached target (DOM mutated without a refresh() while the handle was frozen over
+      // it) — bail before computeHeadingSectionSpan/headingSiblingGaps scan from index 0 and hand
+      // performMove a -1 span. Same idx<0 guard moveBlockToGap/openMenu/deleteSelectedBlock use;
+      // the block/table handle mousedown lacked it (edge-case review). Reset the just-armed state.
+      state = 'idle';
+      return;
+    }
     dragSpan = computeHeadingSectionSpan(block, dragBlocks);
+    // A heading drag is confined to its same-level sibling boundaries under its own parent
+    // (bug_General #2 follow-up); a non-heading drag stays unrestricted (`null`).
+    if (headingLevel(block) !== null) {
+      const sib = headingSiblingGaps(blockLevels(dragBlocks), blockIdx);
+      dragValidGaps = [...sib.siblingStarts, sib.scopeEndGap];
+    } else {
+      dragValidGaps = null;
+    }
     armedBlock = block;
-    block.classList.add('dd-hover-outline');
-    document.addEventListener('mousemove', onDocMouseMove);
-    document.addEventListener('mouseup', onDocMouseUp);
-    document.addEventListener('keydown', onDocKeyDown);
+    // Preview the whole span a drag will move (bug General #2) — dragSpan is exactly the section
+    // for a heading, or [block] otherwise, so no recompute is needed here.
+    dragSpan.forEach((el) => el.classList.add('dd-hover-outline'));
+    attachDragListeners();
   }
 
   function armLiDrag(li: HTMLLIElement, clientX: number, clientY: number): void {
@@ -1280,9 +1531,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liOrigDepth = liDepth(li);
     currentLiDepth = liOrigDepth;
     li.classList.add('dd-hover-outline');
-    document.addEventListener('mousemove', onDocMouseMove);
-    document.addEventListener('mouseup', onDocMouseUp);
-    document.addEventListener('keydown', onDocKeyDown);
+    attachDragListeners();
   }
 
   handleEl.addEventListener('mousedown', (e) => {
@@ -1291,6 +1540,40 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     e.preventDefault();
     armDrag(hoveredBlock, e.clientX, e.clientY);
+  });
+
+  // Bug #3: hovering a handle GLYPH previews its drag target with the same
+  // `.dd-hover-outline` an actual drag/menu uses, so the user sees exactly which
+  // block will move before pressing. This is NOT a regression of bug 0716 #6 —
+  // that removed the outline on plain CONTENT hover (it flickered while merely
+  // reading a block); here the outline shows only while the cursor is on the
+  // small handle itself. Skip while a drag is in flight (armDrag and the drag
+  // path own the outline then) or while a menu is open (it keeps its own target
+  // outlined until it closes — bug 0716 #6 click-to-menu path).
+  handleEl.addEventListener('mouseenter', () => {
+    // Guard isMenuOpen() like the matching mouseleave below: with a menu already open for another
+    // block, a hover-preview add here would outline a SECOND section that closeMenu wouldn't clear
+    // (bug General #2 follow-up).
+    if (state !== 'idle' || isMenuOpen()) {
+      return;
+    }
+    addBlockSpanOutline(hoveredBlock);
+  });
+  handleEl.addEventListener('mouseleave', () => {
+    if (state !== 'idle' || isMenuOpen()) {
+      return;
+    }
+    removeBlockSpanOutline(hoveredBlock);
+  });
+
+  // Bug #3: same hover preview for the li handle. Adding is a plain mouseenter;
+  // removal is folded into the existing `mouseleave` below (which already runs
+  // the leftward climb), so both effects share one exit handler.
+  liHandleEl.addEventListener('mouseenter', () => {
+    if (state !== 'idle') {
+      return;
+    }
+    hoveredLi?.classList.add('dd-hover-outline');
   });
 
   liHandleEl.addEventListener('mousedown', (e) => {
@@ -1333,6 +1616,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
+    // Bug #3: leaving the glyph drops its hover preview outline. The climb below
+    // only re-targets which handle shows (a bare gutter band is not a glyph, so it
+    // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
+    // return-to-#content path — so clear it unconditionally here.
+    hoveredLi?.classList.remove('dd-hover-outline');
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (
@@ -1356,6 +1644,22 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     e.preventDefault();
     armDrag(hoveredTableBlock, e.clientX, e.clientY);
+  });
+
+  // Bug #3: same hover preview for the whole-table handle. A table click opens a
+  // menu too (armDrag sets armedBlock), so guard `mouseleave` with isMenuOpen()
+  // exactly like the block handle.
+  tableHandleEl.addEventListener('mouseenter', () => {
+    if (state !== 'idle') {
+      return;
+    }
+    hoveredTableBlock?.classList.add('dd-hover-outline');
+  });
+  tableHandleEl.addEventListener('mouseleave', () => {
+    if (state !== 'idle' || isMenuOpen()) {
+      return;
+    }
+    hoveredTableBlock?.classList.remove('dd-hover-outline');
   });
 
   function refresh(): void {

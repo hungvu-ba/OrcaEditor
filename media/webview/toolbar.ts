@@ -1,35 +1,52 @@
 /**
  * Toolbar định dạng chính: format text (bold/italic/heading/list/quote...),
- * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file cho Claude.
+ * chèn bảng/liên kết/ảnh, undo/redo, nút mục lục và nút copy @file reference.
  */
 import hljs from 'highlight.js/lib/common';
 import {
   addCheckbox,
   closestElement,
-  encodeLinkPath,
   escapeAttr,
   escapeHtml,
   findTaskCheckbox,
-  isAbsoluteUrl,
+  scrollBehavior,
   svgIcon,
+  warningTriangleIcon,
   type DomHelpers,
 } from './dom-utils';
+import {
+  commitListOp,
+  commitListOpDirect,
+  computeRetagListRange,
+  computeTaskifyListRange,
+  computeToList,
+  computeToListAroundAtoms,
+  computeUnwrapListRange,
+} from './list-ops';
 import { insertTable } from './table';
-import type { PromptController } from './prompt';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
-import { READING_STYLES, type ReadabilityController } from './readability';
-import { attachTooltip, hideTooltip } from './tooltip';
+import { type ReadabilityController } from './readability';
+import { attachTooltip, hideTooltip, setTooltip } from './tooltip';
 import { READING_PREVIEW_DEBOUNCE_MS } from './constants';
+import { codeLangDisplayName, codeLangFromClass, postProcessCodeHeaders } from './dom-postprocess';
+import { MD_CODE_LANG_CLASS } from './render';
+import { LANG_SWITCHED_ATTR } from './block-style';
 
 export interface ToolbarContext {
   vscode: VsCodeApi;
   scheduleSync: () => void;
+  /** Flush any pending debounced sync NOW — commits prior typing as its own undo unit (main.ts). */
+  flushPendingSync: () => void;
+  /** Serialize + post an 'edit' immediately, no debounce (no-op when content is unchanged) (main.ts). */
+  syncNow: () => void;
+  /** Delegate undo/redo to the host TextDocument (single undo stack) — same contract as Ctrl+Z/Y in main.ts. */
+  requestUndo: () => void;
+  requestRedo: () => void;
   dom: DomHelpers;
   toc: TocController;
   /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
   readability: ReadabilityController;
-  promptInput: PromptController['promptInput'];
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
   insertMarkdown: (text: string) => void;
 }
@@ -60,8 +77,8 @@ const ZEN_ICON = svgIcon(
   `<path d="M2.75 5.5v-2.75h2.75M13.25 5.5v-2.75h-2.75M2.75 10.5v2.75h2.75M13.25 10.5v2.75h-2.75" ${FMT_STROKE}/>`
 );
 
-/** Icon clipboard có ký tự @ — copy @file cho chat Claude Code. */
-const CLAUDE_COPY_ICON =
+/** Clipboard-with-@ icon — copies an @file reference. */
+const FILE_MENTION_ICON =
   '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
   '<rect x="3" y="2.75" width="10" height="12" rx="1.25" stroke="currentColor" stroke-width="1.2" fill="none"/>' +
   '<path d="M5.75 2.75V2a1 1 0 0 1 1-1h2.5a1 1 0 0 1 1 1v.75" stroke="currentColor" stroke-width="1.2" fill="none"/>' +
@@ -191,8 +208,20 @@ interface ToolbarDropdownEntry {
    */
   onHoverPreview?: () => void;
   onHoverCancel?: () => void;
-  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi 10 bundle bên dưới). */
+  /** Vẽ vạch chia NGAY TRƯỚC hàng này — tách nhóm hàng theo ngữ nghĩa (vd Reading Mode: "Follow VS Code" đứng riêng khỏi các bundle bên dưới). */
   separatorBefore?: boolean;
+  /** US-4.27: caption nhóm (đậm, mờ) render NGAY TRƯỚC hàng này (vd "Comfortable Reading"). */
+  groupCaption?: string;
+  /** US-4.27: dữ liệu vẽ swatch 14×14 xem trước style (nền palette + "A" màu chữ + font preset). */
+  swatch?: { palette: string; preset: string };
+  /**
+   * true nếu hàng chỉ đổi HIỂN THỊ (Reading Mode: Standard/Sepia/Paper), không
+   * đụng markdown — như ToolbarItem.viewOnly, để invokeAction BỎ QUA syncNow sau
+   * action. Nếu không, syncNow serialize lại DOM và post 'edit' làm file dirty
+   * dù nội dung không đổi, mỗi khi bản render lệch byte so với text trên đĩa
+   * (drift chuẩn hoá vốn nằm im tới lần sửa thật — vd bullet "* " → "*   ").
+   */
+  viewOnly?: boolean;
 }
 
 interface ToolbarItem {
@@ -207,12 +236,40 @@ interface ToolbarItem {
   /** Đẩy nút (và mọi nút sau nó) sang mép phải toolbar — nhóm tiện ích. */
   alignRight?: boolean;
   /**
-   * true nếu action tự mở popup nhập liệu bất đồng bộ (chèn liên kết/ảnh).
-   * Popup tự focus vào ô nhập và tự restore selection khi đóng (xem prompt.ts) —
-   * nếu vẫn để click handler gọi content.focus() ngay, nó sẽ cướp focus khỏi ô
-   * nhập trong lúc selection đang rỗng, khiến caret nhảy về đầu file.
+   * Thứ tự thu vào menu tràn "•••" khi toolbar hẹp (US-4.24): số NHỎ = thu
+   * TRƯỚC. Nút KHÔNG có field này thì không bao giờ thu (pinned) — kể cả nút ở
+   * nhóm `alignRight`. Tách hẳn khỏi vị trí trong mảng vì tập nút luôn-hiện của
+   * wireframe không liền mạch (Link/Image phải sống lâu hơn Table/Rule dù đứng sau).
+   */
+  collapsePriority?: number;
+  /**
+   * true nếu action tự mở một trigger-popup bất đồng bộ thay vì mutate tại
+   * chỗ (chèn liên kết/ảnh — US-20.8, xem trigger-at.ts's openFromToolbar).
+   * Popup tự quản lý focus/selection lúc mở lẫn lúc đóng — nếu vẫn để click
+   * handler gọi content.focus() ngay, nó sẽ cướp focus khỏi popup trong lúc
+   * selection đang rỗng, khiến caret nhảy về đầu file.
    */
   opensAsyncPrompt?: boolean;
+  /**
+   * true if the action only posts a message to the host (Undo/Redo) and
+   * mutates nothing locally. Such items must BYPASS invokeAction's
+   * flush-before/syncNow-after bracketing: flushing first would strip the
+   * pendingText off the undo/redo message into a separate racing 'edit'
+   * (losing the atomic single-message contract the host handler relies on),
+   * and syncing after could post a stale pre-undo 'edit' right behind the
+   * 'undo' whenever serialize() drifts from currentText (e.g. trailing-newline
+   * normalization) — re-applying just-undone content and killing the redo stack.
+   */
+  hostDelegated?: boolean;
+  /**
+   * true nếu nút chỉ đổi HIỂN THỊ (Reading Mode / Focus / Table of Contents),
+   * không mutate markdown — invokeAction BỎ QUA syncNow sau action (vẫn giữ
+   * flushPendingSync để không mất phần gõ đang chờ). Cùng lớp lỗi mà chú thích
+   * `hostDelegated` ở trên phòng: syncNow sau một action không-đổi-nội-dung vẫn
+   * serialize lại DOM và, nếu bản render lệch byte so với text trên đĩa (drift
+   * chuẩn hoá còn ngủ — vd "* " → "*   "), post 'edit' làm file dirty oan.
+   */
+  viewOnly?: boolean;
   /**
    * Có mặt → render thành split-button (mặt chính + caret) thay vì nút đơn
    * (US-4.9/4.10/4.11). `action` vẫn là hành vi mặt chính (mặc định); caret mở
@@ -223,12 +280,6 @@ interface ToolbarItem {
   dropdown?: ToolbarDropdownEntry[];
   /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
   dropdownTitle?: string;
-  /**
-   * true → mặt chính của split-button MỞ dropdown thay vì chạy `action` (nút
-   * kiểu "menu chọn 1 trong N" không có hành vi mặc định rõ ràng, vd chọn
-   * palette đọc US-19.10). Mặc định (false) giữ hành vi cũ: mặt chính = action.
-   */
-  mainOpensDropdown?: boolean;
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -241,6 +292,72 @@ export function syncTocButton(): void {
   updateTocButton();
 }
 
+// ---------------------------------------------------------------------------
+// Broken-reference count badge (Req 21 US-21.3) — right-pinned toolbar group.
+// Built generically over `HTMLAnchorElement[]` (broken-ref.ts's `list()`) so
+// a later Sprint E task's entity-reference markers extend the SAME badge for
+// free, without touching this module again.
+// ---------------------------------------------------------------------------
+let brokenRefBadgeEl: HTMLButtonElement | undefined;
+let brokenRefCountEl: HTMLSpanElement | undefined;
+let getBrokenRefs: (() => HTMLAnchorElement[]) | undefined;
+
+/**
+ * Called once from main.ts right after `broken-ref.ts`'s controller is
+ * created — a separate setup call (not a field on `ToolbarContext`/
+ * `initToolbar`'s args) because `initToolbar()` runs BEFORE broken-ref.ts is
+ * constructed in main.ts's init order; the badge is simply appended as the
+ * toolbar's last child, so call order relative to `initToolbar` doesn't
+ * matter either way.
+ */
+export function initBrokenRefBadge(getList: () => HTMLAnchorElement[]): void {
+  getBrokenRefs = getList;
+  if (!toolbarElRef || brokenRefBadgeEl) {
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'broken-ref-badge';
+  btn.hidden = true; // hidden entirely at count 0 (wireframe spec)
+  btn.innerHTML = warningTriangleIcon(11);
+  const count = document.createElement('span');
+  btn.appendChild(count);
+  wireTriggerButton(btn, 'Jump to nearest broken reference');
+  btn.addEventListener('click', jumpToNearestBrokenRef);
+  toolbarElRef.appendChild(btn);
+  brokenRefBadgeEl = btn;
+  brokenRefCountEl = count;
+}
+
+/** Gọi từ main.ts mỗi khi broken-ref.ts quét lại (onChange) — cập nhật số đếm + ẩn/hiện. */
+export function syncBrokenRefBadge(): void {
+  if (!brokenRefBadgeEl || !brokenRefCountEl || !getBrokenRefs) {
+    return;
+  }
+  const refs = getBrokenRefs();
+  brokenRefBadgeEl.hidden = refs.length === 0;
+  brokenRefCountEl.textContent = String(refs.length);
+}
+
+/** True when `anchor` comes strictly after `caret` in document order (Node.compareDocumentPosition semantics). */
+function isAfterCaret(anchor: Node, caret: Node): boolean {
+  return !!(caret.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+/** Jump the caret to the nearest broken reference AFTER the current caret position, wrapping to the first past the last. Read-only navigation (like toc.ts's scrollToHeading) — not a content mutation, so no invokeAction/syncNow. */
+function jumpToNearestBrokenRef(): void {
+  const refs = getBrokenRefs?.() ?? [];
+  if (refs.length === 0) {
+    return;
+  }
+  const sel = window.getSelection();
+  const caret = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).startContainer : null;
+  const target = (caret && refs.find((a) => isAfterCaret(a, caret))) || refs[0];
+  hideTooltip();
+  target.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
+  ctx.dom.placeCaretIn(target);
+}
+
 /**
  * Đồng bộ trạng thái "đang bật" của nút Reading Mode + Zen (US-19.1/19.9/19.18)
  * — gọi từ readability controller mỗi khi state đổi (id nằm trên split-main
@@ -251,9 +368,9 @@ export function syncReadingButtons(): void {
   const enabled = ctx.readability.isEnabled();
   document.getElementById('reading-toggle')?.classList.toggle('active', enabled);
   document.getElementById('zen-toggle')?.classList.toggle('active', ctx.readability.isZen());
-  // Dấu ✓ hàng bundle đang áp (US-19.18) — 'off' khi tắt hẳn, hoặc không hàng
-  // nào nếu state hiện tại (vd seed tay qua settings.json) không khớp bundle nào.
-  const current = enabled ? (ctx.readability.getStyleId() ?? '') : 'off';
+  // Dấu ✓ hàng mode đang áp (US-19.24) — 'off' khi tắt hẳn (= hàng "Standard"),
+  // ngược lại là mode màu hiện tại (sepia/paper).
+  const current = enabled ? ctx.readability.getMode() : 'off';
   syncDropdownSelection('reading-toggle', current);
 }
 
@@ -296,17 +413,55 @@ const HEADING_DROPDOWN: ToolbarDropdownEntry[] = [
  * chung `insertCodeBlock(lang)` nên hành vi tách before/`<pre>`/after theo
  * vùng chọn (US-4.4) giữ nguyên cho cả 9 ngôn ngữ, chỉ khác class `language-*`.
  */
-const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = [
-  { label: 'Plain text', action: () => insertCodeBlock('plaintext') },
-  { label: 'JavaScript', badge: 'Common', action: () => insertCodeBlock('javascript') },
-  { label: 'TypeScript', action: () => insertCodeBlock('typescript') },
-  { label: 'Python', action: () => insertCodeBlock('python') },
-  { label: 'Bash', action: () => insertCodeBlock('bash') },
-  { label: 'JSON', action: () => insertCodeBlock('json') },
-  { label: 'HTML', action: () => insertCodeBlock('html') },
-  { label: 'CSS', action: () => insertCodeBlock('css') },
-  { label: 'SQL', action: () => insertCodeBlock('sql') },
+/**
+ * Nguồn duy nhất cho danh sách 9 ngôn ngữ code — dùng chung cho cả nút chèn
+ * (CODE_BLOCK_DROPDOWN, US-4.10) và bộ đổi ngôn ngữ tại chỗ (openCodeLangSwitcher,
+ * US-4.28). `value` là token `language-*` ghi vào `<code>` (turndown đọc đúng
+ * token này ra fence). Sửa danh sách 1 chỗ → cả hai đồng bộ.
+ */
+const CODE_LANGUAGES: { value: string; label: string; badge?: string }[] = [
+  { value: 'plaintext', label: 'Plain text' },
+  { value: 'javascript', label: 'JavaScript', badge: 'Common' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'python', label: 'Python' },
+  { value: 'bash', label: 'Bash' },
+  { value: 'json', label: 'JSON' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'sql', label: 'SQL' },
 ];
+
+/**
+ * Alias → canonical token cho 9 ngôn ngữ dropdown (US-4.28): fence do người dùng
+ * gõ/nhập thường dùng token rút gọn (`js`, `ts`, `py`, `sh`...), trong khi
+ * `CODE_LANGUAGES.value` là dạng chuẩn. Chuẩn hoá trước khi so sánh để một block
+ * `language-js` vẫn được đánh dấu ✓ ở hàng JavaScript và chọn lại JavaScript là
+ * no-op (không ghi đè token `js` thành `javascript`, không phát 'edit' thừa).
+ * `xml` cố ý KHÔNG map về `html` — chúng khác ngôn ngữ hljs, để nguyên không ✓.
+ */
+const CANONICAL_LANG: Record<string, string> = {
+  js: 'javascript',
+  ts: 'typescript',
+  py: 'python',
+  sh: 'bash',
+  shell: 'bash',
+  txt: 'plaintext',
+  text: 'plaintext',
+};
+
+function canonicalLang(token: string | null): string {
+  if (!token) {
+    return '';
+  }
+  const t = token.toLowerCase();
+  return CANONICAL_LANG[t] ?? t;
+}
+
+const CODE_BLOCK_DROPDOWN: ToolbarDropdownEntry[] = CODE_LANGUAGES.map((c) => ({
+  label: c.label,
+  badge: c.badge,
+  action: () => insertCodeBlock(c.value),
+}));
 
 /**
  * Dropdown của Math split-button (US-4.11) — Inline (mặc định của mặt chính)
@@ -347,56 +502,88 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
- * Dropdown của Reading Mode split-button (US-19.18, bug 0715 — thay 2 dropdown
- * Reading/Palette độc lập trước đây, 30 tổ hợp reachable) — 10 bundle
- * preset+palette đã kiểm chứng (contrast WCAG tính toán + soi ảnh 25 tổ hợp,
- * xem `READING_STYLES` trong readability.ts và Requirement - 19
- * Readability.md US-19.18) + dòng "Follow VS Code" để tắt hẳn. Hover 1 hàng
- * live-preview theme lên file hiện tại (`previewStyle`) — rời hàng mà không
- * chọn thì `cancelPreview()` trả lại đúng theme đã commit (wiring hover ở
- * addPopoverRow). Chọn hàng qua `setStyle`/`disable` — kéo theo bật/tắt Reading
- * Mode. ctx được gán trong initToolbar trước khi mọi action chạy nên tham
- * chiếu an toàn (cùng pattern MATH_DROPDOWN/MERMAID_DROPDOWN).
- *
- * "Follow VS Code" đứng ĐẦU danh sách (không phải cuối) — đây là hàng "tắt/
- * reset" duy nhất, khác loại với 10 bundle bên dưới (đều là biến thể "bật");
- * đặt lên đầu giúp thao tác phổ biến nhất ("tôi muốn về bình thường") không
- * phải cuộn qua hết 10 hàng mới thấy, và tách riêng bằng 1 vạch chia
- * (`separatorBefore` trên hàng bundle đầu tiên) để không lẫn vào như một lựa
- * chọn "style" thứ 11.
+ * Dropdown của Reading Mode split-button — 3 mode phẳng (US-19.24): "Standard"
+ * (tắt reading style, `disable()`) + "Sepia"/"Paper" (bật trực tiếp,
+ * `setMode`). Hover 1 hàng live-preview lên file hiện tại (`previewMode`); rời
+ * hàng không chọn thì `cancelPreview()` trả lại theme đã commit (wiring hover ở
+ * addPopoverRow). ctx được gán trong initToolbar trước khi mọi action chạy nên
+ * tham chiếu an toàn.
  */
 const READING_DROPDOWN: ToolbarDropdownEntry[] = [
   {
-    label: 'Follow VS Code (no reading style)',
+    label: 'Standard',
     value: 'off',
     action: () => ctx.readability.disable(),
-    onHoverPreview: () => ctx.readability.previewStyle('off'),
+    onHoverPreview: () => ctx.readability.previewMode('off'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
+    viewOnly: true,
   },
-  ...READING_STYLES.map((style, i) => ({
-    label: style.label,
-    badge: style.id === 'comfortable-sepia' ? 'Default' : undefined,
-    value: style.id,
-    action: () => ctx.readability.setStyle(style.id),
-    onHoverPreview: () => ctx.readability.previewStyle(style.id),
+  {
+    label: 'Sepia Comfort',
+    value: 'sepia',
+    action: () => ctx.readability.setMode('sepia'),
+    onHoverPreview: () => ctx.readability.previewMode('sepia'),
     onHoverCancel: () => ctx.readability.cancelPreview(),
-    separatorBefore: i === 0,
-  })),
+    viewOnly: true,
+  },
+  {
+    label: 'Paper Comfort',
+    value: 'paper',
+    action: () => ctx.readability.setMode('paper'),
+    onHoverPreview: () => ctx.readability.previewMode('paper'),
+    onHoverCancel: () => ctx.readability.cancelPreview(),
+    viewOnly: true,
+  },
 ];
 
-// Thứ tự nhóm cuối cùng theo US-4.8: B/I/S → Heading → Clear formatting/Undo/
-// Redo → Bullet/Numbered/Task → Blockquote/Table/HR → Link/Image → Inline
-// code/Code block/Math/Mermaid → [pinned phải: TOC + more options]. Ở GĐ1 mới
-// chỉ dời VỊ TRÍ (Inline code, cụm Undo/Redo) — control cũ giữ nguyên y hệt,
-// chưa có Clear formatting/Math/Mermaid/ngôn ngữ code block (để dành GĐ3–8).
+// Thứ tự control theo wireframe (US-4.24, thay phần thứ tự của US-4.8):
+// Undo/Redo → B/I/S/Inline code/Clear formatting → Heading → Bullet/Numbered/
+// Task/Blockquote → Table/Rule → Link/Image → Code block → Math → Mermaid →
+// [nhóm phải: Reading Mode, Focus, Outline].
+// `collapsePriority` (nhỏ = thu vào menu "•••" trước) điều khiển thứ tự thu gọn
+// khi toolbar hẹp — KHÔNG suy ra từ vị trí mảng, vì thứ tự thu ≠ thứ tự hiển thị.
+// CHỦ TRƯƠNG ẩn (theo yêu cầu): các nút ĐỊNH DẠNG bên trái (kể cả Undo/Heading/
+// Bold/Link...) thu TRƯỚC (priority 1–19); nhóm tiện ích PHẢI (Focus/Outline/
+// Reading) thu SAU CÙNG (priority 20–22). Chỉ hai nút "•••" (menu tràn) và "⋮"
+// (More options) là KHÔNG có collapsePriority → không bao giờ thu, luôn-hiện; nhờ
+// vậy mọi nút khác đã vào menu trước khi toolbar chật tới mức đụng chúng, nên
+// không còn bị cắt/đè (bỏ cơ chế pinned-clip cũ của US-4.24).
+// INVARIANT separator: mỗi `separatorBefore` "thuộc về" item MỞ nhóm; khi item
+// đó thu thì sep thu cùng. Để không bị sep mồ côi, item mở nhóm phải là item có
+// collapsePriority LỚN NHẤT trong nhóm (thu SAU cùng): Bold=12 (nhóm B/I/S/code/
+// clear), Bullet=14 (Bullet/Numbered/Task/Quote), Table=5 (Table/Rule), Link=16
+// (Link/Image); các nhóm 1-item (Heading/Code/Math/Mermaid) đương nhiên đạt.
+// Nếu sau này đổi priority/thêm item, giữ nguyên bất biến này.
 const toolbarItems: ToolbarItem[] = [
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold' },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic' },
+  // Undo/redo in this extension is TextDocument-based (one single stack, see
+  // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
+  // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
+  // execCommand('undo') here would skip those changes and desync the stacks.
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
+  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
+  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
   {
     label: 'S',
     title: 'Strikethrough (⌘⇧X)',
     action: () => document.execCommand('strikeThrough'),
     id: 'fmt-strike',
+    collapsePriority: 10,
+  },
+  {
+    label: '</>',
+    title: 'Inline code (⌘E)',
+    action: toggleInlineCode,
+    id: 'fmt-inline-code',
+    collapsePriority: 9,
+  },
+  {
+    label: '⌫',
+    icon: FMT_ICONS.eraser,
+    title: 'Clear formatting',
+    action: () => document.execCommand('removeFormat'),
+    id: 'fmt-clear',
+    collapsePriority: 8,
   },
   {
     label: DEFAULT_HEADING.toUpperCase(),
@@ -406,16 +593,8 @@ const toolbarItems: ToolbarItem[] = [
     dropdownTitle: 'Choose heading level',
     separatorBefore: true,
     id: 'fmt-heading',
+    collapsePriority: 17,
   },
-  {
-    label: '⌫',
-    icon: FMT_ICONS.eraser,
-    title: 'Clear formatting',
-    action: () => document.execCommand('removeFormat'),
-    separatorBefore: true,
-  },
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => document.execCommand('undo') },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => document.execCommand('redo') },
   {
     label: '•',
     icon: FMT_ICONS.ul,
@@ -423,6 +602,7 @@ const toolbarItems: ToolbarItem[] = [
     action: setBulletList,
     separatorBefore: true,
     id: 'fmt-bullet',
+    collapsePriority: 14,
   },
   {
     label: '1.',
@@ -430,44 +610,44 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Numbered list',
     action: setNumberedList,
     id: 'fmt-numbered',
+    collapsePriority: 13,
   },
-  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task' },
+  { label: '☑', icon: FMT_ICONS.task, title: 'Task list', action: toggleTaskItem, id: 'fmt-task', collapsePriority: 7 },
   {
     label: '❝',
     icon: FMT_ICONS.quote,
     title: 'Blockquote (click again to remove)',
     action: toggleBlockquote,
-    separatorBefore: true,
     id: 'fmt-blockquote',
+    collapsePriority: 6,
   },
-  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable },
+  { label: '⊞', icon: FMT_ICONS.table, title: 'Insert 3×3 table', action: insertTable, id: 'fmt-table', separatorBefore: true, collapsePriority: 5 },
   {
     label: '—',
     icon: FMT_ICONS.hr,
     title: 'Horizontal rule',
     action: () => document.execCommand('insertHTML', false, '<hr><p><br></p>'),
+    id: 'fmt-hr',
+    collapsePriority: 4,
   },
   {
     label: '🔗',
     icon: FMT_ICONS.link,
     title: 'Insert link',
     action: insertLink,
+    id: 'fmt-link',
     separatorBefore: true,
     opensAsyncPrompt: true,
+    collapsePriority: 16,
   },
   {
     label: '🖼',
     icon: FMT_ICONS.image,
-    title: 'Insert image (path)',
+    title: 'Insert image',
     action: insertImage,
+    id: 'fmt-image',
     opensAsyncPrompt: true,
-  },
-  {
-    label: '</>',
-    title: 'Inline code (⌘E)',
-    action: toggleInlineCode,
-    separatorBefore: true,
-    id: 'fmt-inline-code',
+    collapsePriority: 15,
   },
   {
     label: '{ }',
@@ -476,6 +656,9 @@ const toolbarItems: ToolbarItem[] = [
     action: () => insertCodeBlock('javascript'),
     dropdown: CODE_BLOCK_DROPDOWN,
     dropdownTitle: 'Choose code language',
+    id: 'fmt-codeblock',
+    separatorBefore: true,
+    collapsePriority: 3,
   },
   {
     label: '∑',
@@ -483,6 +666,9 @@ const toolbarItems: ToolbarItem[] = [
     action: insertInlineMath,
     dropdown: MATH_DROPDOWN,
     dropdownTitle: 'Choose math type',
+    id: 'fmt-math',
+    separatorBefore: true,
+    collapsePriority: 2,
   },
   {
     label: '⎇',
@@ -491,18 +677,31 @@ const toolbarItems: ToolbarItem[] = [
     action: insertMermaidFlowchart,
     dropdown: MERMAID_DROPDOWN,
     dropdownTitle: 'Choose diagram type',
+    id: 'fmt-mermaid',
+    separatorBefore: true,
+    collapsePriority: 1,
   },
   {
     label: 'Read',
     icon: READING_ICON,
-    title: 'Reading Mode (comfortable reading layout)',
-    action: () => ctx.readability.toggle(),
-    // US-19.18 (bug 0715): dropdown giờ gộp cả preset+palette thành 10 bundle đã
-    // kiểm chứng + dòng "Follow VS Code" — không còn split-button "Color" riêng.
+    title: 'Reading Mode — Standard (pick a reading style from the dropdown)',
+    // Clicking the main icon always resets to "Standard" (= top dropdown row,
+    // disable() reading style) rather than toggle() restoring the most recently
+    // used mode — users want the main button to reset to Standard, not
+    // reopen the previous reading mode.
+    action: () => ctx.readability.disable(),
+    // US-19.24: dropdown phơi 3 mode (Standard/Sepia/Paper) — không còn
+    // split-button "Color" riêng.
     dropdown: READING_DROPDOWN,
     dropdownTitle: 'Choose reading style (hover to preview)',
     id: 'reading-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
     alignRight: true,
+    // Nhóm phải thu SAU cùng (20–22). Reading giữ priority CAO NHẤT (22) vì nó
+    // mang cờ alignRight/`toolbar-push-right` (margin-left:auto) — là mỏ neo đẩy
+    // cả nhóm sang phải, nên phải là nút cuối cùng của nhóm còn hiển thị.
+    collapsePriority: 22,
   },
   {
     label: 'Focus',
@@ -510,6 +709,9 @@ const toolbarItems: ToolbarItem[] = [
     title: 'Focus Mode (hide chrome, center text — Esc to exit)',
     action: () => ctx.readability.toggleZen(),
     id: 'zen-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
+    collapsePriority: 20,
   },
   {
     label: '☰',
@@ -520,28 +722,64 @@ const toolbarItems: ToolbarItem[] = [
       updateTocButton();
     },
     id: 'toc-toggle',
+    // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
+    viewOnly: true,
+    collapsePriority: 21,
   },
 ];
 
 
 /**
- * Chạy 1 action bất kỳ: action + (focus lại #content trừ khi tự mở prompt bất
- * đồng bộ) + scheduleSync — logic dùng chung cho nút đơn, mặt chính của
- * split-button, hàng dropdown của split-button, VÀ hàng trong menu tràn
- * (US-4.7) khi đại diện split-button bị ẩn (chỉ action mặc định được liệt kê,
- * xem ToolbarItem.dropdown doc).
+ * Run any content-mutating toolbar action: flushPendingSync-before + action +
+ * (re-focus #content unless the action opens an async prompt) + syncNow-after.
+ * Shared by single buttons, a split-button's main face, its dropdown rows, AND
+ * overflow-menu rows (US-4.7) when the split-button representative is hidden
+ * (only the default action is listed, see ToolbarItem.dropdown doc).
+ * Host-delegated items (Undo/Redo) never come through here — see invokeItem.
  */
-function invokeAction(action: () => void, opensAsyncPrompt?: boolean): void {
+function invokeAction(action: () => void, opensAsyncPrompt?: boolean, viewOnly?: boolean): void {
   hideTooltip();
+  // Undo chronology (bug 0717): commit typing still waiting on the 250ms sync
+  // debounce BEFORE the action mutates the DOM — once mutated, the pending
+  // typing and the format change would serialize into ONE 'edit' = ONE
+  // TextDocument undo unit, so a single Ctrl/Cmd+Z would revert both at once.
+  ctx.flushPendingSync();
   action();
   if (!opensAsyncPrompt) {
     content.focus();
   }
-  ctx.scheduleSync();
+  // View-only actions (Reading Mode / Focus / TOC) change presentation only,
+  // never the markdown — skip the post-action syncNow. Otherwise syncNow
+  // serializes the DOM and, whenever the freshly-loaded render drifts byte-wise
+  // from the on-disk text (a dormant normalization diff, e.g. "* " → "*   "),
+  // posts a spurious 'edit' that dirties the file with no content change.
+  if (viewOnly) {
+    return;
+  }
+  // Sync immediately (not debounced) so the action is its own undo unit too:
+  // typing that follows the click can never coalesce into the same 'edit'.
+  ctx.syncNow();
 }
 
 function invokeItem(item: ToolbarItem): void {
-  invokeAction(item.action, item.opensAsyncPrompt);
+  // US-4.23: honor the caret-in-code-block disabled state no matter which
+  // surface fired — the plain toolbar button AND its overflow-menu "•••" row
+  // both route through here, so the guard belongs at this choke point (not on
+  // one button's click listener). The real button holds aria-disabled even when
+  // it is hidden into the overflow menu, so getElementById still sees it.
+  if (item.id && document.getElementById(item.id)?.getAttribute('aria-disabled') === 'true') {
+    hideTooltip();
+    return;
+  }
+  if (item.hostDelegated) {
+    // Undo/Redo: pendingText rides the undo/redo message itself (one atomic
+    // host handler) and no sync may run after it — see ToolbarItem.hostDelegated.
+    hideTooltip();
+    item.action();
+    content.focus();
+    return;
+  }
+  invokeAction(item.action, item.opensAsyncPrompt, item.viewOnly);
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +842,21 @@ function buildPopover(extraClassName?: string): HTMLDivElement {
  * mà user KHÔNG chọn (Escape/click ra ngoài), tránh kẹt theme preview (US-19.18).
  */
 let activeHoverCancel: (() => void) | undefined;
+/**
+ * US-4.27: timer debounce của hover-preview ở CẤP MODULE (chỉ 1 hàng hover tại
+ * một thời điểm) — để closePopover() huỷ được nó. Trước đây timer là closure
+ * per-row, chỉ mouseleave của chính hàng đó huỷ; đóng popover bằng Escape/click
+ * ngoài TRONG cửa sổ debounce (chuột chưa rời hàng → không có mouseleave) khiến
+ * timer vẫn bắn sau khi popover đã đóng → áp preview "mồ côi" (theme kẹt) + tag
+ * .is-previewing stale. Giữ ở module + clear khi đóng vá cả 2.
+ */
+let hoverPreviewTimer: ReturnType<typeof setTimeout> | undefined;
+function clearHoverPreviewTimer(): void {
+  if (hoverPreviewTimer !== undefined) {
+    clearTimeout(hoverPreviewTimer);
+    hoverPreviewTimer = undefined;
+  }
+}
 
 /** Thêm 1 hàng (icon + label + badge tuỳ chọn) vào popover, dùng chung cho menu tràn lẫn dropdown split-button. */
 function addPopoverRow(
@@ -614,7 +867,8 @@ function addPopoverRow(
   onClick: () => void,
   value?: string,
   onHoverPreview?: () => void,
-  onHoverCancel?: () => void
+  onHoverCancel?: () => void,
+  swatch?: { palette: string; preset: string }
 ): void {
   const row = document.createElement('button');
   row.type = 'button';
@@ -627,6 +881,15 @@ function addPopoverRow(
     iconSpan.className = 'toolbar-popover-icon';
     iconSpan.innerHTML = icon;
     row.appendChild(iconSpan);
+  }
+  if (swatch) {
+    // US-4.27: swatch xem trước style — nền/chữ/font do CSS map theo data-*.
+    const sw = document.createElement('span');
+    sw.className = 'toolbar-popover-swatch';
+    sw.dataset.palette = swatch.palette;
+    sw.dataset.preset = swatch.preset;
+    sw.textContent = 'A';
+    row.appendChild(sw);
   }
   const labelSpan = document.createElement('span');
   labelSpan.className = 'toolbar-popover-label';
@@ -641,28 +904,38 @@ function addPopoverRow(
   row.addEventListener('mousedown', (e) => e.preventDefault());
   row.addEventListener('click', onClick);
   if (onHoverPreview && onHoverCancel) {
+    // US-4.27: tag "Previewing…" hiện trên hàng đang preview (CSS ẩn khi thiếu
+    // .is-previewing). Chỉ hàng có hover-preview mới có tag.
+    const previewingTag = document.createElement('span');
+    previewingTag.className = 'toolbar-popover-previewing';
+    previewingTag.textContent = 'Previewing…';
+    row.appendChild(previewingTag);
     // US-19.18 follow-up (bug report "theme apply quá nhanh gây choáng"): trễ
     // READING_PREVIEW_DEBOUNCE_MS trước khi THẬT SỰ áp preview — rê chuột lướt
     // qua nhiều hàng liên tục (không dừng ở hàng nào) sẽ không kích hoạt lần
     // preview nào cả, chỉ hàng con trỏ dừng đủ lâu mới đổi theme. mouseleave
     // luôn huỷ timer + revert ngay lập tức (không debounce chiều huỷ) nên rời
     // hàng luôn phản hồi tức thì dù preview đã kịp áp hay chưa.
-    let previewTimer: ReturnType<typeof setTimeout> | undefined;
     row.addEventListener('mouseenter', () => {
       activeHoverCancel = onHoverCancel;
-      previewTimer = setTimeout(() => {
-        previewTimer = undefined;
+      clearHoverPreviewTimer(); // huỷ debounce đang chờ của hàng trước (nếu có)
+      hoverPreviewTimer = setTimeout(() => {
+        hoverPreviewTimer = undefined;
+        // US-4.27: tag "Previewing…" bám đúng 1 hàng — gỡ khỏi các hàng khác
+        // rồi gắn hàng này, đồng thời với lúc preview THẬT SỰ áp.
+        for (const r of popoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+          r.classList.remove('is-previewing');
+        }
+        row.classList.add('is-previewing');
         onHoverPreview();
       }, READING_PREVIEW_DEBOUNCE_MS);
     });
     row.addEventListener('mouseleave', () => {
-      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce
-      // của CHÍNH hàng này nếu nó chưa kịp bắn, để rời hàng trước khi preview
-      // áp thì không áp preview đó nữa (giữ nguyên preview trước đó, nếu có).
-      if (previewTimer !== undefined) {
-        clearTimeout(previewTimer);
-        previewTimer = undefined;
-      }
+      // Không revert ở đây (xem comment ở buildPopover()) — chỉ huỷ debounce nếu
+      // nó chưa kịp bắn, để rời hàng trước khi preview áp thì không áp nữa (giữ
+      // nguyên preview trước đó, nếu có).
+      clearHoverPreviewTimer();
+      row.classList.remove('is-previewing');
     });
   }
   popoverEl.appendChild(row);
@@ -674,16 +947,16 @@ function addPopoverRow(
  * bằng inline style tại thời điểm mở — bắt buộc phải là INLINE trên CHÍNH
  * từng hàng (không phải custom property đặt trên popoverEl) vì rule cỡ chữ
  * (editor.css US-19.6) gate theo SỰ CÓ MẶT của class `body.reading-mode`:
- * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-font-
- * size, 12px); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi
- * body → rule này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên
- * chỉ đóng băng custom property không đủ — phải khoá thẳng `font-size` trên
- * từng hàng, thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự
- * đổi cỡ chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể
- * không bao giờ nhận được click — bắt bằng Playwright).
+ * `body.reading-mode .toolbar-popover-item { font-size: var(--reading-ui-fs-
+ * 12); }`. Preview hàng "Follow VS Code" gỡ hẳn `reading-mode` khỏi body → rule
+ * này NGỪNG KHỚP hoàn toàn (không phải chỉ đổi giá trị biến), nên chỉ đóng
+ * băng custom property không đủ — phải khoá thẳng `font-size` trên từng hàng,
+ * thắng bất kể selector nào đang khớp lúc đó. Nếu không, dropdown tự đổi cỡ
+ * chữ ngay lúc hover, đẩy hàng dưới khỏi con trỏ (hàng cuối có thể không bao
+ * giờ nhận được click — bắt bằng Playwright).
  */
 function freezePopoverRowSize(popoverEl: HTMLElement): void {
-  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-font-size').trim() || '12px';
+  const uiFontSize = getComputedStyle(document.body).getPropertyValue('--reading-ui-fs-12').trim() || '12px';
   popoverEl.querySelectorAll<HTMLElement>('.toolbar-popover-item').forEach((row) => {
     row.style.fontSize = uiFontSize;
   });
@@ -711,9 +984,17 @@ function openPopover(triggerBtn: HTMLElement, popoverEl: HTMLElement): void {
 }
 
 function closePopover(): void {
+  // US-4.27: huỷ debounce hover-preview đang chờ — nếu không, đóng bằng Escape
+  // TRONG cửa sổ debounce (chuột chưa rời hàng) để timer bắn sau khi popover đã
+  // đóng → áp preview mồ côi (theme kẹt) + tag stale.
+  clearHoverPreviewTimer();
   if (openPopoverEl) {
     openPopoverEl.style.display = 'none';
     unfreezePopoverRowSize(openPopoverEl);
+    // US-4.27: đóng popover → gỡ tag "Previewing…" kẻo còn kẹt lần mở sau.
+    for (const r of openPopoverEl.querySelectorAll('.toolbar-popover-item.is-previewing')) {
+      r.classList.remove('is-previewing');
+    }
   }
   openPopoverEl = undefined;
   openPopoverTrigger = undefined;
@@ -751,6 +1032,8 @@ interface CollapsibleEntry {
   btn: HTMLElement;
   /** Dấu phân cách đứng NGAY TRƯỚC nút này (nếu có) — ẩn/hiện cùng nhau. */
   sep: HTMLSpanElement | null;
+  /** Thứ tự thu (nhỏ = thu trước) — copy từ item.collapsePriority (US-4.24). */
+  priority: number;
 }
 
 let toolbarElRef: HTMLElement | undefined;
@@ -758,6 +1041,15 @@ let moreBtn: HTMLButtonElement | undefined;
 let overflowMenu: HTMLDivElement | undefined;
 let collapsibleEntries: CollapsibleEntry[] = [];
 let overflowResizeObserver: ResizeObserver | undefined;
+
+// aria-label + tooltip + mousedown-preventDefault (giữ selection trong #content)
+// — bộ dây chung của mọi nút trigger trên toolbar (nút đơn, 2 mặt split-button,
+// nút overflow).
+function wireTriggerButton(el: HTMLElement, title: string): void {
+  el.setAttribute('aria-label', title);
+  attachTooltip(el, title);
+  el.addEventListener('mousedown', (e) => e.preventDefault());
+}
 
 /** Dựng nút đơn (label/icon text, không dropdown) — trường hợp đa số các ToolbarItem. */
 function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
@@ -774,10 +1066,7 @@ function buildPlainButtonEl(item: ToolbarItem): HTMLButtonElement {
   } else {
     btn.textContent = item.label;
   }
-  btn.setAttribute('aria-label', item.title);
-  attachTooltip(btn, item.title);
-  // mousedown + preventDefault để không mất selection trong #content
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, item.title);
   btn.addEventListener('click', () => invokeItem(item));
   return btn;
 }
@@ -810,9 +1099,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   } else {
     main.textContent = item.label;
   }
-  main.setAttribute('aria-label', item.title);
-  attachTooltip(main, item.title);
-  main.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(main, item.title);
 
   const divider = document.createElement('span');
   divider.className = 'split-divider';
@@ -822,9 +1109,7 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
   caret.className = 'split-caret';
   caret.innerHTML = CARET_DOWN_ICON;
   const dropdownTitle = item.dropdownTitle ?? `${item.title} — more options`;
-  caret.setAttribute('aria-label', dropdownTitle);
-  attachTooltip(caret, dropdownTitle);
-  caret.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(caret, dropdownTitle);
 
   const popover = buildPopover('toolbar-split-popover');
   if (item.id) {
@@ -837,6 +1122,13 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       sep.className = 'toolbar-popover-sep';
       popover.appendChild(sep);
     }
+    if (entry.groupCaption) {
+      // US-4.27: caption nhóm (không tương tác) trước hàng đầu mỗi nhóm.
+      const caption = document.createElement('div');
+      caption.className = 'toolbar-popover-caption';
+      caption.textContent = entry.groupCaption;
+      popover.appendChild(caption);
+    }
     addPopoverRow(
       popover,
       entry.icon,
@@ -844,22 +1136,15 @@ function buildSplitButtonEl(item: ToolbarItem): HTMLElement {
       entry.badge,
       () => {
         closePopover();
-        invokeAction(entry.action, item.opensAsyncPrompt);
+        invokeAction(entry.action, item.opensAsyncPrompt, entry.viewOnly);
       },
       entry.value,
       entry.onHoverPreview,
-      entry.onHoverCancel
+      entry.onHoverCancel,
+      entry.swatch
     );
   }
-  // Menu-only (vd palette US-19.10): mặt chính mở dropdown thay vì chạy action.
-  main.addEventListener('click', () => {
-    if (item.mainOpensDropdown) {
-      hideTooltip();
-      togglePopover(caret, popover);
-    } else {
-      invokeItem(item);
-    }
-  });
+  main.addEventListener('click', () => invokeItem(item));
   caret.addEventListener('click', () => {
     hideTooltip();
     togglePopover(caret, popover);
@@ -904,8 +1189,11 @@ export function initToolbar(contentEl: HTMLElement, toolbarEl: HTMLElement, cont
     const el = item.dropdown ? buildSplitButtonEl(item) : buildPlainButtonEl(item);
     toolbarEl.appendChild(el);
 
-    if (!inPinnedGroup) {
-      collapsibleEntries.push({ item, btn: el, sep });
+    // US-4.24: collapsibility do `collapsePriority` quyết định, KHÔNG do vị trí
+    // so với nhóm alignRight nữa — nên Zen (nằm SAU Reading Mode alignRight) vẫn
+    // thu được, còn Link/Image (đứng trước) vẫn pinned.
+    if (item.collapsePriority !== undefined) {
+      collapsibleEntries.push({ item, btn: el, sep, priority: item.collapsePriority });
     }
   }
 
@@ -932,9 +1220,7 @@ function createMoreButton(): HTMLButtonElement {
   btn.className = 'toolbar-more';
   btn.innerHTML = MORE_ICON;
   btn.style.display = 'none';
-  btn.setAttribute('aria-label', 'More tools');
-  attachTooltip(btn, 'More tools');
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, 'More tools');
   btn.addEventListener('click', () => {
     hideTooltip();
     toggleOverflowMenu();
@@ -943,17 +1229,21 @@ function createMoreButton(): HTMLButtonElement {
 }
 
 /**
- * Nút "⋮" (kebab dọc) — gộp Copy "@file" cho Claude / View raw Markdown
- * source vào 1 popover, thay cho 2 nút luôn-hiện trước đây (US-4.6/US-4.14).
- * Cùng action/message gốc (`addToClaudeContext`/`viewSource`), chỉ đổi UI.
+ * "⋮" (vertical kebab) button — merges Copy "@file" reference / View raw
+ * Markdown source into 1 popover, replacing the 2 always-visible buttons
+ * from before (US-4.6/US-4.14). Same underlying action/message
+ * (`copyFileMention`/`viewSource`), only the UI changed.
  */
 function createMoreOptionsButton(): HTMLButtonElement {
   const btn = document.createElement('button');
   btn.type = 'button';
+  // Kebab KHÔNG bao giờ thu gọn (không có collapsePriority, ngoài toolbarItems):
+  // nó cùng nút "•••" là hai phần tử luôn-hiện duy nhất, nên mọi nút khác đã thu
+  // hết vào menu trước khi toolbar chật tới mức đụng kebab → nó là icon "ẩn CUỐI
+  // cùng". Class chỉ để CSS/test chọn được nút (kebab vốn không có id).
+  btn.className = 'toolbar-more-options';
   btn.innerHTML = MORE_OPTIONS_ICON;
-  btn.setAttribute('aria-label', 'More options');
-  attachTooltip(btn, 'More options');
-  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  wireTriggerButton(btn, 'More options');
 
   // invokeAction (không phải postMessage trần) để khôi phục focus về #content
   // sau khi chọn — quan trọng nhất khi kích hoạt bằng bàn phím (Tab + Enter):
@@ -962,9 +1252,9 @@ function createMoreOptionsButton(): HTMLButtonElement {
   // click, nên PHẢI có content.focus() tường minh — không thì focus kẹt lại
   // trên hàng vừa ẩn (display:none) thay vì quay về editor.
   const popover = buildPopover('toolbar-more-options-menu');
-  addPopoverRow(popover, CLAUDE_COPY_ICON, 'Copy "@file" for Claude Code chat', undefined, () => {
+  addPopoverRow(popover, FILE_MENTION_ICON, 'Copy "@file" reference', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'addToClaudeContext' }));
+    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }));
   });
   addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
     closePopover();
@@ -1035,19 +1325,24 @@ function recalcOverflow(): void {
   }
 
   moreBtn.style.display = '';
-  const hidden: CollapsibleEntry[] = [];
-  for (let i = collapsibleEntries.length - 1; i >= 0; i--) {
+  // US-4.24: thu theo `priority` TĂNG DẦN (nhỏ = thu trước), không theo vị trí
+  // mảng. Khi rộng ra sẽ hiện lại theo chiều ngược (priority lớn hiện lại trước)
+  // — chỉ cần dừng ngay khi vừa đủ chỗ.
+  const hiddenSet = new Set<CollapsibleEntry>();
+  const byPriority = [...collapsibleEntries].sort((a, b) => a.priority - b.priority);
+  for (const entry of byPriority) {
     if (toolbarEl.scrollWidth <= toolbarEl.clientWidth) {
       break;
     }
-    const entry = collapsibleEntries[i];
     entry.btn.style.display = 'none';
     if (entry.sep) {
       entry.sep.style.display = 'none';
     }
-    hidden.unshift(entry);
+    hiddenSet.add(entry);
   }
-  rebuildOverflowMenu(hidden);
+  // Menu liệt kê theo thứ tự hiển thị trên toolbar (collapsibleEntries đã theo
+  // đúng thứ tự mảng), không theo thứ tự bị thu.
+  rebuildOverflowMenu(collapsibleEntries.filter((e) => hiddenSet.has(e)));
 }
 
 /**
@@ -1079,9 +1374,15 @@ function rebuildOverflowMenu(hidden: CollapsibleEntry[]): void {
  * formatHeading) VÀ updateHeadingLabel() bên dưới — đảm bảo nút luôn hiển thị
  * đúng cấp mà click vào nó sẽ áp dụng/toggle.
  */
-function currentHeadingTag(): string {
+// window.getSelection()'s anchor as its nearest Element (or null) — the opening
+// every selection-scoped format helper (heading/blockquote) shares.
+function getAnchorElement(): Element | null {
   const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  return sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+}
+
+function currentHeadingTag(): string {
+  const anchor = getAnchorElement();
   const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
   return heading && content.contains(heading) ? heading.tagName.toLowerCase() : DEFAULT_HEADING;
 }
@@ -1101,8 +1402,7 @@ function updateHeadingLabel(): void {
  * heading → trở về đoạn văn (toggle).
  */
 function formatHeading(tag: string): void {
-  const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const anchor = getAnchorElement();
   if (!anchor) {
     return;
   }
@@ -1111,6 +1411,22 @@ function formatHeading(tag: string): void {
   }
   const block = anchor.closest('h1, h2, h3, h4, h5, h6, p') as HTMLElement | null;
   if (!block || !content.contains(block) || block === content) {
+    // HLR 22 Phase 2 (Bug #7), defense-in-depth for Group HrCaretTrap: when the
+    // anchor is the #content root ITSELF — the degenerate "caret in the gap next
+    // to an <hr>" selection that main.ts's ensureCaretSpotBeforeHr trap normally
+    // prevents — there is no real block to format, and execCommand('formatBlock')
+    // here absorbs the adjacent <hr> into a heading. Bail instead. Genuine
+    // uncharacterized shapes (caret in a tight <li>, <pre>...) still reach the
+    // legacy fallback below: their anchor is inside that element, not #content.
+    if (anchor === content) {
+      return;
+    }
+    // HLR 22 Phase 2.6: intentionally KEPT on legacy execCommand — this branch
+    // only fires for uncharacterized shapes (caret in a tight <li>, <pre>...,
+    // or no resolvable block at all), same deliberate-fallback policy as
+    // setBulletList/setNumberedList's unresolvable-range cases (2.3/2.4). The
+    // characterized p/heading path below never reaches execCommand
+    // (replaceBlockTag, Phase 2.5).
     document.execCommand('formatBlock', false, tag);
     ctx.scheduleSync();
     return;
@@ -1129,16 +1445,22 @@ function formatHeading(tag: string): void {
 /** Toggle blockquote — formatBlock lặp lại sẽ lồng quote, nên tự xử lý. */
 function toggleBlockquote(): void {
   const sel = window.getSelection();
-  const anchor = sel?.anchorNode ? closestElement(sel.anchorNode) : null;
+  const anchor = getAnchorElement();
   const bq = anchor?.closest('blockquote');
   if (bq && content.contains(bq)) {
     const saved = sel && sel.rangeCount > 0 ? { node: sel.anchorNode, offset: sel.anchorOffset } : null;
-    const parent = bq.parentNode;
+    // Remove only the quote LEVEL the caret sits in (the nearest blockquote) plus
+    // any quotes nested deeper inside it — its content drops one level up to the
+    // enclosing (higher) blockquote, which stays untouched.
     const firstChild: Node | null = bq.firstChild;
-    while (bq.firstChild) {
-      parent?.insertBefore(bq.firstChild, bq);
+    const quotes = [bq, ...Array.from(bq.querySelectorAll('blockquote'))];
+    for (const q of quotes.reverse()) {
+      const p = q.parentNode;
+      while (q.firstChild) {
+        p?.insertBefore(q.firstChild, q);
+      }
+      q.remove();
     }
-    bq.remove();
     if (saved?.node && saved.node.isConnected) {
       const range = document.createRange();
       try {
@@ -1154,7 +1476,16 @@ function toggleBlockquote(): void {
       content.focus();
     }
   } else {
-    document.execCommand('formatBlock', false, 'blockquote');
+    // HLR 22 Phase 2.6: characterized case (caret in a top-level p/heading) →
+    // wrapInBlockquote (direct-Range, canonical <blockquote><p>> shape, same
+    // markdown output). Anything else (li/td/pre..., or no resolvable block)
+    // keeps the legacy execCommand fallback unchanged, mirroring 2.3/2.4.
+    const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+    if (block && block.parentElement === content) {
+      ctx.dom.wrapInBlockquote(block);
+    } else {
+      document.execCommand('formatBlock', false, 'blockquote');
+    }
   }
   ctx.scheduleSync();
 }
@@ -1208,9 +1539,13 @@ function findListItemsBetween(parent: Element, before: Element | null, after: El
   return result;
 }
 
-/** Đặt lại selection = Range bao trọn từ items[0] đến items cuối — đảm bảo
- * execCommand gọi NGAY SAU đó (vd. đổi <ol>↔<ul>) áp lên đúng toàn bộ các
- * <li> vừa xử lý, không bị thu hẹp về caret đơn lẻ mà insertHTML để lại. */
+/** Đặt lại selection = Range bao trọn từ items[0] đến items cuối. Thao tác đổi
+ * kiểu list ngay sau đó ở đường CHÍNH giờ đi qua compute-then-commit primitive
+ * (computeRetag/UnwrapListRange → commitListOpDirect, HLR 22 Phase 2.3/2.4) vốn
+ * TỰ dựng range từ plan nên KHÔNG đọc selection này; reselection chỉ còn cần cho
+ * nhánh fallback execCommand('insert{Un}orderedList') còn giữ (khi plan = null)
+ * — execCommand cần selection trải đúng toàn bộ <li> vừa xử lý, không bị thu về
+ * caret đơn lẻ mà insertHTML để lại. */
 function reselectItems(items: HTMLLIElement[]): void {
   if (items.length === 0) {
     return;
@@ -1249,9 +1584,11 @@ function removeStrayEmptyParagraphNear(list: Element | null): void {
  * trực tiếp) — thao tác DOM trần không được trình duyệt ghi vào lịch sử
  * undo/redo gốc, cùng lý do đã sửa ở replaceBlockTag (dom-utils.ts) và
  * convertBlockToListItem (input-rules.ts). Trả về các <li> MỚI vừa chèn (xem
- * findListItemsBetween) để caller re-select đúng phạm vi nếu cần thao tác
- * execCommand tiếp theo — insertHTML để lại selection collapse về 1 điểm,
- * không đủ để execCommand sau đó áp lên toàn bộ targets.
+ * findListItemsBetween) để caller re-select đúng phạm vi cho nhánh fallback
+ * execCommand('insert{Un}orderedList') còn giữ (đổi kiểu list khi primitive trả
+ * null) — insertHTML để lại selection collapse về 1 điểm, không đủ để execCommand
+ * áp lên toàn bộ targets. Đường chính (computeRetag/UnwrapListRange →
+ * commitListOpDirect, HLR 22 Phase 2.3/2.4) tự dựng range nên không cần bước này.
  */
 function replaceListItems(items: HTMLLIElement[], mutate: (clone: HTMLLIElement) => void): HTMLLIElement[] {
   const parent = items[0].parentElement;
@@ -1305,6 +1642,33 @@ function syncTaskListClass(list: HTMLElement): void {
 }
 
 /**
+ * Build a list from a selection that is NOT yet inside a list, shared by the
+ * `!current` branches of `setBulletList`/`setNumberedList`. Two tiers:
+ *   1. A clean P/UL/OL span → `computeToList` (tight list; blank <p>s dropped as
+ *      spacing).
+ *   2. Otherwise the span contains an atom (<hr>/<table>/<pre>/<blockquote>/
+ *      heading) → `computeToListAroundAtoms`, which keeps each atom verbatim and
+ *      splits the list AROUND it (multi-root plan → `commitListOpDirect`).
+ * Never the corruption-prone legacy `execCommand('insert(Un)orderedList')`
+ * (bug 0717r3 #5/#11) — the same path `toggleTaskItem` already uses.
+ */
+function convertSelectionToList(ordered: boolean): void {
+  const blocks = resolveTopLevelBlocks();
+  if (blocks) {
+    commitListOp(computeToList(blocks, ordered), ctx.dom.placeCaretAtOffsets);
+    return;
+  }
+  const run = resolveTopLevelBlockRun();
+  if (!run) {
+    return;
+  }
+  const plan = computeToListAroundAtoms(run, ordered);
+  if (plan) {
+    commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+  }
+}
+
+/**
  * Nút bullet (•): nếu vùng chọn đang ở task list, bỏ checkbox trước khi đổi
  * kiểu — execCommand không phân biệt được <ul> thường với <ul> task-list
  * (cùng thẻ), nên gọi thẳng insertUnorderedList trên task list sẽ TOGGLE OFF
@@ -1313,11 +1677,15 @@ function syncTaskListClass(list: HTMLElement): void {
 function setBulletList(): void {
   const current = getListSelection();
   if (!current) {
-    document.execCommand('insertUnorderedList');
+    convertSelectionToList(false);
     return;
   }
   const { list, items } = current;
   const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // Tracks whichever <li> set is the LIVE target for the retag/unwrap below --
+  // `replaceListItems` detaches the original `items` nodes once it runs, so
+  // after checkbox stripping the live set is `inserted`, not `items`.
+  let targets = items;
   if (hasCheckbox) {
     const inserted = replaceListItems(items, stripCheckboxFrom);
     syncTaskListClass(list);
@@ -1325,30 +1693,68 @@ function setBulletList(): void {
       return; // đã là bullet thường sau khi bỏ checkbox, không cần execCommand
     }
     reselectItems(inserted);
+    targets = inserted;
+  }
+  // Caret/selection already in a list, Bullet clicked: an all-<ul> target
+  // range toggles off to plain <p>s (computeUnwrapListRange), an all-<ol>
+  // range converts to its own <ul> (computeRetagListRange) -- both split
+  // untouched siblings into their own list of the original type instead of
+  // splitting the whole list (HLR 22 Phase 2.3). Nested sublist on any target
+  // -> null -> unchanged legacy execCommand fallback.
+  // commitListOpDirect never lands on the browser's native undo stack, but
+  // that's not a regression here: `invokeAction` (the shared toolbar-click
+  // wrapper) always calls `ctx.syncNow()` right after the action runs,
+  // regardless of which DOM mechanism produced the change, and Ctrl+Z/Y in
+  // this extension is delegated entirely to VS Code's own TextDocument undo
+  // (never the browser's native stack) -- same reasoning as list-ops.ts's
+  // outdent/indent wiring in main.ts.
+  const plan = list.tagName === 'UL' ? computeUnwrapListRange(list, targets) : computeRetagListRange(list, targets, false);
+  if (plan) {
+    commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+    return;
   }
   document.execCommand('insertUnorderedList');
   removeStrayEmptyParagraphNear(list);
 }
 
 /**
- * Nút numbered (1.): tương tự setBulletList — bỏ checkbox trước nếu có, để
- * execCommand('insertOrderedList') chuyển đúng <ul>→<ol> thay vì phó mặc cho
- * trình duyệt xử lý <li> còn lẫn checkbox trong danh sách số.
+ * Nút numbered (1.): đối xứng với setBulletList (HLR 22 Phase 2.4).
+ *   - Chưa ở trong list: dựng list qua convertSelectionToList (computeToList cho
+ *     span P/UL/OL "chặt", hoặc computeToListAroundAtoms khi có atom) — không còn
+ *     execCommand('insertOrderedList') vốn rò rỉ <p><ol>…</ol></p> / corrupt gần
+ *     <hr>/table (xem list-verbs-audit, bug 0717r3 #5).
+ *   - Đang trong list: bỏ checkbox trước nếu có (như bullet), rồi <ol> đích →
+ *     toggle off về <p> (computeUnwrapListRange), <ul> đích → đổi thành <ol>
+ *     (computeRetagListRange). Sublist lồng trong <li> đích → null → fallback
+ *     execCommand cũ, không đổi hành vi.
+ * commitListOpDirect không nằm trên native undo stack, nhưng không phải hồi
+ * quy: invokeAction luôn gọi ctx.syncNow() ngay sau action và Ctrl+Z/Y ở
+ * extension này đều uỷ cho TextDocument (xem lý do ở setBulletList).
  */
 function setNumberedList(): void {
   const current = getListSelection();
-  if (current) {
-    const hasCheckbox = current.items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
-    if (hasCheckbox) {
-      const inserted = replaceListItems(current.items, stripCheckboxFrom);
-      syncTaskListClass(current.list);
-      reselectItems(inserted);
-    }
+  if (!current) {
+    convertSelectionToList(true);
+    return;
+  }
+  const { list, items } = current;
+  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // Tracks the LIVE <li> set for the retag/unwrap below -- replaceListItems
+  // detaches the original `items` nodes once it runs (same note as setBulletList).
+  let targets = items;
+  if (hasCheckbox) {
+    const inserted = replaceListItems(items, stripCheckboxFrom);
+    syncTaskListClass(list);
+    reselectItems(inserted);
+    targets = inserted;
+  }
+  const plan = list.tagName === 'OL' ? computeUnwrapListRange(list, targets) : computeRetagListRange(list, targets, true);
+  if (plan) {
+    commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+    return;
   }
   document.execCommand('insertOrderedList');
-  if (current) {
-    removeStrayEmptyParagraphNear(current.list);
-  }
+  removeStrayEmptyParagraphNear(list);
 }
 
 /** Phần tử con TRỰC TIẾP của #content chứa `node` — dò bằng parentElement (không phải
@@ -1361,70 +1767,150 @@ function topLevelChildContaining(node: Node): Element | null {
   return el;
 }
 
+/**
+ * Resolve one Range boundary (container + offset) to the top-level child of
+ * `content` it sits in. Normally delegates to `topLevelChildContaining`, but
+ * also handles Chrome placing the boundary ON `content` itself (Ctrl+A /
+ * select-to-edge, where the offset indexes `content`'s children) by clamping to
+ * a real child — otherwise those selections would resolve to null and the caller
+ * would silently no-op. `isEnd` picks the child just before the end offset.
+ */
+function boundaryTopLevelChild(container: Node, offset: number, isEnd: boolean): Element | null {
+  if (container === content) {
+    const kids = content.children;
+    if (kids.length === 0) {
+      return null;
+    }
+    const idx = Math.max(0, Math.min(isEnd ? offset - 1 : offset, kids.length - 1));
+    return kids[idx];
+  }
+  return topLevelChildContaining(container);
+}
+
+/**
+ * Walk the contiguous run of top-level children of `content` spanned by the
+ * current selection ([startTop..endTop]). `accept` decides per block whether to
+ * keep it in the run (true) or abandon the whole run (false → null). Returns
+ * null if there's no selection or a boundary doesn't resolve to a top-level
+ * child of `content` (e.g. selection outside `content`). Shared by
+ * `resolveTopLevelBlocks` (strict — only characterized/droppable blocks) and
+ * `resolveTopLevelBlockRun` (permissive — keep everything incl. atoms).
+ */
+function resolveSelectionBlockRun(accept: (el: Element) => boolean): Element[] | null {
+  const sel = window.getSelection();
+  const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  if (!range) {
+    return null;
+  }
+  const startTop = boundaryTopLevelChild(range.startContainer, range.startOffset, false);
+  const endTop = boundaryTopLevelChild(range.endContainer, range.endOffset, true);
+  if (!startTop || !endTop) {
+    return null;
+  }
+  const blocks: Element[] = [];
+  for (let el: Element | null = startTop; el; el = el.nextElementSibling) {
+    if (!accept(el)) {
+      return null;
+    }
+    blocks.push(el);
+    if (el === endTop) {
+      break;
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Resolve the top-level blocks spanned by the current selection, for the
+ * `!current` (not-yet-in-a-list) branches of `setBulletList`/`setNumberedList`/
+ * `toggleTaskItem` to feed `computeToList` — the single shared resolver since
+ * HLR 22 Phase 2.7 (toggleTaskItem's former inline startTop/endTop walk was
+ * consolidated onto it). Returns null if any spanned block is outside the
+ * characterized/droppable set (bails to the caller's fallback).
+ */
+function resolveTopLevelBlocks(): Element[] | null {
+  // Strict: computeToList is only characterized for P/UL/OL. Anything else in
+  // the span (a content-bearing atom like <table>/<pre>/<blockquote>/heading,
+  // OR a separator like <hr>) bails to null, so the caller routes through the
+  // atom-aware computeToListAroundAtoms path (which splits the list around atoms
+  // and keeps them verbatim) instead — never dropping/mangling them. A blank
+  // <p> IS P/UL/OL-listable, so blank-line dropping still happens cleanly here
+  // via computeToList (bug 0717 round3 #5, Group ListVerbBlankDrop).
+  return resolveSelectionBlockRun((el) => el.tagName === 'P' || el.tagName === 'UL' || el.tagName === 'OL');
+}
+
+/**
+ * Like `resolveTopLevelBlocks`, but returns the FULL contiguous run of
+ * top-level children between the selection's boundaries INCLUDING content-
+ * bearing atom blocks (table/pre/blockquote/heading) instead of bailing on
+ * them. Feeds `computeToListAroundAtoms`, which splits the list around atoms
+ * (and converts headings) rather than corrupting via native execCommand (bug
+ * 0717r3 #11). Returns null only if a boundary doesn't resolve to a top-level
+ * child of `content`. A boundary inside a table cell resolves (via
+ * `topLevelChildContaining`) to the whole <table>, so a partial/in-cell
+ * selection yields an all-atom run — computeToListAroundAtoms then no-ops.
+ */
+function resolveTopLevelBlockRun(): Element[] | null {
+  return resolveSelectionBlockRun(() => true);
+}
+
 function toggleTaskItem(): void {
   const current = getListSelection();
 
   if (!current) {
     // Not inside a list yet → build a list for the whole selection first.
-    const sel = window.getSelection();
-    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-    const startTop = range ? topLevelChildContaining(range.startContainer) : null;
-    const endTop = range ? topLevelChildContaining(range.endContainer) : null;
-    const before = startTop?.previousElementSibling ?? null;
-
+    // HLR 22 Phase 2.7: the former inline startTop/endTop walk + hand-built
+    // tight-<ul> insertHTML (the per-feature workaround for bug #3's
+    // execCommand('insertUnorderedList') multi-<ul>/loose-list splits) is
+    // consolidated onto the same resolveTopLevelBlocks + computeToList/
+    // commitListOp pair setBulletList already uses — identical tight-<ul>
+    // shape, blank-line skipping, and single-insertHTML undo step, one shared
+    // implementation instead of two.
     let freshItems: HTMLLIElement[] = [];
+    const blocks = resolveTopLevelBlocks();
 
-    if (startTop && endTop) {
-      // Main path (bug #3): build ONE "tight" <ul> (content sits directly in
-      // <li>, no wrapping <p>) from every top-level block in the selection and
-      // insert it in a single shot via insertHTML — NOT
-      // execCommand('insertUnorderedList'), because Chrome tends to split a
-      // selection spanning several separate paragraphs into MULTIPLE <ul>s
-      // and/or keep child <p>s as a "loose" list. Observed fallout (bug report
-      // #3): the first item got split into its own <ul> → a stray bullet "•"
-      // showed up next to the checkbox, and turndown serialized the loose item
-      // with an extra blank line. A single tight <ul> eliminates both. insertHTML
-      // (instead of raw DOM ops) so Ctrl/Cmd+Z undoes it in one step (same
-      // reasoning as convertBlockToListItem/input-rules.ts).
-      const itemsHtml: string[] = [];
-      for (let el: Element | null = startTop; el; el = el.nextElementSibling) {
-        if (el.tagName === 'UL' || el.tagName === 'OL') {
-          el.querySelectorAll(':scope > li').forEach((li) =>
-            itemsHtml.push(li.innerHTML.trim() ? li.innerHTML : '<br>')
-          );
-        } else {
-          itemsHtml.push(el.innerHTML.trim() ? el.innerHTML : '<br>');
-        }
-        if (el === endTop) {
-          break;
-        }
-      }
-      if (itemsHtml.length) {
-        const html = `<ul>${itemsHtml.map((h) => `<li>${h}</li>`).join('')}</ul>`;
-        const replaceRange = document.createRange();
-        replaceRange.setStartBefore(startTop);
-        replaceRange.setEndAfter(endTop);
-        sel?.removeAllRanges();
-        sel?.addRange(replaceRange);
-        document.execCommand('insertHTML', false, html);
-
-        // The just-inserted <ul> is deterministically at this position — read
-        // its own children directly instead of sweeping an unbounded sibling
-        // range (bug #10: a stale/unresolved end boundary must never leak into
-        // which <li>s get a checkbox).
-        const insertedList = before ? before.nextElementSibling : content.firstElementChild;
-        if (insertedList) {
-          freshItems = Array.from(insertedList.querySelectorAll(':scope > li')) as HTMLLIElement[];
-        }
+    if (blocks) {
+      // Captured BEFORE the commit — the just-inserted <ul> is then
+      // deterministically at this position; read its own children instead of
+      // sweeping an unbounded sibling range (bug #10: a stale/unresolved end
+      // boundary must never leak into which <li>s get a checkbox).
+      const before = blocks[0].previousElementSibling;
+      commitListOp(computeToList(blocks, false), ctx.dom.placeCaretAtOffsets);
+      const insertedList = before ? before.nextElementSibling : content.firstElementChild;
+      if (insertedList) {
+        freshItems = Array.from(insertedList.querySelectorAll(':scope > li')) as HTMLLIElement[];
       }
     } else {
-      // Rare fallback — block boundary couldn't be resolved (e.g. no
-      // selection) → fall back to the old execCommand behavior, then re-resolve
-      // the list it just created via getListSelection() instead of sweeping.
-      document.execCommand('insertUnorderedList');
-      const created = getListSelection();
-      if (created) {
-        freshItems = created.items;
+      // Uncharacterized shape — the selection spans a content-bearing block
+      // outside computeToList's P/UL/OL set (a <table>/<pre>/<blockquote>/
+      // heading). Instead of the corruption-prone native
+      // execCommand('insertUnorderedList') (bug 0717r3 #11: it merged an
+      // unrelated pre-existing <ul> and demoted an intervening heading),
+      // build the list ourselves with computeToListAroundAtoms: convertible
+      // blocks (incl. headings) become <li>s while each atom block is kept
+      // verbatim, so the list splits AROUND it. commitListOpDirect (not
+      // commitListOp) because the plan is multi-root — and, like the rest of
+      // this module's raw-DOM ops, it lands as one host TextDocument edit, so
+      // a single Ctrl+Z reverts only this edit (the entangled-undo half of #11).
+      const run = resolveTopLevelBlockRun();
+      if (!run) {
+        return;
+      }
+      // Snapshot the boundaries BEFORE the commit — commitListOpDirect creates
+      // brand-new nodes, so the fresh list(s) can only be found by position,
+      // between the untouched siblings just outside the replaced range.
+      const before = run[0].previousElementSibling;
+      const after = run[run.length - 1].nextElementSibling;
+      const plan = computeToListAroundAtoms(run, false);
+      if (!plan) {
+        return; // no convertible block (e.g. selection resolved to only a table) → no-op
+      }
+      commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+      const start = before ? before.nextElementSibling : content.firstElementChild;
+      for (let el: Element | null = start; el && el !== after; el = el.nextElementSibling) {
+        if (el.tagName === 'UL' || el.tagName === 'OL') {
+          freshItems.push(...(Array.from(el.querySelectorAll(':scope > li')) as HTMLLIElement[]));
+        }
       }
     }
 
@@ -1443,28 +1929,62 @@ function toggleTaskItem(): void {
   if (targets.length === 1) {
     const existing = findTaskCheckbox(targets[0]);
     if (existing) {
+      // Bỏ checkbox thì trả item về ĐOẠN VĂN THƯỜNG (<p>), không để trơ lại
+      // thành bullet — cùng chiều toggle-off của nút Bullet/Numbered
+      // (setBulletList/setNumberedList dùng chung computeUnwrapListRange, bug
+      // ExcelCmd #5). Hàm này tách list quanh target và tự mang lại
+      // `contains-task-list` cho các item trước/sau còn là task, nên KHÔNG gỡ
+      // class khỏi cả list bằng tay (sẽ mất checkbox marker của các item còn
+      // lại); chỉ nhánh fallback (sublist lồng → plan null) mới cần gỡ.
       stripCheckboxFrom(targets[0]);
-      list.classList.remove('contains-task-list');
-      if (list.tagName === 'UL' && list.children.length === 1) {
-        // <ul> chỉ tạo riêng cho item này (do nhánh !current ở trên) → bỏ
-        // checkbox lần 2 phải về lại đoạn văn thường, không được để trơ lại
-        // thành bullet.
+      const plan = computeUnwrapListRange(list, targets);
+      if (plan) {
+        commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+      } else {
+        list.classList.remove('contains-task-list');
         document.execCommand('insertUnorderedList');
         removeStrayEmptyParagraphNear(list);
       }
     } else {
-      // Checkbox độc lập với kiểu list (bullet/numbered) — markdown-it-task-
-      // lists và turndown đều không phân biệt <ol>/<ul>, nên KHÔNG ép đổi
-      // sang <ul>: giữ nguyên số thứ tự nếu list đang là <ol> (xem CSS riêng
-      // cho ol.contains-task-list/ul.contains-task-list ở markdown.css).
-      addCheckbox(targets[0]);
+      // <ol> đích → tách item ra <ul class="contains-task-list"> riêng, các item
+      // trước/sau giữ nguyên <ol> (giống setBulletList/setNumberedList retag-split
+      // cho TC2.3c/2.4c). Nếu addCheckbox tại chỗ, item sẽ thành "2. [ ] Bravo"
+      // (vừa số vừa checkbox) và class contains-task-list gắn lên cả <ol> khiến
+      // padding-left tụt còn 1.2em (markdown.css) → Alpha/Charlie bị đẩy lệch
+      // trái (bug ExcelCmd #3). Sublist lồng trong <li> đích → null → fallback.
+      // <ul> đích giữ nguyên addCheckbox tại chỗ: "- [ ] x" trong bullet list là
+      // markdown hợp lệ, checkbox độc lập kiểu list (markdown-it-task-lists và
+      // turndown không phân biệt <ol>/<ul>).
+      const plan = list.tagName === 'OL' ? computeTaskifyListRange(list, targets) : null;
+      if (plan) {
+        commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+      } else {
+        addCheckbox(targets[0]);
+      }
     }
     return;
   }
 
   // Nhiều <li> đang được chọn → convert TOÀN BỘ sang cùng chiều (thêm hoặc bỏ
-  // checkbox), không chỉ mỗi item chứa anchor.
-  const shouldAdd = !targets.every((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // checkbox), không chỉ mỗi item chứa anchor. Dùng findTaskCheckbox (nhận cả
+  // checkbox nằm trong <p> con của item LOOSE) thay vì query ':scope > input'
+  // chỉ bắt item tight — nếu không, chọn nhiều item loose sẽ bị coi là "chưa có
+  // checkbox" → nhầm sang nhánh add và toggle-off không làm gì (bug ExcelCmd #5 review).
+  const shouldAdd = !targets.every((item) => findTaskCheckbox(item));
+  if (!shouldAdd) {
+    // Bỏ checkbox cho cả vùng chọn → trả về đoạn văn thường (<p>), tách list
+    // quanh dải target — cùng chiều toggle-off của nhánh 1-item ở trên (bug
+    // ExcelCmd #5). Gỡ checkbox TRƯỚC để innerHTML dùng dựng <p> không còn thẻ
+    // <input> (nếu không, checkbox lọt vào <p> và serialize ra HTML thô). Sublist
+    // lồng → plan null → rơi xuống strip tại chỗ bên dưới (giữ hành vi cũ, các
+    // target lúc này đã bị gỡ checkbox nên replaceListItems chỉ còn là bullet).
+    targets.forEach((li) => stripCheckboxFrom(li));
+    const plan = computeUnwrapListRange(list, targets);
+    if (plan) {
+      commitListOpDirect(plan, ctx.dom.placeCaretAtOffsets);
+      return;
+    }
+  }
   replaceListItems(targets, (clone) => {
     const existing = clone.querySelector(':scope > input[type="checkbox"]');
     if (shouldAdd) {
@@ -1575,52 +2095,131 @@ function highlightNewCodeBlocks(): void {
   content.querySelectorAll('pre > code[class*="language-"]:not(.hljs)').forEach((el) => {
     hljs.highlightElement(el as HTMLElement);
   });
+  // Bug fix: a toolbar insert only produced a bare <pre><code> — the header bar
+  // (language label = in-place switch menu, Copy, Wrap) was injected only on the
+  // next host render, so it appeared just after an undo. Inject it now (idempotent,
+  // skips blocks that already have a header) so a fresh insert shows it immediately.
+  postProcessCodeHeaders(content, document);
 }
 
-function insertLink(): void {
-  const selectedText = window.getSelection()?.toString().trim() ?? '';
-  ctx.promptInput(
-    'Link URL:',
-    'https://… or type a file name in the project',
-    (url, displayText) => {
-      if (!url) {
-        return;
-      }
-      const sel = window.getSelection();
-      if (sel && !sel.isCollapsed) {
-        document.execCommand('createLink', false, url);
-      } else {
-        // encodeLinkPath CHỈ áp cho path tương đối (không có scheme) — URL
-        // tuyệt đối giữ nguyên, encode sẽ phá "://" và query string "?a=1&b=2"
-        // (bug đã xác nhận qua test/roundtrip/toolbar-insert.ts: path tương
-        // đối có dấu cách không encode làm markdown đổi hình dạng ở lần
-        // render→serialize thứ 2, xem insertImage() bên dưới).
-        const href = isAbsoluteUrl(url) ? url : encodeLinkPath(url);
-        document.execCommand(
-          'insertHTML',
-          false,
-          `<a href="${escapeAttr(href)}">${escapeHtml(displayText ?? url)}</a>`
-        );
-      }
-      ctx.scheduleSync();
-    },
-    { fileSearchQuery: selectedText }
-  );
-}
-
-function insertImage(): void {
-  ctx.promptInput('Image path (relative or URL):', '', (src) => {
-    if (!src) {
-      return;
+/**
+ * US-4.28: đổi ngôn ngữ của MỘT code block đã có. Ghi lại đúng 1 class
+ * `language-<lang>` trên `<code>` (turndown.ts `fencedCodeWithLang` đọc đúng
+ * class này ra fence info-string), reset token hljs cũ về text thô rồi tô sáng
+ * lại theo ngôn ngữ mới, và cập nhật nhãn trên header. Trả về `false` (no-op)
+ * khi ngôn ngữ chọn trùng ngôn ngữ hiện tại — caller bỏ qua việc phát 'edit'.
+ */
+function setCodeBlockLanguage(code: HTMLElement, lang: string): boolean {
+  // Block có thể đã bị gỡ khỏi DOM nếu một 'update' từ host render lại #content
+  // trong lúc popover còn mở (popover sống trên <body>): thao tác trên node mồ
+  // côi rồi syncNow sẽ serialize block LIVE mới → mất thay đổi. Bỏ qua an toàn.
+  if (!code.isConnected) {
+    return false;
+  }
+  // So khớp qua dạng chuẩn: block `language-js` + chọn JavaScript = no-op (không
+  // đổi token `js`→`javascript`, không phát 'edit' thừa) — xem CANONICAL_LANG.
+  if (canonicalLang(codeLangFromClass(code)) === lang) {
+    return false;
+  }
+  // Gỡ mọi class language-*/hljs cũ (giữ nguyên class khác nếu có), thêm đúng 1
+  // language mới. Iterate qua bản sao vì classList là live-list.
+  for (const c of Array.from(code.classList)) {
+    if (c.startsWith('language-') || c === 'hljs' || c.startsWith('hljs-')) {
+      code.classList.remove(c);
     }
-    // Cùng lý do với insertLink() ở trên: chỉ encode path tương đối, giữ
-    // nguyên URL tuyệt đối — trước đây KHÔNG encode gì cả (khác paste-image.ts
-    // insertImageAt, vốn luôn encode vì relPath luôn là path tương đối), khiến
-    // path có dấu cách không ổn định qua lần render→serialize thứ 2.
-    const href = isAbsoluteUrl(src) ? src : encodeLinkPath(src);
-    document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
-    ctx.scheduleSync();
+  }
+  code.classList.add(`language-${lang}`);
+  // Đánh dấu block đã đổi ngôn ngữ: nếu gốc là code THỤT LỀ, style override lúc
+  // serialize (applyBlockStyleOverrides từ blockMap gốc) sẽ ép lại "indented" và
+  // turndown bỏ token ngôn ngữ → switch serialize ra .md y hệt (không 'edit',
+  // nhãn revert). Marker này để applyBlockStyleOverrides bỏ trục code cho block,
+  // cho nó chuyển sang fence mang được ngôn ngữ vừa chọn. (data-* không leak vào
+  // .md — turndown fencedCodeWithLang dựng fence từ đầu, bỏ qua attr của <pre>.)
+  code.parentElement?.setAttribute(LANG_SWITCHED_ATTR, '');
+  // hljs v11 đánh dấu phần tử đã tô bằng data-highlighted → gỡ đi và trả nội
+  // dung về text thô (bỏ các <span> token cũ) để highlightElement tô lại từ đầu
+  // theo ngôn ngữ mới thay vì cảnh báo "already highlighted".
+  code.removeAttribute('data-highlighted');
+  const rawText = code.textContent ?? '';
+  code.textContent = rawText;
+  hljs.highlightElement(code);
+  const label = code.parentElement?.querySelector<HTMLElement>(`.${MD_CODE_LANG_CLASS}`);
+  if (label) {
+    label.textContent = codeLangDisplayName(lang);
+  }
+  return true;
+}
+
+/** Popover dùng lại cho bộ đổi ngôn ngữ tại chỗ — dựng 1 lần, mở lại nhiều block. */
+let codeLangPopover: HTMLDivElement | undefined;
+
+/**
+ * US-4.28: mở dropdown 9 ngôn ngữ (đúng danh sách US-4.10) neo theo nhãn ngôn
+ * ngữ `labelEl` trên header của một code block, đánh dấu ✓ ngôn ngữ hiện tại;
+ * chọn 1 hàng → đổi ngôn ngữ block đó tại chỗ rồi phát 'edit' (bỏ qua nếu trùng).
+ * Gọi từ listener delegated ở main.ts. Không đụng selection nên caret không lọt
+ * vào block (header vốn contenteditable=false), không kích hoạt state US-4.23.
+ */
+export function openCodeLangSwitcher(labelEl: HTMLElement): void {
+  const code = labelEl.closest('pre')?.querySelector<HTMLElement>(':scope > code');
+  if (!code) {
+    return;
+  }
+  if (!codeLangPopover) {
+    codeLangPopover = buildPopover('code-lang-popover');
+  }
+  const popover = codeLangPopover;
+  // Dựng lại hàng mỗi lần mở để closure bám đúng `<code>` đang thao tác.
+  popover.replaceChildren();
+  for (const c of CODE_LANGUAGES) {
+    addPopoverRow(
+      popover,
+      undefined,
+      c.label,
+      c.badge,
+      () => {
+        closePopover();
+        if (setCodeBlockLanguage(code, c.value)) {
+          ctx.syncNow();
+        }
+      },
+      c.value
+    );
+  }
+  // Dấu ✓ cho ngôn ngữ hiện tại của block — chuẩn hoá alias (`js`→`javascript`)
+  // để token rút gọn vẫn khớp đúng hàng dropdown (khớp data-dropdown-value).
+  const current = canonicalLang(codeLangFromClass(code));
+  popover.querySelectorAll<HTMLElement>('.toolbar-popover-item[data-dropdown-value]').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.dropdownValue === current);
   });
+  togglePopover(labelEl, popover);
+}
+
+/**
+ * Req 20 US-20.8 — the `@` trigger-popup opener installed by trigger-at.ts
+ * (main.ts wires it in via initToolbarTriggerAt, AFTER trigger-at.ts is
+ * constructed — same deferred-wiring reason as initBrokenRefBadge: initToolbar
+ * runs before trigger-at.ts exists in main.ts's init order).
+ */
+let openAtTriggerFromToolbar: ((imageMode: boolean) => void) | undefined;
+
+/** Call once from main.ts right after trigger-at.ts's controller is built. */
+export function initToolbarTriggerAt(openFromToolbar: (imageMode: boolean) => void): void {
+  openAtTriggerFromToolbar = openFromToolbar;
+}
+
+/**
+ * US-20.8: the old prompt.ts modal is gone — Link places the caret (or keeps
+ * the current selection) and hands off to the SAME `@` trigger-popup real
+ * typing opens (trigger-at.ts's openFromToolbar), no parallel implementation.
+ */
+function insertLink(): void {
+  openAtTriggerFromToolbar?.(false);
+}
+
+/** US-20.8: Image button — same `@` popup, image-mode (commits a bare `<img>`, see runAtInsertImage). */
+function insertImage(): void {
+  openAtTriggerFromToolbar?.(true);
 }
 
 export function toggleInlineCode(): void {
@@ -1656,6 +2255,272 @@ export function toggleInlineCode(): void {
   sel.removeAllRanges();
 }
 
+/**
+ * Req 20 US-20.2 — the `/` Define popup's group-1 block-level item ids. Each
+ * maps to the SAME underlying insert function the toolbar button already
+ * calls (formatHeading/setBulletList/setNumberedList/toggleBlockquote/
+ * insertTable/insertCodeBlock/insertMermaidFlowchart/ctx.insertMarkdown/
+ * ctx.toc.toggle) — no parallel implementation.
+ */
+export type TriggerDefineBlockId =
+  | 'heading-1'
+  | 'heading-2'
+  | 'heading-3'
+  | 'heading-4'
+  | 'heading-5'
+  | 'heading-6'
+  | 'bullet'
+  | 'numbered'
+  | 'blockquote'
+  | 'table'
+  | 'code-block'
+  | 'mermaid'
+  | 'math-block'
+  | 'hr'
+  | 'toc';
+
+/**
+ * Bug #9 (bug_General.md) — a `/`-triggered heading pick on an EMPTY line
+ * produces a blank, invisible heading. Pre-fill level-specific sample text
+ * ("Heading 1".."Heading 6") and select it so the next keystroke overwrites it.
+ * Runs ONLY after the trigger-path formatHeading (never the toolbar button) and
+ * ONLY when the heading came out empty — a line that already held text (Bug #10
+ * re-format) keeps that text as the heading content untouched.
+ */
+function prefillEmptyHeadingSample(id: TriggerDefineBlockId): void {
+  const anchor = getAnchorElement();
+  const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  if (!heading || !content.contains(heading)) {
+    return;
+  }
+  if ((heading.textContent ?? '').trim() !== '') {
+    return; // Bug #10: preserve the existing line text — no sample injection.
+  }
+  const level = id.slice(-1); // 'heading-2' -> '2'
+  heading.textContent = `Heading ${level}`;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(heading);
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+function runTriggerBlockAction(id: TriggerDefineBlockId): void {
+  switch (id) {
+    case 'heading-1':
+    case 'heading-2':
+    case 'heading-3':
+    case 'heading-4':
+    case 'heading-5':
+    case 'heading-6': {
+      const tag = id.replace('heading-', 'h'); // 'heading-2' -> 'h2'
+      // A `/` heading pick is an ABSOLUTE choice, not a toggle: picking the level
+      // the line already has must keep it a heading (formatHeading would toggle
+      // the same tag back to <p>). Only convert when the tag actually differs.
+      const block = getAnchorElement()?.closest('h1, h2, h3, h4, h5, h6, p') as HTMLElement | null;
+      if (!block || block.tagName.toLowerCase() !== tag) {
+        formatHeading(tag);
+      }
+      prefillEmptyHeadingSample(id);
+      return;
+    }
+    case 'bullet':
+      setBulletList();
+      return;
+    case 'numbered':
+      setNumberedList();
+      return;
+    case 'blockquote':
+      toggleBlockquote();
+      return;
+    case 'table':
+      insertTable();
+      return;
+    case 'code-block':
+      insertCodeBlock('javascript');
+      return;
+    case 'mermaid':
+      insertMermaidFlowchart();
+      return;
+    case 'math-block':
+      ctx.insertMarkdown(`$$${MATH_FORMULA}$$`);
+      return;
+    case 'hr':
+      document.execCommand('insertHTML', false, '<hr><p><br></p>');
+      return;
+    case 'toc':
+      // No standalone "insert a TOC block into the document" feature exists —
+      // this reuses the existing sidebar TOC panel toggle (fmt id 'toc-toggle').
+      ctx.toc.toggle();
+      return;
+  }
+}
+
+/**
+ * Shared preamble for every `@`/`/` trigger commit (US-20.1/20.2/20.3): delete
+ * the trigger+filter run (a clone of `deleteRange`, so the caller's own Range
+ * is left untouched), collapse there, and — since a block-level pick can leave
+ * a paragraph with zero children — append a `<br>` caret host (same safeguard
+ * as input-rules.ts's stripMarkerBeforeCaret). Sets the collapsed result as
+ * the live selection so the caller's own insert/action reads the right caret.
+ */
+function collapseSelectionAfterTriggerDelete(deleteRange: Range): void {
+  const range = deleteRange.cloneRange();
+  range.deleteContents();
+  range.collapse(true);
+  const block = closestElement(range.startContainer);
+  if (block && !block.firstChild) {
+    block.appendChild(document.createElement('br'));
+  }
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+/**
+ * Insert `node` at the current collapsed caret via the live Range and leave the
+ * caret right after it. Used by every trigger commit that adds content (`/date`
+ * text, `@` link/image): a direct Range.insertNode preserves the surrounding
+ * text byte-for-byte, whereas execCommand('insertText'/'insertHTML') drops an
+ * ASCII space that becomes trailing on the preceding text node (Bug #6 / the
+ * date-space trap runTriggerInsertDate documents).
+ */
+function insertNodeAtCaret(node: Node): void {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+/**
+ * Req 20 US-20.2 — run a `/` Define group-1/group-2 insert for the trigger
+ * popup: delete the `/`+filter run first, then the toolbar action, bracketed
+ * by flushPendingSync/syncNow (same contract as invokeAction) so the whole
+ * delete+insert lands in ONE host-side undo unit.
+ */
+export function runTriggerDefineInsert(id: TriggerDefineBlockId, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  runTriggerBlockAction(id);
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.2 — insert today's date at the caret (already collapsed after
+ * the `/`+filter run is deleted by the same contract as runTriggerDefineInsert).
+ * `text` is the already-formatted date string (trigger-slash.ts resolves the
+ * configurable `orcaEditor.trigger.dateFormat` deterministically before calling).
+ */
+export function runTriggerInsertDate(text: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  // Insert the date as a plain text node via the live Range rather than
+  // execCommand('insertText'): Chromium's insertText mangles an ASCII space
+  // sitting immediately before the caret (it treats the now-trailing space as
+  // collapsible and drops it), so `Today is /date` → date would lose the space
+  // between "is" and the date. A direct text-node insert preserves the
+  // surrounding text byte-for-byte.
+  insertNodeAtCaret(document.createTextNode(text));
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.3 — an Execute-group command item leaves no textual trace: just
+ * delete the `/`+filter run (single, self-contained undo step, same bracketing
+ * as runTriggerDefineInsert) and settle the caret. Called BEFORE the
+ * `executeCommand` message is dispatched, so a command that rebuilds the view
+ * (Reading Mode/Zen) never fires against a still-open popup or a stale anchor.
+ */
+export function runTriggerDeleteOnly(deleteRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.1 — collapsed-caret branch: delete the `@`+filter run (same
+ * preamble as runTriggerDefineInsert), then insert a brand-new `<a>` with both
+ * display text and href from scratch. Inserts via a live-Range `insertNode`
+ * rather than execCommand('insertHTML'): Chromium's insertHTML drops the ASCII
+ * space that ends the preceding text node when it becomes trailing (Bug #6 —
+ * `Hello @` → pick would eat the space, giving `HelloMyHeading`). A direct
+ * node insert preserves the surrounding text byte-for-byte, same as
+ * runTriggerInsertDate. Building the element via DOM APIs keeps href/text
+ * escaping automatic (no `escapeAttr`/`escapeHtml` string interpolation).
+ */
+export function runAtInsertLink(href: string, displayText: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  const anchor = document.createElement('a');
+  anchor.setAttribute('href', href);
+  anchor.textContent = displayText;
+  insertNodeAtCaret(anchor);
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.8 — Image toolbar button's `@`-popup commit: delete the
+ * trigger run (or the original selection it was invoked on) and insert a bare
+ * `<img>`, mirroring the deleted insertImage() modal exactly (`alt=""`, no
+ * alt-text UX invented). `href` arrives already-encoded (trigger-at.ts's
+ * targetsById runs `encodeLinkPath` once when building the Files group — same
+ * contract runAtInsertLink relies on), so no second encode pass here. Uses the
+ * same space-preserving node insert as runAtInsertLink (Bug #6).
+ */
+export function runAtInsertImage(href: string, deleteRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  collapseSelectionAfterTriggerDelete(deleteRange);
+  const img = document.createElement('img');
+  img.setAttribute('src', href);
+  img.setAttribute('alt', '');
+  insertNodeAtCaret(img);
+  ctx.syncNow();
+}
+
+/**
+ * Req 20 US-20.1 — active-selection branch: `@` was intercepted at keydown so
+ * it never touched the document; the ORIGINAL selection is restored here and
+ * only its `href` is set (`createLink`, display text untouched) — mirrors
+ * insertLink()'s non-collapsed branch exactly.
+ */
+export function runAtSetHrefOnSelection(href: string, selectionRange: Range): void {
+  ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(selectionRange);
+  document.execCommand('createLink', false, href);
+  ctx.syncNow();
+}
+
 // ---------------------------------------------------------------------------
 // Active-state sync theo caret (US-4.15) — Bold/Italic/Strikethrough/Inline
 // code/Blockquote/Bullet/Numbered/Task đồng bộ class `.active` (đã ship, xem
@@ -1684,6 +2549,38 @@ function setActive(id: string, active: boolean): void {
   document.getElementById(id)?.classList.toggle('active', active);
 }
 
+// US-4.23: nút bị vô hiệu khi caret nằm trong code block (design state f — chỉ
+// Link/Image). Key theo caret + danh sách id (không phải instance nút cụ thể)
+// nên vẫn là no-op an toàn sau khi Link/Image bị gỡ vào luồng @-popup
+// (US-20.1/20.8): getElementById trả null → bỏ qua.
+const CODE_BLOCK_DISABLED_BUTTONS = [
+  { id: 'fmt-link', name: 'Link' },
+  { id: 'fmt-image', name: 'Image' },
+];
+
+/**
+ * Bật/tắt trạng thái vô hiệu của Link/Image theo việc caret có trong code block
+ * không. Dùng aria-disabled (KHÔNG dùng thuộc tính `disabled` gốc, để nút vẫn
+ * nhận hover → tooltip vẫn hiện lời giải thích, đúng design state f); CSS bắt
+ * theo `[aria-disabled='true']`, click bị chặn ở invokeItem. aria-label giữ
+ * nguyên (lời giải thích chỉ ở tooltip) nên khi bật lại chỉ cần restore từ đó.
+ */
+function setCodeBlockDisabled(inCodeBlock: boolean): void {
+  for (const { id, name } of CODE_BLOCK_DISABLED_BUTTONS) {
+    const btn = document.getElementById(id);
+    if (!btn) {
+      continue;
+    }
+    if (inCodeBlock) {
+      btn.setAttribute('aria-disabled', 'true');
+      setTooltip(btn, `${name} — unavailable inside a code block`);
+    } else {
+      btn.removeAttribute('aria-disabled');
+      setTooltip(btn, btn.getAttribute('aria-label') ?? '');
+    }
+  }
+}
+
 /**
  * Tính lại + gán `.active` cho 8 nút ở trên. Bullet/Numbered dựa theo
  * `getListSelection()` (US-4.2) — CHỈ theo tag `<ul>`/`<ol>`, không loại trừ
@@ -1701,6 +2598,7 @@ function recomputeActiveFormatting(): void {
     for (const id of ACTIVE_SYNC_IDS) {
       setActive(id, false);
     }
+    setCodeBlockDisabled(false);
     return;
   }
 
@@ -1711,6 +2609,12 @@ function recomputeActiveFormatting(): void {
   const anchorEl = closestElement(anchor);
   const inlineCode = anchorEl?.closest('code') ?? null;
   setActive('fmt-inline-code', !!inlineCode && !inlineCode.closest('pre'));
+
+  // Code block = <pre> (US-4.23). Vô hiệu Link/Image khi caret ở trong — xét
+  // CẢ hai đầu selection: kéo chọn từ đoạn văn xuống một <pre> (anchor ngoài,
+  // focus trong) vẫn phải chặn, nếu không createLink sẽ bắc qua ranh code block.
+  const focusInPre = !!closestElement(focus)?.closest('pre');
+  setCodeBlockDisabled(!!anchorEl?.closest('pre') || focusInPre);
 
   const bq = anchorEl?.closest('blockquote') ?? null;
   setActive('fmt-blockquote', !!bq && content.contains(bq));

@@ -8,7 +8,8 @@
  * Trong ô bảng (td/th), heading/quote/hr/code không áp dụng (không hợp lý ở
  * đó) nhưng bullet/số/task list vẫn gõ được — xem applyCellListInputRule.
  */
-import { addCheckbox, closestElement, type DomHelpers } from './dom-utils';
+import { addCheckbox, closestElement, emptyParagraph, type DomHelpers } from './dom-utils';
+import { hasInputOwner } from './input-ownership';
 
 export interface InputRulesContext {
   scheduleSync: () => void;
@@ -23,12 +24,17 @@ export function initInputRules(contentEl: HTMLElement, context: InputRulesContex
   ctx = context;
 
   content.addEventListener('keydown', (e) => {
+    // Req 20 US-20.2: while a trigger overlay owns the keyboard, editor input
+    // rules must not fire — the overlay handles the key.
+    if (hasInputOwner()) {
+      return;
+    }
     // Bỏ qua khi đang gõ tiếng Việt (IME) hoặc có phím bổ trợ.
     if (e.isComposing || e.keyCode === 229 || e.metaKey || e.ctrlKey || e.altKey) {
       return;
     }
     if (e.key === ' ') {
-      if (applySpaceInputRule() || applyCellListInputRule()) {
+      if (applySpaceInputRule() || applyBlockquoteNestInputRule() || applyCellListInputRule()) {
         e.preventDefault();
       }
     } else if (e.key === 'Enter' && !e.shiftKey) {
@@ -109,29 +115,6 @@ function placeCaretAtEnd(el: Element): void {
   const sel = window.getSelection();
   sel?.removeAllRanges();
   sel?.addRange(range);
-}
-
-/**
- * Đặt caret ngay SAU checkbox vừa thêm vào một task item (gọi sau addCheckbox()).
- * addCheckbox() luôn chèn <input> làm con đầu tiên của <li> — nếu đặt caret vào
- * (li, 0) như placeCaretIn mặc định, offset 0 vẫn trỏ TRƯỚC checkbox (vì offset
- * đó tính theo chỉ số con của li, không neo vào text node cụ thể nào). Dùng
- * setStartAfter(checkbox) để offset trỏ đúng vị trí ngay sau checkbox, trước
- * phần text theo sau (nếu có).
- */
-function placeCaretAfterCheckbox(li: HTMLElement): void {
-  const checkbox = li.querySelector(':scope > input[type="checkbox"]');
-  const range = document.createRange();
-  if (checkbox) {
-    range.setStartAfter(checkbox);
-  } else {
-    range.selectNodeContents(li);
-  }
-  range.collapse(true);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  content.focus();
 }
 
 /**
@@ -242,6 +225,29 @@ function removeStrayEmptyParagraphAfter(list: Element | null): void {
   }
 }
 
+// Post-`<li>`-creation tail shared by the top-level and table-cell task-item
+// rules: add the checkbox, mark it checked for "[x]"/"[X]", place the caret.
+// The `<li>` creation + marker removal differ per call site and stay there.
+function finishTaskItem(li: HTMLLIElement, task: RegExpExecArray): void {
+  addCheckbox(li);
+  if (task[1] === 'x' || task[1] === 'X') {
+    li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
+  }
+  placeCaretAtBlockStart(li);
+}
+
+// Ordered-list start-number tail shared by the same two rules: a non-1 start
+// stamps `start` on the parent `<ol>`. Operates only on the created `<li>`.
+function applyOrderedStart(li: HTMLLIElement, ordered: RegExpExecArray): void {
+  const start = parseInt(ordered[1], 10);
+  if (start !== 1) {
+    const list = li.parentElement;
+    if (list && list.nodeName === 'OL') {
+      list.setAttribute('start', String(start));
+    }
+  }
+}
+
 /** Xử lý các input rule kích hoạt bằng Space. Trả về true nếu đã chuyển đổi. */
 function applySpaceInputRule(): boolean {
   const block = inputRuleParagraph();
@@ -260,7 +266,10 @@ function applySpaceInputRule(): boolean {
 
   if (marker === '>') {
     stripMarkerBeforeCaret(block);
-    document.execCommand('formatBlock', false, 'blockquote');
+    // HLR 22 Phase 2.6: `block` is a guaranteed top-level <p> here
+    // (inputRuleParagraph), so the direct-Range wrap applies unconditionally —
+    // no execCommand('formatBlock') and no legacy fallback needed.
+    ctx.dom.wrapInBlockquote(block);
     ctx.scheduleSync();
     return true;
   }
@@ -268,12 +277,7 @@ function applySpaceInputRule(): boolean {
   const task = /^\[( |x|X)?\]$/.exec(marker);
   if (task) {
     stripMarkerBeforeCaret(block);
-    const li = convertBlockToListItem(block, false);
-    addCheckbox(li);
-    if (task[1] === 'x' || task[1] === 'X') {
-      li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
-    }
-    placeCaretAfterCheckbox(li);
+    finishTaskItem(convertBlockToListItem(block, false), task);
     ctx.scheduleSync();
     return true;
   }
@@ -288,19 +292,44 @@ function applySpaceInputRule(): boolean {
   const ordered = /^(\d{1,9})[.)]$/.exec(marker);
   if (ordered) {
     stripMarkerBeforeCaret(block);
-    const li = convertBlockToListItem(block, true);
-    const start = parseInt(ordered[1], 10);
-    if (start !== 1) {
-      const list = li.parentElement;
-      if (list && list.nodeName === 'OL') {
-        list.setAttribute('start', String(start));
-      }
-    }
+    applyOrderedStart(convertBlockToListItem(block, true), ordered);
     ctx.scheduleSync();
     return true;
   }
 
   return false;
+}
+
+/**
+ * Trích dẫn lồng: khi caret ở đầu một <p> nằm TRỰC TIẾP trong <blockquote> và
+ * gõ "> " → bọc riêng đoạn đó vào một <blockquote> con. inputRuleParagraph cố
+ * tình bỏ qua ngữ cảnh blockquote (chỉ nhận <p> top-level), nên xử lý riêng ở
+ * đây. Chỉ hỗ trợ ">" — heading/list bên trong quote không thuộc phạm vi này.
+ * turndown serialize <blockquote> đệ quy nên quote lồng ra "> > ..." thay vì bị
+ * escape thành "\>" như khi để nguyên text "> ..." trong <p>.
+ */
+function applyBlockquoteNestInputRule(): boolean {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) {
+    return false;
+  }
+  const anchor = sel.anchorNode ? closestElement(sel.anchorNode) : null;
+  const block = anchor?.closest('p, h1, h2, h3, h4, h5, h6, li, td, th, pre, blockquote');
+  if (
+    !block ||
+    block.nodeName !== 'P' ||
+    block.parentElement?.nodeName !== 'BLOCKQUOTE' ||
+    !content.contains(block)
+  ) {
+    return false;
+  }
+  if (textBeforeCaret(block) !== '>') {
+    return false;
+  }
+  stripMarkerBeforeCaret(block);
+  ctx.dom.wrapInBlockquote(block as HTMLElement);
+  ctx.scheduleSync();
+  return true;
 }
 
 /**
@@ -343,21 +372,9 @@ function applyCellListInputRule(): boolean {
   del.deleteContents();
 
   if (task) {
-    const li = convertCellLineToListItem(cell, lineStart, false);
-    addCheckbox(li);
-    if (task[1] === 'x' || task[1] === 'X') {
-      li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
-    }
-    placeCaretAfterCheckbox(li);
+    finishTaskItem(convertCellLineToListItem(cell, lineStart, false), task);
   } else if (ordered) {
-    const li = convertCellLineToListItem(cell, lineStart, true);
-    const start = parseInt(ordered[1], 10);
-    if (start !== 1) {
-      const list = li.parentElement;
-      if (list && list.nodeName === 'OL') {
-        list.setAttribute('start', String(start));
-      }
-    }
+    applyOrderedStart(convertCellLineToListItem(cell, lineStart, true), ordered);
   } else {
     convertCellLineToListItem(cell, lineStart, false);
   }
@@ -417,6 +434,17 @@ function cellListMergeTarget(
 }
 
 /**
+ * Nội dung HTML của `range` (clone vào div tạm), fallback '<br>' khi rỗng để
+ * <li>/block mới luôn có caret host hợp lệ. Gom pattern lặp ở
+ * convertCellLineToListItem/applyTaskListEnterRule.
+ */
+function rangeToInnerHtml(range: Range): string {
+  const container = document.createElement('div');
+  container.appendChild(range.cloneContents());
+  return container.textContent ? container.innerHTML : '<br>';
+}
+
+/**
  * Rút "dòng" hiện tại trong ô bảng (từ lineStart tới <br>/<ul>/<ol> kế tiếp ở
  * cấp con trực tiếp, hoặc tới hết ô) thành một <li> — gộp vào list liền
  * trước nếu cùng loại (xem cellListMergeTarget), nếu không thì tạo list mới.
@@ -438,9 +466,7 @@ function convertCellLineToListItem(cell: HTMLElement, lineStart: number, ordered
   const lineRange = document.createRange();
   lineRange.setStart(cell, lineStart);
   lineRange.setEnd(cell, endIdx);
-  const container = document.createElement('div');
-  container.appendChild(lineRange.cloneContents());
-  const innerHtml = container.textContent ? container.innerHTML : '<br>';
+  const innerHtml = rangeToInnerHtml(lineRange);
 
   const listTag = ordered ? 'OL' : 'UL';
   const merge = cellListMergeTarget(cell, lineStart, listTag);
@@ -467,8 +493,7 @@ function applyEnterInputRule(): boolean {
 
   if (/^(-{3,}|\*{3,}|_{3,})$/.test(text)) {
     const hr = document.createElement('hr');
-    const after = document.createElement('p');
-    after.appendChild(document.createElement('br'));
+    const after = emptyParagraph();
     block.replaceWith(hr);
     hr.after(after);
     ctx.dom.placeCaretIn(after);
@@ -483,8 +508,7 @@ function applyEnterInputRule(): boolean {
     code.className = `language-${fence[1] || 'plaintext'}`;
     code.appendChild(document.createElement('br'));
     pre.appendChild(code);
-    const after = document.createElement('p');
-    after.appendChild(document.createElement('br'));
+    const after = emptyParagraph();
     block.replaceWith(pre);
     pre.after(after);
     ctx.dom.placeCaretIn(code);
@@ -532,15 +556,13 @@ function applyTaskListEnterRule(): boolean {
     return false;
   }
 
-  const container = document.createElement('div');
-  container.appendChild(afterRange.cloneContents());
-  const afterHtml = container.textContent ? container.innerHTML : '<br>';
+  const afterHtml = rangeToInnerHtml(afterRange);
   afterRange.deleteContents();
 
   const listTag = li.parentElement?.nodeName === 'OL' ? 'OL' : 'UL';
   const newLi = insertListItemViaExec(afterHtml, listTag, 'merge', li);
   addCheckbox(newLi);
-  placeCaretAfterCheckbox(newLi);
+  placeCaretAtBlockStart(newLi);
   ctx.scheduleSync();
   return true;
 }

@@ -4,6 +4,31 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.9.0\] - 2026-07-22
+
+### Added
+
+-   Type `@` to mention a file or heading: pick from a searchable popup, press Tab to accept the suggestion, and drop in a ready-made link. Selecting text first turns it into the link. The Insert Link and Insert Image buttons now use this same quick popup.
+-   Type `/` to insert anything without leaving the keyboard — headings, lists, quotes, code, tables, math, Mermaid diagrams, today's date, or a `References` section — offering only what fits where your cursor is.
+-   Type `/` to run actions too: toggle Reading Mode, Focus Mode, or the outline directly from the editor.
+-   Define and cross-link entities (use cases, requirements, etc.): tag any text as a named entity, then mention it anywhere with `@` — search by id or title, browse by namespace, or drill into a specific one. A mention inserts the entity's full name and links straight to where it's defined.
+-   Broken links and mentions are flagged as you write, with a warning marker, a hover explanation, and a one-click "Search again" to fix the target. A toolbar badge counts them and jumps you to the next one.
+-   New setting to switch between Simple and Advanced editing, controlling whether the `@` and `/` shortcuts appear.
+-   Pasting text next to a word now keeps a space between them, so words no longer run together.
+
+### Changed
+
+-   Reading Mode simplified to three clear choices — Standard, Sepia Comfort, and Paper Comfort — so switching reading styles is one obvious pick instead of juggling separate preset and palette menus.
+-   The toolbar now collapses formatting buttons first when space is tight, keeping Reading, Focus, and the outline within reach the longest.
+-   Horizontal rules (`---`) now stand out a little more clearly from heading underlines.
+
+### Fixed
+
+-   Turning Reading Mode, Focus, or the outline on/off no longer marks the file as unsaved.
+-   The `@` and `/` popups now type correctly with a Vietnamese IME, never leak what you typed into the document, and open upward when there's no room below.
+-   The broken-link tooltip stays put long enough to click "Search again", and relative links resolve more reliably.
+-   Zooming a Mermaid diagram now opens it fit-to-screen instead of tiny.
+
 ## \[0.8.0\] - 2026-07-17
 
 ### Added

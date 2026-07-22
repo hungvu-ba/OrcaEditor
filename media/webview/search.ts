@@ -182,12 +182,7 @@ export function initSearch(content: HTMLElement): SearchController {
     if (!supportsHighlight) {
       return;
     }
-    const others: Range[] = [];
-    for (let i = 0; i < matches.length; i++) {
-      if (i !== current) {
-        others.push(matches[i]);
-      }
-    }
+    const others = matches.filter((_, i) => i !== current);
     if (others.length) {
       CSS.highlights.set(MATCH_HL, new Highlight(...others));
     } else {

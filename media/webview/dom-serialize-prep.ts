@@ -27,8 +27,44 @@ export function prepareDomForSerialize(root: Element, doc: Document): void {
     comment.parentNode?.replaceChild(span, comment);
   }
   normalizeListDom(root);
+  dropEmptyNestedSublists(root);
   flattenSimpleTableCellLists(root, doc);
   normalizeNbsp(root);
+}
+
+/** Media/void content that makes a list item non-empty even with no text. */
+const NESTED_EMPTY_MEDIA_SELECTOR = 'img, input, video, audio, iframe, picture, svg, hr';
+
+/**
+ * Drop a NESTED sublist whose every <li> is empty (no text, no media — only a
+ * <br> caret placeholder or nothing). A truly-empty child bullet directly under
+ * a parent's text line has no faithful CommonMark serialization: with a `-`
+ * bullet marker it serializes as "parentText\n    -", and a lone `-` line under
+ * a paragraph is a SETEXT H2 underline — so re-parsing turns the parent's text
+ * into a heading (reported: "Undo khi indent ở TC2.2c… - dưới Alpha/Bravo bị
+ * nhận diện thành heading"). turndown already drops a nested sublist whose <li>
+ * has ZERO children (the whole all-blank <ul> is isBlank), but a <li><br></li>
+ * is "non-blank" to turndown (a <br> is a void element), so its sublist
+ * survives and emits the trap. This unifies the two paths: an all-blank nested
+ * sublist is transient editing state (a freshly Tab-indented empty item never
+ * typed into), not document content, so it is removed before serialize — same
+ * "blank line in a list is spacing, not content" stance as list-ops' computeToList.
+ *
+ * TOP-LEVEL empty items are left untouched (they serialize as a safe "-" bullet
+ * on their own line, not a setext underline, and must round-trip — see
+ * test/roundtrip/lists.ts). A nested sublist that mixes blank and non-blank
+ * items is also left untouched: its blank items are sibling bullets, not a
+ * setext trap.
+ */
+function dropEmptyNestedSublists(root: Element): void {
+  const isBlankItem = (li: Element): boolean =>
+    (li.textContent ?? '').trim() === '' && !li.querySelector(NESTED_EMPTY_MEDIA_SELECTOR);
+  for (const list of Array.from(root.querySelectorAll('ul ul, ul ol, ol ul, ol ol'))) {
+    const items = Array.from(list.children).filter((c) => c.nodeName === 'LI');
+    if (items.length > 0 && items.every(isBlankItem)) {
+      list.remove();
+    }
+  }
 }
 
 /**
@@ -46,6 +82,21 @@ export function prepareDomForSerialize(root: Element, doc: Document): void {
  * từ bước xoá gốc, không hiểu ngữ nghĩa "list phân cấp" để phục hồi đúng cây.
  * Chuẩn hóa về cây lồng nhau hợp lệ, khớp đúng mức thụt lề người dùng nhìn thấy,
  * trước khi phát hiện độ phức tạp và flatten.
+ *
+ * HLR 22 Phase 3 (guarded patch-removal) audit outcome — Rules A/B are NOT dead
+ * after the Phase 2 verb replacement and MUST stay. The primary indent/outdent
+ * and bullet/number toolbar paths now build clean `li > ul` via the list-ops
+ * primitive, but the narrow execCommand fallbacks intentionally kept for the
+ * uncharacterized cases still emit these malformed shapes on the live DOM and
+ * reach this normalizer through the serialize clone:
+ *  - Rule B `ul>ul` / Rule A `li>li`: `execCommand('indent' | 'outdent')` in the
+ *    main.ts Tab handler (non-collapsed selection, or top-level/first `<li>` where
+ *    computeIndent/computeOutdent return null).
+ *  - Rule B `ul>ul`: `execCommand('insert{Un}orderedList')` in toolbar
+ *    setBulletList/setNumberedList/toggleTaskItem (nested-sublist target → plan null).
+ * Rule C additionally has delete/cut/undo as its own independent source (that path
+ * self-heals live via fixOrphanNestedListItems, which runs Rule C only). Do not
+ * delete any rule while those execCommand fallbacks exist.
  */
 export function normalizeListDom(root: Element): void {
   const isList = (n: Node | null): boolean => !!n && (n.nodeName === 'UL' || n.nodeName === 'OL');
@@ -248,9 +299,8 @@ export function fillSequenceColumn(table: Element, newRow: Element): boolean {
   if (!tbody) {
     return false;
   }
-  const rows = Array.from(tbody.children).filter((el) => el.tagName === 'TR');
-  const firstCellOf = (r: Element): Element | undefined =>
-    Array.from(r.children).find((el) => el.tagName === 'TD' || el.tagName === 'TH');
+  const rows = Array.from(tbody.rows);
+  const firstCellOf = (r: HTMLTableRowElement): Element | undefined => r.cells[0];
   const others = rows.filter((r) => r !== newRow);
   if (others.length === 0) {
     return false;

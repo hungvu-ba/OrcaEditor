@@ -4,20 +4,32 @@
  * classifyLink (scheme allowlist) và một kiểm tra type-level của message
  * contract (src/shared/messages.ts). (finding C6)
  *
+ * Cũng gồm security tripwire đọc src/provider.ts dạng text (xem cuối file) —
+ * provider.ts import 'vscode' nên không import trực tiếp được ở đây.
+ *
  * Chạy: npm run test:unit
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
+  entityFollowingLabel,
+  entityFollowingPreview,
   imageNamePrefix,
   normalizeForSearch,
   relativePath,
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
-import type { HostToWebview, WebviewToHost } from '../src/shared/messages';
+import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
+import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
+import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { truncateDisplay } from '../media/webview/trigger-popup';
+import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
 let pass = 0;
 let fail = 0;
@@ -190,7 +202,7 @@ const fromWebview: WebviewToHost[] = [
   { type: 'edit', text: 'x' },
   { type: 'openLink', href: 'https://x' },
   { type: 'searchFiles', query: 'q', requestId: 1 },
-  { type: 'addToClaudeContext' },
+  { type: 'copyFileMention' },
   { type: 'viewSource' },
   { type: 'crossFileSearch:request', requestId: 1, query: 'q', scope: 'markdown', matchCase: false, wholeWord: true },
   { type: 'crossFileSearch:openResult', uri: 'file:///a.md', line: 0, character: 0, length: 1, matchText: 'x' },
@@ -198,32 +210,34 @@ const fromWebview: WebviewToHost[] = [
   { type: 'pasteImage', requestId: 1, mime: 'image/png', dataBase64: 'AA==' },
   { type: 'dropFile', requestId: 1, name: 'report.pdf', dataBase64: 'AA==' },
   { type: 'zenChanged', zen: true },
-  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
+  { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
+
 const readabilityFixture = {
-  enabled: false, preset: 'comfortable', palette: 'followTheme',
+  enabled: false, mode: 'standard',
   fontFamily: '', zen: false,
 } as const;
+const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' };
 const toWebview: HostToWebview[] = [
-  { type: 'init', text: 'x', config: {
+  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture,
+    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
   } },
-  { type: 'init', text: 'x', config: {
+  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture,
+    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
-  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true },
+  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced' },
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
   { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
   { type: 'dropFileResult', requestId: 1, relativePath: 'assets/report.pdf' },
   { type: 'zenChanged', zen: true },
-  { type: 'readingModeChanged', enabled: true, preset: 'comfortable', palette: 'sepia' },
+  { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
 check('contract: WebviewToHost phủ đủ 13 biến thể', fromWebview.length === 13);
 check('contract: HostToWebview phủ đủ 11 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 11);
@@ -340,6 +354,7 @@ function style(over: Partial<StyleOverride>): StyleOverride {
     em: null,
     strong: null,
     hr: null,
+    tableSeparator: null,
     ...over,
   };
 }
@@ -407,6 +422,447 @@ eq('style: "_" in link URL not em evidence', detectBlockStyle('[doc](https://ex.
 eq('style: intraword "_" after non-ASCII letter ignored', detectBlockStyle('chữ_ký here and *em*', 'paragraph').em, null);
 eq('style: escaped backslash before "_" → em "_"', detectBlockStyle('C:\\\\_dir_ here', 'paragraph').em, '_');
 eq('style: backtick-run span strips fully → em null', detectBlockStyle('Use ``x `_foo` y`` here', 'paragraph').em, null);
+
+// ---------------------------------------------------------------------------
+// reading-stats (US-10.7) — word count (CJK char = 1 word), read-time
+// estimate (200 WPM, 0 words → 0 min), hardcoded thousands separator.
+// ---------------------------------------------------------------------------
+
+eq('countWords: mixed non-CJK + CJK → 2 words + 5 chars = 7', countWords('Hello world こんにちは'), 7);
+// Supplementary-plane Han (CJK Extension B, U+20000) is still one word each,
+// not collapsed into a single run — a plain BMP-only regex would miss these.
+eq('countWords: supplementary-plane Han counts per character', countWords(String.fromCodePoint(0x20000, 0x20001, 0x20002)), 3);
+eq('estimateReadMinutes: 0 words → 0 min', estimateReadMinutes(0), 0);
+eq('estimateReadMinutes: 7 words → 1 min (floor never shown for real content)', estimateReadMinutes(7), 1);
+eq('formatCount: hardcoded comma, not toLocaleString', formatCount(1860), '1,860');
+
+// ---------------------------------------------------------------------------
+// Security tripwires (src/provider.ts) — khoá các bất biến từ security review
+// 2026-07-17 (xem Plan/Optimization Notes.md § Security hardening). Đọc source
+// dạng text vì provider.ts import 'vscode', không mock được trong test này.
+// ---------------------------------------------------------------------------
+
+const providerSrc = fs.readFileSync(path.join(process.cwd(), 'src/provider.ts'), 'utf8');
+
+// CSP lock — mọi nới lỏng directive phải sửa test này một cách CÓ CHỦ ĐÍCH,
+// không thể vô tình lọt qua.
+const REQUIRED_CSP_DIRECTIVES = [
+  "default-src 'none'",
+  "script-src 'nonce-${nonce}'",
+  "base-uri ${webview.cspSource}",
+  "form-action 'none'",
+  "frame-src 'none'",
+];
+for (const directive of REQUIRED_CSP_DIRECTIVES) {
+  check(`security: CSP giữ directive "${directive}"`, providerSrc.includes(directive));
+}
+check(
+  'security: img-src KHÔNG có "https:" (chặn ảnh remote/exfil qua .md độc hại)',
+  /img-src[^\n]*data:/.test(providerSrc) && !/img-src[^\n]*https:/.test(providerSrc)
+);
+check(
+  'security: script-src KHÔNG có "unsafe-inline" (chặn inline script tiêm từ .md)',
+  !/script-src[^\n]*unsafe-inline/.test(providerSrc)
+);
+
+// Security hardening (Plan/Optimization Notes.md § Security hardening) — S-1/S-2
+// đã fix: message boundary webview→host phải whitelist/gate trước khi dùng giá
+// trị. Scan trực tiếp source provider.ts để bám sát fix thật.
+const readingModeCaseBody =
+  providerSrc.match(/case 'readingModeChanged': \{([\s\S]*?)\n        \}/)?.[1] ?? '';
+check(
+  'security S-1: readingModeChanged whitelist mode trước khi lưu',
+  /READING_MODES/.test(readingModeCaseBody) && /msg\.mode/.test(readingModeCaseBody)
+);
+
+// Anchor vào ĐỊNH NGHĨA method (không phải chỗ gọi cùng tên đứng trước nó).
+const openResultBody = providerSrc.match(/private async openCrossFileSearchResult\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
+  'security S-2: crossFileSearch:openResult gate qua isInsideAllowedRoots trước khi mở',
+  /isInsideAllowedRoots/.test(openResultBody)
+);
+
+// Bug 1 (2026-07-18): file kéo-thả (không phải ảnh) giờ được orphan-cleanup như
+// ảnh dán — saveDroppedFile phải theo dõi file, cleanupOrphanImages phải gộp tập
+// theo dõi, và restore qua undo phải re-track. Scan source (host-fs, không có
+// harness vscode) — cùng kiểu guard như S-1/S-2.
+const saveDroppedBody = providerSrc.match(/private async saveDroppedFile\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: saveDroppedFile theo dõi asset để dọn khi mồ côi', /trackDroppedAsset/.test(saveDroppedBody));
+const cleanupBody = providerSrc.match(/private async cleanupOrphanImages\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: cleanupOrphanImages gộp file kéo-thả đã theo dõi', /droppedAssetsByDoc/.test(cleanupBody));
+const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /trackDroppedAsset/.test(restoreBody));
+
+// headingSiblingGaps (bug_General #2 follow-up): same-level/same-parent heading move scope.
+// Pure outline math on level arrays (null = non-heading block) — mirrors the I/O matrix cases.
+{
+  // #H1 / ##A + content / ##B  →  A(idx1) siblings = {A@1, B@3}; scope end = doc end.
+  const g = headingSiblingGaps([1, 2, null, 2], 1);
+  check('sibling: H2 siblings under one H1', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: scope end = doc end (no closing heading)', g.scopeEndGap === 4);
+  check('sibling: first sibling has no Move Up', g.moveUpGap === null);
+  check('sibling: Move Down past next sibling → scope end', g.moveDownGap === 4);
+}
+{
+  // Move the second sibling B up over A: [#H1, ##A, ##B] moving B(idx2).
+  const g = headingSiblingGaps([1, 2, 2], 2);
+  check('sibling: last sibling Move Up = previous sibling start', g.moveUpGap === 1);
+  check('sibling: last sibling has no Move Down', g.moveDownGap === null);
+}
+{
+  // Only child: #H1 / ##A  → A(idx1) has no sibling to swap with (immovable within scope).
+  const g = headingSiblingGaps([1, 2], 1);
+  check('sibling: only child has just itself', JSON.stringify(g.siblingStarts) === '[1]');
+  check('sibling: only child cannot Move Up/Down', g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Top-level H1s (parent = root): #A / #B / #C → all reorder among each other, scope = whole doc.
+  const g = headingSiblingGaps([1, 1, 1], 1);
+  check('sibling: top-level H1s are all siblings', JSON.stringify(g.siblingStarts) === '[0,1,2]');
+  check('sibling: top-level scope = whole doc', g.scopeEndGap === 3);
+  check('sibling: middle H1 Move Up=0, Move Down=3', g.moveUpGap === 0 && g.moveDownGap === 3);
+}
+{
+  // Different parents: #H1a / ##x / #H1b / ##y  → ##x(idx1) parent = H1a; ##y is NOT its sibling.
+  const g = headingSiblingGaps([1, 2, 1, 2], 1);
+  check('sibling: different-parent H2 excluded (scope ends at next H1)', JSON.stringify(g.siblingStarts) === '[1]' && g.scopeEndGap === 2, JSON.stringify(g));
+}
+{
+  // Nested levels: #H1 / ##A / ###a1 / ##B  → A(idx1) siblings under H1 = {A@1, B@3}; a1 is A's child.
+  const g = headingSiblingGaps([1, 2, 3, 2], 1);
+  check('sibling: nested child (###) is not a sibling of its parent (##)', JSON.stringify(g.siblingStarts) === '[1,3]', JSON.stringify(g));
+  check('sibling: A Move Down past its own [A, a1] section → scope end', g.moveDownGap === 4);
+}
+
+{
+  // Malformed outline: #H1 / ###X / ##Y  → X(idx1, H3) has NO same-level sibling. Its scope must
+  // END at the following H2 (level 2 < 3), so it can't be dragged below the H2 and nest under it.
+  const g = headingSiblingGaps([1, 3, 2], 1);
+  check('sibling: H3 scope stops at a following shallower H2 (no nest-under)', g.scopeEndGap === 2, JSON.stringify(g));
+  check('sibling: lone H3 among different levels is immovable', JSON.stringify(g.siblingStarts) === '[1]' && g.moveUpGap === null && g.moveDownGap === null);
+}
+{
+  // Skipped-level, two siblings: #H1 / ###A / ###B / ##C  → A,B are H3 siblings under H1; the
+  // trailing H2 (level 2 < 3) must bound the scope so Move Down keeps them BEFORE the H2, never
+  // nesting into it (blind review F1 repro B).
+  const g = headingSiblingGaps([1, 3, 3, 2], 1);
+  check('sibling: skipped-level scope ends at trailing shallower heading', g.scopeEndGap === 3, JSON.stringify(g));
+  check('sibling: first of two H3 siblings Move Down stays before the H2', g.moveDownGap === 3);
+}
+{
+  // Doc starting shallower-then-deeper reversed: ##A / #B  → A(idx0, H2) at root has no sibling and
+  // must not be draggable below the H1 (would nest under it). scope ends at the H1 (level 1 < 2).
+  const g = headingSiblingGaps([2, 1], 0);
+  check('sibling: top H2 before an H1 is immovable (scope ends at the H1)', g.scopeEndGap === 1 && JSON.stringify(g.siblingStarts) === '[0]' && g.moveDownGap === null, JSON.stringify(g));
+}
+
+// ---------------------------------------------------------------------------
+// EntityIndex (Req 21 US-21.2) — host-side workspace entity index. Pure module
+// (no 'vscode' import) so it bundles into this node harness like text-utils.
+// ---------------------------------------------------------------------------
+
+// caption:: parse — namespace = leading letters, id = remainder.
+{
+  const rows: IndexedEntity[] = parseEntities('file:///a.md', '## Login flow\n\ncaption::UC01\n');
+  eq('entity: caption parses namespace/id/title', rows, [
+    { namespace: 'UC', id: '01', file: 'file:///a.md', line: 2, title: 'Login flow', preview: '', label: '' },
+  ]);
+}
+
+// entityFollowingPreview (Req 21 hover tooltip) — shared truncation rule.
+{
+  eq('preview: short following text passes through trimmed', entityFollowingPreview(' Submit Leave Request'), 'Submit Leave Request');
+  eq('preview: empty when nothing follows', entityFollowingPreview(''), '');
+  eq('preview: whitespace-only follows -> empty', entityFollowingPreview('   '), '');
+  eq('preview: over 20 chars is capped with an ellipsis', entityFollowingPreview(' A very long description here'), 'A very long descript…');
+  eq('preview: stops at a colon (no ellipsis on a delimiter cut)', entityFollowingPreview(' Login: then more'), 'Login');
+  eq('preview: stops at a semicolon', entityFollowingPreview(' Login; then more'), 'Login');
+  eq('preview: stops at a backtick (inline code / command)', entityFollowingPreview(' run `cmd` now'), 'run');
+  eq('preview: stops at a newline', entityFollowingPreview(' first line\nsecond'), 'first line');
+  // Code-point-safe cap: an emoji straddling the 20th unit is not split into a broken half.
+  eq('preview: caps on code points, not UTF-16 units', entityFollowingPreview('1234567890123456789😀X'), '1234567890123456789😀…');
+}
+
+// entityFollowingLabel (Req 21 mention display) — same delimiter rule as the
+// preview but UNCAPPED (the entity's full human name), so a long label is kept.
+{
+  eq('label: passes the full following text through trimmed', entityFollowingLabel(' Submit Leave Request'), 'Submit Leave Request');
+  eq('label: NOT capped at 20 chars (unlike the preview)', entityFollowingLabel(' A very long description here'), 'A very long description here');
+  eq('label: empty when nothing follows', entityFollowingLabel('   '), '');
+  eq('label: stops at the same break delimiters', entityFollowingLabel(' Login: then more'), 'Login');
+}
+
+// parseEntities preview alignment: inline code BEFORE the caption must not shift
+// the following-text slice (stripInlineCode is length-preserving).
+{
+  const rows = parseEntities('file:///pv2.md', 'See `foo()` caption::UC01 The login flow\n');
+  eq('entity: preview correct when inline code precedes the caption', rows.map((r) => `${r.namespace}${r.id}=${r.preview}`), ['UC01=The login flow']);
+}
+
+// parseEntities carries the following-text preview per declaration.
+{
+  const rows = parseEntities('file:///pv.md', 'caption::UC01 Submit Leave Request\ncaption::BR05\n');
+  eq('entity: preview = text following the token', rows.map((r) => r.preview), ['Submit Leave Request', '']);
+  eq('entity: label = full following text (uncapped) per declaration', rows.map((r) => r.label), ['Submit Leave Request', '']);
+}
+
+// id match (both full id and partial) + title match — proves id-OR-title query.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '## Login flow\n\ncaption::UC01\n' }]);
+  check('entity: query by full id UC01', idx.query('UC01').length === 1);
+  check('entity: query by partial id 01', idx.query('01').length === 1);
+  check('entity: query by title token "login"', idx.query('login').length === 1);
+  check('entity: query by full title "Login flow"', idx.query('Login flow').length === 1);
+  check('entity: non-matching query returns nothing', idx.query('zzz').length === 0);
+  const q = idx.query('UC01')[0];
+  check('entity: namespace parsed as UC, id 01', q.namespace === 'UC' && q.id === '01');
+}
+
+// Bug C1 — a short token must not match mid-word inside a title. Typing `UC`
+// used to return `BR05`/`NAMESPACE_ID` because their titles contain "strUCtured".
+{
+  const idx = new EntityIndex();
+  idx.build([
+    { uri: 'file:///a.md', text: '# Login flow\ncaption::UC01\n' },
+    { uri: 'file:///b.md', text: '# Structured Entity Reference System\ncaption::BR05\n' },
+    { uri: 'file:///c.md', text: '# 21 Structured Entity Reference\ncaption::NAMESPACE_ID\n' },
+  ]);
+  const uc = idx.query('UC');
+  check('entity: query "UC" excludes mid-word title hits (BR05/NAMESPACE_ID)', uc.length === 1 && uc[0].namespace === 'UC');
+  check('entity: title word-start search still matches ("structured")', idx.query('structured').length === 2);
+}
+
+// Empty/malformed declarations are refused (US-21.1 empty-id).
+{
+  const rows = parseEntities('file:///m.md', 'caption::\ncaption::UC02\ncaption::123\n');
+  eq('entity: empty id + no-namespace declarations skipped', rows.map((r) => r.namespace + r.id), ['UC02']);
+}
+
+// Trailing punctuation the `\S+` capture absorbed from prose/markdown is stripped.
+{
+  const rows = parseEntities('file:///p.md', 'caption::UC01`,\ncaption::BR05).\ncaption::UC02\n');
+  eq('entity: trailing punctuation stripped from parsed token', rows.map((r) => r.namespace + r.id), ['UC01', 'BR05', 'UC02']);
+}
+
+// nearestEnclosingHeading — nesting, fence-immunity, above-any-heading.
+{
+  const lines = '# Top\n\n## Mid\n\ncaption::UC01\n\n### Deep\ncaption::UC02\n'.split('\n');
+  eq('entity: nearest heading picks the immediately-enclosing ## Mid', nearestEnclosingHeading(lines, 4), 'Mid');
+  eq('entity: nearest heading updates to ### Deep further down', nearestEnclosingHeading(lines, 7), 'Deep');
+}
+{
+  const lines = '# Real\n\n```\n# NotAHeading\n```\ncaption::UC01\n'.split('\n');
+  eq('entity: a "#"-looking line inside a fence is not a heading', nearestEnclosingHeading(lines, 5), 'Real');
+}
+{
+  const lines = 'caption::UC01\n\n# Later\n'.split('\n');
+  eq('entity: caption above any heading -> empty title', nearestEnclosingHeading(lines, 0), '');
+}
+
+// caption inside a fence is not indexed.
+{
+  const rows = parseEntities('file:///f.md', '# H\n\n```\ncaption::UC99\n```\ncaption::UC01\n');
+  eq('entity: caption inside a fence is skipped', rows.map((r) => r.id), ['01']);
+}
+
+// Bug D2 — a caption:: written inside an inline code span (backticks) is
+// documentation/example syntax, not a live declaration, so it is NOT indexed
+// (matches the webview's CODE-ancestor skip; PO 2026-07-22). Reproduces the
+// Requirement 21 file's `declare inline (`caption::UC01`)` examples.
+{
+  const rows = parseEntities('file:///d2.md', 'declare a named entity inline (`caption::UC01`) here\n');
+  eq('entity D2: caption inside inline code span is not indexed', rows.map((r) => r.namespace + r.id), []);
+}
+{
+  const rows = parseEntities('file:///d2.md', 'code `caption::UC01` but plain caption::RE02 counts\n');
+  eq('entity D2: only the plain caption on a mixed line is indexed', rows.map((r) => r.namespace + r.id), ['RE02']);
+}
+{
+  const rows = parseEntities('file:///d2.md', 'caption::UC01\n');
+  eq('entity D2: a plain (non-backticked) declaration is still indexed', rows.map((r) => r.namespace + r.id), ['UC01']);
+}
+{
+  // A lone backtick that never closes is not a code span — the token survives.
+  const rows = parseEntities('file:///d2.md', 'caption::UC01`, and more\n');
+  eq('entity D2: unmatched backtick is literal, token still indexed', rows.map((r) => r.namespace + r.id), ['UC01']);
+}
+
+// Incremental update — onFileChanged replaces just that file's rows.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '# H\ncaption::UC01\n' }]);
+  check('entity: initial row present', idx.query('UC01').length === 1);
+  idx.onFileChanged('file:///a.md', '# H\ncaption::UC02\n');
+  check('entity: old row gone after incremental update', idx.query('UC01').length === 0);
+  check('entity: new row present after incremental update', idx.query('UC02').length === 1);
+  idx.onFileChanged('file:///a.md', ''); // deleted / emptied file drops its rows.
+  check('entity: emptied file drops all its rows', idx.query('UC02').length === 0);
+}
+
+// Indexing state — isReady() false before build, true after.
+{
+  const idx = new EntityIndex();
+  check('entity: fresh index is not ready (indexing state)', idx.isReady() === false);
+  idx.build([]);
+  check('entity: index is ready after build', idx.isReady() === true);
+}
+
+// namespaces() — count-desc sort + case-insensitive fold to first-seen casing.
+{
+  const idx = new EntityIndex();
+  idx.build([
+    { uri: 'file:///a.md', text: 'caption::UC01\ncaption::UC02\ncaption::BR01\n' },
+    { uri: 'file:///b.md', text: 'caption::uc03\n' }, // case variant of UC.
+  ]);
+  const ns = idx.namespaces();
+  eq('entity: namespaces fold case-insensitively, sort by count desc', ns, [
+    { name: 'UC', count: 3 },
+    { name: 'BR', count: 1 },
+  ]);
+}
+
+// namespace filter narrows case-insensitively.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::UC01\ncaption::BR01\n' }]);
+  check('entity: namespace filter narrows (case-insensitive)', idx.query('', { namespace: 'uc' }).length === 1);
+  check('entity: empty query returns all when no namespace filter', idx.query('').length === 2);
+}
+
+// lookup() — EXACT id resolver for broken-reference existence (Req 21 US-21.3).
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::UC01\ncaption::BR02\n' }]);
+  check('entity: lookup exact id hits', idx.lookup('UC01').length === 1);
+  check('entity: lookup namespace is case-insensitive', idx.lookup('uc01').length === 1);
+  check('entity: lookup id is case-sensitive / exact (no fuzzy)', idx.lookup('UC0').length === 0);
+  check('entity: lookup empty id half returns none', idx.lookup('UC').length === 0);
+  check('entity: lookup unknown id returns none', idx.lookup('XX99').length === 0);
+}
+
+// canonicalEntityId — ns folded to lower, id kept; invalid tokens rejected.
+{
+  eq('occurrence: canonical folds ns to lower', canonicalEntityId('UC01'), 'uc01');
+  check('occurrence: canonical rejects all-letters (empty id)', canonicalEntityId('readme') === null);
+  check('occurrence: canonical rejects no-letter-prefix', canonicalEntityId('01') === null);
+}
+
+// scanEntityOccurrences — reference links only, fence-aware, canonical ids.
+{
+  const occ = scanEntityOccurrences('See [UC01](#UC01) and [again](other.md#uc01).\n\n[x](https://a.com)\n');
+  eq('occurrence: entity-ref links found (canonical), non-entity links skipped', occ, [
+    { id: 'uc01', line: 0 },
+    { id: 'uc01', line: 0 },
+  ]);
+  const fenced = scanEntityOccurrences('```\n[UC01](#UC01)\n```\n[BR02](#BR02)\n');
+  eq('occurrence: links inside a fence are skipped', fenced, [{ id: 'br02', line: 3 }]);
+}
+
+// truncateDisplay — Bug 11: cap @ result label/detail at 30 chars + ellipsis.
+{
+  check('truncate: short text unchanged', truncateDisplay('BR02') === 'BR02');
+  check('truncate: exactly 20 chars unchanged', truncateDisplay('a'.repeat(20)) === 'a'.repeat(20));
+  eq('truncate: >30 chars → 30 chars + ellipsis', truncateDisplay('Requirement: 21. Structured Entity Reference System'), 'Requirement: 21. Structured En…');
+  check('truncate: result length is 30 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(30) + '…');
+  check('truncate: empty string unchanged', truncateDisplay('') === '');
+  check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(40)) === '😀'.repeat(30) + '…');
+}
+
+// ---------------------------------------------------------------------------
+// Bug #3 — echo-suppression cho applyEditBreakingCoalesce. provider.ts import
+// 'vscode' nên không nạp được ở đây; MÔ PHỎNG đúng quyết định echo của
+// changeSubscription + case 'edit' (giống model applyEdit ở đầu file). Nhánh
+// nghịch đảo áp HAI applyEdit → hai sự kiện đổi; sự kiện TRUNG GIAN mới là thứ
+// rò filter-text nếu không có guard breakingEditInProgress.
+// ---------------------------------------------------------------------------
+{
+  // Bám sát applyEditBreakingCoalesce (src/provider.ts): phát sự kiện đổi cho
+  // trạng thái GIỮA rồi trạng thái CUỐI, đúng cấu trúc nhánh của hàm thật.
+  function emitBreakingChanges(before: string, after: string, onChange: (t: string) => void): void {
+    const diff = computeMinimalEdit(before, after);
+    if (!diff) {
+      return;
+    }
+    const { start, oldEnd, newText: ins } = diff;
+    if (ins === '' && oldEnd - start >= 2) {
+      const mid = start + Math.floor((oldEnd - start) / 2);
+      onChange(before.slice(0, mid) + before.slice(oldEnd)); // xoá nửa sau (giữa)
+      onChange(after); // xoá nửa đầu (cuối)
+      return;
+    }
+    if (ins !== '' && oldEnd > start) {
+      onChange(before.slice(0, start) + before.slice(oldEnd)); // đã xoá, chưa chèn (giữa)
+      onChange(after);
+      return;
+    }
+    onChange(after); // chèn thuần / xoá 1 ký tự: một sự kiện
+  }
+
+  function makeHost(withGuard: boolean) {
+    let lastTextFromWebview: string | undefined;
+    let prevEditBeforeText: string | undefined;
+    let breakingEditInProgress = false;
+    let doc = '';
+    let updatesPosted = 0;
+
+    // changeSubscription: chỉ phần quyết định echo (bỏ nhánh undo/redo).
+    function onChange(newText: string): void {
+      doc = newText;
+      if (withGuard && breakingEditInProgress) {
+        return; // Bug #3 guard
+      }
+      if (newText === lastTextFromWebview) {
+        return; // echo của chính webview (khớp text cuối)
+      }
+      lastTextFromWebview = undefined;
+      updatesPosted++; // lên lịch 'update' debounce → echo về webview
+    }
+
+    // case 'edit'.
+    function edit(text: string): void {
+      const beforeThis = doc;
+      const isInverseOfPrev =
+        prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
+      lastTextFromWebview = text;
+      if (isInverseOfPrev) {
+        breakingEditInProgress = true;
+        try {
+          emitBreakingChanges(beforeThis, text, onChange);
+        } finally {
+          breakingEditInProgress = false;
+        }
+      } else {
+        onChange(text); // applyMinimalEdit: một sự kiện
+      }
+      prevEditBeforeText = beforeThis;
+    }
+
+    return { edit, external: onChange, get updates() { return updatesPosted; } };
+  }
+
+  // Kịch bản rò (Bug #3): sau "foo" gõ "/De" rồi commit trigger xoá "/De" về
+  // "foo". prevEditBeforeText là doc-state TRƯỚC edit liền trước, nên phải seed
+  // "foo" bằng một edit rồi mới gõ "/De" — khi đó commit về "foo" mới là nghịch
+  // đảo chính xác của edit trước → chạy nhánh breaking (HAI applyEdit).
+  function runScenario(withGuard: boolean): number {
+    const h = makeHost(withGuard);
+    h.edit('foo'); // seed
+    h.edit('foo/De'); // gõ trigger + filter (edit thường)
+    h.edit('foo'); // commit delete-only (inverse-of-prev → breaking)
+    return h.updates;
+  }
+  check('bug3: commit nghịch đảo KHÔNG post update khi có guard', runScenario(true) === 0);
+  // Reproduce-first: bỏ guard → ít nhất một 'update' thừa bị lên lịch (sự kiện
+  // trung gian ≠ text cuối vượt echo-check rồi clear lastTextFromWebview). Số
+  // đếm chính xác tuỳ debounce gộp — bất biến then chốt là >0 so với 0 khi có guard.
+  check('bug3: KHÔNG guard → có update thừa bị lên lịch (reproduce)', runScenario(false) > 0);
+
+  // Edit ngoài thật (git/format...) vẫn phải post update.
+  const ext = makeHost(true);
+  ext.external('bar'); // thay đổi không do webview
+  check('bug3: edit ngoài thật vẫn post update (không over-suppress)', ext.updates === 1);
+}
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

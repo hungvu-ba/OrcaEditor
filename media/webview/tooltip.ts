@@ -10,7 +10,13 @@
 
 let tooltipEl: HTMLDivElement | undefined;
 
-export function showTooltip(target: HTMLElement, text: string): void {
+/**
+ * `placement` = 'above' đặt tooltip PHÍA TRÊN target (mặc định 'below', dưới
+ * target). Entity-ref info tooltip dùng 'above' để không đè lên popup sửa link
+ * hỏng của broken-ref.ts (popup đó luôn nằm dưới anchor) trong lúc chuột băng
+ * từ tam giác sang phần chữ. Tự lật xuống dưới nếu 'above' không đủ chỗ.
+ */
+export function showTooltip(target: HTMLElement, text: string, placement: 'above' | 'below' = 'below'): void {
   if (!tooltipEl) {
     tooltipEl = document.createElement('div');
     tooltipEl.id = 'toolbar-tooltip';
@@ -22,7 +28,9 @@ export function showTooltip(target: HTMLElement, text: string): void {
   const tipRect = tooltipEl.getBoundingClientRect();
   const left = Math.max(4, Math.min(rect.left + rect.width / 2 - tipRect.width / 2, window.innerWidth - tipRect.width - 4));
   tooltipEl.style.left = `${left}px`;
-  tooltipEl.style.top = `${rect.bottom + 6}px`;
+  const aboveTop = rect.top - 6 - tipRect.height;
+  const top = placement === 'above' && aboveTop >= 4 ? aboveTop : rect.bottom + 6;
+  tooltipEl.style.top = `${top}px`;
 }
 
 export function hideTooltip(): void {
@@ -31,10 +39,19 @@ export function hideTooltip(): void {
   }
 }
 
+/**
+ * Cập nhật text tooltip cho 1 phần tử đã attachTooltip (đọc lại lúc hover, nên
+ * đổi được động — vd. nút đổi lời giải thích khi bị vô hiệu, US-4.23).
+ */
+export function setTooltip(el: HTMLElement, text: string): void {
+  el.dataset.tooltip = text;
+}
+
 /** Gắn tooltip tự vẽ (mouseenter/focus → hiện, mouseleave/blur → ẩn) cho 1 phần tử. */
 export function attachTooltip(el: HTMLElement, text: string): void {
-  el.addEventListener('mouseenter', () => showTooltip(el, text));
+  setTooltip(el, text);
+  el.addEventListener('mouseenter', () => showTooltip(el, el.dataset.tooltip ?? text));
   el.addEventListener('mouseleave', hideTooltip);
-  el.addEventListener('focus', () => showTooltip(el, text));
+  el.addEventListener('focus', () => showTooltip(el, el.dataset.tooltip ?? text));
   el.addEventListener('blur', hideTooltip);
 }

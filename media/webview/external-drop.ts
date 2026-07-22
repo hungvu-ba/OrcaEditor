@@ -22,7 +22,7 @@
  * isn't guaranteed to match drop order. Single-file drop (the common case)
  * is unaffected.
  */
-import { encodeLinkPath, showToast } from './dom-utils';
+import { dataUrlToBase64, encodeLinkPath, readAsDataUrl, showToast } from './dom-utils';
 import type { PasteImageController } from './paste-image';
 import type { VsCodeApi } from './vscode-api';
 
@@ -31,6 +31,8 @@ export interface ExternalDropDeps {
   pasteImage: PasteImageController;
   /** Renders markdown → HTML and inserts it at the caret (main.ts's insertMarkdownAtCaret) — reused so a dropped-file link renders immediately as a clickable <a>, not literal `[text](url)` characters. */
   insertMarkdown: (text: string) => void;
+  /** dom-utils' canonical restoreSelection (from createDomHelpers) — reused instead of re-implementing the removeAllRanges/addRange/focus tail locally. */
+  restoreSelection: (range: Range | undefined) => void;
 }
 
 export interface ExternalDropController {
@@ -100,39 +102,30 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
     e.preventDefault();
     const range = caretRangeAt(e.clientX, e.clientY);
     const fillCell = cellAt(range) !== null;
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       if (file.type.startsWith('image/')) {
         deps.pasteImage.saveDroppedImage(file, file.type, range, fillCell);
       } else {
-        requestDropFile(file, range);
+        void requestDropFile(file, range);
       }
     }
   });
 
-  function requestDropFile(file: File, range: Range | undefined): void {
+  async function requestDropFile(file: File, range: Range | undefined): Promise<void> {
     const requestId = ++seq;
     pending.set(requestId, { range, name: file.name });
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      if (!base64) {
-        pending.delete(requestId);
-        return;
-      }
-      deps.vscode.postMessage({ type: 'dropFile', requestId, name: file.name, dataBase64: base64 });
-    };
-    reader.onerror = () => pending.delete(requestId);
-    reader.readAsDataURL(file);
+    const base64 = dataUrlToBase64(await readAsDataUrl(file));
+    if (!base64) {
+      // Empty on read error too (readAsDataUrl resolves '') — same bail as the
+      // previous FileReader.onerror path.
+      pending.delete(requestId);
+      return;
+    }
+    deps.vscode.postMessage({ type: 'dropFile', requestId, name: file.name, dataBase64: base64 });
   }
 
   function insertLinkAt(range: Range | undefined, name: string, relPath: string): void {
-    if (range) {
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-      content.focus();
-    }
+    deps.restoreSelection(range);
     deps.insertMarkdown(`[${name}](${encodeLinkPath(relPath)})`);
   }
 

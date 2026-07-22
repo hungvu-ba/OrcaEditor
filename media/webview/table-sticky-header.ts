@@ -45,8 +45,8 @@ export function initStickyTableHeader(
    * bảng thỏa (bảng dài xếp chồng), lấy bảng có mép trên THẤP nhất (bảng dưới
    * cùng đang che vạch) để header hiển thị đúng bảng người dùng đang đọc.
    */
-  function pickTable(top: number): { table: HTMLTableElement; headH: number } | null {
-    let best: { table: HTMLTableElement; headH: number; topY: number } | null = null;
+  function pickTable(top: number): { table: HTMLTableElement; headH: number; rect: DOMRect } | null {
+    let best: { table: HTMLTableElement; headH: number; rect: DOMRect } | null = null;
     for (const table of Array.from(content.querySelectorAll('table'))) {
       const thead = table.tHead;
       if (!thead) {
@@ -59,19 +59,19 @@ export function initStickyTableHeader(
       }
       // Header đã lên tới/qua vạch, và còn ít nhất một dòng thân dưới header dính.
       if (rect.top <= top && rect.bottom > top + headH) {
-        if (!best || rect.top > best.topY) {
-          best = { table, headH, topY: rect.top };
+        if (!best || rect.top > best.rect.top) {
+          best = { table, headH, rect };
         }
       }
     }
-    return best ? { table: best.table, headH: best.headH } : null;
+    return best;
   }
 
   /**
    * Dựng lại clone thead cho `table`: khóa bề rộng từng cột theo bề rộng cột
    * THẬT đang render (table-layout:fixed) để header dính khớp cột thân bảng kể
    * cả khi scroll ngang. Đặt ngoài #content nên chỉ hưởng style `th`/`table`
-   * chung (CSS #sticky-table-header bù màu nền/viền theo theme + palette).
+   * chung (CSS #sticky-table-header bù màu nền/viền theo theme + reading mode).
    */
   function buildClone(table: HTMLTableElement): void {
     const thead = table.tHead!;
@@ -97,9 +97,7 @@ export function initStickyTableHeader(
   }
 
   function hide(): void {
-    if (floatEl.classList.contains('visible')) {
-      floatEl.classList.remove('visible');
-    }
+    floatEl.classList.remove('visible');
     activeTable = null;
     cloneTable = null;
   }
@@ -111,12 +109,11 @@ export function initStickyTableHeader(
       hide();
       return;
     }
-    const { table, headH } = picked;
+    const { table, headH, rect } = picked;
     if (table !== activeTable || !cloneTable) {
       activeTable = table;
       buildClone(table);
     }
-    const rect = table.getBoundingClientRect();
     // Khung nổi bám mép trong (content box) của bảng, cao đúng dòng header, cắt
     // phần cột tràn ngoài scroll island (overflow:hidden trong CSS).
     floatEl.style.top = `${top}px`;

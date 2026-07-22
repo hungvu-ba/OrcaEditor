@@ -18,6 +18,21 @@ Every **project output** — code, **all code comments** (inline, block, JSDoc/T
 
 Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't translate code/docs back into Vietnamese "for readability".
 
+## Mandatory Rule: Be Concise (chat replies + user stories)
+
+- **Chat replies**: state the answer or what you did. No preamble, no filler, no restating the request.
+- **User stories (US)**: one clear who/what/why + tight acceptance criteria. Cut anything a reader can infer.
+
+## Mandatory Rule: Todo List
+
+Maintain a todo list (TodoWrite) for any task that is multi-step, spans multiple files, or has a verifiable success criterion. Update it as you go: exactly one item `in_progress`, mark `completed` immediately on finish.
+
+**Skip the todo list** when the request is a single trivial action or a conversational reply — a one-line answer, a single-file read, one obvious edit, a yes/no or factual question. Don't create a one-item list to restate a trivial task.
+
+Rule of thumb: 3+ distinct steps or 2+ files → todo list. Otherwise just do it.
+
+**Granularity**: one item = one independently-verifiable outcome. Split a todo that bundles multiple such outcomes (e.g. separate test suites, compile, docs) into one item per pass/fail result. Stop splitting at the file/command/outcome level; don't decompose into editor micro-steps.
+
 ## Mandatory Rule: Working Principles
 
 ### 1. Think before coding
@@ -63,6 +78,55 @@ Before adding a new helper function, check whether one of these already covers i
 
 Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-prune) before merge — see [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md).
 
+## Mandatory Rule: Known Traps
+
+**Correctness trap (not performance):**
+
+- **Domino has no `ParentNode.append`.** `media/webview/dom-postprocess.ts`, `dom-serialize-prep.ts`, `sibling-move.ts`, and `turndown.ts` also run under Node via `@mixmark-io/domino` for round-trip tests. Domino does not implement `element.append(a, b, c)` — always use chained `element.appendChild(a); element.appendChild(b);` in these files. `.append()` looks like a harmless shortening but breaks at runtime under domino, so don't "clean it up."
+
+**Performance trap:**
+
+- **Throttle layout-forcing reads in hot handlers.** Any `getBoundingClientRect`/`offsetHeight`/`offsetWidth`/`scrollWidth` read inside a `mousemove`/`scroll`/`pointermove`/drag handler must be rAF-coalesced or throttled — follow the existing pattern in `match-utils.ts`/`search.ts` (`SELECT_OVERVIEW_THROTTLE_MS`) or `toc.ts`'s `onScroll`, not the uncoalesced version.
+
 ## Mandatory Rule: Git Workflow
 
 For any git operation (branch, commit, merge, PR, release, hotfix, worktree...), read and follow [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — it defines branch structure, commit conventions, feature/release/hotfix lifecycle, and presentation style (explain for newcomers + a status sitemap after each commit).
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
+
+Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern="tests_for" to check coverage.

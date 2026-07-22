@@ -6,12 +6,18 @@ import type {
   CrossFileMatch,
   CrossFileMatchGroup,
   CrossFileSearchScope,
+  EntityExistResult,
+  EntitySuggestion,
   HostToWebview,
+  NamespaceSummary,
   ReadabilityConfig,
-  ReadingPalette,
-  ReadingPreset,
+  ReadingMode,
+  TargetExistsResult,
+  TriggerMode,
   WebviewToHost,
 } from './shared/messages';
+import { EntityIndex } from './entity-index';
+import { canonicalEntityId, scanEntityOccurrences } from './occurrence-scan';
 import {
   classifyLink,
   computeMinimalEdit,
@@ -22,25 +28,7 @@ import {
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
-
-/**
- * Trễ (ms) khi phối hợp với extension Claude Code. Đây là các HEURISTIC mong
- * manh: không có tín hiệu "đã sẵn sàng" nào để chờ, nên phải đợi cứng cho
- * webview/panel của Claude khởi tạo hoặc reveal xong trước bước kế. Máy chậm
- * hoặc Claude Code đổi thời gian khởi tạo có thể làm các mốc này không còn đủ
- * — chỉnh khi thấy chèn @mention thỉnh thoảng trượt. (finding C9)
- *
- * Không dùng media/webview/constants.ts: file này thuộc bundle Node của
- * extension, tách biệt với bundle webview.
- */
-/** Chờ tab chat Claude có sẵn thành visible sau khi reveal. */
-const CLAUDE_REVEAL_DELAY_MS = 300;
-/** Chờ webview chat Claude vừa mở khởi tạo xong. */
-const CLAUDE_OPEN_DELAY_MS = 700;
-/** Chờ text editor tạm mở xong trước khi chạy insertAtMention. */
-const CLAUDE_TEMP_EDITOR_DELAY_MS = 150;
-/** Chờ chat panel reveal xong trước khi đóng text editor tạm. */
-const CLAUDE_PANEL_REVEAL_DELAY_MS = 250;
+import { planReferences, renderReferences, type RefCandidate } from './references-section';
 
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
 const UNDO_SETTLE_MS = 200;
@@ -86,6 +74,11 @@ function sourceLineCol(text: string, offset: number): { line: number; col: numbe
   return { line, col: end - lineStart };
 }
 
+/** Req 21 US-21.2: does this uri point at a markdown file the entity index tracks? */
+function isMarkdownUri(uri: vscode.Uri): boolean {
+  return /\.(md|markdown)$/i.test(uri.path);
+}
+
 /**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
@@ -102,14 +95,194 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   public static readonly viewType = 'orcaEditor.editor';
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
-    return vscode.window.registerCustomEditorProvider(
+    const provider = new MarkdownWysiwygProvider(context);
+    const providerDisposable = vscode.window.registerCustomEditorProvider(
       MarkdownWysiwygProvider.viewType,
-      new MarkdownWysiwygProvider(context),
+      provider,
       {
         webviewOptions: { retainContextWhenHidden: true },
         supportsMultipleEditorsPerDocument: true,
       }
     );
+    // Req 20 US-20.3: real contributed commands (package.json's `commands` +
+    // the dedicated `orcaEditorExecuteCommands` membership list) — the SAME
+    // handler runs whether invoked from the Command Palette or from the `/`
+    // popup's Execute group (webview → 'executeCommand' → this →
+    // vscode.commands.executeCommand(id), see case 'executeCommand' above).
+    const commandDisposables = [
+      vscode.commands.registerCommand('orcaEditor.toggleReadingMode', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleReadingMode' })
+      ),
+      vscode.commands.registerCommand('orcaEditor.toggleZen', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleZen' })
+      ),
+      vscode.commands.registerCommand('orcaEditor.openToc', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'openToc' })
+      ),
+    ];
+    // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
+    // declarations) live. Provider-level (not per-panel) so it covers every
+    // markdown doc, open or not:
+    //  - onDidChangeTextDocument: open/unsaved buffers, re-parse on each edit.
+    //  - FileSystemWatcher: on-disk changes to files with no open editor
+    //    (change/create -> re-read + re-parse; delete -> drop that file's rows).
+    // The initial full scan is kicked off fire-and-forget so it never blocks
+    // activation (isReady() stays false until it finishes — the "indexing" state).
+    const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (isMarkdownUri(e.document.uri)) {
+        provider.entityIndex.onFileChanged(e.document.uri.toString(), e.document.getText());
+      }
+    });
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
+    const reindex = (uri: vscode.Uri): void => void provider.reindexFile(uri);
+    const watcherSubs = [
+      watcher.onDidChange(reindex),
+      watcher.onDidCreate(reindex),
+      watcher.onDidDelete((uri) => provider.entityIndex.onFileChanged(uri.toString(), '')),
+      watcher,
+    ];
+    // Req 21 US-21.3: session-only occurrence cache — every markdown file the
+    // user actually opens gets a low-priority background scan for its entity
+    // references, backing "Fix all"'s `+N other occurrence(s)` count (never a
+    // proactive crawl, never persisted).
+    const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => provider.scheduleOccurrenceScan(doc));
+    void provider.buildEntityIndex();
+    return vscode.Disposable.from(providerDisposable, ...commandDisposables, docChangeSub, docOpenSub, ...watcherSubs);
+  }
+
+  /** Req 21 US-21.2: the live workspace entity index (`caption::` declarations). */
+  public readonly entityIndex = new EntityIndex();
+
+  /**
+   * Req 21 US-21.3: session-only entity-reference occurrence cache, keyed by
+   * canonical full id (ns.toLowerCase()+id) → the sites that reference it. Grows
+   * only from files opened this session (never persisted, dies with the session
+   * — same rejection as US-21.2's index persistence). Backs "Fix all"'s `+N
+   * other occurrence(s)` count, NOT any correctness guarantee.
+   */
+  private occurrenceCache = new Map<string, { file: string; line: number }[]>();
+
+  /**
+   * Req 21 US-21.3: re-scan one just-opened markdown document for entity
+   * references and refresh its rows in the occurrence cache. Runs on a
+   * `setTimeout(0)` so it never blocks the open/render (AC: after render, never
+   * blocks typing). Removes the file's prior rows from every bucket first so a
+   * re-open is idempotent (not double-counted).
+   */
+  private scheduleOccurrenceScan(doc: vscode.TextDocument): void {
+    if (!isMarkdownUri(doc.uri)) {
+      return;
+    }
+    const fileKey = doc.uri.toString();
+    const text = doc.getText();
+    setTimeout(() => {
+      for (const rows of this.occurrenceCache.values()) {
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i].file === fileKey) {
+            rows.splice(i, 1);
+          }
+        }
+      }
+      for (const { id, line } of scanEntityOccurrences(text)) {
+        const bucket = this.occurrenceCache.get(id);
+        if (bucket) {
+          bucket.push({ file: fileKey, line });
+        } else {
+          this.occurrenceCache.set(id, [{ file: fileKey, line }]);
+        }
+      }
+    }, 0);
+  }
+
+  /** Cap on files scanned by the initial entity-index build. */
+  private static readonly ENTITY_INDEX_MAX_FILES = 5000;
+
+  /**
+   * Req 21 US-21.2: read one markdown file's text, preferring an open buffer
+   * (catches unsaved edits) and falling back to disk — same source-of-truth
+   * order as crossFileSearch.
+   */
+  private async readMarkdownText(uri: vscode.Uri): Promise<string> {
+    const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+    if (openDoc) {
+      return openDoc.getText();
+    }
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    return new TextDecoder().decode(bytes);
+  }
+
+  /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
+  private async reindexFile(uri: vscode.Uri): Promise<void> {
+    try {
+      this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+    } catch (err) {
+      MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+    }
+  }
+
+  /**
+   * Req 21 US-21.2: initial non-blocking full build of the entity index —
+   * findFiles all markdown, read each (skipping+logging any single failing
+   * file), yielding between files so activation isn't blocked, then build().
+   */
+  public async buildEntityIndex(): Promise<void> {
+    let uris: readonly vscode.Uri[];
+    try {
+      uris = await vscode.workspace.findFiles(
+        '**/*.{md,markdown}',
+        MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
+        MarkdownWysiwygProvider.ENTITY_INDEX_MAX_FILES
+      );
+    } catch (err) {
+      MarkdownWysiwygProvider.log('entityIndex: findFiles failed', err);
+      uris = [];
+    }
+    const entries: { uri: string; text: string }[] = [];
+    for (const uri of uris) {
+      try {
+        entries.push({ uri: uri.toString(), text: await this.readMarkdownText(uri) });
+      } catch (err) {
+        // One unreadable file must not abort the whole build — skip + log.
+        MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+      }
+      // Yield so a large workspace scan doesn't monopolize the event loop.
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    this.entityIndex.build(entries);
+  }
+
+  /**
+   * Req 20 US-20.3: the currently focused Orca Editor panel, if any — target
+   * for a command with no document context of its own (Command Palette
+   * invocation) or the same panel that just asked to run it (`/` Execute).
+   */
+  private activePanel: vscode.WebviewPanel | undefined;
+
+  /** Post `message` to the focused panel only; a no-op if none is focused. */
+  public postToActivePanel(message: HostToWebview): void {
+    void this.activePanel?.webview.postMessage(message);
+  }
+
+  /** Req 20 US-20.3 membership list: ids from `contributes.orcaEditorExecuteCommands`. */
+  private triggerExecuteCommandIds(): string[] {
+    return (this.context.extension.packageJSON.contributes?.orcaEditorExecuteCommands as string[] | undefined) ?? [];
+  }
+
+  /**
+   * Req 20 US-20.3: resolve each membership id's label from `contributes.
+   * commands`'s own `title` — single source of truth, no duplicated string in
+   * webview code. An id with no matching `commands` entry is skipped (defensive
+   * only; every id on the membership list is expected to also be a real
+   * contributed command, per the AC).
+   */
+  private triggerExecuteCommands(): { id: string; label: string }[] {
+    const commands = (this.context.extension.packageJSON.contributes?.commands as
+      | { command: string; title: string }[]
+      | undefined) ?? [];
+    const titleById = new Map(commands.map((c) => [c.command, c.title]));
+    return this.triggerExecuteCommandIds()
+      .map((id) => ({ id, label: titleById.get(id) }))
+      .filter((c): c is { id: string; label: string } => c.label !== undefined);
   }
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -124,9 +297,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
 
   /**
-   * US-19.19: Zen/Focus mode giờ là trạng thái GLOBAL (khác enabled/preset/
-   * palette — vẫn per-tab, US-19.18) — bật/tắt ở 1 tab lan sang MỌI tab .md
-   * đang mở. `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
+   * US-19.19: Zen/Focus mode là trạng thái GLOBAL — bật/tắt ở 1 tab lan sang
+   * MỌI tab .md đang mở (cùng mô hình `globalReadingMode` bên dưới, kênh riêng).
+   * `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
    * theo `orcaEditor.readability.zen` như cũ. Chỉ sống trong bộ nhớ process
    * (KHÔNG ghi persist Settings — Zen là "phiên tập trung" tạm thời, không
    * nên tự động bật lại mỗi khi mở lại VS Code); tắt/mở lại VS Code thì về
@@ -136,14 +309,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /**
    * Bug 0716 #2 (reversal 2026-07-16): cùng mô hình `globalZen` ở trên nhưng
-   * cho bundle enabled/preset/palette — trước đó (bug 0715 mục 4, US-19.17–
-   * 19.20) 3 field này cố tình per-tab, session-only; user giờ đổi ý muốn
-   * global giống hệt Zen. `undefined` = chưa tab nào đổi trong phiên này →
-   * seed tab mới theo `orcaEditor.readability.*` như cũ. `fontFamily` KHÔNG
-   * nằm trong bundle này — không có UI toggle runtime nên vẫn seed theo
-   * setting mỗi tab, không đổi.
+   * cho enabled/mode (US-19.24) — global giống hệt Zen. `undefined` = chưa tab
+   * nào đổi trong phiên này → seed tab mới theo `orcaEditor.readability.*` như
+   * cũ. `fontFamily` KHÔNG nằm trong bundle này — không có UI toggle runtime
+   * nên vẫn seed theo setting mỗi tab, không đổi.
    */
-  private globalReadingMode: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette } | undefined;
+  private globalReadingMode: { enabled: boolean; mode: ReadingMode } | undefined;
 
   /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
@@ -152,7 +323,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * lại file này sau đó (không qua cross-file-search) sẽ vô tình áp lại vị trí
    * cũ.
    */
-  private pendingReveal = new Map<string, { line: number; character: number; length: number; matchText?: string }>();
+  private pendingReveal = new Map<
+    string,
+    { line: number; character: number; length: number; matchText?: string; searchText?: string }
+  >();
 
   /**
    * US-19.19: đọc ReadabilityConfig từ settings.json rồi ghi đè `zen` bằng
@@ -175,24 +349,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * không cần thiết).
    */
   private broadcastZen(zen: boolean, exclude: vscode.WebviewPanel): void {
-    for (const panels of this.panelsByUri.values()) {
-      for (const panel of panels) {
-        if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'zenChanged', zen } satisfies HostToWebview);
-        }
-      }
-    }
+    this.broadcastToOtherPanels(exclude, { type: 'zenChanged', zen });
   }
 
-  /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho bundle enabled/preset/palette. */
+  /** Bug 0716 #2: cùng cơ chế broadcastZen ở trên, cho enabled/mode (US-19.24). */
   private broadcastReadingMode(
-    state: { enabled: boolean; preset: ReadingPreset; palette: ReadingPalette },
+    state: { enabled: boolean; mode: ReadingMode },
     exclude: vscode.WebviewPanel
   ): void {
+    this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
+  }
+
+  /** Post `message` to every open .md panel (all uris) except `exclude`. */
+  private broadcastToOtherPanels(exclude: vscode.WebviewPanel, message: HostToWebview): void {
     for (const panels of this.panelsByUri.values()) {
       for (const panel of panels) {
         if (panel !== exclude) {
-          void panel.webview.postMessage({ type: 'readingModeChanged', ...state } satisfies HostToWebview);
+          void panel.webview.postMessage(message);
         }
       }
     }
@@ -218,6 +391,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const webview = webviewPanel.webview;
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const docUriStr = document.uri.toString();
+
+    // Req 21 US-21.3: seed the occurrence cache for this document — a custom
+    // editor open does not always surface as onDidOpenTextDocument.
+    this.scheduleOccurrenceScan(document);
 
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
@@ -256,6 +433,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+    /** Serializes webview-originated document mutations — see case 'edit'. */
+    let editChain: Promise<void> = Promise.resolve();
+    /**
+     * Trạng thái document NGAY TRƯỚC edit webview liền trước. Nếu edit hiện tại đưa
+     * document về đúng chuỗi này → nó là nghịch đảo chính xác của edit trước (vd
+     * paste ảnh rồi xoá ngay). VS Code gộp cặp insert↔delete nghịch đảo thành MỘT
+     * undo-element net-zero (trạng thái giữa — có ảnh — không undo tới được). Tách
+     * để phá coalescing (xem applyEditBreakingCoalesce).
+     */
+    let prevEditBeforeText: string | undefined;
+    /**
+     * Req 20 US-20.9: in-flight `checkTargetsExist` batch, if any — a new
+     * request (the webview re-scanning after a fresh doc-version) cancels the
+     * previous one so a slow/stale `fs.stat` batch never races a newer reply.
+     */
+    let existCheckTokenSource: vscode.CancellationTokenSource | undefined;
+    /** Req 21 US-21.3: in-flight `checkEntitiesExist` batch — same cancel-the-previous discipline as `existCheckTokenSource`. */
+    let entityExistCheckTokenSource: vscode.CancellationTokenSource | undefined;
+    /**
+     * Req 20 US-20.5: guards against overlapping `/add reference` runs — while
+     * one run's `fs.stat` batch + merge write is in flight, a second invocation
+     * is ignored so two edits never race (AC "No overlapping runs").
+     */
+    let addReferenceInFlight = false;
 
     // P-01: debounce các thay đổi document dồn dập (git checkout, format, gõ ở
     // text editor bên ngoài) để gộp thành một lần postMessage 'update'.
@@ -265,6 +466,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // đường 'update' debounce cho các thay đổi này, để case 'undo'/'redo' tự gửi
     // MỘT update cuối cùng (không debounce) → undo↔redo render đối xứng.
     let undoRedoInProgress = false;
+    // Bug #3: bật quanh applyEditBreakingCoalesce (case 'edit', nhánh nghịch đảo).
+    // Hàm đó áp HAI applyEdit → bắn HAI sự kiện đổi; lastTextFromWebview chỉ giữ
+    // text CUỐI nên sự kiện TRUNG GIAN trượt echo-check, clear guard rồi lên lịch
+    // một 'update' debounce thừa — rebuild #content làm rớt popup trigger đang mở,
+    // rò filter-text xuống editor/namespace. Flag này bỏ qua cả hai sự kiện (edit
+    // vẫn áp đủ vào undo stack — fix bug-2 nguyên vẹn), chỉ chặn echo webview.
+    let breakingEditInProgress = false;
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) {
@@ -281,6 +489,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       void this.restoreUndoneImageDeletions(e.document, text);
       // Undo/redo tự lo gửi update cuối cùng (case bên dưới) — không đi debounce.
       if (undoRedoInProgress) {
+        return;
+      }
+      // Bug #3: bỏ qua cả hai sự kiện của applyEditBreakingCoalesce — không echo
+      // 'update' về webview. Sự kiện cuối trùng lastTextFromWebview sẽ bị chặn ở
+      // dưới, còn sự kiện trung gian mới là thứ trước đây rò ra.
+      if (breakingEditInProgress) {
         return;
       }
       if (text === lastTextFromWebview) {
@@ -307,15 +521,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
-    // cần đóng/mở lại preview (claudeAutoInsert không cần vì đã đọc live ở
-    // addToClaudeContext, tại thời điểm bấm nút).
+    // cần đóng/mở lại preview.
     const configSubscription = vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('orcaEditor', document.uri)) {
         return;
       }
       const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
-      // KHÔNG gửi enabled/preset/palette/zen qua configUpdate: dù cả 2 bundle
-      // giờ đều global-in-memory (zen: US-19.19; enabled/preset/palette: bug
+      // KHÔNG gửi enabled/mode/zen qua configUpdate: dù cả 2 bundle
+      // giờ đều global-in-memory (zen: US-19.19; enabled/mode: bug
       // 0716 #2, đảo ngược per-tab cũ của bug 0715 mục 4), mỗi bundle đã có
       // kênh broadcast runtime riêng của chính nó (xem case 'zenChanged' /
       // case 'readingModeChanged'). Kênh configUpdate này CHỈ phát khi user
@@ -325,6 +538,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
         showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+        // US-21.5: triggerActions.mode is the one trigger.* setting that DOES
+        // need live propagation (visibility gate, not just a seed) — dateFormat/
+        // executeCommands stay init-only, unchanged behavior.
+        triggerMode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
       });
     });
 
@@ -355,6 +572,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({
             type: 'init',
             text: document.getText(),
+            docUri: docUriStr,
             ...(reveal ? { reveal } : {}),
             config: {
               breaks: cfg.get<boolean>('breaks', false),
@@ -370,21 +588,62 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               readability: this.resolveReadability(wysiwygCfg),
+              trigger: {
+                dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
+                executeCommands: this.triggerExecuteCommands(),
+                mode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
+              },
             },
           });
           break;
         }
         case 'edit': {
           const text = msg.text;
-          lastTextFromWebview = text;
-          const ok = await this.applyMinimalEdit(document, text);
-          if (!ok) {
-            lastTextFromWebview = undefined;
-          }
+          // Chain, don't apply directly: the webview can post two 'edit's in
+          // the SAME frame (invokeAction: flush of pending typing + the
+          // action's own sync — two deliberate undo units, bug 0717), and
+          // onDidReceiveMessage does not await async handlers. Unchained, the
+          // second applyMinimalEdit would diff against a document the first
+          // edit hasn't committed to yet — a mis-anchored replace corrupting
+          // the text. lastTextFromWebview is set INSIDE the thunk so each
+          // edit's echo suppression is armed exactly while ITS change applies.
+          editChain = editChain.then(async () => {
+            const beforeThis = document.getText();
+            // Nghịch đảo chính xác của edit trước → phá coalescing để undo dừng được
+            // ở trạng thái giữa (xem prevEditBeforeText).
+            const isInverseOfPrev =
+              prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
+            lastTextFromWebview = text;
+            let ok: boolean;
+            if (isInverseOfPrev) {
+              // Bug #3: chặn echo trong lúc HAI applyEdit của nhánh nghịch đảo bắn
+              // sự kiện đổi (xem breakingEditInProgress). finally để không kẹt cờ.
+              // Dựa vào việc applyEdit bắn onDidChangeTextDocument ĐỒNG BỘ trước khi
+              // promise resolve (giống echo-check lastTextFromWebview đang dùng) → cả
+              // hai sự kiện rơi vào lúc cờ còn true. KHÁC nhánh undo/redo phải chờ
+              // waitForDocChange vì executeCommand('undo') resolve TRƯỚC khi edit áp.
+              breakingEditInProgress = true;
+              try {
+                ok = await this.applyEditBreakingCoalesce(document, text);
+              } finally {
+                breakingEditInProgress = false;
+              }
+            } else {
+              ok = await this.applyMinimalEdit(document, text);
+            }
+            if (!ok) {
+              lastTextFromWebview = undefined;
+            }
+            prevEditBeforeText = beforeThis;
+          });
+          await editChain;
           break;
         }
         case 'undo':
         case 'redo': {
+          // Any in-flight chained 'edit' must commit first — its undo unit
+          // precedes this undo/redo chronologically (bug 0717).
+          await editChain;
           // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
           // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
           if (msg.pendingText !== undefined) {
@@ -434,8 +693,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           void postToWebview({ type: 'fileSearchResult', requestId: msg.requestId, files });
           break;
         }
-        case 'addToClaudeContext': {
-          void this.addToClaudeContext(document, webviewPanel.viewColumn);
+        case 'copyFileMention': {
+          void this.copyFileMention(document);
           break;
         }
         case 'viewSource': {
@@ -451,7 +710,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'crossFileSearch:openResult': {
-          void this.openCrossFileSearchResult(msg.uri, msg.line, msg.character, msg.length, msg.matchText);
+          void this.openCrossFileSearchResult(document, msg.uri, msg.line, msg.character, msg.length, msg.matchText);
           break;
         }
         case 'crossFileSearch:openInSearchPanel': {
@@ -476,13 +735,141 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'readingModeChanged': {
-          // Bug 0716 #2: enabled/preset/palette giờ global (đảo ngược per-tab
-          // cũ, cùng mô hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi
-          // phát cho mọi panel .md khác đang mở.
-          this.globalReadingMode = { enabled: msg.enabled, preset: msg.preset, palette: msg.palette };
+          // Bug 0716 #2: enabled/mode giờ global (đảo ngược per-tab cũ, cùng mô
+          // hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi phát cho mọi
+          // panel .md khác đang mở.
+          // S-1: whitelist mode trước khi lưu — message từ webview có thể bị giả
+          // giá trị ngoài enum, mà globalReadingMode được nội suy vào class
+          // attribute của getHtml cho panel mở sau (cùng ràng buộc mà
+          // readReadabilityConfig áp cho đường settings). Giá trị lạ → mặc định.
+          this.globalReadingMode = {
+            enabled: msg.enabled,
+            mode: READING_MODES.includes(msg.mode) ? msg.mode : 'standard',
+          };
           this.broadcastReadingMode(this.globalReadingMode, webviewPanel);
           break;
         }
+        case 'executeCommand': {
+          // Req 20 US-20.3: never an arbitrary-command execution surface —
+          // validate against the same membership list sent in InitConfig, and
+          // only run it if this document is still the one the message came for
+          // (a message arriving after a tab switch must never fire against the
+          // wrong document).
+          if (
+            this.triggerExecuteCommandIds().includes(msg.commandId) &&
+            msg.docUri === docUriStr
+          ) {
+            await vscode.commands.executeCommand(msg.commandId);
+          }
+          break;
+        }
+        case 'checkTargetsExist': {
+          existCheckTokenSource?.cancel();
+          existCheckTokenSource?.dispose();
+          const tokenSource = new vscode.CancellationTokenSource();
+          existCheckTokenSource = tokenSource;
+          const results = await this.checkTargetsExist(document, msg.targets, tokenSource.token);
+          // Cancelled by a newer request while the fs.stat batch was in flight
+          // — its reply is stale, discard rather than posting it.
+          if (!tokenSource.token.isCancellationRequested) {
+            void postToWebview({
+              type: 'targetsExistResult',
+              requestId: msg.requestId,
+              docVersion: msg.docVersion,
+              results,
+            });
+          }
+          break;
+        }
+        case 'checkEntitiesExist': {
+          entityExistCheckTokenSource?.cancel();
+          entityExistCheckTokenSource?.dispose();
+          const tokenSource = new vscode.CancellationTokenSource();
+          entityExistCheckTokenSource = tokenSource;
+          const results = await this.checkEntitiesExist(document, msg.ids, tokenSource.token);
+          if (!tokenSource.token.isCancellationRequested) {
+            void postToWebview({
+              type: 'entitiesExistResult',
+              requestId: msg.requestId,
+              docVersion: msg.docVersion,
+              results,
+            });
+          }
+          break;
+        }
+        case 'addReference': {
+          // Req 20 US-20.5: build/update the `## References` section as ONE
+          // ordinary document edit (saves/undoes like any insert).
+          if (msg.docUri !== docUriStr) {
+            break; // message arrived after a tab switch — never edit the wrong document.
+          }
+          if (document.uri.scheme !== 'file' || document.isUntitled) {
+            // No base directory to resolve relative hrefs against (AC "Skip un-resolvable documents").
+            void vscode.window.showInformationMessage('Add reference needs a saved file.');
+            break;
+          }
+          if (addReferenceInFlight) {
+            break; // AC "No overlapping runs".
+          }
+          addReferenceInFlight = true;
+          try {
+            // Let the trigger-text delete edit commit first, then read the text.
+            await editChain;
+            const text = document.getText();
+            const plan = planReferences(text);
+            if (plan.candidates.length === 0) {
+              void vscode.window.showInformationMessage('No new references to add.');
+              break;
+            }
+            const brokenKeys = await this.checkTargetsMissing(document, plan.candidates);
+            const newText = renderReferences(text, plan, brokenKeys);
+            if (newText === null) {
+              break;
+            }
+            editChain = editChain.then(() => this.applyMinimalEdit(document, newText).then(() => undefined));
+            await editChain;
+          } finally {
+            addReferenceInFlight = false;
+          }
+          break;
+        }
+        case 'entitySearch': {
+          // Req 21 US-21.2: entity search, mirroring searchFiles ->
+          // fileSearchResult's requestId echo. `ready` carries the indexing
+          // state so the popup never reads an empty result as "nothing exists".
+          const entities: EntitySuggestion[] = this.entityIndex.query(msg.query, { namespace: msg.namespace });
+          void postToWebview({
+            type: 'entityResult',
+            requestId: msg.requestId,
+            ready: this.entityIndex.isReady(),
+            entities,
+          });
+          break;
+        }
+        case 'namespaceList': {
+          // Req 21 US-21.2: namespace browse list (with counts).
+          const namespaces: NamespaceSummary[] = this.entityIndex.namespaces();
+          void postToWebview({
+            type: 'namespaceListResult',
+            requestId: msg.requestId,
+            ready: this.entityIndex.isReady(),
+            namespaces,
+          });
+          break;
+        }
+      }
+    });
+
+    // Req 20 US-20.3: track the focused Orca Editor panel so a globally
+    // registered command (invoked from the Command Palette, with no document/
+    // panel context of its own) has a well-defined target for a per-panel
+    // action (openToc). Reading/Zen stay global broadcasts (unaffected).
+    if (webviewPanel.active) {
+      this.activePanel = webviewPanel;
+    }
+    const viewStateSubscription = webviewPanel.onDidChangeViewState((e) => {
+      if (e.webviewPanel.active) {
+        this.activePanel = e.webviewPanel;
       }
     });
 
@@ -495,6 +882,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       saveSubscription.dispose();
       configSubscription.dispose();
       messageSubscription.dispose();
+      viewStateSubscription.dispose();
+      existCheckTokenSource?.dispose();
+      if (this.activePanel === webviewPanel) {
+        this.activePanel = undefined;
+      }
 
       // C6b: gỡ panel khỏi registry để tránh rò rỉ / nhắm 'scrollToPosition'
       // vào 1 panel đã đóng.
@@ -524,6 +916,45 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return vscode.workspace.applyEdit(edit);
   }
 
+  /** Áp một replace đơn qua applyEdit (helper cho applyEditBreakingCoalesce). */
+  private applyRange(document: vscode.TextDocument, start: number, end: number, text: string): Thenable<boolean> {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(document.positionAt(start), document.positionAt(end)), text);
+    return vscode.workspace.applyEdit(edit);
+  }
+
+  /**
+   * Áp newText bằng HAI applyEdit riêng, tạo một trạng thái GIỮA khác biệt mọi
+   * checkpoint đã có → phá việc VS Code gộp cặp edit nghịch đảo thành một
+   * undo-element net-zero (vd paste ảnh rồi xoá ngay: trạng thái giữa có ảnh không
+   * undo tới được). Kết quả cuối luôn đúng bằng newText. Dùng khi edit là nghịch đảo
+   * chính xác của edit liền trước (xem prevEditBeforeText).
+   */
+  private async applyEditBreakingCoalesce(document: vscode.TextDocument, newText: string): Promise<boolean> {
+    const diff = computeMinimalEdit(document.getText(), newText);
+    if (!diff) {
+      return true;
+    }
+    const { start, oldEnd, newText: ins } = diff;
+    if (ins === '' && oldEnd - start >= 2) {
+      // Xoá thuần: tách vùng xoá làm đôi (xoá nửa sau trước, rồi nửa đầu).
+      const mid = start + Math.floor((oldEnd - start) / 2);
+      if (!(await this.applyRange(document, mid, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, mid, '');
+    }
+    if (ins !== '' && oldEnd > start) {
+      // Replace: xoá cũ trước, chèn mới sau (trạng thái giữa = đã xoá, chưa chèn).
+      if (!(await this.applyRange(document, start, oldEnd, ''))) {
+        return false;
+      }
+      return this.applyRange(document, start, start, ins);
+    }
+    // Chèn thuần hoặc xoá 1 ký tự: không tách được có ý nghĩa → áp bình thường.
+    return this.applyRange(document, start, oldEnd, ins);
+  }
+
   private async openLink(document: vscode.TextDocument, href: string): Promise<void> {
     const link = classifyLink(href);
     if (link.kind === 'empty') {
@@ -545,13 +976,48 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     // Đường dẫn tương đối so với file hiện tại — không cho thoát ra ngoài
     // thư mục tài liệu / workspace (path traversal qua ../..).
-    const [pathPart] = href.split('#');
+    const [pathPart, fragment] = href.split('#');
     if (!pathPart) {
       return;
     }
-    const target = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(pathPart));
-    if (!(await this.isInsideAllowedRoots(document, target))) {
+    // Cùng quy ước resolve như marker báo hỏng: root-relative trước, fallback
+    // file-relative. Mở ứng viên đầu tiên tồn tại; nếu không có, mở ứng viên
+    // ưu tiên (root) để VS Code tự báo lỗi mở.
+    const candidates = await this.relativeTargetCandidates(document, pathPart);
+    if (candidates.length === 0) {
       void vscode.window.showWarningMessage(`Blocked link pointing outside the workspace: ${href}`);
+      return;
+    }
+    let target = candidates[0];
+    for (const uri of candidates) {
+      try {
+        await vscode.workspace.fs.stat(uri);
+        target = uri;
+        break;
+      } catch {
+        // ứng viên này không tồn tại — thử ứng viên kế.
+      }
+    }
+    // Bug General #1: an entity fragment (`#NAMESPACE_ID`) should scroll to the
+    // `caption::` declaration, not just open the file at the top. Reveal it by
+    // TEXT SEARCH in the opened document (the webview finds "caption::NS_ID",
+    // scrolls to + flashes it) rather than via the entity index: the target file
+    // is frequently OUTSIDE the workspace (e.g. `../../OtherRepo/…`) so it is
+    // never indexed, and text search is also immune to source-line↔DOM drift and
+    // is case-insensitive. A non-entity fragment (e.g. a heading slug) simply
+    // finds no `caption::` match → file opens with no scroll. Reuse the cross-file
+    // open path (Orca-Editor open + allowed-roots guard + panel/pendingReveal).
+    if (fragment) {
+      // Fragment có thể tới ở dạng percent-encoded (markdown-it/serialize có thể
+      // mã hoá id entity non-ASCII, ví dụ namespace tiếng Việt) — decode trước
+      // khi tìm. Chuỗi %-escape hỏng → giữ thô.
+      let token = fragment;
+      try {
+        token = decodeURIComponent(fragment);
+      } catch {
+        // giữ nguyên fragment thô nếu chuỗi %-escape không hợp lệ.
+      }
+      await this.openCrossFileSearchResult(document, target.toString(), 0, 0, 0, undefined, `caption::${token}`);
       return;
     }
     try {
@@ -580,14 +1046,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    *    đọc lại giá trị này khi gửi message 'init' (xem case 'ready' ở trên).
    */
   private async openCrossFileSearchResult(
+    document: vscode.TextDocument,
     uriStr: string,
     line: number,
     character: number,
     length: number,
-    matchText?: string
+    matchText?: string,
+    searchText?: string
   ): Promise<void> {
     try {
       const uri = vscode.Uri.parse(uriStr);
+      // S-2: kết quả tìm thật luôn nằm trong workspace — chặn uri không phải
+      // scheme file hoặc trỏ ra ngoài allowed roots (webview có thể bị giả uri
+      // để mở file tuỳ ý), cùng guard như đường link tương đối trong openLink().
+      if (uri.scheme !== 'file' || !(await this.isInsideAllowedRoots(document, uri))) {
+        void vscode.window.showWarningMessage(`Blocked opening a file outside the workspace: ${uriStr}`);
+        return;
+      }
       const range = new vscode.Range(
         new vscode.Position(line, character),
         new vscode.Position(line, character + length)
@@ -608,10 +1083,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             target = existingPanels.values().next().value;
           }
           target?.reveal(target.viewColumn);
-          const msg: HostToWebview = { type: 'scrollToPosition', line, character, length, matchText };
+          const msg: HostToWebview = { type: 'scrollToPosition', line, character, length, matchText, searchText };
           void target?.webview.postMessage(msg);
         } else {
-          this.pendingReveal.set(uri.toString(), { line, character, length, matchText });
+          this.pendingReveal.set(uri.toString(), { line, character, length, matchText, searchText });
           await vscode.commands.executeCommand('vscode.openWith', uri, MarkdownWysiwygProvider.viewType, {
             selection: range,
           });
@@ -644,162 +1119,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /**
-   * Thêm nhanh file hiện tại vào context chat của Claude Code.
-   *
-   * Cơ chế phía Claude Code: command insertAtMention đọc activeTextEditor và
-   * bắn sự kiện; sự kiện chỉ được xử lý khi ĐÃ có panel chat (consumer gửi
-   * "insert_at_mention" vào webview rồi tự reveal panel). Vì vậy thứ tự đúng:
-   *   1. Mở latest conversation (claude-vscode.editor.openLast) để chắc chắn
-   *      có panel nhận sự kiện, chờ panel khởi tạo.
-   *   2. Đưa file về làm activeTextEditor (webview WYSIWYG không được tính).
-   *   3. Gọi insertAtMention — chat tự reveal với "@file" trong ô nhập.
-   * Không có Claude Code thì fallback copy "@file" vào clipboard.
-   */
-  /** Tab webview chat của Claude Code — cách nhận diện giống chính Claude Code. */
-  private static isClaudeChatTab(tab: vscode.Tab): boolean {
-    return (
-      tab.input instanceof vscode.TabInputWebview &&
-      (tab.input as vscode.TabInputWebview).viewType.includes('claudeVSCodePanel')
-    );
-  }
-
-  private findClaudeChatTabs(): vscode.Tab[] {
-    return vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter(MarkdownWysiwygProvider.isClaudeChatTab);
-  }
-
-  /**
-   * Điều hướng tới một tab bất kỳ: focus đúng editor group theo viewColumn,
-   * rồi chọn tab theo vị trí trong group (cơ chế như phím Ctrl/Alt+1..9).
-   */
-  private async revealTab(tab: vscode.Tab): Promise<void> {
-    const FOCUS_GROUP_COMMANDS = [
-      'workbench.action.focusFirstEditorGroup',
-      'workbench.action.focusSecondEditorGroup',
-      'workbench.action.focusThirdEditorGroup',
-      'workbench.action.focusFourthEditorGroup',
-      'workbench.action.focusFifthEditorGroup',
-      'workbench.action.focusSixthEditorGroup',
-      'workbench.action.focusSeventhEditorGroup',
-      'workbench.action.focusEighthEditorGroup',
-    ];
-    const column = tab.group.viewColumn;
-    if (column >= 1 && column <= FOCUS_GROUP_COMMANDS.length) {
-      await vscode.commands.executeCommand(FOCUS_GROUP_COMMANDS[column - 1]);
-    }
-    const index = tab.group.tabs.indexOf(tab);
-    if (index >= 0 && index < 9) {
-      await vscode.commands.executeCommand(`workbench.action.openEditorAtIndex${index + 1}`);
-      return;
-    }
-    // Group có hơn 9 tab — duyệt tuần tự tới khi tab chat thành active
-    for (let i = 0; i < tab.group.tabs.length; i++) {
-      const active = vscode.window.tabGroups.all.find((g) => g.viewColumn === column)?.activeTab;
-      if (active && MarkdownWysiwygProvider.isClaudeChatTab(active)) {
-        return;
-      }
-      await vscode.commands.executeCommand('workbench.action.nextEditorInGroup');
-    }
-  }
-
-  private async addToClaudeContext(document: vscode.TextDocument, panelColumn?: vscode.ViewColumn): Promise<void> {
+  /** Copies the current file's "@relativePath" mention to the clipboard — works with any chat that understands @file mention syntax. */
+  private async copyFileMention(document: vscode.TextDocument): Promise<void> {
     const mention = `@${vscode.workspace.asRelativePath(document.uri, false)}`;
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     try {
-      const available = await vscode.commands.getCommands(true);
-
-      // 1) Đảm bảo tab chat Claude đang hiển thị: reveal tab có sẵn (giữ nguyên
-      //    hội thoại), chỉ mở mới khi chưa có chat nào.
-      const tabs = this.findClaudeChatTabs();
-      let visibleChat = tabs.find((t) => t.isActive);
-      if (!visibleChat && tabs.length > 0) {
-        await this.revealTab(tabs[0]);
-        await delay(CLAUDE_REVEAL_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      } else if (tabs.length === 0 && available.includes('claude-vscode.editor.openLast')) {
-        await vscode.commands.executeCommand('claude-vscode.editor.openLast');
-        await delay(CLAUDE_OPEN_DELAY_MS);
-        visibleChat = this.findClaudeChatTabs().find((t) => t.isActive);
-      }
-
-      // 2) Tự chèn @mention (mặc định): command insertAtMention của Claude Code
-      //    bắt buộc đọc activeTextEditor nên phải mở tạm text editor của file
-      //    rồi tự đóng lại — không còn cách nào khác để "paste thẳng" vào
-      //    webview của extension khác (VS Code không expose command paste cho
-      //    webview; Electron xử lý ⌘V ở tầng native).
-      const autoInsert = vscode.workspace
-        .getConfiguration('orcaEditor')
-        .get<boolean>('claudeAutoInsert', false);
-      const insertCmd = ['claude-vscode.insertAtMention', 'claude-code.insertAtMentioned'].find((c) =>
-        available.includes(c)
-      );
-      if (autoInsert && insertCmd) {
-        await this.insertMentionViaTempEditor(document, insertCmd, visibleChat, panelColumn);
-        vscode.window.setStatusBarMessage(`Đã chèn ${mention} vào chat Claude Code`, 4000);
-        return;
-      }
-
-      // 3) Mặc định: KHÔNG mở file — copy mention + focus thẳng ô nhập chat,
-      //    người dùng chỉ cần ⌘V.
-      await vscode.env.clipboard.writeText(`${mention} `);
-      if (available.includes('claude-vscode.focus')) {
-        await vscode.commands.executeCommand('claude-vscode.focus');
-      }
-      vscode.window.setStatusBarMessage(`Đã copy "${mention}" — nhấn ⌘V trong ô chat để chèn`, 6000);
-      return;
+      await vscode.env.clipboard.writeText(mention);
     } catch (err) {
-      // C8: log lỗi trước khi rơi xuống fallback clipboard để không nuốt lỗi.
-      MarkdownWysiwygProvider.log('addToClaudeContext failed, falling back to clipboard', err);
+      MarkdownWysiwygProvider.log('copyFileMention failed', err);
+      void vscode.window.showWarningMessage(`Could not copy "${mention}" to the clipboard.`);
+      return;
     }
-    await vscode.env.clipboard.writeText(mention);
-    void vscode.window.showInformationMessage(
-      `Copied "${mention}" — paste it into the Claude chat input to add the file to context.`
-    );
-  }
-
-  /**
-   * Chèn @mention tự động: mở tạm text editor của file (điều kiện bắt buộc để
-   * insertAtMention của Claude Code đọc được), chèn xong tự đóng — layout giữ
-   * nguyên. Mở ở group KHÁC group chứa chat để không che tab chat (mention chỉ
-   * được panel đang hiển thị xử lý).
-   */
-  private async insertMentionViaTempEditor(
-    document: vscode.TextDocument,
-    insertCmd: string,
-    visibleChat: vscode.Tab | undefined,
-    panelColumn?: vscode.ViewColumn
-  ): Promise<void> {
-    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-    const uriStr = document.uri.toString();
-    const findTextTab = () =>
-      vscode.window.tabGroups.all
-        .flatMap((g) => g.tabs)
-        .find((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uriStr);
-    // File đã được user tự mở dạng text từ trước thì không đóng của họ
-    const openedByUser = findTextTab() !== undefined;
-
-    const chatColumn = visibleChat?.group.viewColumn;
-    let targetColumn: vscode.ViewColumn | undefined = panelColumn;
-    if (chatColumn !== undefined && (targetColumn === undefined || targetColumn === chatColumn)) {
-      targetColumn =
-        vscode.window.tabGroups.all.map((g) => g.viewColumn).find((c) => c !== chatColumn) ??
-        vscode.ViewColumn.Beside;
-    }
-    await vscode.window.showTextDocument(document, {
-      viewColumn: targetColumn ?? vscode.ViewColumn.Active,
-      preview: true,
-      preserveFocus: false,
-    });
-    await delay(CLAUDE_TEMP_EDITOR_DELAY_MS);
-    await vscode.commands.executeCommand(insertCmd);
-
-    if (!openedByUser) {
-      await delay(CLAUDE_PANEL_REVEAL_DELAY_MS);
-      const tempTab = findTextTab();
-      if (tempTab) {
-        await vscode.window.tabGroups.close(tempTab);
-      }
-    }
+    vscode.window.setStatusBarMessage(`Copied "${mention}"`, 4000);
   }
 
   /** Mở chính file đang xem ở text editor thường (mã nguồn .md thô) cạnh bên. */
@@ -1109,6 +1439,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * resolveAssetsDir + isInsideAllowedRoots guard shared by savePastedImage /
+   * saveDroppedFile / cleanupOrphanImages: returns the assets dir only when it
+   * sits inside the allowed workspace roots, else undefined so a mis-configured
+   * customFolderPath cannot write/scan outside. Each caller keeps its own bail.
+   */
+  private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
+    const dir = this.resolveAssetsDir(document);
+    return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+  }
+
+  /**
    * Prefix tên file ảnh suy ra từ basename document — gắn "quyền sở hữu" ảnh
    * vào 1 file .md mà không cần lưu index riêng (xem imageNamePrefix). Rỗng
    * khi basename không chuẩn hoá được (vd toàn CJK) — cleanupOrphanImages bỏ
@@ -1139,9 +1480,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured paste-image folder is outside the allowed workspace.' };
     }
 
@@ -1166,10 +1506,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * pasted images, which get a generated + prefixed name for orphan-cleanup
    * bookkeeping, dropped files keep their ORIGINAL name (so a linked
    * `report.pdf` reads as `report.pdf`, not a hash) with a numeric suffix
-   * added only if that name is already taken. Not covered by
-   * cleanupOrphanImages — deleting an unused dropped file is manual for now
-   * (scope cut: extending orphan detection to arbitrary `[text](path)` links,
-   * not just `<img>`, is a larger change deferred to a later pass).
+   * added only if that name is already taken. Because they carry no marker,
+   * orphan cleanup tracks them per-document in memory (trackDroppedAsset) so
+   * deleting the link removes + caches the file the same way pasted images are
+   * handled (cleanupOrphanImages / restoreUndoneImageDeletions).
    */
   private async saveDroppedFile(
     document: vscode.TextDocument,
@@ -1177,9 +1517,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const targetDir = this.resolveAssetsDir(document);
-
-    if (!(await this.isInsideAllowedRoots(document, targetDir))) {
+    const targetDir = await this.resolveAllowedAssetsDir(document);
+    if (!targetDir) {
       return { error: 'Configured assets folder is outside the allowed workspace.' };
     }
 
@@ -1187,6 +1526,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       await vscode.workspace.fs.createDirectory(targetDir);
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
+      this.trackDroppedAsset(document, path.basename(targetUri.path));
       return { relativePath: relativePath(documentDir.path, targetUri.path) };
     } catch (err) {
       MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
@@ -1233,6 +1573,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * File kéo-thả (không phải ảnh) giữ TÊN GỐC nên không mang marker như ảnh dán
+   * — theo dõi tên file theo document (chỉ trong phiên) để cleanupOrphanImages
+   * biết file nào là asset do lần drop này tạo mà dọn khi link bị xoá. Giới hạn
+   * phiên: đóng/mở lại editor sẽ quên (giống ảnh dán trước khi có tính năng).
+   */
+  private readonly droppedAssetsByDoc = new Map<string, Set<string>>();
+
+  private trackDroppedAsset(document: vscode.TextDocument, fileName: string): void {
+    const key = document.uri.toString();
+    let set = this.droppedAssetsByDoc.get(key);
+    if (!set) {
+      set = new Set<string>();
+      this.droppedAssetsByDoc.set(key, set);
+    }
+    set.add(fileName);
+  }
+
+  /**
    * Dọn ảnh mồ côi khi save (đăng ký ở onDidSaveTextDocument, xem
    * resolveCustomTextEditor): ảnh do document này "sở hữu" (tên file có
    * prefix từ imagePrefixFor, xem savePastedImage) nhưng không còn xuất hiện
@@ -1259,65 +1617,78 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
 
-    const imagesDir = this.resolveAssetsDir(document);
-    if (!(await this.isInsideAllowedRoots(document, imagesDir))) {
+    const imagesDir = await this.resolveAllowedAssetsDir(document);
+    if (!imagesDir) {
       return;
     }
+
+    const text = document.getText();
+
+    // Ứng viên = ảnh dán do document sở hữu (nhận diện qua prefix marker, quét
+    // thư mục) ∪ file kéo-thả không phải ảnh (giữ tên gốc, không marker — theo
+    // dõi trong phiên qua droppedAssetsByDoc).
+    const pool = new Set<string>();
 
     const prefix = this.imagePrefixFor(document);
-    if (!prefix) {
+    if (prefix) {
+      const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
+      try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(imagesDir)) {
+          if (type === vscode.FileType.File && name.startsWith(ownedMarker)) {
+            pool.add(name);
+          }
+        }
+      } catch {
+        // Chưa có thư mục ảnh — không có ảnh dán để dọn (file drop xử lý bên dưới).
+      }
+    }
+
+    const dropped = this.droppedAssetsByDoc.get(document.uri.toString());
+    if (dropped) {
+      for (const name of dropped) {
+        pool.add(name);
+      }
+    }
+
+    // Còn xuất hiện trong nội dung vừa lưu ⇒ đang dùng, bỏ. Chỉ đọc sibling khi
+    // thật sự còn ứng viên mồ côi (tránh quét thư mục khi không cần).
+    const orphans = [...pool].filter((name) => !text.includes(name));
+    if (orphans.length === 0) {
       return;
     }
 
-    let entries: [string, vscode.FileType][];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(imagesDir);
-    } catch {
-      return; // Chưa có thư mục ảnh nào — không có gì để dọn.
-    }
-
-    const ownedMarker = `${prefix}-${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}`;
-    const text = document.getText();
-    const candidates = entries
-      .filter(([name, type]) => type === vscode.FileType.File && name.startsWith(ownedMarker))
-      .map(([name]) => name)
-      .filter((name) => !text.includes(name));
-
-    if (candidates.length === 0) {
-      return;
-    }
-
-    const documentDir = vscode.Uri.joinPath(document.uri, '..');
-    const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
-
-    for (const name of candidates) {
-      if (await this.isReferencedInSiblingFiles(name, siblingMdUris, document.uri)) {
+    const siblingTexts = await this.readSiblingMdTexts(document);
+    for (const name of orphans) {
+      // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
+      if (siblingTexts.some((sibling) => sibling.includes(name))) {
         continue;
       }
       await this.deleteOrphanImage(imagesDir, name);
+      dropped?.delete(name); // đã xoá+cache; thôi theo dõi (undo sẽ re-track qua restore).
     }
   }
 
-  /** true nếu tìm thấy 1 file .md khác (không phải chính document) còn nhắc tới fileName — dừng ngay, không đọc hết danh sách. */
-  private async isReferencedInSiblingFiles(
-    fileName: string,
-    siblingUris: readonly vscode.Uri[],
-    ownDocumentUri: vscode.Uri
-  ): Promise<boolean> {
-    for (const uri of siblingUris) {
-      if (uri.toString() === ownDocumentUri.toString()) {
+  /**
+   * Nội dung mọi file .md anh em CÙNG THƯ MỤC (bỏ chính document), đọc mỗi file
+   * đúng MỘT lần — để cleanupOrphanImages đối chiếu mọi ứng viên trong O(siblings)
+   * thay vì mở lại danh sách sibling cho từng ứng viên.
+   */
+  private async readSiblingMdTexts(document: vscode.TextDocument): Promise<string[]> {
+    const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const siblingMdUris = await vscode.workspace.findFiles(new vscode.RelativePattern(documentDir, '*.md'));
+    const ownUri = document.uri.toString();
+    const texts: string[] = [];
+    for (const uri of siblingMdUris) {
+      if (uri.toString() === ownUri) {
         continue;
       }
       try {
-        const opened = await vscode.workspace.openTextDocument(uri);
-        if (opened.getText().includes(fileName)) {
-          return true;
-        }
+        texts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }
     }
-    return false;
+    return texts;
   }
 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
@@ -1353,6 +1724,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       try {
         await vscode.workspace.fs.createDirectory(imagesDir);
         await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+        // File kéo-thả (không có marker ảnh dán) vừa khôi phục qua undo → theo
+        // dõi lại để lần xoá link kế tiếp vẫn dọn được; ảnh dán tự nhận diện
+        // qua marker nên không cần.
+        if (!fileName.includes(MarkdownWysiwygProvider.PASTE_IMAGE_MARKER)) {
+          this.trackDroppedAsset(document, fileName);
+        }
       } catch (err) {
         MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: failed to restore ${fileName}`, err);
       }
@@ -1365,6 +1742,153 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * tồn tại (broken link) → realpath ném lỗi → fallback về path đã chuẩn hóa
    * (vẫn chặn được traversal qua ../..).
    */
+  /**
+   * Req 20 US-20.9: existence check for a batch of broken-reference candidate
+   * targets (file/heading links only — same-document `#heading`-only anchors
+   * never reach here, resolved by the webview's own TOC heading index). Each
+   * `target` is the raw file-part of an href (webview already stripped any
+   * `#fragment` — cross-file `path.md#heading` is file-level existence only,
+   * per the Broken Reference plan). Read-only: `fs.stat` via `workspace.fs`,
+   * same allowed-roots guard as `openLink` (never leaks existence of a path
+   * outside the document/workspace). Bails out early once `token` is
+   * cancelled (superseded by a newer request) — the caller discards a
+   * cancelled batch's result rather than posting it.
+   */
+  /**
+   * Ứng viên Uri (đã lọc qua allowed-roots) để resolve một href tương đối, theo
+   * thứ tự ưu tiên: workspace-root-relative TRƯỚC (quy ước người dùng viết link
+   * — coi đường dẫn như tính từ gốc dự án), rồi mới document-relative (chuẩn
+   * Markdown, làm fallback). Dùng CHUNG bởi `checkTargetsExist` (marker báo hỏng)
+   * và `openLink` (mở link) để một link được đánh "không hỏng" đúng là link được
+   * mở ra. Href có `#fragment`/`?query` phải được tách trước khi truyền vào.
+   */
+  private async relativeTargetCandidates(
+    document: vscode.TextDocument,
+    relPath: string
+  ): Promise<vscode.Uri[]> {
+    const decoded = decodeURIComponent(relPath);
+    const ordered: vscode.Uri[] = [];
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (folder) {
+      ordered.push(vscode.Uri.joinPath(folder.uri, decoded));
+    }
+    ordered.push(vscode.Uri.joinPath(document.uri, '..', decoded));
+    const seen = new Set<string>();
+    const allowed: vscode.Uri[] = [];
+    for (const uri of ordered) {
+      const key = uri.toString();
+      if (seen.has(key)) {
+        continue; // root === thư mục file (dự án 1 tầng) → 2 ứng viên trùng, bỏ 1.
+      }
+      seen.add(key);
+      if (await this.isInsideAllowedRoots(document, uri)) {
+        allowed.push(uri);
+      }
+    }
+    return allowed;
+  }
+
+  private async checkTargetsExist(
+    document: vscode.TextDocument,
+    targets: readonly string[],
+    token: vscode.CancellationToken
+  ): Promise<TargetExistsResult[]> {
+    const results: TargetExistsResult[] = [];
+    for (const target of targets) {
+      if (token.isCancellationRequested) {
+        break;
+      }
+      let exists = false;
+      // Không hỏng nếu BẤT KỲ ứng viên (root-relative hoặc file-relative) stat được.
+      for (const uri of await this.relativeTargetCandidates(document, target)) {
+        try {
+          await vscode.workspace.fs.stat(uri);
+          exists = true;
+          break;
+        } catch {
+          // ứng viên này không tồn tại — thử ứng viên kế.
+        }
+      }
+      results.push({ target, exists });
+    }
+    return results;
+  }
+
+  /**
+   * Req 21 US-21.3: which of `ids` (full entity tokens namespace+id) resolve to
+   * a live declaration. `exists` is true only when the index has a row for that
+   * id AND at least one of its declaration files passes the allowed-roots guard
+   * and a live `fs.stat` (index freshness is NOT truth — a stale row whose file
+   * was deleted/renamed reports broken). `occurrences` is the session cache's
+   * count for that id (best-effort). Bails early on cancellation, same as
+   * `checkTargetsExist`.
+   */
+  private async checkEntitiesExist(
+    document: vscode.TextDocument,
+    ids: readonly string[],
+    token: vscode.CancellationToken
+  ): Promise<EntityExistResult[]> {
+    const results: EntityExistResult[] = [];
+    for (const id of ids) {
+      if (token.isCancellationRequested) {
+        break;
+      }
+      const rows = this.entityIndex.lookup(id);
+      let exists = false;
+      let preview = ''; // Req 21 tooltip: only a RESOLVED declaration contributes a preview.
+      for (const row of rows) {
+        try {
+          const uri = vscode.Uri.parse(row.file);
+          // Same allowed-roots guard as checkTargetsExist — never leak existence
+          // of a declaration file outside the current document/workspace roots.
+          if (await this.isInsideAllowedRoots(document, uri)) {
+            await vscode.workspace.fs.stat(uri);
+            exists = true;
+            preview = row.preview;
+            break;
+          }
+        } catch {
+          // stat failed / file gone for this row — try the next declaration row.
+        }
+      }
+      const canonical = canonicalEntityId(id);
+      const occurrences = canonical !== null ? this.occurrenceCache.get(canonical)?.length ?? 0 : 0;
+      results.push({ id, exists, occurrences, preview });
+    }
+    return results;
+  }
+
+  /**
+   * Req 20 US-20.5: which of `candidates` are MISSING — `fs.stat` throws
+   * `FileNotFound`. Unlike `checkTargetsExist` (used for the always-visible
+   * inline marker, where any failure means "no mark"), a stat failure for any
+   * OTHER reason (permission/IO) is treated as *unknown* and NOT reported
+   * missing, so the appended entry never gets a false `⚠️` (AC "never a false
+   * ⚠️"). A target outside the allowed roots is likewise not marked. Returns the
+   * set of missing candidates' `key`s.
+   */
+  private async checkTargetsMissing(
+    document: vscode.TextDocument,
+    candidates: readonly RefCandidate[]
+  ): Promise<Set<string>> {
+    const missing = new Set<string>();
+    for (const candidate of candidates) {
+      const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(candidate.fileSegment));
+      if (!(await this.isInsideAllowedRoots(document, uri))) {
+        continue; // unknown / out of scope — do not mark.
+      }
+      try {
+        await vscode.workspace.fs.stat(uri);
+      } catch (err) {
+        if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
+          missing.add(candidate.key);
+        }
+        // Any other error → unknown → no mark.
+      }
+    }
+    return missing;
+  }
+
   private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
     const roots = [
       vscode.Uri.joinPath(document.uri, '..'),
@@ -1433,17 +1957,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Bug 0715 (US-19.9): class trạng thái đọc phải có mặt NGAY từ first paint
     // — nếu chờ message 'init' mới áp (readability.applyFromHost) thì toolbar
     // hiện ra một nhịp rồi trượt lên (transition của .reading-zen) và nội dung
-    // giật vì toolbar rời flow. Giá trị preset/palette đã được whitelist trong
-    // readReadabilityConfig nên an toàn để nội suy vào attribute.
-    const stylingActive = readability.enabled || readability.zen;
+    // giật vì toolbar rời flow. Giá trị mode luôn được whitelist trước khi tới
+    // đây — đường settings qua readReadabilityConfig, đường message qua handler
+    // 'readingModeChanged' (S-1) — nên an toàn để nội suy vào attribute.
+    // bug_General #1: reading styling (reading-mode/reading-mode-<mode>) gate
+    // CHỈ theo `enabled` — Zen KHÔNG kéo theo (khớp stylingActive() ở
+    // readability.ts). `reading-zen` (ẩn toolbar/gutter) vẫn bake độc lập theo
+    // `zen`.
+    const stylingActive = readability.enabled;
     const bodyClasses = [
       ...(stylingActive ? ['reading-mode'] : []),
       ...(readability.zen ? ['reading-zen'] : []),
-      // US-19.18: palette giờ gate theo stylingActive giống preset (không còn
-      // là lớp GLOBAL độc lập của US-19.11) — tắt Reading Mode = tắt luôn màu.
-      ...(stylingActive && readability.palette !== 'followTheme' ? [`reading-palette-${readability.palette}`] : []),
+      // US-19.24: mode màu (sepia/paper) thêm class `reading-mode-<mode>`;
+      // `standard` = follow theme, không thêm class màu. Gate theo stylingActive.
+      ...(stylingActive && readability.mode !== 'standard' ? [`reading-mode-${readability.mode}`] : []),
     ].join(' ');
-    const contentClasses = stylingActive ? `reading-preset-${readability.preset}` : '';
+    const contentClasses = '';
     // Bug 0716 #1: class `reading-zen` ở trên chỉ ẨN toolbar khi editor.css
     // (external stylesheet) đã load/parse xong. Nếu file CSS này apply SAU
     // khi toolbar đã kịp paint ở trạng thái mặc định (không transform), trình
@@ -1484,19 +2013,18 @@ function getNonce(): string {
   return crypto.randomBytes(16).toString('base64');
 }
 
-/** Giá trị hợp lệ của preset/palette — settings.json có thể chứa chuỗi tùy ý,
- * phải whitelist trước khi nội suy vào class attribute của HTML (getHtml). */
-const READING_PRESETS: readonly ReadingPreset[] = ['comfortable', 'default', 'compact', 'dyslexia', 'academic'];
-const READING_PALETTES: readonly ReadingPalette[] = ['followTheme', 'light', 'dark', 'sepia', 'highContrast', 'paper'];
+/** US-19.24: các reading mode hợp lệ — whitelist dùng cho CẢ đường settings.json
+ * (`orcaEditor.readability.readingMode`) LẪN message 'readingModeChanged' từ
+ * webview (runtime, untrusted) trước khi nội suy vào class attribute của HTML
+ * (getHtml). Giá trị lạ → 'standard'. */
+const READING_MODES: readonly ReadingMode[] = ['standard', 'sepia', 'paper'];
 
 /** Đọc trạng thái Reading Mode (US-19.x) từ config `orcaEditor.readability.*`. */
 function readReadabilityConfig(cfg: vscode.WorkspaceConfiguration): ReadabilityConfig {
-  const preset = cfg.get<ReadingPreset>('readability.preset', 'comfortable');
-  const palette = cfg.get<ReadingPalette>('readability.palette', 'followTheme');
+  const readingMode = cfg.get<string>('readability.readingMode', 'standard') as ReadingMode;
   return {
-    enabled: cfg.get<boolean>('readability.enabled', true),
-    preset: READING_PRESETS.includes(preset) ? preset : 'comfortable',
-    palette: READING_PALETTES.includes(palette) ? palette : 'followTheme',
+    enabled: cfg.get<boolean>('readability.enabled', false),
+    mode: READING_MODES.includes(readingMode) ? readingMode : 'standard',
     fontFamily: cfg.get<string>('readability.fontFamily', ''),
     zen: cfg.get<boolean>('readability.zen', false),
   };

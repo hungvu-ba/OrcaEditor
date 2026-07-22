@@ -13,6 +13,8 @@ import {
   MATH_BLOCK_CLASS,
   MERMAID_CLASS,
   MERMAID_SOURCE_CLASS,
+  AUTOLINK_PATH_ATTR,
+  EMPTY_LINK_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
@@ -23,15 +25,19 @@ import {
   EM_STYLE_ATTR,
   STRONG_STYLE_ATTR,
   HR_STYLE_ATTR,
+  TABLE_SEP_STYLE_ATTR,
 } from './block-style';
 
 export function createTurndown(): TurndownService {
+  // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
+  // '*' bullets and backslash hard breaks — see US-18.4b. Named so
+  // blankReplacement's zero-child <li> branch (no access to `options` there)
+  // can share the same fallback as 'listItemWithBulletStyle' below.
+  const BULLET_MARKER = '*';
   const td = new TurndownService({
     headingStyle: 'atx',
     hr: '---',
-    // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
-    // '*' bullets and backslash hard breaks — see US-18.4b.
-    bulletListMarker: '*',
+    bulletListMarker: BULLET_MARKER,
     codeBlockStyle: 'fenced',
     fence: '```',
     emDelimiter: '*',
@@ -42,22 +48,25 @@ export function createTurndown(): TurndownService {
     // (div, custom element...). Riêng SPAN là rác contentEditable → chỉ lấy nội dung.
     defaultReplacement: (content, node) => {
       const el = node as HTMLElement;
-      if (el.nodeName === 'SPAN' || typeof el.outerHTML !== 'string') {
+      if (el.nodeName === 'SPAN') {
         return content;
       }
-      return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+      return outerHtmlFallback(el, content);
     },
     // Thẻ trong keep() cũng phải né dòng trống bên trong (cắt html_block).
-    keepReplacement: (content, node) => {
-      const el = node as HTMLElement;
-      if (typeof el.outerHTML !== 'string') {
-        return content;
-      }
-      return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
-    },
-    // Node "rỗng" (turndown coi là blank và bỏ qua rule thường):
+    keepReplacement: (content, node) => outerHtmlFallback(node as HTMLElement, content),
+    // Node "rỗng" (turndown coi là blank và bỏ qua rule thường, kể cả rule tự
+    // thêm qua addRule — xem forNode trong turndown core: isBlank luôn được xét
+    // TRƯỚC rule lookup):
     //  - placeholder HTML comment phải được giữ lại
     //  - ô bảng rỗng vẫn phải emit "|" để không vỡ cột
+    //  - <li> rỗng hoàn toàn (0 con — markdown-it tự dựng lại từ 1 dòng bullet
+    //    trống khi re-parse) phải emit đúng prefix bullet/số của nó, không phải
+    //    default "\n\n" chung cho mọi block rỗng — nếu không, turndown MẤT hẳn
+    //    mục này khi nối với các <li> anh em (vỡ round-trip, không chỉ vỡ hiển
+    //    thị). Mục rỗng có <br> placeholder (Enter tạo mục mới chưa gõ gì) thì
+    //    KHÔNG rơi vào nhánh này — <br> là void element nên turndown coi <li>
+    //    đó "not blank", đã có rule riêng 'strayTrailingBr' xử lý.
     blankReplacement: (_content, node) => {
       const el = node as HTMLElement;
       if (el.getAttribute?.('data-md-comment') != null) {
@@ -65,6 +74,9 @@ export function createTurndown(): TurndownService {
       }
       if (el.nodeName === 'TD' || el.nodeName === 'TH') {
         return cellPrefix(el) + ' |';
+      }
+      if (el.nodeName === 'LI') {
+        return emptyListItemPrefix(el, BULLET_MARKER);
       }
       return (node as { isBlock?: boolean }).isBlock ? '\n\n' : '';
     },
@@ -107,6 +119,38 @@ export function createTurndown(): TurndownService {
     replacement: (content, node) => {
       const safe = content.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
       return cellPrefix(node as HTMLElement) + safe + ' |';
+    },
+  });
+
+  // --- US-18.5: table separator (border) row honoring its ORIGINAL spacing
+  //     (`|---|---|`, no inner spaces) when the table is stamped 'compact'
+  //     from mdSlice; supersedes turndown-plugin-gfm's tableRow rule, whose
+  //     cell() helper unconditionally pads every border cell — the actual
+  //     cause of untouched tables getting rewritten. Content cells
+  //     (tableCellPipeEscape above) are untouched; no mark → unchanged padded
+  //     output (Golden Rule). ---
+  td.addRule('tableRowBorderStyle', {
+    filter: 'tr',
+    replacement: (content, node) => {
+      const tr = node as HTMLElement;
+      let borderCells = '';
+      if (isHeadingRow(tr)) {
+        const table = getAncestor(tr, (el) => el.nodeName === 'TABLE');
+        const compact = table?.getAttribute(TABLE_SEP_STYLE_ATTR) === 'compact';
+        const alignMap: Record<string, string> = { left: ':--', right: '--:', center: ':-:' };
+        for (let i = 0; i < tr.childNodes.length; i++) {
+          const cellEl = tr.childNodes[i] as HTMLElement;
+          let border = '---';
+          const align = (cellEl.getAttribute?.('align') || '').toLowerCase();
+          if (align) {
+            border = alignMap[align] ?? border;
+          }
+          borderCells += compact
+            ? (i === 0 ? '|' : '') + border + '|'
+            : (i === 0 ? '| ' : ' ') + border + ' |';
+        }
+      }
+      return '\n' + content + (borderCells ? '\n' + borderCells : '');
     },
   });
 
@@ -192,22 +236,7 @@ export function createTurndown(): TurndownService {
           return `\n\n${body}\n\n`;
         }
       }
-      const fenceChar = codeStyle === 'fence-tilde' ? '~' : '`';
-      let fence = fenceChar.repeat(3);
-      if (fenceChar === '~') {
-        // Only a line-start tilde run can close a fence — mid-line `~~~` is
-        // harmless and must not grow the fence (byte churn on untouched blocks).
-        for (const run of text.match(/^ {0,3}~{3,}\s*$/gm) ?? []) {
-          const needed = run.trim().length + 1;
-          if (needed > fence.length) {
-            fence = fenceChar.repeat(needed);
-          }
-        }
-      } else {
-        while (text.includes(fence)) {
-          fence += fenceChar;
-        }
-      }
+      const fence = pickFence(text, codeStyle === 'fence-tilde' ? '~' : '`');
       return `\n\n${fence}${lang}\n${text}\n${fence}\n\n`;
     },
   });
@@ -289,10 +318,95 @@ export function createTurndown(): TurndownService {
     },
   });
 
+  // --- Residual <br> that would otherwise serialize to a stray "\" under this
+  //     branch's `br: '\\'` convention (US-18.4b hard-break marker). A <br> is
+  //     "residual" when it is the LAST meaningful node inside an <li>/<p>/
+  //     <blockquote> -- no following sibling carries visible content (only other
+  //     <br>s, whitespace text, or empty/void-less elements follow) -- so it
+  //     carries no real hard break and only exists
+  //     as contentEditable/execCommand leftover: an Enter-created empty list
+  //     item, Enter/Backspace residue, or the indent/outdent / list-unwrap /
+  //     blockquote-toggle native fallbacks. Dropping it lets the parent emit a
+  //     clean empty bullet / paragraph / "> " line instead of "\" (the default
+  //     'br' rule would turn it into a hard break, which 'listItem' then indents
+  //     and appends an extra "\n" to when a sibling follows -> "-     \n    \n").
+  //     A GENUINE mid-content hard break (foo<br>bar) is untouched: "bar" follows
+  //     the <br>, so it is not trailing and the default 'br' rule still runs.
+  //     One rule covers all three parents: <li> (bug 0717 / round2 #1 empty item,
+  //     round3 #2/#6), <p> (round3 #6) and <blockquote> (round3 #8). Note: an
+  //     empty <li>/<p> still passes turndown's isBlank() as non-blank because a
+  //     <br> is a void element, so 'listItem'/paragraph rules run normally and
+  //     compute the correct prefix from the now-empty content -- do NOT add a
+  //     prefix here (that would double-prefix). Zero-child <li> is a separate
+  //     path (turndown's isBlank short-circuits to blankReplacement's LI branch).
+  td.addRule('strayTrailingBr', {
+    filter: (node) => {
+      if (node.nodeName !== 'BR') {
+        return false;
+      }
+      const parent = node.parentElement;
+      if (!parent || !/^(LI|P|BLOCKQUOTE)$/.test(parent.nodeName)) {
+        return false;
+      }
+      // Trailing when NO following sibling carries visible content: skip other
+      // <br>s and any node whose textContent is blank AND holds no visible void
+      // (img/input/media/hr) -- covers whitespace text, empty inline cruft like
+      // <span></span>, and empty elements. Any real text or visible void after
+      // the <br> means it is a genuine hard break -> keep it (default 'br' rule).
+      for (let sib = node.nextSibling; sib; sib = sib.nextSibling) {
+        if (sib.nodeName === 'BR') {
+          continue;
+        }
+        if ((sib.textContent ?? '').trim() !== '') {
+          return false;
+        }
+        if ((sib as Element).querySelector?.('img, input, video, audio, iframe, picture, hr')) {
+          return false;
+        }
+      }
+      return true;
+    },
+    replacement: () => '',
+  });
+
   // --- HTML comment (đã được prepareDomForSerialize đổi thành placeholder) ---
   td.addRule('mdComment', {
     filter: (node) => (node as HTMLElement).hasAttribute?.('data-md-comment') ?? false,
     replacement: (_content, node) => commentReplacement(node as HTMLElement),
+  });
+
+  // --- display-only auto-link path: <a data-autolink-path> created by
+  // postProcessRelativePathLinks (text = file name, href = encoded path).
+  // Emit the ORIGINAL raw path run through td.escape() — the SAME escaping the
+  // plain-text serializer applies — so serialize-with-feature is byte-identical
+  // to serialize-without-feature (display-only must not alter the .md). Custom
+  // rules are checked before the built-in inlineLink; this rule's data-attr
+  // filter is disjoint from bareUrl (text = file name ≠ href), so it is the one
+  // that fires for these anchors.
+  td.addRule('autolinkPath', {
+    filter: (node) =>
+      node.nodeName === 'A' && ((node as HTMLElement).hasAttribute?.(AUTOLINK_PATH_ATTR) ?? false),
+    replacement: (_content, node) => td.escape((node as HTMLElement).getAttribute(AUTOLINK_PATH_ATTR) ?? ''),
+  });
+
+  // --- display-only auto-link path in an inline code span: <code data-autolink-path>
+  // shows only the file name but must serialize back to the ORIGINAL `full-path`
+  // code span (inline-code content is literal — no escaping) so the .md is unchanged.
+  td.addRule('autolinkCodePath', {
+    filter: (node) =>
+      node.nodeName === 'CODE' && ((node as HTMLElement).hasAttribute?.(AUTOLINK_PATH_ATTR) ?? false),
+    replacement: (_content, node) => '`' + ((node as HTMLElement).getAttribute(AUTOLINK_PATH_ATTR) ?? '') + '`',
+  });
+
+  // --- display-only empty link: <a data-empty-link> shows the decoded target
+  // file name (postProcessEmptyLinks — bug_General #15) but must serialize back
+  // to the ORIGINAL empty-text link `[](href)`, dropping the display text, so the
+  // .md is unchanged. href is the raw attribute (already URL-encoded); emitted as-is
+  // like the built-in inlineLink rule → byte-identical to the untouched .md.
+  td.addRule('emptyLink', {
+    filter: (node) =>
+      node.nodeName === 'A' && ((node as HTMLElement).hasAttribute?.(EMPTY_LINK_ATTR) ?? false),
+    replacement: (_content, node) => `[](${(node as HTMLElement).getAttribute(EMPTY_LINK_ATTR) ?? ''})`,
   });
 
   // --- linkify/autolink: <a> có text trùng href → giữ dạng URL trần ---
@@ -338,10 +452,7 @@ export function createTurndown(): TurndownService {
     replacement: (_content, node) => {
       const code = (node as HTMLElement).querySelector(`.${MERMAID_SOURCE_CLASS} code`);
       const text = (code?.textContent ?? '').replace(/\n$/, '');
-      let fence = '```';
-      while (text.includes(fence)) {
-        fence += '`';
-      }
+      const fence = pickFence(text);
       return `\n\n${fence}mermaid\n${text}\n${fence}\n\n`;
     },
   });
@@ -491,6 +602,7 @@ const TRANSIENT_ATTRS = [
   EM_STYLE_ATTR,
   STRONG_STYLE_ATTR,
   HR_STYLE_ATTR,
+  TABLE_SEP_STYLE_ATTR,
 ];
 
 function safeOuterHtml(el: HTMLElement): string {
@@ -529,19 +641,65 @@ function getBlockAlign(el: HTMLElement): string {
   return m ? m[1].toLowerCase() : '';
 }
 
+/**
+ * Prefix markdown ("-   " hoặc "1.  ") cho một <li> RỖNG (không có content thật
+ * để turndown tự tính content/prefix qua rule 'listItem' mặc định) — dùng chung
+ * bởi blankReplacement (li 0 con) và rule 'strayTrailingBr' (li chỉ có <br>).
+ * Công thức numbering khớp CHÍNH XÁC turndown's default 'listItem' rule (start
+ * attribute + vị trí trong danh sách con của cha) để mục rỗng đánh số đúng như
+ * mọi mục khác trong cùng <ol>.
+ */
+function emptyListItemPrefix(li: HTMLElement, defaultMarker: string): string {
+  const parent = li.parentElement;
+  let prefix: string;
+  if (parent && parent.nodeName === 'OL') {
+    const start = parent.getAttribute('start');
+    const index = Array.prototype.indexOf.call(parent.children, li);
+    prefix = `${start ? Number(start) + index : index + 1}.  `;
+  } else {
+    // US-18.4b: honor the block's original bullet marker here too, same lookup
+    // as 'listItemWithBulletStyle' — this branch bypasses that rule entirely
+    // (turndown's isBlank check routes zero-child <li> straight to
+    // blankReplacement), so without this it always fell back to '-'.
+    const block = getAncestor(li, (el) => el.hasAttribute(BULLET_STYLE_ATTR));
+    const marker = block?.getAttribute(BULLET_STYLE_ATTR) ?? defaultMarker;
+    prefix = marker + '   ';
+  }
+  return prefix + (li.nextSibling ? '\n' : '');
+}
+
 /** '| ' cho ô đầu hàng, ' ' cho các ô sau — giống turndown-plugin-gfm. */
 function cellPrefix(cell: HTMLElement): string {
   const parent = cell.parentNode;
   if (!parent) {
     return '| ';
   }
-  const kids = parent.childNodes;
-  for (let i = 0; i < kids.length; i++) {
-    if (kids[i] === cell) {
-      return i === 0 ? '| ' : ' ';
-    }
+  return Array.prototype.indexOf.call(parent.childNodes, cell) === 0 ? '| ' : ' ';
+}
+
+/**
+ * A <tr> is the heading row when its parent is a THEAD, or it's the first
+ * child of the TABLE/first TBODY and every cell is a TH — mirrors
+ * turndown-plugin-gfm's isHeadingRow exactly, needed here because that
+ * plugin's own tableRow rule is superseded by 'tableRowBorderStyle' above.
+ */
+function isHeadingRow(tr: HTMLElement): boolean {
+  const parent = tr.parentNode as HTMLElement | null;
+  if (!parent) {
+    return false;
   }
-  return ' ';
+  if (parent.nodeName === 'THEAD') {
+    return true;
+  }
+  const isFirstTbody =
+    parent.nodeName === 'TBODY' &&
+    (!parent.previousElementSibling ||
+      (parent.previousElementSibling.nodeName === 'THEAD' &&
+        /^\s*$/.test(parent.previousElementSibling.textContent ?? '')));
+  if (parent.firstChild !== tr || (parent.nodeName !== 'TABLE' && !isFirstTbody)) {
+    return false;
+  }
+  return Array.prototype.every.call(tr.childNodes, (n: Node) => (n as Element).nodeName === 'TH');
 }
 
 function blockLike(el: HTMLElement): boolean {
@@ -556,6 +714,36 @@ function decodeSafe(s: string): string {
   } catch {
     return s;
   }
+}
+
+// Unrecognized tag → keep its outerHTML (never bleed inner blank lines that
+// would cut an html_block); non-string outerHTML → fall back to plain content.
+// Shared by defaultReplacement/keepReplacement; the former adds its own SPAN guard.
+function outerHtmlFallback(el: HTMLElement, content: string): string {
+  if (typeof el.outerHTML !== 'string') {
+    return content;
+  }
+  return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+}
+
+// Pick a code fence long enough that `text` cannot close it early.
+function pickFence(text: string, fenceChar: '`' | '~' = '`'): string {
+  let fence = fenceChar.repeat(3);
+  if (fenceChar === '~') {
+    // Only a line-start tilde run can close a fence — mid-line `~~~` is
+    // harmless and must not grow the fence (byte churn on untouched blocks).
+    for (const run of text.match(/^ {0,3}~{3,}\s*$/gm) ?? []) {
+      const needed = run.trim().length + 1;
+      if (needed > fence.length) {
+        fence = fenceChar.repeat(needed);
+      }
+    }
+  } else {
+    while (text.includes(fence)) {
+      fence += fenceChar;
+    }
+  }
+  return fence;
 }
 
 /** Chuẩn hóa markdown sau serialize: gộp dòng trống thừa, đảm bảo newline cuối. */

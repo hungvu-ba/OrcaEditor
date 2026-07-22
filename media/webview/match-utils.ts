@@ -139,6 +139,11 @@ export interface OverviewTicksOptions {
  * (Ctrl+F, có click-to-jump + tick "current") và select-highlight.ts (Feature A, chỉ báo trực quan
  * thuần, không click-to-jump, không khái niệm "current").
  */
+/** Total document height, used to convert tick/band position to %. Also reused by toc.ts (US-10.7) for the reading-progress ring percent. */
+export function getDocHeight(): number {
+  return Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, 1);
+}
+
 export function buildOverviewTicks(options: OverviewTicksOptions): void {
   const { container, matches, tickClass, current = -1, maxTicks = Infinity, onTickClick } = options;
   container.textContent = '';

@@ -17,30 +17,61 @@ import {
   normalizeMarkdown,
   postProcessMathDom,
   postProcessMermaidDom,
+  postProcessCodeHeaders,
+  postProcessRelativePathLinks,
+  postProcessCaptions,
+  postProcessEntityRefs,
+  postProcessEmptyLinks,
   prepareDomForSerialize,
+  CAPTION_CLASS,
+  AUTOLINK_PATH_ATTR,
+  MD_CODE_COPY_CLASS,
+  MD_CODE_LANG_CLASS,
+  MD_CODE_WRAP_CLASS,
+  MD_CODE_WRAPPED_CLASS,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
+import { initBrokenRef, slugifyHeadingText } from './broken-ref';
+import { initQuickCorrect } from './quick-correct';
+import { initCaptionEdit } from './caption-edit';
 import { initMermaid } from './mermaid';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
-import { detectBlockStyle, stampStyleOverride } from './block-style';
-import { initDragDrop } from './drag-drop';
-import { closestElement, createDomHelpers, scrollBehavior } from './dom-utils';
-import { initPrompt } from './prompt';
+import { readSrcRange } from './block-info';
+import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
+import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
+import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
+import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
 import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
 import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
-import { initToolbar, syncTocButton, syncReadingButtons, toggleInlineCode, isPopoverOpen } from './toolbar';
+import {
+  initToolbar,
+  syncTocButton,
+  syncReadingButtons,
+  toggleInlineCode,
+  isPopoverOpen,
+  openCodeLangSwitcher,
+  initBrokenRefBadge,
+  syncBrokenRefBadge,
+  initToolbarTriggerAt,
+} from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
+import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
+import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
+import { initTriggerSlash } from './trigger-slash';
+import { initTriggerAt } from './trigger-at';
+import { initEntityScope } from './entity-scope';
 import type { VsCodeApi } from './vscode-api';
-import type { HostToWebview, InitConfig, WebviewToHost } from '../../src/shared/messages';
+import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
+import { normalizeHrefKey } from '../../src/references-section';
 import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -70,16 +101,31 @@ let lineNumbersEnabled = false;
 const dom = createDomHelpers(content);
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
-const dragDrop = initDragDrop(content, { scheduleSync, dom, lineGutter });
-const prompt = initPrompt(vscode, dom);
+const dragDrop = initDragDrop(content, {
+  scheduleSync,
+  dom,
+  lineGutter,
+  // Same caret-host invariants renderDocument enforces — reused after a handle-delete (bug
+  // General #1) whose suppressed host echo means renderDocument won't re-run.
+  ensureCaretHost: () => {
+    ensureCaretSpotAfterAtomBlocks();
+    ensureCaretSpotBeforeHr();
+    ensureTrailingParagraph();
+  },
+});
 const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
 // US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
 // its save+insert flow) and insertMarkdownAtCaret (hoisted function, declared below).
-const externalDrop = initExternalDrop(content, { vscode, pasteImage, insertMarkdown: insertMarkdownAtCaret });
+const externalDrop = initExternalDrop(content, {
+  vscode,
+  pasteImage,
+  insertMarkdown: insertMarkdownAtCaret,
+  restoreSelection: dom.restoreSelection,
+});
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
-// Reading Mode (US-19.x) — controller lái CSS class/var. enabled/preset/palette
+// Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
 const readability = initReadability({
@@ -90,18 +136,104 @@ const readability = initReadability({
   isPopoverOpen,
   onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
   onReadingModeChange: (state) => postToHost({ type: 'readingModeChanged', ...state }),
+  // bug_General #7: khi commit 1 bộ style, Mermaid dựng lại nếu nền sáng/tối lật.
+  onStyleApplied: () => mermaidView.refreshTheme(),
 });
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
   scheduleSync,
+  flushPendingSync,
+  syncNow,
+  // Same host-delegation contract as the Ctrl+Z/Y keydown path below: one
+  // single TextDocument undo stack, never the browser's native one.
+  requestUndo: () => postToHost({ type: 'undo', pendingText: takePendingSync() }),
+  requestRedo: () => postToHost({ type: 'redo', pendingText: takePendingSync() }),
   dom,
   toc,
   readability,
-  promptInput: prompt.promptInput,
   insertMarkdown: insertMarkdownAtCaret,
 });
 initInputRules(content, { scheduleSync, dom });
+
+// Req 20 US-20.1/20.2/20.3: ONE shared trigger-popup shell — created LAZILY on
+// first open(). Both the `@` (trigger-at) and `/` (trigger-slash) triggers plug
+// their own dataSource into this SAME single instance, which is what gives "only
+// one overlay active at a time" for free (open() tears down any previous session
+// before opening, see trigger-popup.ts). It must NOT be built eagerly at init:
+// initTriggerPopup() appends a `.trigger-popup` card to the body, and a standing
+// hidden card at startup shadows the debug-driven card the shell spec drives —
+// the exact foundation bug. `isOpen()` therefore never forces construction (it
+// answers false until something has actually opened the popup).
+let sharedTriggerPopup: TriggerPopupController | undefined;
+const triggerPopup: TriggerPopupController = {
+  open: (args) => {
+    if (!sharedTriggerPopup) {
+      sharedTriggerPopup = initTriggerPopup({ content });
+    }
+    sharedTriggerPopup.open(args);
+  },
+  updateQuery: (q) => sharedTriggerPopup?.updateQuery(q),
+  isOpen: () => sharedTriggerPopup?.isOpen() ?? false,
+  close: () => sharedTriggerPopup?.close(),
+  showGhost: (text, afterRange) => sharedTriggerPopup?.showGhost(text, afterRange),
+  hideGhost: () => sharedTriggerPopup?.hideGhost(),
+};
+const triggerSlash = initTriggerSlash(content, triggerPopup, postToHost);
+const triggerAt = initTriggerAt(content, triggerPopup, postToHost);
+// Req 20 US-20.8: toolbar Link/Image buttons invoke trigger-at.ts's popup —
+// wired here (not a field on initToolbar's args) because initToolbar runs
+// BEFORE triggerAt exists in this init order (same reason as initBrokenRefBadge).
+initToolbarTriggerAt(triggerAt.openFromToolbar);
+
+// Req 21 US-21.3: `UC01.` dot-drill (current-document scope) + entity-ref
+// hover parent-context — own `input`/hover wiring, independent of trigger-at's
+// `@` detection (fires on '.' typed right after an already-inserted entity
+// reference, not on '@').
+// Req 21 hover tooltip: id → following-text preview for CROSS-FILE mentions,
+// populated from every `entitiesExistResult` reply (the broken-ref scan already
+// round-trips every mention id through the host). Same-file previews are read
+// straight from the DOM in entity-scope.ts and don't need this cache.
+const entityPreviewById = new Map<string, string>();
+const entityScope = initEntityScope(content, triggerPopup, (id) => entityPreviewById.get(id));
+content.addEventListener('input', (e) => entityScope.onInput(e as InputEvent));
+content.addEventListener('mousemove', (e) => entityScope.onMouseMove(e), true);
+content.addEventListener('mouseout', (e) => entityScope.onMouseOut(e), true);
+
+// Req 20 US-20.9 / Req 21 US-21.3: broken-reference marker (file/heading links
+// only for now) + its "Search again" quick-correct popover. quickCorrect is
+// created first; its onFixed callback references brokenRef (assigned right
+// after) — safe because both callbacks only ever run later, from a user
+// interaction, well after this synchronous init block has finished.
+const quickCorrect = initQuickCorrect(vscode, content, () => {
+  scheduleSync();
+  brokenRef.refresh();
+});
+const brokenRef = initBrokenRef({
+  content,
+  vscode,
+  onSearchAgain: (anchor) => quickCorrect.open(anchor),
+  // Req 21 US-21.3: "Fix all" — one pick applied to every same-id occurrence in this file.
+  onFixAll: (anchor) => quickCorrect.open(anchor, { fixAll: true }),
+  // Req 21 US-21.3: right-pinned toolbar count badge, recomputed live from
+  // every recompute pass (current document only).
+  onChange: () => syncBrokenRefBadge(),
+});
+initBrokenRefBadge(() => brokenRef.list());
+
+// bug_General Mention Declare #6: click a declaration pill (.md-caption, a
+// non-editable atom) to edit its value via an anchored popover with duplicate
+// validation. onEdited persists the rewritten token to the document.
+const captionEdit = initCaptionEdit(vscode, () => {
+  scheduleSync();
+});
+content.addEventListener('click', (e) => {
+  const badge = (e.target as Element | null)?.closest?.(`.${CAPTION_CLASS}`);
+  if (badge) {
+    e.preventDefault();
+    captionEdit.open(badge as HTMLElement);
+  }
+});
 
 /**
  * Đồng bộ chiều cao toolbar (sticky, top:0) vào CSS var `--toolbar-height` để
@@ -131,14 +263,27 @@ let blockMap: BlockEntry[] = [];
 document.execCommand('defaultParagraphSeparator', false, 'p');
 
 /**
- * Tab (webview) hẹp hơn nửa màn hình vật lý → không đủ chỗ cho panel mục lục
- * cố định bên phải mà không đè lên nội dung. So window.innerWidth (bề rộng
- * tab) với screen.width (màn hình) chứ không phải bề rộng #content, vì mục
- * đích là phát hiện tab đang bị chia đôi/thu nhỏ, không phải nội dung dài hay
- * ngắn.
+ * Reference prose-column width = reading measure 70ch
+ * @ 16px font (markdown.css body.reading-mode #content). ch→px via the
+ * fixed estimate 1ch ≈ 0.5em → 70 × 0.5 × 16 = 560px. A reference constant,
+ * independent of whether Reading Mode is currently on.
+ */
+const COMFORTABLE_MEASURE_PX = 70 * 0.5 * 16;
+
+/** Right-side space body.toc-open reserves BEYOND --toc-width (editor.css). */
+const TOC_GUTTER_PX = 26;
+
+/**
+ * The tab (webview) is no longer wide enough to show the prose column at
+ * Comfortable Reading size WHILE the TOC panel is open → auto-hide so content
+ * isn't squeezed too narrow. Threshold = reference column (COMFORTABLE_MEASURE_PX)
+ * + panel width (--toc-width, read live since the user can resize it) + gutter.
+ * Compared against window.innerWidth (tab width), not the physical screen.
  */
 function isNarrowViewport(): boolean {
-  return window.innerWidth < window.screen.width / 2;
+  const tocWidth =
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--toc-width')) || 300;
+  return window.innerWidth < COMFORTABLE_MEASURE_PX + tocWidth + TOC_GUTTER_PX;
 }
 
 /**
@@ -166,6 +311,18 @@ function shouldAutoOpenToc(flag: boolean | undefined): boolean {
  */
 let lastAutoOpenToc: boolean | undefined;
 
+/**
+ * Req 21 US-21.5 — propagate `orcaEditor.triggerActions.mode` to both trigger
+ * modules (seed at 'init', live-updated on 'configUpdate') and mirror it onto
+ * `body[data-trigger-mode]` — an observable hook for tests/future CSS, gating
+ * visibility only, never restyling/hiding already-written content.
+ */
+function applyTriggerMode(mode: TriggerMode): void {
+  document.body.dataset.triggerMode = mode;
+  triggerSlash.setTriggerMode(mode);
+  triggerAt.setTriggerMode(mode);
+}
+
 window.addEventListener('message', (event) => {
   const msg = event.data as HostToWebview;
   switch (msg.type) {
@@ -179,11 +336,28 @@ window.addEventListener('message', (event) => {
       if (cfg.readability) {
         readability.applyFromHost(cfg.readability);
       }
+      // Req 20 US-20.2/20.3: seed the `/` trigger popup — docUri is echoed back
+      // on 'executeCommand' so the host can verify this document is still the
+      // target (see triggerSlash.setDocUri).
+      triggerSlash.setDocUri(msg.docUri);
+      triggerSlash.setConfig(cfg.trigger);
+      // Req 21 US-21.2: the `@` popup's Entities scope also needs docUri, to
+      // relativize a picked entity's declaring-file href client-side.
+      triggerAt.setDocUri(msg.docUri);
+      // Req 21 bug fix: the quick-correct popover needs docUri to relativize a
+      // corrected entity's declaring-file href (else it keeps the old file).
+      quickCorrect.setDocUri(msg.docUri);
+      // Req 21 US-21.5: also seed the `@` popup's gate.
+      applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       renderDocument(msg.text ?? '');
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
       // lưu — chỉ fallback về restoreScroll() cho luồng mở file bình thường.
-      if (msg.reveal) {
+      if (msg.reveal?.searchText) {
+        // Bug General #1: entity link → reveal by whole-doc text search (works
+        // for out-of-workspace targets; immune to line↔DOM drift).
+        lineGutter.scrollToText(msg.reveal.searchText);
+      } else if (msg.reveal) {
         lineGutter.scrollToSourceLine(msg.reveal.line + 1, msg.reveal.character, msg.reveal.length, msg.reveal.matchText);
       } else {
         restoreScroll();
@@ -199,17 +373,45 @@ window.addEventListener('message', (event) => {
       if (msg.text === currentText) {
         break;
       }
-      renderDocument(msg.text ?? '');
-      // Chỉ update từ undo/redo mới kèm caretLine — đặt lại caret về đúng vị trí
-      // vừa đổi (renderDocument dựng lại DOM nên caret bị mất). External edit
-      // không kèm field này → không đụng caret (giữ hành vi cũ).
-      if (msg.caretLine !== undefined) {
-        restoreCaretAtSource(msg.caretLine, msg.caretCol ?? 0);
+      // Bug #3 (filter leak): while a trigger popup (`/`/`@`) owns the editor
+      // keyboard it anchors a Range into #content and keeps its query input
+      // focused. Rebuilding #content NOW would detach that Range and
+      // restoreCaretAtSource would steal focus back to #content — the filter
+      // text typed next then leaks into the editor (+ a stray newline on Enter).
+      // Defer the render until the popup releases input ownership (commit/cancel).
+      if (hasInputOwner()) {
+        pendingUpdate = { text: msg.text ?? '', caretLine: msg.caretLine, caretCol: msg.caretCol, baseText: currentText };
+        break;
       }
+      applyDocumentUpdate(msg.text ?? '', msg.caretLine, msg.caretCol);
       break;
     }
     case 'fileSearchResult': {
-      prompt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      // quick-correct.ts and trigger-at.ts (Req 20 US-20.1 `@` Files scope)
+      // share the SAME 'searchFiles'/'fileSearchResult' channel (each keeps
+      // its own requestId sequence — ignores this if it isn't the one it's
+      // waiting for), so no new host message shape.
+      quickCorrect.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      triggerAt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      break;
+    }
+    case 'namespaceListResult': {
+      // Req 21 US-21.1's Declare-entity flow (triggerSlash) and Req 21 US-21.2's
+      // `@` Entities scope (triggerAt) share the SAME 'namespaceList'/
+      // 'namespaceListResult' channel (each keeps its own requestId sequence —
+      // ignores this if it isn't the one it's waiting for), same pattern as
+      // 'fileSearchResult' above.
+      triggerSlash.notifyNamespaceListResult(msg.requestId, msg.ready, msg.namespaces);
+      triggerAt.notifyNamespaceListResult(msg.requestId, msg.ready, msg.namespaces);
+      break;
+    }
+    case 'entityResult': {
+      // Same sharing as 'namespaceListResult' above, for 'entitySearch' — now
+      // also the broken-entity quick-correct's Entities scope (Req 21 US-21.3).
+      triggerSlash.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      triggerAt.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      quickCorrect.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
+      captionEdit.notifyEntityResult(msg.requestId, msg.ready, msg.entities);
       break;
     }
     case 'pasteImageResult': {
@@ -224,14 +426,33 @@ window.addEventListener('message', (event) => {
       crossFileSearch.notifyResult(msg.requestId, msg.groups, msg.truncated, msg.usedFallback);
       break;
     }
+    case 'targetsExistResult': {
+      brokenRef.notifyResult(msg.requestId, msg.docVersion, msg.results);
+      break;
+    }
+    case 'entitiesExistResult': {
+      // Cache each id's preview for the cross-file hover tooltip (Req 21).
+      // Set unconditionally (incl. '') so a declaration that lost its following
+      // text — or became unresolved — clears any stale cached preview.
+      for (const r of msg.results) {
+        entityPreviewById.set(r.id, r.preview ?? '');
+      }
+      brokenRef.notifyEntitiesResult(msg.requestId, msg.docVersion, msg.results);
+      break;
+    }
     case 'scrollToPosition': {
       // C6b: file .md đã có panel mở sẵn — host gửi thẳng message này thay vì
       // qua 'init' vì resolveCustomTextEditor không chạy lại trong trường hợp này.
-      lineGutter.scrollToSourceLine(msg.line + 1, msg.character, msg.length, msg.matchText);
+      if (msg.searchText) {
+        // Bug General #1: entity link → reveal by whole-doc text search.
+        lineGutter.scrollToText(msg.searchText);
+      } else {
+        lineGutter.scrollToSourceLine(msg.line + 1, msg.character, msg.length, msg.matchText);
+      }
       break;
     }
     case 'configUpdate': {
-      // Reading Mode/preset/palette KHÔNG áp qua configUpdate dù giờ global
+      // Reading Mode (enabled/mode) KHÔNG áp qua configUpdate dù giờ global
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
@@ -247,6 +468,10 @@ window.addEventListener('message', (event) => {
         syncTocButton();
       }
       lastAutoOpenToc = msg.autoOpenToc;
+      // Req 21 US-21.5: live-toggle the trigger-actions visibility gate — the
+      // one trigger.* field that changes at runtime (dateFormat/executeCommands
+      // stay init-only, unchanged behavior).
+      applyTriggerMode(msg.triggerMode);
       break;
     }
     case 'zenChanged': {
@@ -256,10 +481,27 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'readingModeChanged': {
-      // Bug 0716 #2: enabled/preset/palette vừa đổi ở TAB KHÁC, host broadcast
+      // Bug 0716 #2: enabled/mode vừa đổi ở TAB KHÁC, host broadcast
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
       // onReadingModeChange, tránh vòng lặp).
       readability.applyReadingModeFromHost(msg);
+      break;
+    }
+    case 'runCommand': {
+      // Req 20 US-20.3: the `/` popup's Execute group, after the host validated
+      // and ran vscode.commands.executeCommand — reuse the SAME local actions
+      // the toolbar buttons already call (no parallel implementation).
+      // toggle()/toggleZen() report back via onReadingModeChange/onZenChange
+      // (postToHost above) exactly as when driven from the toolbar, so other
+      // open tabs stay in sync.
+      if (msg.command === 'toggleReadingMode') {
+        readability.toggle();
+      } else if (msg.command === 'toggleZen') {
+        readability.toggleZen();
+      } else if (msg.command === 'openToc') {
+        toc.toggle();
+        syncTocButton();
+      }
       break;
     }
   }
@@ -267,12 +509,16 @@ window.addEventListener('message', (event) => {
 
 postToHost({ type: 'ready' });
 
-// Tab bị thu hẹp xuống dưới nửa màn hình (vd. chia đôi split editor) → tự ẩn
-// mục lục để không choán chỗ nội dung. Chỉ tự ẩn đúng lúc CHUYỂN từ rộng sang
-// hẹp — nếu user tự bật lại panel trong lúc tab vẫn đang hẹp, không tự đóng
-// lại lần nữa (tôn trọng lựa chọn thủ công của họ) cho tới lần hẹp tiếp theo.
+// Tab shrank below the width needed for the prose column + panel
+// (isNarrowViewport, e.g. a split editor) → auto-hide the TOC so it doesn't
+// crowd content. Only auto-hides on the wide→narrow TRANSITION — if the user
+// re-opens the panel while the tab is still narrow, don't auto-close it again
+// (respect their manual choice) until the next time it goes narrow.
 let wasNarrowViewport = isNarrowViewport();
 window.addEventListener('resize', () => {
+  // Shrink the panel proportionally first, so the narrow-viewport check below
+  // reads the reflowed --toc-width (panel shrinks, then auto-hides at the floor).
+  toc.reflowWidth();
   const narrow = isNarrowViewport();
   if (narrow && !wasNarrowViewport && toc.isOpen()) {
     toc.toggle();
@@ -311,9 +557,18 @@ function renderDocument(markdown: string): void {
   content.innerHTML = html;
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
+  postProcessCodeHeaders(content, document);
+  postProcessRelativePathLinks(content, document);
+  postProcessCaptions(content, document);
+  postProcessEntityRefs(content);
+  postProcessEmptyLinks(content);
   ensureTrailingParagraph();
+  ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
   table.hideTableToolbar();
+  // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
+  // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
+  table.closeRowMenu();
   if (lineNumbersEnabled) {
     lineGutter.refreshFromDom();
   }
@@ -322,9 +577,6 @@ function renderDocument(markdown: string): void {
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
   blockMap = buildBlockMap(content, markdown, blockMap);
-  // US-19.15: dò ngôn ngữ tài liệu (Việt/khác) để preset Academic Paper chọn font
-  // đúng — chạy sau khi #content đã dựng lại nội dung mới.
-  readability.refreshContentLanguage();
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
@@ -333,13 +585,62 @@ function renderDocument(markdown: string): void {
   selectHighlight.refresh();
   // Vị trí icon/selection cũ không còn hợp lệ sau khi DOM đổi — ẩn icon/đóng popover.
   crossFileSearch.refresh();
+  // The @// trigger popup anchors into #content just rebuilt — close it (no-op when
+  // not open) so its orphaned card and the `trigger-popup-open` caret-suppression
+  // class can't linger with the editor caret hidden (bug General: Mention Declare 3 & 4).
+  triggerPopup.close();
   // Heading có thể đã đổi — dựng lại mục lục nếu panel đang mở.
   toc.refresh();
+  // Req 20 US-20.9: anchors/headings just rebuilt — re-scan for broken references.
+  brokenRef.refresh();
   // Bảng vừa dựng lại — bỏ cache header dính cũ, tính lại theo DOM mới.
   stickyTableHeader.refresh();
   // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
   dragDrop.refresh();
 }
+
+/**
+ * Bug #3 — a host 'update' that arrived while a trigger popup owned the editor
+ * keyboard, deferred until the popup releases input (see the `update` handler).
+ * `baseText` is `currentText` at defer time: if a local edit (the popup's own
+ * commit) has advanced `currentText` since, the deferred host text is stale and
+ * dropped so the commit's DOM wins.
+ */
+interface PendingUpdate {
+  text: string;
+  caretLine?: number;
+  caretCol?: number;
+  baseText: string;
+}
+let pendingUpdate: PendingUpdate | undefined;
+
+/** Render a host document 'update' and restore the caret (undo/redo carries an
+ * explicit caretLine; a caret-less update snapshots the source caret and restores
+ * it so it doesn't jump to the top of the file). */
+function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): void {
+  const preservedCaret = caretLine === undefined ? captureCaretSource() : undefined;
+  renderDocument(text);
+  if (caretLine !== undefined) {
+    restoreCaretAtSource(caretLine, caretCol ?? 0);
+  } else if (preservedCaret) {
+    restoreCaretAtSource(preservedCaret.line, preservedCaret.col);
+  }
+}
+
+// Flush a deferred update when the trigger popup releases the editor keyboard.
+onInputOwnerRelease(() => {
+  const u = pendingUpdate;
+  pendingUpdate = undefined;
+  if (!u) {
+    return;
+  }
+  // A local edit (e.g. the popup's own commit) advanced the doc since we
+  // deferred → the deferred host text is stale; drop it, the local DOM wins.
+  if (currentText !== u.baseText || u.text === currentText) {
+    return;
+  }
+  applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+});
 
 /**
  * Sau khi render lại vì undo/redo, đặt caret về vị trí nguồn (`line` 1-based,
@@ -349,8 +650,9 @@ function renderDocument(markdown: string): void {
  *
  * Với block ĐƠN DÒNG nguồn (đoạn văn/heading thường), cột nguồn = offset ký tự
  * trong text hiển thị của block, nên đặt đúng cột được (placeCaretAtOffsets tự
- * kẹp về cuối nếu vượt — vd. bỏ qua prefix "## " của heading). Block ĐA DÒNG
- * (list/bảng/blockquote/code) không map cột→DOM đơn giản → lùi về đầu block
+ * kẹp về cuối nếu vượt — vd. bỏ qua prefix "## " của heading). LIST đa dòng có
+ * data-line riêng cho từng <li> nên vẫn đặt caret vào đúng bullet + cột. Block ĐA
+ * DÒNG còn lại (bảng/blockquote/code) không map cột→DOM đơn giản → lùi về đầu block
  * (đủ để gõ tiếp đúng chỗ, đã tốt hơn hẳn mất caret).
  */
 /**
@@ -368,6 +670,72 @@ function sourcePrefixLen(mdSlice: string): number {
   return m ? m[0].length : 0;
 }
 
+/**
+ * <li> lồng SÂU NHẤT có srcRange (data-line/data-line-end) chứa dòng nguồn `line`.
+ * Một bullet cha và bullet con lồng trong nó cùng chứa dòng của con, nên chọn theo
+ * số tổ tiên <li> lớn nhất để con thắng cha. Trả null nếu không bullet nào khớp.
+ */
+function deepestListItemAt(listEl: Element, line: number): Element | null {
+  let best: Element | null = null;
+  let bestDepth = -1;
+  for (const li of Array.from(listEl.querySelectorAll('li'))) {
+    const range = readSrcRange(li);
+    if (!range || line < range.start || line > range.end) {
+      continue;
+    }
+    let depth = 0;
+    for (let p = li.parentElement; p && p !== listEl; p = p.parentElement) {
+      if (p.tagName === 'LI') {
+        depth++;
+      }
+    }
+    if (depth > bestDepth) {
+      best = li;
+      bestDepth = depth;
+    }
+  }
+  return best;
+}
+
+/**
+ * Vị trí nguồn (line 1-based, col 0-based) của caret HIỆN TẠI trong #content,
+ * suy từ blockMap của DOM đang hiển thị — nghịch đảo của restoreCaretAtSource.
+ * Dùng để GIỮ caret qua một lần renderDocument mà host KHÔNG kèm caretLine (edit
+ * do host tự ghi: Add reference/lệnh Execute sửa nội dung, hoặc external edit);
+ * nếu không, DOM dựng lại làm caret bay về đầu file. Trả undefined khi không có
+ * caret trong #content hoặc không map được block — khi đó caller không đụng caret.
+ */
+function captureCaretSource(): { line: number; col: number } | undefined {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    return undefined;
+  }
+  const node = sel.focusNode;
+  if (!node || !content.contains(node)) {
+    return undefined;
+  }
+  const entry = blockMap.find((b) => b.el.contains(node));
+  if (!entry) {
+    return undefined;
+  }
+  if (entry.srcRange.start === entry.srcRange.end) {
+    // Block đơn dòng (đoạn văn/heading): cột nguồn = offset ký tự trong text render
+    // + độ dài cú pháp đầu dòng (heading "## ", bullet "- "...) mà render đã bỏ —
+    // đúng nghịch đảo của restoreCaretAtSource (renderedCol = col - sourcePrefixLen).
+    const offset = getOffsetWithin(entry.el, node, sel.focusOffset);
+    if (offset === null) {
+      return { line: entry.srcRange.start, col: 0 };
+    }
+    return { line: entry.srcRange.start, col: offset + sourcePrefixLen(entry.mdSlice) };
+  }
+  // Block đa dòng (list/bảng/blockquote/code): caret trong một <li> mang data-line
+  // riêng → lấy dòng của bullet đó (restoreCaretAtSource tự đặt về đầu bullet);
+  // còn lại lùi về đầu block. Cột không map đơn giản → 0 (đủ để gõ tiếp đúng chỗ).
+  const li = closestElement(node)?.closest('li');
+  const liRange = li && entry.el.contains(li) ? readSrcRange(li) : null;
+  return { line: liRange ? liRange.start : entry.srcRange.start, col: 0 };
+}
+
 function restoreCaretAtSource(line: number, col: number): void {
   if (blockMap.length === 0) {
     return;
@@ -382,6 +750,29 @@ function restoreCaretAtSource(line: number, col: number): void {
     return;
   }
   if (exact) {
+    // List đa dòng: Block Map chỉ giữ cả <ul>/<ol> (start !== end) nên nhánh cột
+    // chính xác ở trên bị bỏ qua và caret sẽ rơi về ĐẦU list. Nhưng mỗi <li> mang
+    // data-line riêng (render.ts) → tìm đúng bullet đang sửa và đặt caret theo cột
+    // trong bullet đó, thay vì collapse về bullet đầu.
+    const li = deepestListItemAt(exact.el, line);
+    if (li) {
+      const liRange = readSrcRange(li);
+      // Chỉ suy cột khi <li> chỉ chiếm ĐÚNG một dòng nguồn: khi đó cột nguồn của
+      // dòng = offset ký tự trong text của li. Li ĐA DÒNG (bullet wrap, item nhiều
+      // đoạn, item chứa block con/sublist) có text = nhiều dòng ghép lại nên cột
+      // theo-dòng lệch hệ quy chiếu với offset-toàn-li của placeCaretAtOffsets →
+      // dễ rơi sai chỗ/lọt sang bullet con; lùi về đầu li (đúng bullet, hơn hẳn về
+      // đầu cả list).
+      if (liRange && liRange.start === liRange.end) {
+        const srcLine = currentText.split('\n')[line - 1] ?? '';
+        const indentLen = srcLine.length - srcLine.trimStart().length;
+        const renderedCol = Math.max(0, col - indentLen - sourcePrefixLen(srcLine.slice(indentLen)));
+        dom.placeCaretAtOffsets(li, renderedCol, renderedCol);
+      } else {
+        dom.placeCaretIn(li);
+      }
+      return;
+    }
     dom.placeCaretIn(exact.el);
     return;
   }
@@ -418,9 +809,7 @@ function ensureTrailingParagraph(): void {
     return;
   }
   if (last.matches(TRAILING_TRAP_SELECTOR)) {
-    const p = document.createElement('p');
-    p.appendChild(document.createElement('br'));
-    content.appendChild(p);
+    content.appendChild(emptyParagraph());
   }
 }
 
@@ -442,9 +831,30 @@ function ensureCaretSpotAfterAtomBlocks(): void {
   for (const atom of Array.from(content.querySelectorAll(ATOM_BLOCK_SELECTOR))) {
     const next = atom.nextElementSibling;
     if (!next || next.matches(TRAILING_TRAP_SELECTOR)) {
-      const p = document.createElement('p');
-      p.appendChild(document.createElement('br'));
-      atom.parentNode?.insertBefore(p, atom.nextSibling);
+      atom.parentNode?.insertBefore(emptyParagraph(), atom.nextSibling);
+    }
+  }
+}
+
+/**
+ * Một <hr> giữa tài liệu thường bị kẹp ngay dưới một heading/khối khác, và dòng
+ * trắng CommonMark ở phía trên nó KHÔNG sinh ra node DOM nào (blank line = không
+ * có <p>). Click vào khoảng hở phía trên <hr> vì thế rơi thẳng về #content root:
+ * input rule `>` (input-rules.ts) và formatHeading (toolbar.ts) mất block đích,
+ * execCommand native "nuốt" luôn chính cái <hr> kề bên (Bug #7/#9, HLR 22 Phase
+ * 2). Đảm bảo LUÔN có một <p> rỗng ngay TRƯỚC mỗi <hr> cấp cao nhất để click vào
+ * khoảng hở đó có chỗ đặt caret hợp lệ.
+ *
+ * Cùng lý do an-toàn-serialize với ensureTrailingParagraph: <p> rỗng bị rule
+ * 'emptyParagraph' của turndown bỏ khi lưu, và buildBlockMap bỏ qua <p> không có
+ * src-range nên không lệch Block Map / số dòng.
+ */
+function ensureCaretSpotBeforeHr(): void {
+  for (const hr of Array.from(content.querySelectorAll(':scope > hr'))) {
+    const prev = hr.previousElementSibling;
+    const alreadyTrapped = prev?.nodeName === 'P' && (prev.textContent ?? '').trim() === '';
+    if (!alreadyTrapped) {
+      hr.parentNode?.insertBefore(emptyParagraph(), hr);
     }
   }
 }
@@ -458,22 +868,59 @@ function scheduleSync(): void {
     clearTimeout(syncTimer);
   }
   syncTimer = setTimeout(syncNow, SYNC_DEBOUNCE_MS);
+  // Any content mutation may have added/removed/retitled a heading. Raw-DOM
+  // toolbar ops (formatHeading's replaceBlockTag, list/blockquote conversions)
+  // call scheduleSync but never fire an 'input' event, so refreshing here — not
+  // only in the 'input' handler — is the single place that keeps the TOC in sync
+  // for BOTH keyboard edits and toolbar actions. (renderDocument refreshes on
+  // its own for host-driven re-renders, which don't go through scheduleSync.)
+  toc.refresh();
+  // Same reasoning as toc.refresh() above — a link's href/text or a heading's
+  // text may have just changed (Req 20 US-20.9).
+  brokenRef.refresh();
 }
 
-function syncNow(): void {
-  syncTimer = undefined;
-  // Vẫn phải turndown để có markdown mà so sánh, nhưng chỉ khi nội dung THỰC SỰ
-  // đổi mới parse lại gutter (markdown-it lần 2) + gửi edit — bỏ hẳn hai bước
-  // này ở nhịp debounce mà nội dung không đổi (finding P-03).
+// Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
+// strikethrough: swallow the browser default, run the format, then schedule a
+// sync. `apply` is a thunk so it covers both execCommand and toggleInlineCode.
+function applyInlineFormat(e: KeyboardEvent, apply: () => void): void {
+  e.preventDefault();
+  apply();
+  scheduleSync();
+}
+
+// Vẫn phải turndown để có markdown mà so sánh, nhưng chỉ khi nội dung THỰC SỰ
+// đổi mới parse lại gutter (markdown-it lần 2) + cập nhật currentText — bỏ hẳn
+// hai bước này ở nhịp debounce mà nội dung không đổi (finding P-03). Trả markdown
+// mới, hoặc undefined khi không đổi. Lõi chung của syncNow/takePendingSync; mỗi
+// hàm giữ prologue timer + đuôi riêng (post vs. return).
+function serializeIfChanged(): string | undefined {
   const markdown = serialize();
   if (markdown === currentText) {
-    return;
+    return undefined;
   }
   if (lineNumbersEnabled) {
     lineGutter.refreshFromMarkdown(markdown);
   }
   currentText = markdown;
-  postToHost({ type: 'edit', text: markdown });
+  return markdown;
+}
+
+function syncNow(): void {
+  // syncNow is also called directly (invokeAction's post-action sync in
+  // toolbar.ts) while a debounce timer armed DURING the action (execCommand's
+  // synchronous 'input' event → scheduleSync) may still be live — cancel it,
+  // or it fires up to 250ms later as an orphan no longer referenced by
+  // syncTimer: it can commit a partial word as its own undo unit and every
+  // scheduleSync after it re-orphans the next timer.
+  if (syncTimer !== undefined) {
+    clearTimeout(syncTimer);
+  }
+  syncTimer = undefined;
+  const markdown = serializeIfChanged();
+  if (markdown !== undefined) {
+    postToHost({ type: 'edit', text: markdown });
+  }
 }
 
 /**
@@ -489,15 +936,7 @@ function takePendingSync(): string | undefined {
   }
   clearTimeout(syncTimer);
   syncTimer = undefined;
-  const markdown = serialize();
-  if (markdown === currentText) {
-    return undefined;
-  }
-  if (lineNumbersEnabled) {
-    lineGutter.refreshFromMarkdown(markdown);
-  }
-  currentText = markdown;
-  return markdown;
+  return serializeIfChanged();
 }
 
 function serialize(): string {
@@ -510,11 +949,7 @@ function serialize(): string {
     if (!c) {
       return;
     }
-    if ((live as HTMLInputElement).checked) {
-      c.setAttribute('checked', 'checked');
-    } else {
-      c.removeAttribute('checked');
-    }
+    c.toggleAttribute('checked', (live as HTMLInputElement).checked);
   });
   prepareDomForSerialize(clone, document);
   applyBlockStyleOverrides(clone);
@@ -541,7 +976,15 @@ function applyBlockStyleOverrides(clone: HTMLElement): void {
     if (!el) {
       continue;
     }
-    stampStyleOverride(el, detectBlockStyle(entry.mdSlice, entry.type));
+    const style = detectBlockStyle(entry.mdSlice, entry.type);
+    // US-4.28: a block whose language the user switched in place must not be
+    // re-forced back to its ORIGINAL indented syntax — indented code can't carry
+    // a language, so turndown would drop the pick. Drop the code axis so it
+    // serializes as a fence (only indented needs this; tilde fences keep a lang).
+    if (el.hasAttribute(LANG_SWITCHED_ATTR) && (style.code === 'indented' || style.code === 'indented-tab')) {
+      style.code = null;
+    }
+    stampStyleOverride(el, style);
   }
 }
 
@@ -564,6 +1007,23 @@ const ORPHAN_LIST_INPUT_TYPES = new Set([
   'insertFromPaste',
 ]);
 
+/**
+ * true nếu caret (collapsed) đang đứng ngay sau một ký tự khoảng trắng trong
+ * text node hiện tại — dùng để dò ranh giới TỪ độc lập với inputType/data
+ * (xem chú thích ở content 'input' listener, bug 0717b).
+ */
+function caretPrecededByWhitespace(): boolean {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) {
+    return false;
+  }
+  const { startContainer, startOffset } = sel.getRangeAt(0);
+  if (startContainer.nodeType !== Node.TEXT_NODE || startOffset === 0) {
+    return false;
+  }
+  return /\s/.test((startContainer.textContent ?? '').charAt(startOffset - 1));
+}
+
 content.addEventListener('input', (e) => {
   // inputType rỗng (một số trình duyệt/thao tác không đặt) → quét cho chắc.
   const inputType = (e as InputEvent).inputType;
@@ -575,16 +1035,32 @@ content.addEventListener('input', (e) => {
   // = 1 bước undo (giống mọi editor), thay vì cả cụm gõ liên tục dồn thành một
   // undo-unit. Nếu không, granularity undo phụ thuộc nhịp gõ so với debounce
   // 250ms (gõ nhanh không nghỉ → debounce không fire → 1 undo xoá sạch).
-  const data = (e as InputEvent).data;
+  //
+  // Bug 0717b: dò ranh giới qua inputType==='insertText' + data đúng 1 ký tự
+  // khoảng trắng KHÔNG đáng tin với chữ Việt có dấu — bộ gõ (Telex/VNI, kể cả
+  // IME hệ điều hành) thường tạo tổ hợp sự kiện composition hoặc xoá-gõ-lại
+  // nhiều ký tự một lúc để ráp dấu, nên "data" hiếm khi còn là 1 ký tự khoảng
+  // trắng đơn thuần — flush bị bỏ lỡ, nhiều từ dồn chung một debounce, undo
+  // gộp cả cụm từ. Đọc thẳng ký tự ngay trước caret trong DOM (chỉ khi
+  // composition đã kết thúc — !isComposing) để nhận diện đúng "vừa gõ xong
+  // một khoảng trắng", bất kể trình duyệt tạo ra ký tự đó bằng cơ chế nào.
   if (
     inputType === 'insertParagraph' ||
     inputType === 'insertLineBreak' ||
-    (inputType === 'insertText' && data !== null && /^\s$/.test(data))
+    (!(e as InputEvent).isComposing && caretPrecededByWhitespace())
   ) {
     flushPendingSync();
   }
   search.refresh();
-  toc.refresh();
+  // toc.refresh() intentionally omitted here — scheduleSync() above already
+  // refreshes the TOC for every content mutation (see scheduleSync).
+  // Bug #1 (mở rộng): mọi edit đều có thể dồn/dời block, để lại drag/hover handle
+  // (position:fixed) đứng sai chỗ tới lần di chuột kế. Handle là affordance của
+  // chuột nên ẩn khi gõ, tự hiện lại khi onContentHover chạy lúc di chuột. refresh()
+  // với null không đọc layout nên an toàn cho hot handler này. (Nếu có ai vừa kéo
+  // vừa gõ, refresh() cũng huỷ luôn thao tác kéo dở — chấp nhận được: block-move
+  // dùng Range API không bắn 'input' nên một lần kéo bình thường không tự huỷ.)
+  dragDrop.refresh();
   // Gõ trong ô bảng có thể đổi bề rộng cột (auto-layout co/giãn theo nội dung) —
   // clone header dính (nếu đang hiện) cache bề rộng cột cũ, không tự nhận ra
   // thay đổi này (chỉ dựng lại khi ĐỔI bảng, xem table-sticky-header.ts), gây
@@ -651,7 +1127,9 @@ window.addEventListener('pagehide', flushPendingSync);
 // lại (qua handler 'paste' bên dưới, chỉ đọc text/plain rồi render bằng
 // markdown-it) sẽ mất hẳn cấu trúc bảng/list. Ghi đè text/plain bằng chính
 // Markdown (cùng turndown dùng để lưu file) của đúng vùng đang chọn — copy
-// rồi paste (kể cả dán ra ngoài editor) luôn giữ đúng định dạng.
+// rồi paste vào editor luôn giữ đúng định dạng. Copy handler còn ghi kèm
+// text/html (xem copySelectionAsMarkdown) để dán ra công cụ rich text bên
+// ngoài cũng giữ format.
 function selectionAsMarkdown(): string | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -671,6 +1149,15 @@ function copySelectionAsMarkdown(e: ClipboardEvent): boolean {
   }
   e.preventDefault();
   e.clipboardData?.setData('text/plain', md);
+  // Ngoài text/plain (Markdown, để dán ngược vào editor vẫn convert đúng), ghi
+  // thêm text/html render từ chính Markdown đó — công cụ nhận rich text bên
+  // ngoài (email, Word, Google Docs...) ưu tiên text/html nên giữ được định
+  // dạng như trên editor thay vì phơi ra cú pháp .md thô. Handler 'paste' của
+  // editor chỉ đọc text/plain nên nhánh dán-lại-vào-editor không bị ảnh hưởng.
+  const html = renderPasteHtml(md);
+  if (html) {
+    e.clipboardData?.setData('text/html', html);
+  }
   return true;
 }
 
@@ -681,6 +1168,74 @@ content.addEventListener('cut', (e) => {
     document.execCommand('delete');
     scheduleSync();
   }
+});
+
+// Document Blocks item 8: per-code-block "Copy" button. One delegated listener
+// for every header injected by postProcessCodeHeaders — copies the block's raw
+// code (trailing newline trimmed) and briefly flips the label to "Copied".
+content.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_COPY_CLASS) as HTMLElement | null;
+  if (!btn) {
+    return;
+  }
+  const code = btn.closest('pre')?.querySelector('code');
+  if (!code) {
+    return;
+  }
+  const text = (code.textContent ?? '').replace(/\n$/, '');
+  if (!navigator.clipboard) {
+    return; // No Clipboard API in this context — nothing to do (avoid a sync throw).
+  }
+  navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      btn.textContent = 'Copied';
+      window.setTimeout(() => {
+        btn.textContent = 'Copy';
+      }, 1200);
+    })
+    .catch(() => {
+      /* No clipboard-write permission — leave the button unchanged. */
+    });
+});
+
+// US-4.28: keep the caret/selection in #content when the language label is
+// clicked — like every real toolbar trigger (wireTriggerButton in toolbar.ts),
+// preventDefault on mousedown so clicking the label doesn't blur/collapse the
+// selection (else a follow-up keyboard undo may not target the editor).
+content.addEventListener('mousedown', (e) => {
+  if ((e.target as HTMLElement)?.closest?.('.' + MD_CODE_LANG_CLASS)) {
+    e.preventDefault();
+  }
+});
+
+// Per-code-block word-wrap toggle. One delegated listener for every "Wrap"
+// button injected by postProcessCodeHeaders — toggles MD_CODE_WRAPPED_CLASS on
+// the block's <pre> (default ON) and keeps aria-pressed in sync. UI-only state,
+// never serialized (turndown reads only <code>), so no 'edit' is emitted.
+content.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_WRAP_CLASS) as HTMLElement | null;
+  if (!btn) {
+    return;
+  }
+  const pre = btn.closest('pre');
+  if (!pre) {
+    return;
+  }
+  const wrapped = pre.classList.toggle(MD_CODE_WRAPPED_CLASS);
+  btn.setAttribute('aria-pressed', String(wrapped));
+});
+
+// US-4.28: in-place language switcher. One delegated listener for every code
+// header's language label injected by postProcessCodeHeaders — clicking it opens
+// the same 9-language dropdown as the toolbar's code-block button and rewrites
+// the block's language in place (see openCodeLangSwitcher in toolbar.ts).
+content.addEventListener('click', (e) => {
+  const label = (e.target as HTMLElement)?.closest?.('.' + MD_CODE_LANG_CLASS) as HTMLElement | null;
+  if (!label) {
+    return;
+  }
+  openCodeLangSwitcher(label);
 });
 
 /**
@@ -747,20 +1302,82 @@ function pasteFromClipboardApi(): void {
   });
 }
 
+// Bug #8 smart gap: khi dán chữ inline ngay sát một từ có sẵn ("foo" + dán
+// "bar") thì chèn một space ngăn cách để không dính thành "foobar". Chỉ chèn
+// cạnh ký tự "chữ" thực — bỏ qua khi hàng xóm là khoảng trắng hoặc dấu câu
+// (giống thói quen gõ tay: "(x)" không thêm space, "word," không thêm space).
+const SMART_GAP_SUPPRESS_PUNCT = new Set(['(', '[', '{', '"', "'", ')', ']', '}', ',', '.', ';', ':', '!', '?']);
+
+// Thẻ block-level ở tầng trên cùng của fragment vừa render — sự hiện diện của
+// một trong số này nghĩa là dán "block" (heading/list/quote/code/table...),
+// KHÔNG áp smart gap (một space đầu dòng phá cú pháp "# heading").
+const BLOCK_LEVEL_TAGS = new Set([
+  'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'PRE',
+  'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'HR', 'DIV', 'SECTION', 'FIGURE',
+]);
+
+function isInlinePasteFragment(html: string): boolean {
+  const probe = document.createElement('div');
+  probe.innerHTML = html;
+  return !Array.from(probe.children).some((el) => BLOCK_LEVEL_TAGS.has(el.tagName));
+}
+
+// true nếu `ch` là hàng xóm cần chèn gap: tồn tại, không phải khoảng trắng, và
+// không phải dấu câu trong danh sách suppress.
+function needsSmartGap(ch: string): boolean {
+  return ch !== '' && !/\s/.test(ch) && !SMART_GAP_SUPPRESS_PUNCT.has(ch);
+}
+
+// Block giữ MỘT dòng logic — đọc ký tự kề caret phải giới hạn trong đây, không
+// tràn sang <li>/<td> anh em cùng một <ul>/<table> (leo lên tầng trên cùng của
+// #content sẽ gộp cả list/table thành một "block" và bleed qua ranh giới dòng).
+const GAP_LINE_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th, dt, dd, blockquote, figcaption';
+
 /**
- * Chèn text vừa dán vào vị trí caret. Render qua markdown-it trước (cùng
- * renderer dùng cho toàn bộ tài liệu) để cú pháp Markdown được hiểu đúng
- * thành nội dung có định dạng, thay vì nằm lại như text thô rồi bị turndown
- * escape ngược khi serialize. Text thường (không có cú pháp Markdown) vẫn ra
- * y hệt như insertText cũ nhờ bước "bóc <p> đơn" bên dưới.
+ * Bug #8: với dán inline tại caret thu gọn (không nằm trong pre/code), thêm một
+ * gap trước/sau chỗ chèn nếu ký tự liền kề caret là "chữ" thực. `text` là chuỗi
+ * dán thô — mép của chính nó cũng phải "chữ" thì mới chèn gap phía đó (dán
+ * ",bar" cạnh "foo" không được thành "foo ,bar"). Dùng NBSP (\u00A0) thay vì
+ * space ASCII vì `execCommand('insertHTML')` của Chromium nuốt một space ASCII
+ * đứng ngay trước caret (xem toolbar.ts runTriggerInsertDate); NBSP không bị
+ * nuốt và `normalizeNbsp` (dom-serialize-prep.ts) chuyển ngược NBSP -> space
+ * ASCII khi lưu, nên .md ra đúng một space thường. Gộp cả gap vào một lần
+ * insertHTML để giữ một bước undo.
  */
+function applySmartGap(html: string, text: string): string {
+  if (!isInlinePasteFragment(html)) {
+    return html;
+  }
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) {
+    return html;
+  }
+  const range = sel.getRangeAt(0);
+  const block = closestElement(range.startContainer)?.closest(GAP_LINE_BLOCK_SELECTOR);
+  if (!block || block.closest('pre, code') || !content.contains(block)) {
+    return html;
+  }
+  const before = textBeforeCaret(block, range).slice(-1);
+  const after = textAfterCaret(block, range).slice(0, 1);
+  const NBSP = '\u00A0';
+  let out = html;
+  // Chỉ chèn gap khi CẢ hàng xóm CẢ mép tương ứng của text dán đều là "chữ".
+  if (needsSmartGap(before) && needsSmartGap(text.charAt(0))) {
+    out = NBSP + out;
+  }
+  if (needsSmartGap(after) && needsSmartGap(text.charAt(text.length - 1))) {
+    out = out + NBSP;
+  }
+  return out;
+}
+
 function insertPastedMarkdown(text: string): void {
   const html = renderPasteHtml(text);
   if (!html) {
     document.execCommand('insertText', false, text);
     return;
   }
-  document.execCommand('insertHTML', false, html);
+  document.execCommand('insertHTML', false, applySmartGap(html, text));
   // Có thể vừa chèn một khối ```mermaid``` mới — dựng SVG cho nó (renderAll
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
@@ -816,6 +1433,7 @@ function renderPasteHtml(text: string): string {
   tmp.innerHTML = html;
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
+  postProcessCodeHeaders(tmp, document);
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;
   }
@@ -832,11 +1450,7 @@ content.addEventListener('click', (e) => {
     // đã set nhưng property bị revert nên checkbox không đổi trạng thái hiển
     // thị/tương tác được (đúng lỗi user báo). Ở đây chỉ đồng bộ attribute
     // theo property đã được browser toggle sẵn.
-    if (target.checked) {
-      target.setAttribute('checked', 'checked');
-    } else {
-      target.removeAttribute('checked');
-    }
+    target.toggleAttribute('checked', target.checked);
     scheduleSync();
     return;
   }
@@ -858,9 +1472,26 @@ content.addEventListener('click', (e) => {
   if (anchor) {
     e.preventDefault();
     e.stopPropagation();
+    // US-20.5: a plain click on a `## References` entry is navigation, not
+    // link-open — broken (⚠️) → jump to first body occurrence; healthy → open
+    // its target. Cmd/Ctrl+Click on a References entry still opens normally.
+    if (!e.metaKey && !e.ctrlKey && referencesSectionAnchors().has(anchor)) {
+      navigateReferenceEntry(anchor);
+      return;
+    }
     if (e.metaKey || e.ctrlKey) {
       openLink(anchor.getAttribute('href') ?? '');
     }
+    return;
+  }
+  // Inline code span marked as a relative path (bug General #5) — clickable but
+  // NOT wrapped in <a> (that would corrupt the code span's round-trip). Only act
+  // on Cmd/Ctrl+Click; a plain click must still place the caret for editing.
+  const codeLink = target.closest(`code[${AUTOLINK_PATH_ATTR}]`);
+  if (codeLink && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    e.stopPropagation();
+    openLink(encodeLinkPath(codeLink.getAttribute(AUTOLINK_PATH_ATTR) ?? ''));
   }
 });
 
@@ -887,16 +1518,68 @@ function scrollToAnchor(fragment: string): void {
   const decoded = decodeURIComponent(fragment).toLowerCase();
   const headings = content.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (const h of Array.from(headings)) {
-    const slug = (h.textContent ?? '')
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, '-')
-      .replace(/[^\p{L}\p{N}-]/gu, '');
-    if (slug === decoded) {
+    // Same slugify rule broken-ref.ts uses to resolve a #heading link's
+    // existence (Req 20 US-20.9) — shared so the two never drift apart.
+    if (slugifyHeadingText(h.textContent ?? '') === decoded) {
       h.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       return;
     }
   }
+}
+
+/**
+ * US-20.5: anchors inside the rendered `## References` section — the run of
+ * sibling blocks from the References `<h2>` up to the next H1/H2. Returned as a
+ * Set so a clicked anchor can be classified as a References entry AND so the
+ * first-body-occurrence search can SKIP them (a broken entry must never
+ * navigate to itself).
+ */
+function referencesSectionAnchors(): Set<HTMLAnchorElement> {
+  const anchors = new Set<HTMLAnchorElement>();
+  const h2 = Array.from(content.children).find(
+    (child) => child.tagName === 'H2' && /^references$/i.test((child.textContent ?? '').trim())
+  );
+  if (!h2) {
+    return anchors;
+  }
+  for (let sib = h2.nextElementSibling; sib; sib = sib.nextElementSibling) {
+    if (sib.tagName === 'H1' || sib.tagName === 'H2') {
+      break;
+    }
+    for (const a of Array.from(sib.querySelectorAll('a[href]'))) {
+      anchors.add(a as HTMLAnchorElement);
+    }
+  }
+  return anchors;
+}
+
+/**
+ * US-20.5: handle a plain click on a References-section entry. A broken (`⚠️`)
+ * entry scrolls to + flashes the FIRST body occurrence of the same link and
+ * opens the quick-correct fix surface there (the entry itself is only a
+ * listing — the real fix is in the body); a healthy entry opens its target
+ * file via the normal open flow (no line-jump). Resolves US-20.5's open
+ * question for both cases.
+ */
+function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
+  const li = anchor.closest('li');
+  const broken = (li?.textContent ?? '').trimStart().startsWith('⚠️');
+  if (!broken) {
+    openLink(anchor.getAttribute('href') ?? '');
+    return;
+  }
+  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '');
+  const sectionAnchors = referencesSectionAnchors();
+  const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
+    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '') === key
+  );
+  if (!bodyAnchor) {
+    return;
+  }
+  bodyAnchor.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  bodyAnchor.classList.add('ref-nav-flash');
+  setTimeout(() => bodyAnchor.classList.remove('ref-nav-flash'), 1200);
+  quickCorrect.open(bodyAnchor);
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +1631,11 @@ function jumpHeading(dir: 1 | -1): void {
 }
 
 content.addEventListener('keydown', (e) => {
+  // Req 20 US-20.2: while a trigger overlay owns the keyboard, the editor's
+  // shortcut/undo/redo/arrow handling must not fire — the overlay handles the key.
+  if (hasInputOwner()) {
+    return;
+  }
   const mod = e.metaKey || e.ctrlKey;
   // US-19.7: Alt+Shift+↑/↓ nhảy giữa heading (không cần Ctrl/Cmd).
   if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
@@ -974,19 +1662,13 @@ content.addEventListener('keydown', (e) => {
         postToHost({ type: 'redo', pendingText: takePendingSync() });
         return;
       case 'b':
-        e.preventDefault();
-        document.execCommand('bold');
-        scheduleSync();
+        applyInlineFormat(e, () => document.execCommand('bold'));
         return;
       case 'i':
-        e.preventDefault();
-        document.execCommand('italic');
-        scheduleSync();
+        applyInlineFormat(e, () => document.execCommand('italic'));
         return;
       case 'e':
-        e.preventDefault();
-        toggleInlineCode();
-        scheduleSync();
+        applyInlineFormat(e, toggleInlineCode);
         return;
       case 'v':
         e.preventDefault();
@@ -1002,9 +1684,7 @@ content.addEventListener('keydown', (e) => {
     }
   }
   if (mod && e.shiftKey && e.key.toLowerCase() === 'x') {
-    e.preventDefault();
-    document.execCommand('strikeThrough');
-    scheduleSync();
+    applyInlineFormat(e, () => document.execCommand('strikeThrough'));
     return;
   }
   // Ctrl/Cmd+Shift+Z = redo (quy ước Mac, song song với Ctrl+Y ở trên).
@@ -1032,7 +1712,25 @@ content.addEventListener('keydown', (e) => {
     const cellInside = cell && content.contains(cell);
     if (li && content.contains(li) && (!cellInside || caretAtStartOfListItem(li, sel))) {
       e.preventDefault();
-      document.execCommand(e.shiftKey ? 'outdent' : 'indent');
+      // Outdent/indent: wired to the compute-then-commit primitive (HLR 22 Phase
+      // 2.1/2.2) for their characterized cases (collapsed caret; nested <li> for
+      // outdent, <li> with a previous sibling for indent). computeOutdent/
+      // computeIndent return null for anything else (top-level <li>, first <li>),
+      // and a non-collapsed selection is never attempted -- both fall back to the
+      // legacy execCommand unchanged.
+      const outdentPlan = e.shiftKey && sel?.isCollapsed ? computeOutdent(li) : null;
+      const indentPlan = !e.shiftKey && sel?.isCollapsed ? computeIndent(li) : null;
+      if (outdentPlan) {
+        commitListOpDirect(outdentPlan, dom.placeCaretAtOffsets);
+      } else if (indentPlan) {
+        commitListOpDirect(indentPlan, dom.placeCaretAtOffsets);
+      } else {
+        document.execCommand(e.shiftKey ? 'outdent' : 'indent');
+      }
+      // Bug #1: indent/outdent vừa dời <li> — dựng lại drag/hover handle đang trỏ
+      // vào node cũ (handle là position:fixed, chỉ tính lại toạ độ khi chuột di),
+      // mirror đúng renderDocument ở trên.
+      dragDrop.refresh();
       warnIfComplexTableList();
       scheduleSync();
       return;
@@ -1040,6 +1738,56 @@ content.addEventListener('keydown', (e) => {
     if (cellInside) {
       e.preventDefault();
       navigateCells(cell as HTMLTableCellElement, e.shiftKey ? -1 : 1);
+      return;
+    }
+    // Bug_General #9: inside a heading, Tab/Shift+Tab demotes/promotes the heading
+    // level and applies the SAME delta to every descendant heading in its section
+    // (up to, not including, the next same-or-higher heading). Placed AFTER the
+    // li/cell branches so list indent and table-cell nav keep priority. Gate on a
+    // TOP-LEVEL heading only: a heading nested in a blockquote is not in
+    // content.children, so computeHeadingSectionSpan would index-of miss, scan from
+    // doc start, and corrupt unrelated headings (mirror drag-drop.ts's includes guard).
+    const heading = anchor?.closest('h1,h2,h3,h4,h5,h6') as HTMLElement | null;
+    if (heading && heading.parentElement === content) {
+      e.preventDefault();
+      const delta = e.shiftKey ? -1 : 1;
+      const level = headingLevel(heading)!; // 1..6
+      // Promote H1: cannot go higher → no-op (including descendant headings).
+      if (delta < 0 && level === 1) {
+        return;
+      }
+      // Capture the caret offsets on the ORIGINAL heading before re-tagging; block
+      // text is unchanged so offsets map 1-1 into the new element, restored after the
+      // whole section is retagged (each replaceBlockTag moves the caret transiently;
+      // the final placeCaretAtOffsets overrides it).
+      const r = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+      const startOff = r ? getOffsetWithin(heading, r.startContainer, r.startOffset) : null;
+      const endOff = r
+        ? sel!.isCollapsed
+          ? startOff
+          : getOffsetWithin(heading, r.endContainer, r.endOffset)
+        : null;
+      const section = computeHeadingSectionSpan(heading, Array.from(content.children) as HTMLElement[]);
+      let target: HTMLElement = heading;
+      for (const block of section) {
+        const lvl = headingLevel(block);
+        if (lvl === null) {
+          continue; // non-heading content in the section keeps its tag
+        }
+        const next = lvl + delta;
+        // Demote past H6 → normal paragraph; otherwise clamp into 1..6.
+        const el = dom.replaceBlockTag(block, next > 6 ? 'p' : `h${Math.max(1, next)}`);
+        if (block === heading) {
+          target = el;
+        }
+      }
+      if (startOff !== null && endOff !== null) {
+        dom.placeCaretAtOffsets(target, startOff, endOff);
+      } else {
+        dom.placeCaretIn(target);
+      }
+      dragDrop.refresh();
+      scheduleSync();
       return;
     }
   }

@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A fast, clean WYSIWYG editor for .md — drag-and-drop reorder, project-wide search, and a rich toolbar, all while keeping your Markdown source pristine and diff-friendly.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -27,7 +27,7 @@
             "filenamePattern": "*.{md,markdown,mdown,mkd,mdwn,mdtxt,mdtext}"
           }
         ],
-        "priority": "option"
+        "priority": "default"
       }
     ],
     "commands": [
@@ -42,7 +42,27 @@
         "title": "Open Orca MD Editor to the Side",
         "category": "Markdown",
         "icon": "$(open-preview)"
+      },
+      {
+        "command": "orcaEditor.toggleReadingMode",
+        "title": "Toggle Reading Mode",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.toggleZen",
+        "title": "Toggle Focus Mode",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.openToc",
+        "title": "Show/Hide Table of Contents",
+        "category": "Orca MD Editor"
       }
+    ],
+    "orcaEditorExecuteCommands": [
+      "orcaEditor.toggleReadingMode",
+      "orcaEditor.toggleZen",
+      "orcaEditor.openToc"
     ],
     "menus": {
       "commandPalette": [
@@ -95,11 +115,6 @@
     "configuration": {
       "title": "Orca MD Editor",
       "properties": {
-        "orcaEditor.claudeAutoInsert": {
-          "type": "boolean",
-          "default": false,
-          "description": "Copy @file button: insert @file directly into the Claude Code chat input instead of just copying it — requires briefly opening a text editor for the file then closing it right away (a mechanism required by Claude Code; you'll see a brief flicker). Default off: navigates to the chat tab, focuses the input, and copies @file to the clipboard so you can paste with ⌘V."
-        },
         "orcaEditor.autoOpenToc": {
           "type": "boolean",
           "default": true,
@@ -148,58 +163,51 @@
         },
         "orcaEditor.readability.enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Turn on Reading Mode: apply the reading preset (measure/typography) for a comfortable long-form reading experience. This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
+          "default": false,
+          "description": "Turn on Reading Mode: apply the comfortable long-form reading layout (measure/typography). When off, newly opened tabs start in Standard (no reading style). This is the starting default for newly opened tabs; the Reading Mode button on the toolbar applies only to the current tab for the session and is not saved back here."
         },
-        "orcaEditor.readability.preset": {
+        "orcaEditor.readability.readingMode": {
           "type": "string",
           "enum": [
-            "comfortable",
-            "default",
-            "compact",
-            "dyslexia",
-            "academic"
-          ],
-          "enumDescriptions": [
-            "Comfortable Reading: ~70ch measure, roomy line-height, serif reading font.",
-            "Default: current behavior — full width, follow VS Code theme/font.",
-            "Compact: ~90ch measure, tighter spacing to fit more on screen.",
-            "Dyslexia-friendly: accessibility font (Atkinson Hyperlegible / OpenDyslexic if installed) with increased letter/word/line spacing.",
-            "Academic Paper: narrow ~62ch column, classic book serif, roomy line-height — an essay/paper look (ai-2027.com style). Best paired with the Paper palette."
-          ],
-          "default": "comfortable",
-          "description": "Which reading preset to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a preset from the caret dropdown on the toolbar Reading Mode button applies to the current tab only (not saved back here)."
-        },
-        "orcaEditor.readability.palette": {
-          "type": "string",
-          "enum": [
-            "followTheme",
-            "light",
-            "dark",
+            "standard",
             "sepia",
-            "highContrast",
             "paper"
           ],
           "enumDescriptions": [
-            "Follow the VS Code theme colors (current behavior).",
-            "Warm ivory background with near-black text (reduced glare/halation).",
-            "Deep grey background with ivory text (reduced halation).",
-            "Warm low-blue sepia — easy on the eyes at night.",
-            "Maximum-contrast palette for accessibility.",
-            "Paper: bright warm-white (#fffff8) background with near-black text — a printed-page look (ai-2027.com style). Best paired with the Academic Paper preset."
+            "Standard: current behavior — full width, follow VS Code theme/font.",
+            "Sepia: ~70ch measure, roomy line-height, warm low-blue sepia colors.",
+            "Paper: ~70ch measure, roomy line-height, bright warm-white printed-page colors."
           ],
-          "default": "followTheme",
-          "description": "Reading color palette applied when Reading Mode is on — the starting default for newly opened tabs. Sepia and the hand-tuned Light/Dark palettes are designed for long-form reading (WCAG AA+ body contrast). Picking a palette from the toolbar applies to the current tab only (not saved back here)."
+          "default": "standard",
+          "description": "Which Reading Mode to apply when Reading Mode is on — the starting default for newly opened tabs. Picking a mode from the toolbar Reading Mode dropdown applies to the current tab only (not saved back here)."
         },
         "orcaEditor.readability.fontFamily": {
           "type": "string",
           "default": "",
-          "description": "Optional reading font override applied in Reading Mode. Type the name of a font installed on your machine (nothing is bundled/downloaded). Leave empty to use the preset's default font stack."
+          "description": "Optional reading font override applied in Reading Mode. Type the name of a font installed on your machine (nothing is bundled/downloaded). Leave empty to use the reading mode's default font stack."
         },
         "orcaEditor.readability.zen": {
           "type": "boolean",
           "default": false,
           "description": "Focus Mode: hide the toolbar and line-number gutter and center the text column. This is the starting default for newly opened tabs; the Focus button on the toolbar applies only to the current tab for the session (not saved back here). Press Esc to exit."
+        },
+        "orcaEditor.trigger.dateFormat": {
+          "type": "string",
+          "default": "YYYY-MM-DD",
+          "description": "Format used by the `/` trigger popup's \"Insert today's date\" item. Supported tokens: YYYY, MM, DD, HH, mm, ss."
+        },
+        "orcaEditor.triggerActions.mode": {
+          "type": "string",
+          "enum": [
+            "simple",
+            "advanced"
+          ],
+          "enumDescriptions": [
+            "Hide entity-related trigger actions (the @ Entities scope, /declare, /relate).",
+            "Show every trigger action, including entity-related ones."
+          ],
+          "default": "advanced",
+          "description": "Which trigger actions the @ and / popups offer. Advanced adds entity-related actions (Req 21) on top of the base set; Simple hides them. Only gates visibility — never restyles or removes already-written content."
         }
       }
     }
@@ -215,6 +223,7 @@
     "test:roundtrip:rendering": "node esbuild.js --test && node dist/test/roundtrip/rendering.js",
     "test:roundtrip:table": "node esbuild.js --test && node dist/test/roundtrip/table.js",
     "test:roundtrip:lists": "node esbuild.js --test && node dist/test/roundtrip/lists.js",
+    "test:roundtrip:list-ops": "node esbuild.js --test && node dist/test/roundtrip/list-ops.js",
     "test:roundtrip:dom-normalize": "node esbuild.js --test && node dist/test/roundtrip/dom-normalize.js",
     "test:roundtrip:toolbar-format": "node esbuild.js --test && node dist/test/roundtrip/toolbar-format.js",
     "test:roundtrip:toolbar-insert": "node esbuild.js --test && node dist/test/roundtrip/toolbar-insert.js",
@@ -224,13 +233,19 @@
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
+    "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
+    "test:roundtrip:caption-insert": "node esbuild.js --test && node dist/test/roundtrip/caption-insert.js",
+    "test:roundtrip:entity-ref": "node esbuild.js --test && node dist/test/roundtrip/entity-ref.js",
+    "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
+    "test:roundtrip:paste-text": "node esbuild.js --test && node dist/test/roundtrip/paste-text.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
-    "test:webview": "node esbuild.js && playwright test",
-    "test": "npm run test:roundtrip && npm run test:unit && npm run test:webview",
+    "test:webview": "node esbuild.js --test && playwright test",
+    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
-    "release": "./build.sh release"
+    "release": "./build.sh release",
+  "check:css-comments": "node scripts/check-css-comments.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
