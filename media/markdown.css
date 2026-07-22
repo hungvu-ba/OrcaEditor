@@ -19,6 +19,10 @@
   --rp-link: var(--vscode-textLink-foreground);
   --rp-link-hover: var(--vscode-textLink-activeForeground);
   --rp-border: var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+  /* Thematic break (`---`) rule. Deliberately one step stronger than the H1/H2
+   * underline (--rp-border): mixed toward --rp-fg so it stays darker in every
+   * reading mode without a per-mode magic number. Palettes may override. */
+  --rp-hr-border: color-mix(in srgb, var(--rp-border) 58%, var(--rp-fg));
   --rp-code-bg: var(--vscode-textPreformat-background, rgba(220, 220, 220, 0.4));
   --rp-pre-bg: var(--vscode-textCodeBlock-background, rgba(220, 220, 220, 0.4));
   --rp-quote-bg: var(--vscode-textBlockQuote-background);
@@ -49,6 +53,24 @@
   --rp-scrollbar-thumb: var(--vscode-scrollbarSlider-background);
   --rp-scrollbar-thumb-hover: var(--vscode-scrollbarSlider-hoverBackground, var(--rp-scrollbar-thumb));
   --rp-scrollbar-track: transparent;
+  /* Entity reference + broken-reference tokens (Req 20/21). Reading Mode OWNS
+   * the entity accent (Teal base) — no swatch picker in v1. Standard = Teal base
+   * + the native editor-warning color. */
+  --rp-entity-accent: #4fb0a5;
+  --rp-entity-ref-bg: rgba(79, 176, 165, 0.14);
+  /* Entity declaration pill (.md-caption) — Outline capsule design tokens
+   * (bug_General Mention Declare #1). Transparent fill, 1.5px accent border +
+   * accent label, fully-rounded. --orca-entity-accent is per-theme (dark base
+   * here; .vscode-light / .vscode-high-contrast / reading-mode-* override it). */
+  --orca-entity-pill-shape: 999px;
+  --orca-entity-pill-fill: transparent;
+  --orca-entity-pill-border-width: 1.5px;
+  --orca-entity-pill-padding: 1px 11px;
+  --orca-entity-pill-font-weight: 700;
+  --orca-entity-accent: #4fb0a5;
+  --rp-warning: var(--vscode-editorWarning-foreground);
+  --rp-warning-bg: color-mix(in srgb, var(--vscode-editorWarning-foreground) 16%, transparent);
+  --rp-warning-border: color-mix(in srgb, var(--vscode-editorWarning-foreground) 40%, transparent);
   /* content typography / spacing */
   --reading-font-size: var(--markdown-font-size, 14px);
   --reading-line-height: var(--markdown-line-height, 22px);
@@ -86,6 +108,8 @@
  * through the same --hl-* contract). Theme-scoped, not palette-scoped, so it
  * mirrors the previous .vscode-light behavior for followTheme on a light theme. */
 .vscode-light {
+  /* Entity pill accent — light theme (bug_General Mention Declare #1). */
+  --orca-entity-accent: #2f8a7e;
   --hl-keyword: #0000ff;
   --hl-string: #a31515;
   --hl-comment: #008000;
@@ -150,6 +174,147 @@ a:hover {
   text-decoration: underline;
 }
 
+/*
+ * Broken-reference marker (Req 20 US-20.9 / Req 21 US-21.3's shared visual
+ * language — file/heading links only for now). ALWAYS-visible (not hover-
+ * only), stamped as a single class on the existing <a> — no wrapper element,
+ * no <svg> child, so this can never leak into turndown's serialized Markdown
+ * (a plain class does not change what the 'a' rule reads: href + textContent
+ * — see broken-ref.ts's header comment). The warning-triangle icon is a CSS
+ * `::before` mask instead of a real inline SVG for the same reason: only
+ * `background-color` (a themed token) paints it, so it needs no DOM node.
+ */
+#content a.broken-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--rp-warning);
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: var(--rp-warning);
+}
+
+#content a.broken-ref::before {
+  content: '';
+  flex: none;
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background-color: var(--rp-warning);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2 L15 14 H1 Z' stroke='%23000' stroke-width='1.2' stroke-linejoin='round' fill='none'/%3E%3Cline x1='8' y1='6' x2='8' y2='9.5' stroke='%23000' stroke-width='1.2' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='11.5' r='0.7' fill='%23000'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2 L15 14 H1 Z' stroke='%23000' stroke-width='1.2' stroke-linejoin='round' fill='none'/%3E%3Cline x1='8' y1='6' x2='8' y2='9.5' stroke='%23000' stroke-width='1.2' stroke-linecap='round'/%3E%3Ccircle cx='8' cy='11.5' r='0.7' fill='%23000'/%3E%3C/svg%3E");
+}
+
+/* HC bumps the wavy underline thickness — same divergence the Broken Reference plan calls out (Reading HC descoped, see Plan/UI/READING_MODE_CONTROL_MATRIX.md). */
+.vscode-high-contrast #content a.broken-ref {
+  text-decoration-thickness: 2px;
+}
+
+/* Entity pill accent — high contrast, fixed per HC spec (bug_General Mention Declare #1). */
+.vscode-high-contrast {
+  --orca-entity-accent: #ff8ae2;
+}
+
+/*
+ * Entity declaration badge (Req 21 US-21.1) — a literal `caption::NS_ID` token
+ * wrapped in a SOLID pill (postProcessCaptions in dom-postprocess.ts). Solid
+ * fill (not the softer --rp-entity-ref-bg tint a future reference-TO-it marker
+ * would use) because a declaration is the source of truth. Reading Mode OWNS
+ * the entity accent (--rp-entity-accent, Teal base, T0.4) — no swatch picker.
+ */
+/*
+ * Entity REFERENCE (Req 21 US-21.3, bug_General Mention Declare #2): stamped
+ * with .md-entity-ref by postProcessEntityRefs (dom-postprocess.ts). PO decision
+ * (2026-07-22): a reference reads as a NORMAL hyperlink, not a muted pill — so
+ * NO base style rule here; the anchor inherits the standard content-link look.
+ * The class is retained only as a JS/selector hook (entity-scope hover + `.`
+ * drill, broken-ref detection) and for the broken-state rule below.
+ */
+
+/*
+ * Broken ENTITY reference (Req 21 US-21.3): a broken entity ref carries BOTH
+ * .broken-ref AND .md-entity-ref. This two-class rule (higher specificity than
+ * either single-class rule) applies the warning-underline treatment so it
+ * reads as a broken link. font-weight:600 is the ONE
+ * delta vs a broken file link. Warning colors via --rp-warning tokens only.
+ * No .vscode-high-contrast override: Reading HC keeps this NON-HC weight (the
+ * existing broken-ref HC rule still bumps only the underline THICKNESS).
+ */
+#content a.broken-ref.md-entity-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  background: none;
+  color: var(--rp-warning);
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: var(--rp-warning);
+  font-weight: 600;
+}
+
+/*
+ * bug_General Mention Declare #1: the declaration badge is an OUTLINE CAPSULE —
+ * transparent fill, 1.5px accent border + accent label, fully-rounded. Driven
+ * entirely by the --orca-entity-pill-* tokens (see :root) and the per-theme
+ * --orca-entity-accent, never a hardcoded hex.
+ */
+#content .md-caption {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--orca-entity-pill-padding);
+  border-radius: var(--orca-entity-pill-shape);
+  border: var(--orca-entity-pill-border-width) solid var(--orca-entity-accent);
+  font-weight: var(--orca-entity-pill-font-weight);
+  color: var(--orca-entity-accent);
+  background: var(--orca-entity-pill-fill);
+  /* Req 21: breathing room between the declaration badge and the label text that
+   * follows it on the same line (e.g. `[UC 01] Submit Leave Request`) — a CSS
+   * gap on top of the source space, never an extra space character. */
+  margin-right: 0.3em;
+  /* bug_General Mention Declare #6/#7: the badge is a non-editable atom
+   * (contenteditable=false in postProcessCaptions) — click to edit its value
+   * via the caption-edit popover, never inline. */
+  cursor: pointer;
+  user-select: none;
+}
+
+/* bug_General Mention Declare #5: hide the internal `caption::` prefix from
+ * view (still in textContent for byte-identical serialization) and show the
+ * value separated from the namespace by a CSS gap — NOT a space character. */
+#content .md-caption .md-caption-prefix {
+  display: none;
+}
+
+#content .md-caption .md-caption-id {
+  margin-left: 0.35em;
+}
+
+/* US-20.5: transient highlight on the body occurrence a broken References entry
+ * navigates to (main.ts adds/removes .ref-nav-flash around a ~1.2s window).
+ * Reading-mode-tokenized via --rp-accent (never a hardcoded hex) so it restyles
+ * per Reading Mode option. */
+#content a.ref-nav-flash {
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
+  outline: 2px solid var(--rp-accent);
+  outline-offset: 1px;
+}
+
+/* Bug General #1: transient highlight on the caption declaration an entity link
+ * navigates to (gutter.ts adds/removes .entity-reveal-flash around a ~1.2s
+ * window). The badge is a non-selectable atom, so a flash stands in for a text
+ * selection. Reading-mode-tokenized via --rp-accent, same as ref-nav-flash. */
+#content .md-caption.entity-reveal-flash {
+  background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
+  outline: 2px solid var(--rp-accent);
+  outline-offset: 2px;
+}
+
 a:focus,
 input:focus,
 select:focus,
@@ -191,7 +356,7 @@ ol ol:first-child {
 hr {
   border: 0;
   height: 1px;
-  border-bottom: 1px solid;
+  border-bottom: 1px solid var(--rp-hr-border);
 }
 
 h1,
@@ -325,7 +490,6 @@ table > tbody > tr + tr > td {
 /* Màu viền theo theme — giống markdown.css gốc (HC dùng màu đậm rõ) */
 .vscode-light #content h1,
 .vscode-light #content h2,
-.vscode-light hr,
 .vscode-light table > tbody > tr + tr > td {
   border-color: rgba(0, 0, 0, 0.18);
 }
@@ -336,7 +500,6 @@ table > tbody > tr + tr > td {
 
 .vscode-dark #content h1,
 .vscode-dark #content h2,
-.vscode-dark hr,
 .vscode-dark table > tbody > tr + tr > td {
   border-color: rgba(255, 255, 255, 0.18);
 }
@@ -1189,8 +1352,7 @@ body[class*='reading-mode-'] #sticky-table-header th {
   border-color: var(--rp-th-border);
 }
 body[class*='reading-mode-'] #content h1,
-body[class*='reading-mode-'] #content h2,
-body[class*='reading-mode-'] hr {
+body[class*='reading-mode-'] #content h2 {
   border-color: var(--rp-border);
 }
 /* Row separators use a lighter translucent tint than the opaque cell border. */
@@ -1306,6 +1468,16 @@ body.reading-mode-sepia {
   --hl-attr: #6b5638;
   --hl-title: #8a5a1f;
   --hl-meta: #7d6a4a;
+  /* Entity + broken-ref (Req 20/21) — light-bg group Teal #2f8a7e; warning is
+   * Sepia's warm rust. VISUAL SIGN-OFF: teal accent + warning tint alphas are
+   * derived (not taken from a Dark/Light source) — confirm against the wireframe. */
+  --rp-entity-accent: #2f8a7e;
+  --rp-entity-ref-bg: rgba(47, 138, 126, 0.14);
+  /* Entity pill accent — Sepia (bug_General Mention Declare #1). */
+  --orca-entity-accent: #8a4b8a;
+  --rp-warning: #a13d2b;
+  --rp-warning-bg: rgba(161, 61, 43, 0.16);
+  --rp-warning-border: rgba(161, 61, 43, 0.4);
 }
 
 /* Paper (US-19.15): nền kem trắng ấm #fffff8 + chữ gần-đen warm, kiểu trang
@@ -1365,13 +1537,18 @@ body.reading-mode-paper {
   --rp-widget-bg: #f4f4ea;
   --rp-tab-active: #fffff8;
   --rp-widget-shadow: rgba(0, 0, 0, 0.16);
-  /* Defined for future consumers (US-19.15 prototype spec) — no selector reads
-   * these yet; kept here so upcoming features (broken-link warning state,
-   * entity badges, image-placeholder stripes, a distinct hover-outline ring)
-   * don't have to invent per-palette values from scratch. */
-  --rp-warning: #a13d2b;
-  --rp-entity-accent: #9c3fa6;
-  --rp-entity-muted: rgba(156, 63, 166, 0.14);
+  /* Entity + broken-ref (Req 20/21) — finalizes the earlier placeholders to the
+   * shipped contract: light-bg group Teal #2f8a7e, Light-group warning #bf8803.
+   * VISUAL SIGN-OFF: teal accent + warning tint alphas are derived (not from a
+   * Dark/Light source) — confirm against the wireframe. */
+  --rp-entity-accent: #2f8a7e;
+  --rp-entity-ref-bg: rgba(47, 138, 126, 0.14);
+  /* Entity pill accent — Paper (bug_General Mention Declare #1). */
+  --orca-entity-accent: #7a3d82;
+  --rp-warning: #bf8803;
+  --rp-warning-bg: rgba(191, 136, 3, 0.18);
+  --rp-warning-border: rgba(191, 136, 3, 0.4);
+  /* Additional placeholders (no consumer yet) — hover ring + embed stripes. */
   --rp-hover-outline: #2554a0;
   --rp-stripe-a: #f7f6ec;
   --rp-stripe-b: #efeee0;

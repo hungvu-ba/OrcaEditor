@@ -94,6 +94,38 @@ export interface InitConfig {
   crossFileSearchScope: CrossFileSearchScope;
   /** Trạng thái Reading Mode ban đầu (US-19.x). */
   readability: ReadabilityConfig;
+  /** Req 20 US-20.2/20.3: seed for the `/` Define+Execute trigger popup. */
+  trigger: TriggerConfig;
+}
+
+/**
+ * Req 20 US-20.2/20.3 seed for the `/` trigger popup.
+ *  - `dateFormat`: `orcaEditor.trigger.dateFormat` setting (default `YYYY-MM-DD`),
+ *    resolved deterministically by the webview at insert time (US-20.2).
+ *  - `executeCommands`: the group-3 Execute command membership list (US-20.3) —
+ *    read by the host from the dedicated `contributes.orcaEditorExecuteCommands`
+ *    manifest array (ids) + `contributes.commands` (titles → labels), so adding/
+ *    removing an id there needs no second edit in webview code.
+ */
+export interface TriggerConfig {
+  dateFormat: string;
+  executeCommands: TriggerExecuteCommand[];
+  /** Req 21 US-21.5: `orcaEditor.triggerActions.mode` — gates visibility of entity-related trigger actions only. */
+  mode: TriggerMode;
+}
+
+/**
+ * Req 21 US-21.5 (`orcaEditor.triggerActions.mode`) — `simple` hides entity-
+ * related trigger actions (the `@` Entities scope, `/declare`, `/relate`);
+ * `advanced` (default) shows them. Gates VISIBILITY only — never restyles or
+ * hides already-written content (US-21.5).
+ */
+export type TriggerMode = 'simple' | 'advanced';
+
+/** One Execute-group command row (Req 20 US-20.3) — id must be on the host's membership list. */
+export interface TriggerExecuteCommand {
+  id: string;
+  label: string;
 }
 
 /**
@@ -108,6 +140,15 @@ export interface RevealPosition {
   character: number;
   length: number;
   matchText?: string;
+  /**
+   * Bug General #1: when set, reveal by TEXT SEARCH over the opened document
+   * (find this string, scroll to + flash the first match) instead of by
+   * `line`/`character`. Used for entity links (`searchText = "caption::NS_ID"`)
+   * so navigation works even when the target file is outside the workspace /
+   * not in the entity index, and is immune to source-line↔DOM mapping drift.
+   * When present, `line`/`character`/`length` are ignored.
+   */
+  searchText?: string;
 }
 
 /**
@@ -119,6 +160,63 @@ export interface AssetSaveResult {
   requestId: number;
   relativePath?: string;
   error?: string;
+}
+
+/**
+ * Req 20 US-20.9 / Req 21 US-21.3: one entry of a broken-reference file/heading
+ * existence check — `target` echoes back the exact raw string the webview sent
+ * (the file part of an href, no `#fragment`) so the webview can map the result
+ * back to the anchor(s) that share that target.
+ */
+export interface TargetExistsResult {
+  target: string;
+  exists: boolean;
+}
+
+/**
+ * Req 21 US-21.3: one entity-reference existence check result — mirrors
+ * `TargetExistsResult`. `id` echoes back the exact full entity token the webview
+ * sent (namespace+id, e.g. `UC01`). `exists` is true ONLY when the id is present
+ * in the index AND a live `fs.stat` of its declaration file succeeds (index
+ * freshness is NOT existence truth — a stale row whose file was deleted/renamed
+ * reports `false`). `occurrences` = how many times that id was seen across the
+ * session occurrence cache (current file + any other file opened this session);
+ * best-effort, undercounts files not yet opened — never persisted, dies with the
+ * session. Sourced only from the cache, never a workspace crawl.
+ */
+export interface EntityExistResult {
+  id: string;
+  exists: boolean;
+  occurrences: number;
+  /**
+   * Req 21 hover tooltip: short preview of the text following the `caption::NS_ID`
+   * declaration token (from the entity index). Present for a resolved id so a
+   * cross-file mention's tooltip can name what the code refers to; absent/empty
+   * when the id is unknown or nothing follows the declaration.
+   */
+  preview?: string;
+}
+
+/**
+ * Req 21 US-21.2: one entity suggestion returned to the popup (result of an
+ * `entitySearch`). Same shape as the host-side `IndexedEntity` row: `file` =
+ * declaring file's uri.toString(), `line` = 0-based line of its `caption::`
+ * declaration, `title` = nearest enclosing heading ('' if none).
+ */
+export interface EntitySuggestion {
+  namespace: string;
+  id: string;
+  file: string;
+  line: number;
+  title: string;
+  /** Req 21: FULL following text (the entity's human name) — a mention inserts it as the link display text so the pill reads `NS_ID label`; '' when nothing follows. */
+  label: string;
+}
+
+/** Req 21 US-21.2: one namespace + its entity count for the browse/summary view. */
+export interface NamespaceSummary {
+  name: string;
+  count: number;
 }
 
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
@@ -177,13 +275,66 @@ export type WebviewToHost =
    * fontFamily KHÔNG nằm trong bundle này — không có UI toggle runtime, vẫn
    * chỉ seed 1 lần từ setting `orcaEditor.readability.fontFamily`.
    */
-  | ReadingModeChangedMessage;
+  | ReadingModeChangedMessage
+  /**
+   * Req 20 US-20.3: the `/` popup's Execute group selected `commandId` — the
+   * webview never touches the VS Code API directly, so it asks the host to run
+   * `vscode.commands.executeCommand(commandId)`. `docUri` is the owning
+   * document's uri (`document.uri.toString()`) — the host runs the command only
+   * if that document is still the target (a message arriving after a tab switch
+   * must never execute against the wrong document). The host validates
+   * `commandId` against the same membership list sent in `InitConfig.trigger.
+   * executeCommands` — this message is not an arbitrary-command execution surface.
+   */
+  | { type: 'executeCommand'; commandId: string; docUri: string }
+  /**
+   * Req 20 US-20.9: broken-reference detection (file/heading links only) —
+   * `targets` is the DEDUPED list of raw file-part strings (the `href` up to
+   * `#`, never included for a pure `#heading` same-document anchor — those
+   * resolve locally against the TOC heading index, no host round trip).
+   * `docVersion` is a monotonic counter `broken-ref.ts` bumps every recompute
+   * pass, stamped on the response so a late result from a since-superseded
+   * scan (the document re-rendered before the host replied) is discarded —
+   * same position-validity spirit as `trigger-popup.ts`. Never sent for
+   * `http(s)`/other absolute-scheme hrefs.
+   */
+  | { type: 'checkTargetsExist'; requestId: number; docVersion: number; targets: string[] }
+  /**
+   * Req 21 US-21.3: broken-ENTITY-reference detection — parallel to
+   * `checkTargetsExist` but keyed by full entity token (namespace+id) rather
+   * than a file path. `ids` is the DEDUPED list of the `#fragment`s of anchors
+   * carrying `ENTITY_REF_CLASS` (an entity reference's display text equals its
+   * href fragment, a valid entity token). `docVersion`/`requestId` stamp the
+   * same staleness guard as `checkTargetsExist` so a late reply from a
+   * superseded scan is discarded.
+   */
+  | { type: 'checkEntitiesExist'; requestId: number; docVersion: number; ids: string[] }
+  /**
+   * Req 20 US-20.5: the `/add reference` palette item was picked — the host
+   * builds/updates the `## References` section as one ordinary document edit.
+   * `docUri` (echoes `InitConfig.docUri`) is verified host-side like
+   * `executeCommand` so a message arriving after a tab switch never edits the
+   * wrong document. No host→webview reply: the "no new references" outcome is a
+   * host `showInformationMessage` toast, not a message shape.
+   */
+  | { type: 'addReference'; docUri: string }
+  /**
+   * Req 21 US-21.2: the `@`/`/` entity popup asks the host to search the
+   * workspace entity index. `namespace` (optional) narrows to one namespace
+   * (case-insensitive). `requestId` echoes back on `entityResult`, mirroring
+   * the `searchFiles` -> `fileSearchResult` pattern.
+   */
+  | { type: 'entitySearch'; requestId: number; query: string; namespace?: string }
+  /** Req 21 US-21.2: the popup asks for the namespace browse list (with counts). */
+  | { type: 'namespaceList'; requestId: number };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
   | {
       type: 'init';
       text: string;
+      /** Req 20 US-20.3: `document.uri.toString()` — echoed back on `executeCommand` so the host can verify this document is still the target. */
+      docUri: string;
       config: InitConfig;
       /**
        * C6: vị trí cần scroll tới ngay sau khi render lần đầu — trạng thái
@@ -205,7 +356,7 @@ export type HostToWebview =
    */
   | { type: 'update'; text: string; caretLine?: number; caretCol?: number }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
-  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean }
+  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean; triggerMode: TriggerMode }
   /**
    * C4: `usedFallback` = true khi host đã âm thầm hạ một truy vấn Whole Word 0
    * kết quả xuống substring cho chính response này — webview hiện thông báo +
@@ -221,4 +372,27 @@ export type HostToWebview =
   /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
   | ZenChangedMessage
   /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
-  | ReadingModeChangedMessage;
+  | ReadingModeChangedMessage
+  /**
+   * Req 20 US-20.3: the host, after validating and running
+   * `vscode.commands.executeCommand(commandId)` for one of the curated Execute
+   * commands, tells THIS webview to run its own existing local action —
+   * `readability.toggle()` / `readability.toggleZen()` / `toc.toggle()` — the
+   * same functions the toolbar buttons already call (no parallel
+   * implementation); reading/zen keep reporting back via `readingModeChanged`/
+   * `zenChanged` exactly as when driven from the toolbar.
+   */
+  | { type: 'runCommand'; command: 'toggleReadingMode' | 'toggleZen' | 'openToc' }
+  /** Req 20 US-20.9: reply to `checkTargetsExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
+  | { type: 'targetsExistResult'; requestId: number; docVersion: number; results: TargetExistsResult[] }
+  /** Req 21 US-21.3: reply to `checkEntitiesExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
+  | { type: 'entitiesExistResult'; requestId: number; docVersion: number; results: EntityExistResult[] }
+  /**
+   * Req 21 US-21.2: reply to `entitySearch`. `ready` carries the indexing state
+   * — when false the initial background build is still running, so the popup
+   * shows "indexing…" instead of reading an empty `entities` as "nothing
+   * exists" (index freshness is NOT existence truth).
+   */
+  | { type: 'entityResult'; requestId: number; ready: boolean; entities: EntitySuggestion[] }
+  /** Req 21 US-21.2: reply to `namespaceList`; `ready` as in `entityResult`. */
+  | { type: 'namespaceListResult'; requestId: number; ready: boolean; namespaces: NamespaceSummary[] };

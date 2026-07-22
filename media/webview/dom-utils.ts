@@ -37,6 +37,36 @@ export function isAbsoluteUrl(s: string): boolean {
 }
 
 /**
+ * Req 21 US-21.2 — relative path from `fromUri`'s directory to `toUri` (both
+ * `document.uri.toString()`-shaped absolute URIs, e.g. `file:///a/b.md`). Used
+ * by trigger-at.ts's Entities scope: `EntitySuggestion.file` is an absolute
+ * declaring-file uri (unlike Files-scope results, which the host already
+ * relativizes server-side), so the webview relativizes it here before building
+ * an href. Falls back to `toUri` unchanged when the two aren't same-origin/
+ * same-scheme (nothing sane to relativize against).
+ */
+export function relativeLinkPath(fromUri: string, toUri: string): string {
+  let fromUrl: URL;
+  let toUrl: URL;
+  try {
+    fromUrl = new URL(fromUri);
+    toUrl = new URL(toUri);
+  } catch {
+    return toUri;
+  }
+  if (fromUrl.protocol !== toUrl.protocol || fromUrl.host !== toUrl.host) {
+    return toUri;
+  }
+  const fromParts = decodeURIComponent(fromUrl.pathname).split('/').slice(0, -1);
+  const toParts = decodeURIComponent(toUrl.pathname).split('/');
+  let i = 0;
+  while (i < fromParts.length && i < toParts.length - 1 && fromParts[i] === toParts[i]) i++;
+  const ups = fromParts.length - i;
+  const rel = [...Array(ups).fill('..'), ...toParts.slice(i)];
+  return rel.join('/') || toParts[toParts.length - 1];
+}
+
+/**
  * Reads a blob as a `data:` URL (resolves to '' on error). Used instead of
  * `URL.createObjectURL` (which produces a `blob:` URL) because the webview's
  * CSP `img-src` only allows `${webview.cspSource}` and `data:` — no `blob:` —
@@ -111,6 +141,22 @@ export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
 /** Icon SVG 16px, màu theo theme qua currentColor. */
 export function svgIcon(inner: string): string {
   return `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${inner}</svg>`;
+}
+
+/**
+ * Warning-triangle+bang icon (Req 20 US-20.9 / Req 21 US-21.3 broken-reference
+ * marker/tooltip/toolbar-badge — same glyph everywhere, per the wireframe's
+ * "shared visual language"). `size` in px; color follows `currentColor`, so
+ * callers set it via CSS `color` (warning tokens), never a hardcoded hex here.
+ */
+export function warningTriangleIcon(size: number): string {
+  return (
+    `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="flex-shrink:0;">` +
+    '<path d="M8 2 L15 14 H1 Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>' +
+    '<line x1="8" y1="6" x2="8" y2="9.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>' +
+    '<circle cx="8" cy="11.5" r="0.7" fill="currentColor"/>' +
+    '</svg>'
+  );
 }
 
 /**
@@ -234,6 +280,41 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
     return null;
   }
   return probe.toString().length;
+}
+
+/**
+ * Text from the start of `block` up to `range`'s start (i.e. everything left of
+ * the caret within `block`). Shared reader for adjacency checks — e.g. the paste
+ * smart-gap in main.ts needs the single char immediately before the caret
+ * (`textBeforeCaret(block, range).slice(-1)`). Consumed by trigger-at/slash and
+ * main.ts; input-rules.ts keeps its own `(block)` variant that resolves the
+ * selection internally (different signature).
+ */
+export function textBeforeCaret(block: Element, range: Range): string {
+  const probe = document.createRange();
+  probe.selectNodeContents(block);
+  try {
+    probe.setEnd(range.startContainer, range.startOffset);
+  } catch {
+    return '';
+  }
+  return probe.toString();
+}
+
+/**
+ * Mirror of `textBeforeCaret`: text from `range`'s start to the end of `block`
+ * (everything right of the caret within `block`). Used to read the char
+ * immediately after the caret (`textAfterCaret(block, range).slice(0, 1)`).
+ */
+export function textAfterCaret(block: Element, range: Range): string {
+  const probe = document.createRange();
+  probe.selectNodeContents(block);
+  try {
+    probe.setStart(range.startContainer, range.startOffset);
+  } catch {
+    return '';
+  }
+  return probe.toString();
 }
 
 /**

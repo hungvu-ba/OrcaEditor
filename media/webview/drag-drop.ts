@@ -32,6 +32,7 @@ import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
 import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
 import { normalizeListDom } from './dom-serialize-prep';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
+import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
 
@@ -1459,25 +1460,27 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     resetState();
   }
 
-  function onDocKeyDown(e: KeyboardEvent): void {
-    // Cancel/Esc (F6): drop never touched the DOM before mouseup, so cancelling is pure visual cleanup.
-    if (e.key === 'Escape') {
-      cleanupVisuals();
-      resetState();
-    }
-  }
+  // Escape-stack registration: only present while a drag is armed/live, so the
+  // handler is always active → returns true (cancel/Esc, F6). The drop never
+  // touched the DOM before mouseup, so cancelling is pure visual cleanup.
+  let escDisposable: Disposable | undefined;
 
   /** Bộ 3 listener document (mousemove/mouseup/keydown) dùng chung cho cả block-drag và li-drag — gắn khi arm, gỡ khi kết thúc. */
   function attachDragListeners(): void {
     document.addEventListener('mousemove', onDocMouseMove);
     document.addEventListener('mouseup', onDocMouseUp);
-    document.addEventListener('keydown', onDocKeyDown);
+    escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.DRAG, () => {
+      cleanupVisuals();
+      resetState();
+      return true;
+    });
   }
 
   function detachDragListeners(): void {
     document.removeEventListener('mousemove', onDocMouseMove);
     document.removeEventListener('mouseup', onDocMouseUp);
-    document.removeEventListener('keydown', onDocKeyDown);
+    escDisposable?.dispose();
+    escDisposable = undefined;
   }
 
   function armDrag(block: HTMLElement, clientX: number, clientY: number): void {

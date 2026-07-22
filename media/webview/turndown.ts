@@ -14,6 +14,7 @@ import {
   MERMAID_CLASS,
   MERMAID_SOURCE_CLASS,
   AUTOLINK_PATH_ATTR,
+  EMPTY_LINK_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
@@ -395,6 +396,17 @@ export function createTurndown(): TurndownService {
     filter: (node) =>
       node.nodeName === 'CODE' && ((node as HTMLElement).hasAttribute?.(AUTOLINK_PATH_ATTR) ?? false),
     replacement: (_content, node) => '`' + ((node as HTMLElement).getAttribute(AUTOLINK_PATH_ATTR) ?? '') + '`',
+  });
+
+  // --- display-only empty link: <a data-empty-link> shows the decoded target
+  // file name (postProcessEmptyLinks — bug_General #15) but must serialize back
+  // to the ORIGINAL empty-text link `[](href)`, dropping the display text, so the
+  // .md is unchanged. href is the raw attribute (already URL-encoded); emitted as-is
+  // like the built-in inlineLink rule → byte-identical to the untouched .md.
+  td.addRule('emptyLink', {
+    filter: (node) =>
+      node.nodeName === 'A' && ((node as HTMLElement).hasAttribute?.(EMPTY_LINK_ATTR) ?? false),
+    replacement: (_content, node) => `[](${(node as HTMLElement).getAttribute(EMPTY_LINK_ATTR) ?? ''})`,
   });
 
   // --- linkify/autolink: <a> có text trùng href → giữ dạng URL trần ---

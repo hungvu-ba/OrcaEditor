@@ -27,6 +27,25 @@ test('Zoom button opens the diagram in the lightbox; Esc closes it', async ({ pa
   await expect(lightbox).toBeHidden();
 });
 
+test('opened diagram is fit to the viewport, not shown at its small native size', async ({ page }) => {
+  await openEditor(page, '```mermaid\ngraph TD; A-->B; B-->C\n```\n');
+  await page.locator('.md-mermaid-chart svg').waitFor();
+
+  await page.locator('.md-mermaid-zoom').click();
+  const svg = page.locator('#md-lightbox-stage svg');
+  await expect(svg).toBeVisible();
+
+  // The SVG must be scaled up to (roughly) fill a viewport axis, not left at its
+  // ~200px intrinsic size. Assert it reaches most of one available dimension.
+  const { w, h, availW, availH } = await page.evaluate(() => {
+    const el = document.querySelector('#md-lightbox-stage svg') as SVGElement;
+    const r = el.getBoundingClientRect();
+    return { w: r.width, h: r.height, availW: window.innerWidth * 0.92, availH: window.innerHeight * 0.92 };
+  });
+  expect(w <= availW + 1 && h <= availH + 1).toBe(true); // within the fit box
+  expect(w >= availW - 60 || h >= availH - 60).toBe(true); // fills one axis
+});
+
 test('Esc closing the lightbox is modal — does not fire other document Esc handlers', async ({ page }) => {
   await openEditor(page, '```mermaid\ngraph TD; A-->B\n```\n');
   await page.locator('.md-mermaid-chart svg').waitFor();

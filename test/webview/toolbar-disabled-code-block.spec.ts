@@ -43,7 +43,7 @@ test('Link/Image become disabled with an explanatory tooltip when caret is insid
   await expect(link).toHaveCSS('cursor', 'not-allowed');
 });
 
-test('clicking a disabled Link button is a no-op (no insert prompt opens)', async ({ page }) => {
+test('clicking a disabled Link button is a no-op (the @ trigger-popup never opens)', async ({ page }) => {
   await openEditor(page, MD);
   await placeCaret(page, 'pre code', 2);
   await expect(page.locator('#fmt-link')).toHaveAttribute('aria-disabled', 'true');
@@ -53,7 +53,7 @@ test('clicking a disabled Link button is a no-op (no insert prompt opens)', asyn
   // work) — the no-op is enforced by our click handler, not pointer-events.
   await page.locator('#fmt-link').click({ force: true });
 
-  await expect(page.locator('.prompt-box')).toHaveCount(0);
+  await expect(page.locator('.trigger-popup')).toHaveCount(0);
 });
 
 test('Link disables when a selection extends into a code block from outside (focus endpoint inside the pre)', async ({ page }) => {

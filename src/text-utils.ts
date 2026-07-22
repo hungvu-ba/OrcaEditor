@@ -106,6 +106,42 @@ export function sanitizeDroppedFileName(name: string): string {
   return safe || 'file';
 }
 
+/** Max chars of following text shown in an entity mention's hover preview (Req 21). */
+const ENTITY_PREVIEW_MAX = 20;
+
+/**
+ * The FULL label text that FOLLOWS a `caption::NS_ID` declaration token — the
+ * entity's human name used as a mention's link display text (Req 21). Trims
+ * leading whitespace, stops at the first break delimiter (`:`, `;`, a backtick —
+ * inline code / fence / command — or a newline), and trims trailing whitespace.
+ * NOT length-capped (that is the preview's job). Empty string when nothing
+ * meaningful follows. Pure — shared by the host index (entity-index.ts) and the
+ * webview mention-insert paths (trigger-at.ts / entity-scope.ts) so they agree.
+ */
+export function entityFollowingLabel(following: string): string {
+  const trimmed = following.replace(/^\s+/, '');
+  const cut = trimmed.search(/[:;`\r\n]/);
+  return (cut === -1 ? trimmed : trimmed.slice(0, cut)).trimEnd();
+}
+
+/**
+ * Short preview of the entity label (entityFollowingLabel), capped at
+ * ENTITY_PREVIEW_MAX chars for the hover tooltip (Req 21) so a bare namespace
+ * code is understandable at a glance. Appends `…` only when the cap actually
+ * truncated the text (a delimiter cut adds no `…`). Empty string when nothing
+ * meaningful follows.
+ */
+export function entityFollowingPreview(following: string): string {
+  const segment = entityFollowingLabel(following);
+  // Count by code points (not UTF-16 units) so the cap never splits a surrogate
+  // pair (emoji / astral chars) into a broken half-glyph.
+  const points = Array.from(segment);
+  if (points.length <= ENTITY_PREVIEW_MAX) {
+    return segment;
+  }
+  return points.slice(0, ENTITY_PREVIEW_MAX).join('').trimEnd() + '…';
+}
+
 /** Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file). */
 export function relativePath(fromDir: string, toFile: string): string {
   const from = fromDir.split('/').filter(Boolean);

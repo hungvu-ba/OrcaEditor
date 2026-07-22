@@ -26,6 +26,12 @@ import {
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   AUTOLINK_PATH_ATTR,
+  EMPTY_LINK_ATTR,
+  CAPTION_CLASS,
+  CAPTION_PREFIX_CLASS,
+  CAPTION_NS_CLASS,
+  CAPTION_ID_CLASS,
+  ENTITY_REF_CLASS,
 } from './render';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
@@ -363,7 +369,10 @@ function inSkippedContext(node: Node): boolean {
       return true;
     }
     const cl = el.classList;
-    return !!cl && (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS) || cl.contains(MERMAID_CLASS));
+    return (
+      !!cl &&
+      (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS) || cl.contains(MERMAID_CLASS) || cl.contains(CAPTION_CLASS))
+    );
   });
 }
 
@@ -446,5 +455,190 @@ function markCodeSpanPathLinks(root: ParentNode & Node): void {
       code.setAttribute(AUTOLINK_PATH_ATTR, raw);
       code.textContent = raw.slice(raw.lastIndexOf('/') + 1);
     }
+  }
+}
+
+/** Matches `caption::` + a non-whitespace token — mirrors entity-index.ts's CAPTION_RE. */
+const CAPTION_TOKEN_RE = /caption::(\S+)/g;
+/** Leading Unicode-letter run of a caption token = its namespace — mirrors entity-index.ts's NAMESPACE_RE. */
+const CAPTION_NAMESPACE_RE = /^\p{L}+/u;
+
+/**
+ * True when `token` is a validly-shaped `namespace+id` entity token — same
+ * rule as entity-index.ts's parseEntities: namespace = the MAXIMAL leading
+ * Unicode-letter run, id = whatever remains (invalid/rejected if empty, e.g.
+ * an all-letters word like "readme" has no id half). Shared by
+ * postProcessCaptions (below) and postProcessEntityRefs so both apply the
+ * EXACT same validity rule, not two independently-drifting regexes.
+ */
+function isValidEntityToken(token: string): boolean {
+  const nsMatch = CAPTION_NAMESPACE_RE.exec(token);
+  return !!nsMatch && nsMatch[0].length < token.length;
+}
+
+/** True for any href with a URL scheme (`http:`, `https:`, `mailto:`, ...) — mirrors broken-ref.ts's hasUrlScheme (never an entity reference). */
+const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * Req 21 US-21.1 (bug_General Mention Declare #5/#6/#7): (re)build a
+ * CAPTION_CLASS badge's inner structure from a validated `NS_ID` token (NO
+ * `caption::` prefix — `token` is the m[1] half, e.g. `UC1`). Three child spans:
+ *  - PREFIX: the literal `caption::` (kept in `textContent`, hidden via CSS) so
+ *    `badge.textContent` stays exactly `caption::NS_ID` and turndown round-trips
+ *    byte-identical.
+ *  - NS: the leading Unicode-letter run (the namespace).
+ *  - ID: the remaining value; the visible gap before it is CSS margin, never a
+ *    space character.
+ * Clears any existing children first, so caption-edit.ts can reuse it to rewrite
+ * a badge in place after a value edit. Domino trap: appendChild, never append.
+ */
+export function fillCaptionBadge(badge: Element, token: string, doc: Document): void {
+  while (badge.firstChild) {
+    badge.removeChild(badge.firstChild);
+  }
+  const nsMatch = CAPTION_NAMESPACE_RE.exec(token);
+  const namespace = nsMatch ? nsMatch[0] : '';
+  const id = token.slice(namespace.length);
+  const prefix = doc.createElement('span');
+  prefix.className = CAPTION_PREFIX_CLASS;
+  prefix.appendChild(doc.createTextNode('caption::'));
+  const nsEl = doc.createElement('span');
+  nsEl.className = CAPTION_NS_CLASS;
+  nsEl.appendChild(doc.createTextNode(namespace));
+  const idEl = doc.createElement('span');
+  idEl.className = CAPTION_ID_CLASS;
+  idEl.appendChild(doc.createTextNode(id));
+  badge.appendChild(prefix);
+  badge.appendChild(nsEl);
+  badge.appendChild(idEl);
+}
+
+/**
+ * Req 21 US-21.1: wrap every valid `caption::NS_ID` entity-declaration token
+ * (namespace = leading Unicode-letter run, non-empty id remainder — same
+ * validity rule as entity-index.ts's parseEntities, so a malformed token, e.g.
+ * `caption::` with no letters or an empty id half, is left as plain text) into
+ * a `.md-caption` solid-pill badge; its text split into hidden-prefix + ns + id
+ * child spans by fillCaptionBadge, whose concatenated textContent stays the
+ * literal token so turndown's default (no dedicated rule needed) serializes it
+ * back byte-identical. Idempotent: `inSkippedContext` already skips text nested
+ * inside an existing `.md-caption` (see its CAPTION_CLASS check above), so
+ * calling this again on already-processed DOM (e.g. right after a live insert,
+ * for instant pill feedback) never double-wraps.
+ */
+export function postProcessCaptions(root: ParentNode & Node, doc: Document): void {
+  const textNodes: Text[] = [];
+  collectTextNodes(root, textNodes);
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue ?? '';
+    if (!text.includes('caption::') || inSkippedContext(textNode)) {
+      continue;
+    }
+    const parent = textNode.parentNode;
+    if (!parent) {
+      continue;
+    }
+    CAPTION_TOKEN_RE.lastIndex = 0;
+    const matches: Array<{ start: number; end: number; token: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = CAPTION_TOKEN_RE.exec(text)) !== null) {
+      const token = m[1];
+      if (!isValidEntityToken(token)) {
+        continue; // no namespace letters, or empty id half — not a valid declaration.
+      }
+      matches.push({ start: m.index, end: m.index + m[0].length, token });
+    }
+    if (matches.length === 0) {
+      continue;
+    }
+    let cursor = 0;
+    for (const { start, end, token } of matches) {
+      if (start > cursor) {
+        parent.insertBefore(doc.createTextNode(text.slice(cursor, start)), textNode);
+      }
+      const badge = doc.createElement('span');
+      badge.className = CAPTION_CLASS;
+      // Non-editable atom (bug #6/#7): stops inline editing of the token and
+      // stops Enter from splitting the badge / carrying its class onto the next
+      // line. The click-to-edit popover (caption-edit.ts) is the edit path.
+      badge.setAttribute('contenteditable', 'false');
+      // Split display: hidden `caption::` + `NS value` (bug #5). textContent
+      // stays `caption::NS_ID` for byte-identical round-trip.
+      fillCaptionBadge(badge, token, doc);
+      parent.insertBefore(badge, textNode);
+      cursor = end;
+    }
+    if (cursor < text.length) {
+      parent.insertBefore(doc.createTextNode(text.slice(cursor)), textNode);
+    }
+    parent.removeChild(textNode);
+  }
+}
+
+/**
+ * Req 21 US-21.3: mark every `<a>` that is an entity REFERENCE (not a
+ * declaration) with ENTITY_REF_CLASS, so editor.css can paint it as the muted
+ * pill variant of CAPTION_CLASS's solid badge. Detection is a structural
+ * heuristic — no host round trip, no dependency on whether the target
+ * actually exists (that is a separate, not-yet-built broken-reference concern
+ * for entity refs): an entity reference is ALWAYS inserted (trigger-at.ts /
+ * entity-scope.ts) as `[FULLID](path#FULLID)` — display text exactly equal to
+ * the href's `#fragment`, and that fragment shaped like a valid entity token.
+ * A class-only change (no DOM structure added inside the `<a>`) so turndown's
+ * default `<a>` serialization is completely unaffected, same discipline as
+ * BROKEN_REF_CLASS in broken-ref.ts.
+ */
+export function postProcessEntityRefs(root: ParentNode & Node): void {
+  const anchors = Array.from((root as Element).querySelectorAll('a[href]')) as HTMLAnchorElement[];
+  for (const anchor of anchors) {
+    const href = anchor.getAttribute('href') ?? '';
+    const hashIdx = href.indexOf('#');
+    if (hashIdx === -1) {
+      continue;
+    }
+    const fragment = href.slice(hashIdx + 1);
+    const text = (anchor.textContent ?? '').trim();
+    // Req 21: a mention's display text is either the bare `NS_ID` (no label) OR
+    // `NS_ID label` (the entity's human name follows a single space). Both are
+    // entity references — the fragment carries the clean `#NS_ID` either way.
+    const matchesToken = text === fragment || text.startsWith(`${fragment} `);
+    if (fragment && matchesToken && isValidEntityToken(fragment) && !URL_SCHEME_RE.test(href)) {
+      anchor.classList.add(ENTITY_REF_CLASS);
+    } else {
+      anchor.classList.remove(ENTITY_REF_CLASS);
+    }
+  }
+}
+
+/** Decoded, display-friendly file name for an empty link's href (segment after the last `/`, percent-decoded; falls back to the raw href on a malformed sequence). */
+function emptyLinkDisplayText(href: string): string {
+  const name = href.slice(href.lastIndexOf('/') + 1) || href;
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+/**
+ * An empty-text link `[](url)` renders as an empty `<a>` — in a list it shows as
+ * a blank bullet the user can't see or click (bug_General #15). Fill any such
+ * anchor with the decoded target file name as DISPLAY text and stamp
+ * EMPTY_LINK_ATTR with the ORIGINAL href so turndown's `emptyLink` rule
+ * serializes it back to `[](href)` unchanged (display-only, byte-faithful).
+ *
+ * Skips anchors that already carry content: any element child (e.g. an image
+ * link `[![alt](img)](url)`) or non-blank text. Runs under Node/domino for the
+ * round-trip test — sets textContent only (no `.append`/innerHTML).
+ */
+export function postProcessEmptyLinks(root: ParentNode & Node): void {
+  const anchors = Array.from((root as Element).querySelectorAll('a[href]')) as HTMLAnchorElement[];
+  for (const anchor of anchors) {
+    const href = anchor.getAttribute('href') ?? '';
+    if (!href || anchor.children.length > 0 || (anchor.textContent ?? '').trim() !== '') {
+      continue;
+    }
+    anchor.setAttribute(EMPTY_LINK_ATTR, href);
+    anchor.textContent = emptyLinkDisplayText(href);
   }
 }
