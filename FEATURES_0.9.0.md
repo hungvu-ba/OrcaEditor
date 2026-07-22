@@ -2,11 +2,19 @@
 
 A quick tour of the features shipped this round. Three pillars: **Trigger system (`@` / `/`)**, the **Entity declare & reference** model, and the **Reading Mode + UI** redesign.
 
+_All screenshots below are captured from the real editor UI._
+
+![Editor toolbar](docs/features-0.9.0/01-toolbar.png)
+
 ---
 
 ## 1. Mention & Trigger — `@` and `/`
 
 Type a trigger character in the editor and a popup lets you pick without leaving the keyboard.
+
+| `@` — Mention an entity | `/` — Define / Execute |
+| --- | --- |
+| ![@ mention popup](docs/features-0.9.0/04-at-mention-popup.png) | ![/ block menu](docs/features-0.9.0/05-slash-block-menu.png) |
 
 - **`@` — Mention an entity.** Search across your docs and insert a link to a declared entity. The inserted text shows the entity's **full human name** (`UC01 Submit Leave Request`), while the link fragment stays clean (`#UC01`).
 - **`/` — Define / Execute.** A block menu (Heading 1–3, lists, etc.) at the start of a line, plus commands. `/heading` on an empty line pre-selects a level; on a line with text, `/` reformats the whole block.
@@ -21,6 +29,10 @@ Type a trigger character in the editor and a popup lets you pick without leaving
 
 A lightweight cross-document linking model built on a `caption::` declaration.
 
+| Declaration badge | Mention pill |
+| --- | --- |
+| ![Declaration badge](docs/features-0.9.0/02-declaration-badge.png) | ![Entity mention pill](docs/features-0.9.0/03-entity-mention-pill.png) |
+
 - **Declare:** write `caption::NS_ID` to mark a block as an entity (e.g. a use case, a requirement). It renders as a **declaration badge** followed by its label.
 - **Index:** all declarations are indexed automatically, powering `@`-mention search. Malformed captures (trailing punctuation, `caption::` inside inline code) are filtered out.
 - **Reference & navigate:** an entity link resolves through the index. **Cmd/Ctrl-click** opens the target file *and* scrolls to the `caption::` declaration, flashing the badge. Works even for targets outside the workspace (whole-document text search fallback).
@@ -34,6 +46,11 @@ A lightweight cross-document linking model built on a `caption::` declaration.
 ## 3. Reading Mode & UI Redesign
 
 - **3 Reading Modes** — Standard / Sepia / Paper — each a self-contained color set applied per mode, chosen from a dropdown with swatches.
+
+| Standard | Sepia | Paper |
+| --- | --- | --- |
+| ![Standard](docs/features-0.9.0/06-reading-standard.png) | ![Sepia](docs/features-0.9.0/06-reading-sepia.png) | ![Paper](docs/features-0.9.0/06-reading-paper.png) |
+
 - **Popup styling follows the mode.** The trigger query input is a soft-ring field (`--orca-input-*`) with caret/selection colors themed per Reading Mode.
 - **Toolbar redesign.** Reordered to the wireframe with explicit overflow-collapse priority; control sizes derive from one `--toolbar-base-height` knob; Link/Image buttons disable inside code blocks.
 - **TOC rail redesign** — palette theming, reading-stats header, empty state, proportional width, resize/truncation fixes.
@@ -53,3 +70,5 @@ A lightweight cross-document linking model built on a `caption::` declaration.
 | 3 Reading Modes | Standard / Sepia / Paper, fully themed incl. popups. |
 
 _See `Update History.md` / `CHANGELOG.md` [0.9.0] for the full line-by-line list._
+
+_Screenshots regenerate from the live UI via `npx playwright test test/webview/zz-feature-shots.spec.ts` (run `node esbuild.js` first) → `docs/features-0.9.0/`._
