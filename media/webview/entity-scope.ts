@@ -33,10 +33,11 @@
  */
 import { CAPTION_CLASS } from './render';
 import { closestElement } from './dom-utils';
-import { normalizeForSearch } from '../../src/text-utils';
+import { entityFollowingLabel, entityFollowingPreview, normalizeForSearch } from '../../src/text-utils';
 import { runAtInsertLink } from './toolbar';
 import { postProcessEntityRefs } from './dom-postprocess';
 import { showTooltip, hideTooltip } from './tooltip';
+import { BROKEN_REF_CLASS, pointerOverBrokenTriangle } from './broken-ref';
 import type { TriggerPopupController, TriggerPopupGroup, TriggerPopupItem } from './trigger-popup';
 
 const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6';
@@ -92,6 +93,8 @@ export interface ScopedCaption extends EntityToken {
   el: HTMLElement;
   /** Dim breadcrumb — the heading path from the queried anchor down to this caption. */
   breadcrumb: string;
+  /** Req 21: FULL following text (the entity's human name) — a mention inserts `NS_ID label`; '' when nothing follows. */
+  label: string;
 }
 
 export interface EntityScopeResult {
@@ -150,7 +153,10 @@ export function queryEntityScope(content: Element, anchorEl: Element): EntitySco
     if (!isHeadingAnchor && !crossedHeading) {
       break; // a sibling entity at the SAME depth (no heading crossed yet) — ends this scope, not a child.
     }
-    captions.push({ el: node as HTMLElement, ...tok, breadcrumb: [label, ...crumbSoFar].join(' › ') });
+    // The entity's human name is the text following the badge on its own line
+    // (same source as the hover preview, but uncapped) — mirrors entity-index.ts.
+    const captionLabel = entityFollowingLabel(node.nextSibling?.textContent ?? '');
+    captions.push({ el: node as HTMLElement, ...tok, breadcrumb: [label, ...crumbSoFar].join(' › '), label: captionLabel });
   }
 
   for (const h of headings) {
@@ -183,6 +189,16 @@ export function nearestEnclosingEntity(content: Element, badge: Element): Entity
     // Sibling — transparent: keep walking back to find the shared ancestor (if any).
   }
   return null;
+}
+
+/** Decoded, display-friendly file name for a cross-file entity-ref href's file part (segment after the last `/`, percent-decoded; falls back to the raw part on a malformed sequence). */
+function entityRefFileName(filePart: string): string {
+  const base = filePart.slice(filePart.lastIndexOf('/') + 1) || filePart;
+  try {
+    return decodeURIComponent(base);
+  } catch {
+    return base;
+  }
 }
 
 /** The rendered `.md-caption` badge declaring `namespace+id` in `content`, or null if not declared in THIS document. */
@@ -235,16 +251,22 @@ function matchesFilter(text: string, q: string): boolean {
 export interface EntityScopeController {
   /** Wire on `content`'s 'input' listener (main.ts) — opens the drill popup when the dot-drill pattern is detected. */
   onInput(ie: InputEvent): void;
-  /** Wire on `content`'s hover (main.ts) — shows/hides the parent-context tooltip on an entity-ref pill. */
-  onMouseOver(e: MouseEvent): void;
+  /** Wire on `content`'s 'mousemove' (main.ts) — shows the parent-context tooltip on an entity-ref pill's TEXT, hides it over a broken pill's warning triangle (that region belongs to broken-ref.ts's fix popup). */
+  onMouseMove(e: MouseEvent): void;
+  /** Wire on `content`'s 'mouseout' (main.ts) — hides the tooltip when the pointer leaves the pill. */
   onMouseOut(e: MouseEvent): void;
 }
 
-export function initEntityScope(content: HTMLElement, popup: TriggerPopupController): EntityScopeController {
+export function initEntityScope(
+  content: HTMLElement,
+  popup: TriggerPopupController,
+  /** Req 21 hover tooltip: cross-file preview lookup keyed by the href fragment (namespace+id); '' / undefined until the host reply lands. */
+  previewById: (id: string) => string | undefined
+): EntityScopeController {
   let scopeAnchor: HTMLElement | undefined;
   let deleteRange: Range | undefined;
   /** id → resolved commit target, rebuilt on every buildGroups() call (mirrors trigger-at.ts's targetsById). */
-  let itemTargets = new Map<string, { kind: 'heading'; el: HTMLElement } | { kind: 'caption'; namespace: string; id: string }>();
+  let itemTargets = new Map<string, { kind: 'heading'; el: HTMLElement } | { kind: 'caption'; namespace: string; id: string; label: string }>();
 
   function buildGroups(q: string): TriggerPopupGroup[] {
     itemTargets = new Map();
@@ -261,7 +283,7 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
     const shownCaptions = captions.filter((c) => matchesFilter(`${c.namespace}${c.id}`, q)).slice(0, GROUP_CAP);
     const captionItems: TriggerPopupItem[] = shownCaptions.map((c, i) => {
       const id = `c:${i}`;
-      itemTargets.set(id, { kind: 'caption', namespace: c.namespace, id: c.id });
+      itemTargets.set(id, { kind: 'caption', namespace: c.namespace, id: c.id, label: c.label });
       return { id, label: `${c.namespace}${c.id}`, detail: c.breadcrumb, tint: 'entity' };
     });
 
@@ -271,10 +293,12 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
     return groups;
   }
 
-  function commitCaption(namespace: string, id: string): void {
+  function commitCaption(namespace: string, id: string, label: string): void {
     if (!deleteRange) return;
     const fullId = `${namespace}${id}`;
-    runAtInsertLink(`#${fullId}`, fullId, deleteRange);
+    // Req 21: display text = `NS_ID label` so the ref reads the entity's human
+    // name; the href fragment stays the clean `#NS_ID`.
+    runAtInsertLink(`#${fullId}`, label ? `${fullId} ${label}` : fullId, deleteRange);
     postProcessEntityRefs(content);
   }
 
@@ -288,14 +312,17 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
     queueMicrotask(() => {
       scopeAnchor = headingEl;
       deleteRange = captured;
-      openPopup();
+      // Bug B1 — this reopen runs from inside the previous row's Enter handler;
+      // guard so an IME double-Enter can't auto-commit/drill the reopened scope.
+      openPopup(true);
     });
   }
 
-  function openPopup(): void {
+  function openPopup(guardEnter = false): void {
     if (!deleteRange) return;
     popup.open({
       axis: '@',
+      guardEnterUntilKeyup: guardEnter,
       anchorRange: deleteRange.cloneRange(),
       dataSource: { query: (q) => buildGroups(q) },
       onPick: (item) => {
@@ -304,7 +331,7 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
         if (target.kind === 'heading') {
           drillInto(target.el);
         } else {
-          commitCaption(target.namespace, target.id);
+          commitCaption(target.namespace, target.id, target.label);
         }
       },
       onClose: () => {
@@ -326,16 +353,86 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
   // ---- Parent-context hover tooltip (never inline/stored — recomputed live) ----
   let tooltipAnchor: Element | undefined;
 
-  function onMouseOver(e: MouseEvent): void {
-    const anchor = (e.target as HTMLElement).closest('a.md-entity-ref');
-    if (!anchor || anchor === tooltipAnchor || !content.contains(anchor)) return;
+  /**
+   * Joins the tooltip parts, or null when there is nothing to add beyond the
+   * mention text itself (a bare `id` with no preview/location is redundant with
+   * what the pill already shows). Format: `id[ preview][ in location]`.
+   */
+  function composeTooltip(fullId: string, preview: string, location: string): string | null {
+    if (!preview && !location) return null;
+    const head = preview ? `${fullId} ${preview}` : fullId;
+    return location ? `${head} in ${location}` : head;
+  }
+
+  /** The tooltip text for `anchor`, or null when there is nothing to show. */
+  function resolveTooltipText(anchor: Element): string | null {
     const fullId = (anchor.textContent ?? '').trim();
+    const href = anchor.getAttribute('href') ?? '';
+    const hashIdx = href.indexOf('#');
+    const filePart = hashIdx === -1 ? '' : href.slice(0, hashIdx);
+    if (filePart) {
+      // Cross-file mention (`file.md#UC01`): the declaration lives in another
+      // file, so name that file; the preview (text following its `caption::`)
+      // comes from the host, keyed by the raw href fragment (matches the id the
+      // broken-ref scan sent) — '' until the host reply lands.
+      const fragment = href.slice(hashIdx + 1);
+      return composeTooltip(fullId, previewById(fragment) ?? '', entityRefFileName(filePart));
+    }
+    // Same-document mention (`#UC01`): preview from the declaration badge's own
+    // following text node (postProcessCaptions inserts it right after the pill),
+    // location = the nearest enclosing entity (none for a top-level declaration).
     const badge = findCaptionBadge(content, fullId);
-    if (!badge) return; // declared in another file — no same-document parent to show (T8.1 scope limit).
+    if (!badge) return null; // declared in another file — no same-document context (T8.1 scope limit).
+    const preview = entityFollowingPreview(badge.nextSibling?.textContent ?? '');
     const parent = nearestEnclosingEntity(content, badge);
-    if (!parent) return; // top-level declaration — no parent line (per spec).
-    tooltipAnchor = anchor;
-    showTooltip(anchor as HTMLElement, `${fullId} in ${parent.namespace}${parent.id}`);
+    return composeTooltip(fullId, preview, parent ? `${parent.namespace}${parent.id}` : '');
+  }
+
+  function clearTooltip(): void {
+    if (tooltipAnchor) {
+      tooltipAnchor = undefined;
+      hideTooltip();
+    }
+  }
+
+  // Info tooltip on the pill TEXT. mousemove-driven (not mouseover) so that on a
+  // BROKEN pill the tooltip yields the leading warning-triangle region to
+  // broken-ref.ts's fix popup, then re-appears when the pointer returns to the
+  // text. rAF-coalesced per the hot-handler layout-read discipline
+  // (pointerOverBrokenTriangle reads getClientRects); the heavy scope query runs
+  // only on a transition to a NEW pill (anchor === tooltipAnchor short-circuits).
+  let moveRaf = 0;
+  let moveX = 0;
+  let moveY = 0;
+  let moveTarget: HTMLElement | null = null;
+  function onMouseMove(e: MouseEvent): void {
+    moveX = e.clientX;
+    moveY = e.clientY;
+    moveTarget = e.target as HTMLElement;
+    if (moveRaf !== 0) return;
+    moveRaf = requestAnimationFrame(() => {
+      moveRaf = 0;
+      const anchor = moveTarget?.closest('a.md-entity-ref') ?? null;
+      if (!anchor || !content.contains(anchor)) {
+        clearTooltip();
+        return;
+      }
+      // Over a broken pill's warning triangle → that region belongs to the fix popup.
+      if (anchor.classList.contains(BROKEN_REF_CLASS) && pointerOverBrokenTriangle(anchor, moveX, moveY)) {
+        clearTooltip();
+        return;
+      }
+      if (anchor === tooltipAnchor) return; // already resolved + shown for this pill's text.
+      const text = resolveTooltipText(anchor);
+      if (text === null) {
+        clearTooltip();
+        return;
+      }
+      tooltipAnchor = anchor;
+      // Above the pill: broken-ref.ts's fix popup sits BELOW the same anchor, so
+      // placing the info tooltip above keeps the two from overlapping.
+      showTooltip(anchor as HTMLElement, text, 'above');
+    });
   }
 
   function onMouseOut(e: MouseEvent): void {
@@ -346,5 +443,5 @@ export function initEntityScope(content: HTMLElement, popup: TriggerPopupControl
     }
   }
 
-  return { onInput, onMouseOver, onMouseOut };
+  return { onInput, onMouseMove, onMouseOut };
 }

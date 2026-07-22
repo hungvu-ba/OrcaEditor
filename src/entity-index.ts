@@ -6,7 +6,7 @@
  * vscode I/O (findFiles / fs.readFile / watchers) lives in provider.ts, which
  * feeds already-read text into the pure methods here.
  */
-import { normalizeForSearch } from './text-utils';
+import { entityFollowingLabel, entityFollowingPreview, normalizeForSearch } from './text-utils';
 
 /**
  * One indexed entity, flattened per declaration with its namespace carried on
@@ -14,6 +14,10 @@ import { normalizeForSearch } from './text-utils';
  *  - `file` = uri.toString() of the declaring file.
  *  - `line` = 0-based line of the `caption::` declaration.
  *  - `title` = nearest enclosing ATX heading above the declaration ('' if none).
+ *  - `preview` = short preview of the text following the `caption::NS_ID` token
+ *    on its declaration line (Req 21 hover tooltip); '' when nothing follows.
+ *  - `label` = FULL following text (uncapped preview) — the entity's human name,
+ *    used as a mention's link display text (Req 21); '' when nothing follows.
  */
 export interface IndexedEntity {
   namespace: string;
@@ -21,6 +25,8 @@ export interface IndexedEntity {
   file: string;
   line: number;
   title: string;
+  preview: string;
+  label: string;
 }
 
 /** Matches a `caption::TOKEN` declaration; TOKEN is the following non-whitespace run. */
@@ -35,6 +41,77 @@ const ATX_HEADING_RE = /^(#{1,6})\s+(.*)$/;
 /** Split a source blob into lines, normalizing CRLF/CR/LF. */
 function splitLines(text: string): string[] {
   return text.split(/\r\n|\r|\n/);
+}
+
+/**
+ * Blank out CommonMark inline code spans in a single line so a `caption::`
+ * written as example syntax inside backticks (e.g. documentation like
+ * `` `caption::UC01` ``) is NOT parsed as a real declaration — mirrors the
+ * webview's CODE-ancestor skip in dom-postprocess.ts `inSkippedContext`, so the
+ * host index and the rendered pill agree on what counts as a declaration
+ * (PO 2026-07-22: inline-code `caption::` is documentation, not a declaration).
+ *
+ * A span opens on a run of N backticks and closes on the next run of EXACTLY N
+ * backticks; an unmatched run stays literal text (so `` caption::UC01`, `` keeps
+ * its `caption::UC01`, matched by CAPTION_RE and trimmed as before). Linear
+ * left-to-right scan — no backtracking, so no ReDoS. Line-scoped, consistent
+ * with the rest of this line-based, fence-aware parser. A matched span is
+ * replaced by an equal-length run of spaces (NOT removed) so every column offset
+ * is PRESERVED: a `match.index` into the returned string maps straight back onto
+ * the original line, which parseEntities relies on to slice the token's
+ * following text for the hover preview.
+ *
+ * Two deliberate, negligible-in-practice gaps: backslash-escaped backticks are
+ * NOT honored (a `\`` is still treated as a delimiter), and a code span that
+ * opens and closes on different lines is not detected (line-scoped, like the
+ * rest of this parser). Captions in this codebase sit on their own lines and
+ * doc examples are single-line, so neither case occurs in real content.
+ */
+function stripInlineCode(line: string): string {
+  let out = '';
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] !== '`') {
+      out += line[i];
+      i++;
+      continue;
+    }
+    // Measure the opening backtick run.
+    let open = i;
+    while (open < line.length && line[open] === '`') {
+      open++;
+    }
+    const runLen = open - i;
+    // Look for a closing run of exactly the same length.
+    let close = -1;
+    let k = open;
+    while (k < line.length) {
+      if (line[k] !== '`') {
+        k++;
+        continue;
+      }
+      let run = k;
+      while (run < line.length && line[run] === '`') {
+        run++;
+      }
+      if (run - k === runLen) {
+        close = run;
+        break;
+      }
+      k = run;
+    }
+    if (close === -1) {
+      // Unmatched run — keep the backticks as literal text.
+      out += line.slice(i, open);
+      i = open;
+    } else {
+      // Blank the whole span (delimiters + content) with equal-length spaces —
+      // preserves column offsets so match.index maps back onto the original line.
+      out += ' '.repeat(close - i);
+      i = close;
+    }
+  }
+  return out;
 }
 
 /** Fence marker char ('`' or '~') of a trimmed line, or null if it isn't a fence line. */
@@ -127,10 +204,20 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       heading = headingText(raw);
       continue;
     }
+    // Scan the line with inline code spans blanked out so a `caption::` written
+    // as example syntax inside backticks is not indexed as a declaration.
+    const scan = stripInlineCode(raw);
     CAPTION_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
-    while ((match = CAPTION_RE.exec(raw)) !== null) {
-      const token = match[1];
+    while ((match = CAPTION_RE.exec(scan)) !== null) {
+      // The `\S+` capture greedily absorbs trailing punctuation from the
+      // surrounding prose/markdown (e.g. `caption::UC01`, → `` UC01`, ``;
+      // `caption::UC01).` → `UC01).`). Strip that trailing non-alphanumeric run
+      // so the parsed id stays a clean token; a punctuation-only token drops out.
+      const token = match[1].replace(/[^\p{L}\p{N}]+$/u, '');
+      if (token === '') {
+        continue; // nothing left after trimming trailing punctuation.
+      }
       const nsMatch = NAMESPACE_RE.exec(token);
       if (!nsMatch) {
         continue; // no namespace letters — not a valid declaration.
@@ -140,7 +227,12 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       if (id === '') {
         continue; // empty id half — refused (US-21.1).
       }
-      out.push({ namespace, id, file: fileUri, line, title: heading });
+      // Text following the token on this line. stripInlineCode is length-
+      // preserving, so match.index/length (into `scan`) map straight onto `raw`.
+      const following = raw.slice(match.index + match[0].length);
+      const label = entityFollowingLabel(following);
+      const preview = entityFollowingPreview(following);
+      out.push({ namespace, id, file: fileUri, line, title: heading, preview, label });
     }
   }
   return out;
@@ -187,9 +279,12 @@ export class EntityIndex {
   }
 
   /**
-   * Combined id-OR-title fuzzy match (US-21.2): every token of the normalized
-   * query must be a substring of `normalize(id) + '-' + normalize(title)`. An
-   * empty query returns all rows. `opts.namespace` narrows case-insensitively.
+   * Combined id-OR-title match (US-21.2): every token of the normalized query
+   * must match a row on the id OR the title. The id match is a substring of
+   * `normalize(namespace + id)` (so `UC01` and the partial `01` both hit); the
+   * title match is anchored to a word start (segment prefix) so a short token
+   * like `uc` does NOT hit mid-word inside a title (e.g. "strUCtured"). An empty
+   * query returns all rows. `opts.namespace` narrows case-insensitively.
    * Deterministic order (namespace asc, then id asc), capped small.
    */
   query(q: string, opts?: { namespace?: string }): IndexedEntity[] {
@@ -204,9 +299,13 @@ export class EntityIndex {
           continue;
         }
         // Full id is namespace + id (row.id holds only the post-namespace half),
-        // so a full-id query like `UC01` matches; partial-id/title tokens still hit.
-        const haystack = `${normalizeForSearch(row.namespace + row.id)}-${normalizeForSearch(row.title)}`;
-        if (tokens.every((t) => haystack.includes(t))) {
+        // so a full-id query like `UC01` matches, as do partial-id tokens.
+        const idHay = normalizeForSearch(row.namespace + row.id);
+        // Title match anchors to a word start: normalizeForSearch joins words with
+        // '-', so prefixing both sides with '-' turns includes() into a
+        // segment-prefix test (kills mid-word hits like `uc` in "strUCtured").
+        const titleHay = `-${normalizeForSearch(row.title)}`;
+        if (tokens.every((t) => idHay.includes(t) || titleHay.includes(`-${t}`))) {
           out.push(row);
         }
       }

@@ -102,7 +102,9 @@ test('happy path: existing namespace + accepting the suggested next id inserts a
   );
 
   await waitForItemCount(page, 1);
-  await expect(page.locator('.trigger-popup-item-label')).toHaveText('Declare UC02 (suggested — type to change)');
+  // Label is capped at RESULT_TEXT_MAX_CHARS (30) by truncateDisplay, so the 41-char
+  // suggestion row renders ellipsized; the pick value (id) is unaffected.
+  await expect(page.locator('.trigger-popup-item-label')).toHaveText('Declare UC02 (suggested — type…');
   await page.keyboard.press('Enter');
 
   await expect(page.locator('.trigger-popup')).toBeHidden();

@@ -47,13 +47,13 @@ test('tooltip: "Search again" action shown for a broken file link, hidden for a 
   await markBroken(page);
 
   const fileLink = page.locator('#content a[href="./missing.md"]');
-  await fileLink.hover();
+  await fileLink.hover({ position: { x: 4, y: 6 } });
   const fileTooltipAction = page.locator('.broken-ref-tooltip-action');
   await expect(fileTooltipAction).toBeVisible();
   await expect(page.locator('.broken-ref-tooltip-title')).toContainText('File not found');
 
   const headingLink = page.locator('#content a[href="#nowhere"]');
-  await headingLink.hover();
+  await headingLink.hover({ position: { x: 4, y: 6 } });
   await expect(page.locator('.broken-ref-tooltip-title')).toContainText('Heading not found');
   await expect(fileTooltipAction).toBeHidden();
 });
@@ -63,7 +63,7 @@ test('"Search again" opens pre-seeded with the display text and searches immedia
   await markBroken(page);
   await clearPosted(page);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await page.locator('.broken-ref-tooltip-action').click();
 
   await expect(page.locator('.quick-correct-popover')).toBeVisible();
@@ -79,7 +79,7 @@ test('picking a result rewrites the href (keeping display text) and the fix seri
   await openEditor(page, '[Old Setup Guide](./missing.md)\n');
   await markBroken(page);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await page.locator('.broken-ref-tooltip-action').click();
   const search = await waitForType(page, 'searchFiles');
 
@@ -112,7 +112,7 @@ test('Escape closes the popover without changing the document', async ({ page })
   await openEditor(page, '[Old Setup Guide](./missing.md)\n');
   await markBroken(page);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await page.locator('.broken-ref-tooltip-action').click();
   await expect(page.locator('.quick-correct-popover')).toBeVisible();
 

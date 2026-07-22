@@ -17,7 +17,7 @@
  * / entitySearch) is answered by hand — same technique as entity-declare.spec.ts.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor } from './_harness';
+import { openEditor, popupQueryValue } from './_harness';
 
 interface Posted {
   type: string;
@@ -64,10 +64,12 @@ test('bug8: slash + no-match filter + Enter is swallowed (no newline, run intact
 
   await page.keyboard.press('Enter');
 
-  // Enter consumed: popup stays, the `/zzznope` run is untouched, no extra block.
+  // Enter consumed: popup stays, no extra block. The `/` marker stays inline in the
+  // editor; the `zzznope` filter is owned by the popup input, never in #content.
   await expect(page.locator('.trigger-popup')).toBeVisible();
   expect(await blockCount(page)).toBe(1);
-  await expect(page.locator('#content')).toHaveText('/zzznope');
+  await expect(page.locator('#content')).toHaveText('/');
+  expect(await popupQueryValue(page)).toBe('zzznope');
 });
 
 // ── Bug 6: @ file search, results still pending, Enter ──────────────────────
@@ -81,11 +83,12 @@ test('bug6: @ + search text + Enter while results pending does not leak text/new
 
   await page.keyboard.press('Enter');
 
-  // Pending list → Enter consumed: no newline, nothing committed, `@foo` intact.
+  // Pending list → Enter consumed: no newline, nothing committed. The `foo` filter
+  // lives in the popup input, so only the inline `@` marker is in the editor.
   await expect(page.locator('.trigger-popup')).toBeVisible();
   expect(await blockCount(page)).toBe(1);
   await expect(page.locator('#content a')).toHaveCount(0);
-  await expect(page.locator('#content')).toHaveText('@foo');
+  await expect(page.locator('#content')).toHaveText('@');
 
   // Once results arrive, Enter commits the first file and deletes the `@foo` run.
   const req = await waitForPosted(page, 'searchFiles');
@@ -196,7 +199,7 @@ test('bug7-flow: declare, type existing namespace, Enter picks it and commits th
   // Namespace list rendered; type the existing name and pick it with Enter.
   await expect(page.locator('.trigger-popup-item', { hasText: /^UC/ })).toBeVisible();
   await page.keyboard.type('UC');
-  await expect(page.locator('.trigger-popup-query-text')).toHaveText('UC');
+  expect(await popupQueryValue(page)).toBe('UC');
   await page.keyboard.press('Enter');
 
   // Enter picked the real UC namespace — NOT the stale slash "Declare entity" row.
@@ -222,6 +225,91 @@ test('bug7-flow: declare, type existing namespace, Enter picks it and commits th
   // Correct token — not a corrupt `caption::are-entity…`.
   await expect(page.locator('#content .md-caption')).toHaveText('caption::UC02');
   expect(await blockCount(page)).toBe(1);
+});
+
+// ── Bug B1: `/` + Enter double-counts under a Vietnamese IME ────────────────
+// One physical Enter fires TWO Enter keydowns (IME compose-confirm + real Enter)
+// with no keyup between them. Enter#1 picks "Declare entity" → the namespace step
+// reopens via queueMicrotask; Enter#2 — a separate event landing after the
+// reopen — used to commit the first namespace and cascade straight into the
+// id/caption step ("vào thẳng menu tạo caption cho namespace đầu tiên"). The
+// queueMicrotask reopen only guards the SAME event, not a second one. The fix:
+// a reopened stage refuses to commit until an intervening keyup.
+//
+// Reproduced deterministically without a real IME: the two keydowns are
+// dispatched in separate tasks (so the reopen microtask flushes between them)
+// with NO keyup between. The cascade is only observable when the reopened stage
+// renders synchronously — so the namespace cache is warmed first.
+
+/** Dispatch a bare Enter keydown to the focused element (no keyup) — one half of an IME double-Enter. */
+async function dispatchEnterKeydown(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  );
+}
+
+/** Dispatch an Enter keyup to the focused element — the key release that arms a deliberate next press. */
+async function dispatchEnterKeyup(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+  );
+}
+
+/** How many `entitySearch` messages have been posted so far (id/caption step opened = one per open). */
+async function entitySearchCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as unknown as { __posted: Posted[] }).__posted.filter((m) => m.type === 'entitySearch').length
+  );
+}
+
+test('bugB1: IME double-Enter (two keydowns, no keyup) does not cascade namespace→caption', async ({ page }) => {
+  await openEditor(page, '');
+
+  // 1) Warm the namespace cache so the reopened namespace step renders synchronously
+  //    (that is the only window in which a second Enter could cascade).
+  await focusEmptyParagraph(page);
+  await page.keyboard.type('/declare');
+  await page.locator('.trigger-popup-item', { hasText: 'Declare entity' }).first().click();
+  const nsReq = await waitForPosted(page, 'namespaceList');
+  await page.evaluate(
+    (r) =>
+      window.postMessage(
+        { type: 'namespaceListResult', requestId: r.requestId, ready: true, namespaces: [{ name: 'UC', count: 1 }] },
+        '*'
+      ),
+    nsReq
+  );
+  await expect(page.locator('.trigger-popup-item', { hasText: /^UC/ })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+
+  // 2) Second declare. Reset to a clean empty paragraph (the declare flow leaves a
+  //    bare <p></p> whose caret is unreliable), then Enter-pick "Declare entity"
+  //    and fire a second Enter keydown with NO keyup between — the IME double-Enter.
+  await page.locator('#content').evaluate((c) => {
+    c.innerHTML = '<p><br></p>';
+  });
+  await focusEmptyParagraph(page);
+  await page.keyboard.type('/declare');
+  await expect(page.locator('.trigger-popup-item', { hasText: 'Declare entity' })).toBeVisible();
+  const beforeEnt = await entitySearchCount(page);
+
+  await dispatchEnterKeydown(page); // Enter#1 → picks "Declare entity" → namespace step reopens (warm cache, guarded)
+  await dispatchEnterKeydown(page); // Enter#2 → must be swallowed by the guard, NOT commit the namespace
+
+  // Still on the namespace step: UC visible, and NO entitySearch fired (id/caption step never opened).
+  await expect(page.locator('.trigger-popup-item', { hasText: /^UC/ })).toBeVisible();
+  expect(await entitySearchCount(page)).toBe(beforeEnt);
+  expect(await blockCount(page)).toBe(1);
+
+  // 3) Release Enter (keyup) then press it deliberately — now the namespace commits
+  //    and the flow advances one stage (guard does not permanently block).
+  await dispatchEnterKeyup(page);
+  await dispatchEnterKeydown(page);
+
+  const entReq = await waitForPosted(page, 'entitySearch');
+  expect(entReq.namespace).toBe('UC');
+  expect(await entitySearchCount(page)).toBe(beforeEnt + 1);
 });
 
 // ── Bug 7: declare id step, entity fetch pending, typed id + Enter ──────────

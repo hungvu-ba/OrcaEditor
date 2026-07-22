@@ -12,14 +12,13 @@
  * wired) once the shell's `open()` calls `setInputOwner('trigger')` — this
  * module does not need its own guard for that.
  */
-import { closestElement, encodeLinkPath, relativeLinkPath } from './dom-utils';
+import { closestElement, textBeforeCaret } from './dom-utils';
 import { normalizeForSearch } from '../../src/text-utils';
 import { postProcessCaptions } from './dom-postprocess';
 import {
   runTriggerDefineInsert,
   runTriggerDeleteOnly,
   runTriggerInsertDate,
-  runTriggerInsertRelateLink,
   type TriggerDefineBlockId,
 } from './toolbar';
 import type { TriggerPopupController, TriggerPopupGroup, TriggerPopupItem } from './trigger-popup';
@@ -68,6 +67,14 @@ const BLOCK_ITEMS: { id: TriggerDefineBlockId; label: string; detail?: string; a
   { id: 'toc', label: 'Table of Contents' },
 ];
 
+/**
+ * Bug #10 (bug_General.md) — heading-4/5/6 stay in BLOCK_ITEMS (the type and
+ * `runTriggerBlockAction` still handle every level, e.g. from the toolbar), but
+ * the `/` command menu only offers Heading 1–3; deeper levels are hidden from
+ * the list, not removed from the data.
+ */
+const MENU_HIDDEN_BLOCK_IDS = new Set<TriggerDefineBlockId>(['heading-4', 'heading-5', 'heading-6']);
+
 /** ID prefixes disambiguate what a picked TriggerPopupItem.id means to handlePick(). */
 const BLOCK_PREFIX = 'block:';
 const INLINE_DATE_ID = 'inline:insert-date';
@@ -76,8 +83,6 @@ const EXEC_PREFIX = 'exec:';
 const ADD_REFERENCE_ID = 'action:add-reference';
 /** Req 21 US-21.1 — entry point into the 3-step Declare Entity flow (advanced-only, see INLINE_ITEMS). */
 const DECLARE_ENTITY_ID = 'action:declare-entity';
-/** Req 21 US-21.4 — entry point into the `/relate` target-picker (advanced-only, see INLINE_ITEMS). */
-const RELATE_ID = 'action:relate';
 
 /**
  * Group-2 (inline) items — offered at any caret position (no empty-paragraph
@@ -89,7 +94,6 @@ const INLINE_ITEMS: { id: string; label: string; advancedOnly?: boolean }[] = [
   { id: INLINE_DATE_ID, label: "Insert today's date" },
   { id: ADD_REFERENCE_ID, label: 'Add reference' },
   { id: DECLARE_ENTITY_ID, label: 'Declare entity', advancedOnly: true },
-  { id: RELATE_ID, label: 'Relate to entity', advancedOnly: true },
 ];
 
 /** Req 21 US-21.1 — namespace-picker (step 1) row-id prefix; the pinned create-new row. */
@@ -118,24 +122,6 @@ function matchesFilter(label: string, q: string): boolean {
   return normalizeForSearch(label).includes(normalizeForSearch(q));
 }
 
-/**
- * Text from the start of `block` to `range`'s start — used ONLY to judge the
- * "start of word" trigger condition (COPIED, small, from input-rules.ts's own
- * private textBeforeCaret — deliberately not exported/shared so a future
- * change to one is a conscious edit in both, same rationale trigger-popup.ts
- * already documents for its anchoring helper).
- */
-function textBeforeCaret(block: Element, range: Range): string {
-  const probe = document.createRange();
-  probe.selectNodeContents(block);
-  try {
-    probe.setEnd(range.startContainer, range.startOffset);
-  } catch {
-    return '';
-  }
-  return probe.toString();
-}
-
 export function initTriggerSlash(
   content: HTMLElement,
   popup: TriggerPopupController,
@@ -158,28 +144,6 @@ export function initTriggerSlash(
   let triggerRange: Range | undefined;
   /** Set by 'beforeinput' when the NEXT 'input' should open the popup. */
   let pendingOpen = false;
-
-  /**
-   * Req 21 US-21.1 — which step of the Declare-entity flow `triggerRange` is
-   * currently tracking, if any. Unlike the `/`+filter run, these steps have no
-   * leading trigger character to strip: `triggerRange` starts COLLAPSED at the
-   * insertion point and the WHOLE accumulated typed run since then is the query
-   * verbatim (same "no leading-char stripping" rule trigger-at.ts's `toolbar`
-   * mode already uses for its Link/Image button flow — see updateDeclareStepQuery).
-   * `'relate'` (Req 21 US-21.4) reuses this exact same accumulated-typed-run
-   * tracking for the `/relate` target-picker's search box — see openRelatePickStep.
-   */
-  let declareStep: 'namespace' | 'id' | 'relate' | undefined;
-
-  /**
-   * Req 21 US-21.1 — the paragraph the current Declare-entity step is typed
-   * into. Tracked as an ELEMENT (kept a stable caret host by `ensureTextAnchor`)
-   * rather than via a text-node Range: Chromium replaces/merges the anchor text
-   * node between keystrokes, so a text-node-anchored range's container goes
-   * stale, but the `<p>` element identity survives — its `textContent` is the
-   * authoritative, lag-free typed run (see `updateDeclareStepQuery`).
-   */
-  let declareBlock: HTMLElement | undefined;
 
   /** Req 21 US-21.1 — namespace browse list, fetched once and cached for the whole webview session (namespaceListResult echoes `ready`; only a ready reply is cached). */
   let namespaceCache: NamespaceSummary[] | undefined;
@@ -209,69 +173,23 @@ export function initTriggerSlash(
     });
   }
 
-  /** Req 21 US-21.4 — `/relate`'s flat combined id+title search across ALL namespaces (no `namespace` filter), same request/reply channel as fetchEntitiesForNamespace. */
-  function fetchEntitySearch(query: string): Promise<EntitySuggestion[]> {
-    const requestId = ++entityReqSeq;
-    postToHost({ type: 'entitySearch', requestId, query });
-    return new Promise<EntitySuggestion[]>((resolve) => {
-      pendingEntityReq = { requestId, resolve };
-    });
-  }
-
   /**
-   * Req 21 US-21.1 — a collapsed Range whose container is an ELEMENT (e.g. the
-   * `(<p>, 0)` point `collapseSelectionAfterTriggerDelete` (toolbar.ts) leaves
-   * behind when its delete empties the paragraph down to a filler `<br>`) is
-   * fragile as a long-lived "accumulate typed text since here" anchor: per the
-   * DOM boundary-point-adjustment algorithm, inserting the FIRST typed
-   * character at that exact same child index can push the boundary to (p, 1)
-   * — now AFTER the just-inserted text node — so every further keystroke's
-   * `Range.toString()` reads one character behind (confirmed empirically: the
-   * `/`+filter flow never hits this because its anchor is always inside an
-   * EXISTING text node, the trigger character itself). Normalize by inserting
-   * an empty text node at the collapsed point and re-anchoring both the
-   * tracked Range and the live selection INSIDE it — typing then lands inside
-   * a real text node from the very first keystroke, sidestepping the
-   * element-container adjustment case entirely.
+   * Req 21 US-21.1 — capture the stored insertion caret the trigger delete
+   * leaves behind (`collapseSelectionAfterTriggerDelete` in toolbar.ts collapses
+   * the selection to that point), to hand to the next step's popup as its commit
+   * anchor. The popup's focused query input owns filtering while the step is
+   * open, so NO keystrokes reach the editor between here and the commit — the
+   * old live-typing lag-proofing (empty-text-node insertion, `<p>[anchor]<br>`
+   * rebuild, selection re-anchor) is gone: the point is only read again by the
+   * commit's `deleteRange`. Prefer the live collapsed selection, falling back to
+   * the passed `range` when none is available.
    */
   function ensureTextAnchor(range: Range): Range {
-    let anchorNode: Text;
-    if (range.startContainer.nodeType === Node.TEXT_NODE) {
-      anchorNode = range.startContainer as Text;
-    } else {
-      anchorNode = document.createTextNode('');
-      range.insertNode(anchorNode);
-    }
-    // The typed-run anchor lives in a paragraph the trigger delete has just
-    // emptied. An empty `<p>` whose only content is empty text node(s) is not a
-    // stable caret host: Chromium's contentEditable destroys the `<p>` and
-    // reparents the text node up to `#content` on the very first keystroke, and
-    // the selection offset reported DURING that restructuring `input` event
-    // lags one character behind — so every `updateDeclareStepQuery` read is off
-    // by one (confirmed empirically; the `/`+filter path never hits this
-    // because its anchor sits in a paragraph that already holds the real `/`
-    // character, so no restructuring happens). Rebuild the emptied block to the
-    // canonical `<p>[anchor]<br></p>` shape (a `<br>`-backed non-empty block
-    // Chromium leaves intact, stray empty text nodes the delete left behind
-    // cleared) so the paragraph survives and the live selection stays in sync
-    // from the first keystroke.
-    const block = closestElement(anchorNode);
-    if (block && block !== content && (block.textContent ?? '') === '') {
-      while (block.firstChild) {
-        block.removeChild(block.firstChild);
-      }
-      block.appendChild(anchorNode);
-      block.appendChild(document.createElement('br'));
-    }
-    const anchored = document.createRange();
-    anchored.setStart(anchorNode, anchorNode.length);
-    anchored.setEnd(anchorNode, anchorNode.length);
     const sel = window.getSelection();
-    if (sel) {
-      sel.removeAllRanges();
-      sel.addRange(anchored);
+    if (sel && sel.rangeCount > 0 && sel.isCollapsed) {
+      return sel.getRangeAt(0).cloneRange();
     }
-    return anchored;
+    return range.cloneRange();
   }
 
   /** Req 21 US-21.1 — highest NUMERIC existing id in `entities` + 1, zero-padded to that id's width; '' when none is numeric (new namespace or all-non-numeric ids — no suggestion invented). */
@@ -361,8 +279,6 @@ export function initTriggerSlash(
    * the popup (and its input-ownership + Enter capture) held across the fetch. */
   function openDeclareIdStep(insertionPoint: Range, namespace: string): void {
     triggerRange = insertionPoint.cloneRange();
-    declareBlock = closestElement(insertionPoint.startContainer)?.closest('p') ?? undefined;
-    declareStep = 'id';
     let lastQuery = '';
     // Entities (dup check + suggested id) resolve async; cache the single fetch
     // (fetchEntitiesForNamespace keeps one pending-request slot, so it must be
@@ -383,6 +299,9 @@ export function initTriggerSlash(
     popup.open({
       axis: '/',
       anchorRange: triggerRange.cloneRange(),
+      // Bug B1 — reopened from inside the namespace-step Enter handler; same
+      // IME double-Enter guard so it can't auto-commit the id/caption step.
+      guardEnterUntilKeyup: true,
       dataSource: {
         query: (q) => {
           lastQuery = q;
@@ -413,8 +332,6 @@ export function initTriggerSlash(
       onClose: () => {
         triggerBlock = undefined;
         triggerRange = undefined;
-        declareStep = undefined;
-        declareBlock = undefined;
       },
     });
   }
@@ -422,12 +339,13 @@ export function initTriggerSlash(
   /** Req 21 US-21.1 step 1 — namespace-picker popup, opened right after `/declare entity`'s typed text is stripped. */
   function openDeclareNamespaceStep(insertionPoint: Range): void {
     triggerRange = insertionPoint.cloneRange();
-    declareBlock = closestElement(insertionPoint.startContainer)?.closest('p') ?? undefined;
-    declareStep = 'namespace';
     let lastQuery = '';
     popup.open({
       axis: '/',
       anchorRange: triggerRange.cloneRange(),
+      // Bug B1 — reopened from inside the slash-menu Enter handler; guard against
+      // an IME double-Enter committing this namespace step from the same keypress.
+      guardEnterUntilKeyup: true,
       dataSource: {
         query: (q) => {
           lastQuery = q;
@@ -452,131 +370,8 @@ export function initTriggerSlash(
       onClose: () => {
         triggerBlock = undefined;
         triggerRange = undefined;
-        declareStep = undefined;
-        declareBlock = undefined;
       },
     });
-  }
-
-  /** Req 21 US-21.4 — namespace-narrow/back row id prefix for the `/relate` target-picker (mirrors trigger-at.ts's Entities-scope ENTITY_NS_PREFIX/ENTITY_BACK_ID — no create-new-namespace row here, a relate target must already be declared). */
-  const RELATE_NS_PREFIX = 'relate-ns:';
-  const RELATE_BACK_ID = `${RELATE_NS_PREFIX}__back__`;
-  const RELATE_ENTITY_PREFIX = 'relate-ent:';
-
-  /** Req 21 US-21.4 — bare-query browse position: undefined = flat namespace list, set = narrowed into one namespace's id list. */
-  let relateNamespaceBrowse: string | undefined;
-  /** Req 21 US-21.4 — id → resolved commit target, rebuilt on every relateGroups() call (mirrors trigger-at.ts's targetsById). */
-  let relateTargets = new Map<string, { fullId: string; href: string }>();
-
-  /** Req 21 US-21.4 — relative href for one entity result (mirrors trigger-at.ts's own entityHref exactly — same formula, deliberately not shared, see this file's textBeforeCaret comment for the project's precedent on small per-module duplication). */
-  function relateEntityHref(e: EntitySuggestion): string {
-    return `${encodeLinkPath(relativeLinkPath(docUri, e.file))}#${e.namespace}${e.id}`;
-  }
-
-  function relateEntityItems(entities: EntitySuggestion[]): TriggerPopupItem[] {
-    return entities.map((e) => {
-      const id = `${RELATE_ENTITY_PREFIX}${e.namespace}${e.id}`;
-      relateTargets.set(id, { fullId: `${e.namespace}${e.id}`, href: relateEntityHref(e) });
-      return { id, label: `${e.namespace}${e.id}`, detail: e.title || undefined, tint: 'entity' as const };
-    });
-  }
-
-  /**
-   * Req 21 US-21.4 — `/relate` target-picker groups: bare query browses
-   * (namespace list, or a narrowed namespace's id list), any typed query
-   * switches to the flat combined search — same shape as trigger-at.ts's
-   * Entities scope (buildEntityGroups), minus the create-new-namespace row
-   * (a relate target must already exist).
-   */
-  function relateGroups(q: string): TriggerPopupGroup[] | Promise<TriggerPopupGroup[]> {
-    relateTargets = new Map();
-    if (!q) {
-      if (relateNamespaceBrowse) {
-        const ns = relateNamespaceBrowse;
-        return fetchEntitiesForNamespace(ns).then((entities) => [
-          { label: ns, items: [{ id: RELATE_BACK_ID, label: '‹ All namespaces' }, ...relateEntityItems(entities)] },
-        ]);
-      }
-      // Always post a fresh `namespaceList` round trip for the `/relate`
-      // namespace browse (mirrors trigger-at.ts's non-caching Entities scope):
-      // the back-row must re-fetch, not reuse the session cache the Declare
-      // flow relies on — so the browse never reads the cache here.
-      return fetchNamespaces(true).then((namespaces) => [
-        {
-          label: 'Namespaces',
-          items: namespaces.map((n) => ({ id: `${RELATE_NS_PREFIX}${n.name}`, label: n.name, detail: String(n.count) })),
-        },
-      ]);
-    }
-    return fetchEntitySearch(q).then((entities) => [{ label: 'Entities', items: relateEntityItems(entities) }]);
-  }
-
-  /** Req 21 US-21.4 — `/relate` target-picker popup, opened right after the typed `/relate` text is stripped. */
-  function openRelatePickStep(insertionPoint: Range): void {
-    triggerRange = insertionPoint.cloneRange();
-    declareBlock = closestElement(insertionPoint.startContainer)?.closest('p') ?? undefined;
-    declareStep = 'relate';
-    popup.open({
-      axis: '/',
-      anchorRange: triggerRange.cloneRange(),
-      dataSource: { query: relateGroups },
-      onPick: (item) => {
-        if (item.id === RELATE_BACK_ID || item.id.startsWith(RELATE_NS_PREFIX)) {
-          // Navigation pick, not a commit — same close+reopen-via-queueMicrotask
-          // idiom trigger-at.ts's namespace-narrow already uses (the shell
-          // always close()s right after onPick fires).
-          relateNamespaceBrowse = item.id === RELATE_BACK_ID ? undefined : item.id.slice(RELATE_NS_PREFIX.length);
-          const captured = triggerRange?.cloneRange();
-          if (!captured) return;
-          queueMicrotask(() => openRelatePickStep(captured));
-          return;
-        }
-        const target = relateTargets.get(item.id);
-        if (!target || !triggerRange) return;
-        // US-21.4: one-way write, single file — the target file/its References
-        // section is never touched, no reverse line.
-        runTriggerInsertRelateLink(target.href, target.fullId, triggerRange);
-      },
-      onClose: () => {
-        // relateNamespaceBrowse deliberately survives this close: the
-        // namespace-narrow/back nav pick above closes+reopens the SAME
-        // session (mirrors trigger-at.ts's entityNamespaceBrowse, which its
-        // own onPopupClose likewise never clears) — only a brand-new
-        // `/relate` session (handlePick's RELATE_ID branch) resets it.
-        triggerBlock = undefined;
-        triggerRange = undefined;
-        declareStep = undefined;
-        declareBlock = undefined;
-      },
-    });
-  }
-
-  /**
-   * Req 21 US-21.1 — Declare-entity steps 1/2 have no leading trigger char to
-   * strip (unlike `/`+filter): `triggerRange` starts collapsed at the
-   * insertion point, so the WHOLE accumulated typed run since then IS the
-   * query verbatim (mirrors trigger-at.ts's `toolbar` mode).
-   */
-  function updateDeclareStepQuery(): void {
-    if (!triggerRange) {
-      return;
-    }
-    if (!declareBlock || !content.contains(declareBlock)) {
-      popup.close();
-      return;
-    }
-    // The query is the whole typed run, read straight from the trigger
-    // paragraph's `textContent` — NOT from the live selection's offset. The
-    // `input` event fires while the selection is still being reconciled: under
-    // load Chromium reports the PRE-insertion caret offset here (a one-character
-    // lag), so a selection-based `Range.toString()` intermittently drops the
-    // just-typed character. The paragraph (kept a stable, non-hoisting caret
-    // host by `ensureTextAnchor`) holds exactly the typed run after the trigger
-    // delete, so its `textContent` is authoritative and lag-free. `triggerRange`
-    // is re-spanned over the block's contents so the commit's delete (see
-    // `openDeclareIdStep`'s `runTriggerInsertDate`) covers the whole typed run.
-    triggerRange.selectNodeContents(declareBlock);
-    popup.updateQuery(declareBlock.textContent ?? '');
   }
 
   /**
@@ -607,16 +402,44 @@ export function initTriggerSlash(
     return (before.toString() + after.toString()).trim() === '';
   }
 
+  /**
+   * Bug #10 (bug_General.md) — the `/` sits at the START of a top-level
+   * paragraph OR heading that may ALREADY hold text: nothing is left of the
+   * `/`+filter run. On a formatted line (e.g. a heading) the `#` markers are
+   * hidden, so line-start `/` reads as "beginning of the line" to the user — the
+   * full Blocks menu must show, exactly as on a fresh empty line, so they can
+   * re-format that line. Judged on the `before` half only (unlike
+   * isTriggerParagraphEmpty, which also requires the `after` half empty), so it
+   * is a superset: an empty line is line-start too. Block set matches the
+   * trigger open-gate (US-20.1: P/H1–H3; H4–H6 excluded there).
+   */
+  function isTriggerAtLineStart(): boolean {
+    if (!triggerBlock || !triggerRange) return false;
+    const nn = triggerBlock.nodeName;
+    const isTopLevelParagraphOrHeading =
+      triggerBlock.parentElement === content && (nn === 'P' || nn === 'H1' || nn === 'H2' || nn === 'H3');
+    if (!isTopLevelParagraphOrHeading) return false;
+    const before = document.createRange();
+    before.selectNodeContents(triggerBlock);
+    before.setEnd(triggerRange.startContainer, triggerRange.startOffset);
+    return before.toString().trim() === '';
+  }
+
   function buildGroups(q: string): TriggerPopupGroup[] {
-    const blockItems: TriggerPopupItem[] = isTriggerParagraphEmpty()
-      ? gateByMode(BLOCK_ITEMS)
-          .filter((b) => matchesFilter(b.label, q))
-          .map((b) => ({
-            id: `${BLOCK_PREFIX}${b.id}`,
-            label: b.label,
-            detail: b.detail,
-          }))
+    // Bug #10: block items show whenever `/` is at line-start (nothing before it)
+    // of a top-level P/H1–H3 — the SAME full list as a fresh empty line, whether
+    // or not the line already holds text. Heading 4–6 are hidden from the menu
+    // (MENU_HIDDEN_BLOCK_IDS) though they remain in BLOCK_ITEMS.
+    const blockSource = isTriggerAtLineStart()
+      ? BLOCK_ITEMS.filter((b) => !MENU_HIDDEN_BLOCK_IDS.has(b.id))
       : [];
+    const blockItems: TriggerPopupItem[] = gateByMode(blockSource)
+      .filter((b) => matchesFilter(b.label, q))
+      .map((b) => ({
+        id: `${BLOCK_PREFIX}${b.id}`,
+        label: b.label,
+        detail: b.detail,
+      }));
     const inlineItems: TriggerPopupItem[] = gateByMode(INLINE_ITEMS)
       .filter((it) => matchesFilter(it.label, q))
       .map((it) => ({ id: it.id, label: it.label, detail: it.id === INLINE_DATE_ID ? dateFormat : undefined }));
@@ -689,16 +512,6 @@ export function initTriggerSlash(
       runTriggerDeleteOnly(range);
       const insertionPoint = ensureTextAnchor(range.cloneRange());
       queueMicrotask(() => openDeclareNamespaceStep(insertionPoint));
-    } else if (item.id === RELATE_ID) {
-      // Req 21 US-21.4: strip the typed `/relate`, then open the target-picker
-      // at the now-collapsed caret — same close+reopen-via-queueMicrotask
-      // pattern as Declare-entity above. A brand-new session always starts
-      // un-narrowed (see openRelatePickStep's onClose for why this reset
-      // does NOT happen there).
-      runTriggerDeleteOnly(range);
-      relateNamespaceBrowse = undefined;
-      const insertionPoint = ensureTextAnchor(range.cloneRange());
-      queueMicrotask(() => openRelatePickStep(insertionPoint));
     }
   }
 
@@ -723,6 +536,10 @@ export function initTriggerSlash(
     popup.open({
       axis: '/',
       anchorRange: triggerRange.cloneRange(),
+      // Bug 4/5 — typed `/` marker session: Escape / empty-query Space revert the
+      // `/` to literal and restore the caret after it. Re-opened declare
+      // sub-steps (openDeclareIdStep etc.) do NOT set this — they have no marker.
+      restoreCaretOnCancel: true,
       dataSource: { query: buildGroups },
       onPick: handlePick,
       onClose: () => {
@@ -730,41 +547,6 @@ export function initTriggerSlash(
         triggerRange = undefined;
       },
     });
-  }
-
-  function updateTriggerRangeAndQuery(): void {
-    if (!triggerRange) return;
-    const sel = window.getSelection();
-    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) {
-      popup.close();
-      return;
-    }
-    const r = sel.getRangeAt(0);
-    let text: string;
-    try {
-      triggerRange.setEnd(r.startContainer, r.startOffset);
-      text = triggerRange.toString();
-    } catch {
-      // DOM mutated the trigger range's anchors out from under it — bail non-destructively.
-      popup.close();
-      return;
-    }
-    if (!text.startsWith('/')) {
-      // The '/' itself is gone (e.g. Backspace past the filter, already applied
-      // by the browser's default action) — nothing left to clean up.
-      popup.close();
-      return;
-    }
-    const filter = text.slice(1);
-    if (filter === ' ' || filter.charCodeAt(0) === 0xa0) {
-      // '/' + space escape (US-20.2, Notion/Slack pattern): literalize — close
-      // without touching anything; the space is already typed as-is. Chromium's
-      // contentEditable commits a lone trailing space as a non-breaking space
-      // (U+00A0), so match that too or the escape silently never fires.
-      popup.close();
-      return;
-    }
-    popup.updateQuery(filter);
   }
 
   // ---- Trigger detection -----------------------------------------------------
@@ -791,23 +573,11 @@ export function initTriggerSlash(
   });
 
   content.addEventListener('input', (e) => {
-    // While the popup is open, keep filtering even MID-IME-COMPOSITION. A
-    // Vietnamese IME (Telex/VNI/Unikey) composes every letter, so each keystroke
-    // fires `input` with isComposing=true; bailing on that (as the open path
-    // below must) would drop every letter's query update — the user sees the char
-    // land in the editor with no command filtering, while digits (never composed)
-    // still filter.
-    if (popup.isOpen() && triggerRange) {
-      // Req 21 US-21.1: the Declare-entity steps track a plain accumulated
-      // run with no leading trigger char (see updateDeclareStepQuery) — the
-      // ordinary `/`+filter path below does not apply to them.
-      if (declareStep) {
-        updateDeclareStepQuery();
-      } else {
-        updateTriggerRangeAndQuery();
-      }
-      return;
-    }
+    // While the popup is open ALL filter typing (ordinary `/`+filter and every
+    // declare step alike) lands in the popup's focused query input
+    // (T0.1), which drives runQuery natively — the editor is never read for
+    // filtering, so there is nothing to do on an editor `input` here.
+    if (popup.isOpen()) return;
     if ((e as InputEvent).isComposing) return; // never OPEN a trigger mid-composition
     if (pendingOpen) {
       pendingOpen = false;
@@ -815,29 +585,25 @@ export function initTriggerSlash(
     }
   });
 
-  // Caret moved out of the '/'+filter span (arrow keys past its edge, a click
-  // elsewhere) — close, non-destructive. A NON-collapsed selection is fine as long
-  // as it stays WITHIN the span: the user may select part of the `/…` text to edit
-  // it. Close only when an endpoint leaves the run (comparePoint returns 0 for any
-  // point between start and end inclusive, so check BOTH ends, not just isCollapsed).
-  document.addEventListener('selectionchange', () => {
-    if (!popup.isOpen() || !triggerRange) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) {
+  // Click-away dismiss. The old selectionchange+comparePoint auto-close tracked the
+  // editor caret leaving the `/`+filter run — but with the focused-input model the
+  // caret no longer lives in #content while the popup is open (it sits in the popup's
+  // own <input>), so there is no editor-caret "left the run" event to watch, and that
+  // old handler fired the instant open() moved focus into the input, closing the popup
+  // immediately. The remaining close paths are: commit (onPick), Escape (shell escape-
+  // stack), and this — a pointer press anywhere OUTSIDE the popup card. Bound on
+  // mousedown (not the input's blur) on purpose: the programmatic content.focus() T0.2
+  // runs at commit-start would fire a blur on the popup input and re-enter close(), so
+  // a blur listener would reintroduce the commit-timing trap (mirrors trigger-at.ts).
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!popup.isOpen()) return;
+      if ((e.target as Element | null)?.closest('.trigger-popup')) return; // inside the card — not a dismiss.
       popup.close();
-      return;
-    }
-    const r = sel.getRangeAt(0);
-    try {
-      const startIn = triggerRange.comparePoint(r.startContainer, r.startOffset) === 0;
-      const endIn = triggerRange.comparePoint(r.endContainer, r.endOffset) === 0;
-      if (!startIn || !endIn) {
-        popup.close();
-      }
-    } catch {
-      popup.close();
-    }
-  });
+    },
+    true // capture phase, so it runs before the target's own handlers.
+  );
 
   return {
     setDocUri(uri: string): void {

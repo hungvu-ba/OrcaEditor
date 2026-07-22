@@ -82,6 +82,37 @@ test('a broken entity ref gets the marker (broken-ref + md-entity-ref) via the r
   expect(fontWeight).toBe('600');
 });
 
+test('broken cross-file entity ref: triangle hover opens the fix popup, text hover shows the info tooltip', async ({
+  page,
+}) => {
+  await openEditor(page, 'See [UC01](other.md#UC01) here.\n');
+  await markEntityBroken(page, [{ id: 'UC01', exists: false, occurrences: 1 }]);
+
+  const link = page.locator('#content a.broken-ref');
+  const fixPopup = page.locator('.broken-ref-tooltip');
+  const infoTip = page.locator('#toolbar-tooltip');
+
+  // Over the leading warning triangle → fix popup, and NOT the info tooltip.
+  await link.hover({ position: { x: 4, y: 6 } });
+  await expect(fixPopup).toBeVisible();
+  await expect(fixPopup.locator('.broken-ref-tooltip-title')).toHaveText('UC01 not found');
+  await expect(infoTip).toBeHidden();
+
+  // Over the link text → info tooltip names the target file, and the fix popup hides.
+  const box = (await link.boundingBox())!;
+  await link.hover({ position: { x: box.width - 4, y: 6 } });
+  await expect(infoTip).toHaveText('UC01 in other.md');
+  await expect(fixPopup).toBeHidden();
+
+  // Info tooltip sits ABOVE the pill (fix popup sits below) → the two never overlap.
+  const gap = await page.evaluate(() => {
+    const tip = document.querySelector('#toolbar-tooltip') as HTMLElement;
+    const a = document.querySelector('#content a.broken-ref') as HTMLElement;
+    return a.getBoundingClientRect().top - tip.getBoundingClientRect().bottom;
+  });
+  expect(gap).toBeGreaterThanOrEqual(0);
+});
+
 test('a healthy entity ref is NOT marked (guards the latent same-doc heading mis-mark)', async ({ page }) => {
   await openEditor(page, 'See [UC01](#UC01) for details.\n');
   await page.waitForSelector('#content a.md-entity-ref');
@@ -99,7 +130,7 @@ test('tooltip copy is verbatim; Fix-all line shows +N when other occurrences exi
   await openEditor(page, 'See [UC01](#UC01) here.\n');
   await markEntityBroken(page, [{ id: 'UC01', exists: false, occurrences: 3 }]);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await expect(page.locator('.broken-ref-tooltip-title')).toHaveText('UC01 not found');
   await expect(page.locator('.broken-ref-tooltip-desc')).toHaveText(
     'The declaration may have been deleted, renamed, or its namespace changed.'
@@ -111,7 +142,7 @@ test('Fix-all line is hidden when the ref is the only occurrence', async ({ page
   await openEditor(page, 'See [UC01](#UC01) here.\n');
   await markEntityBroken(page, [{ id: 'UC01', exists: false, occurrences: 1 }]);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await expect(page.locator('.broken-ref-tooltip-fixall')).toBeHidden();
 });
 
@@ -122,7 +153,7 @@ test('Entities quick-correct: pre-seeded from display text, replace-in-place kee
   await markEntityBroken(page, [{ id: 'UC01', exists: false, occurrences: 1 }]);
   await clearPosted(page);
 
-  await page.locator('#content a.broken-ref').hover();
+  await page.locator('#content a.broken-ref').hover({ position: { x: 4, y: 6 } });
   await page.locator('.broken-ref-tooltip-action').click();
 
   await expect(page.locator('.quick-correct-popover')).toBeVisible();
@@ -167,7 +198,7 @@ test('Fix-all applies one pick to every same-id occurrence in the current file',
   await markEntityBroken(page, [{ id: 'UC01', exists: false, occurrences: 2 }]);
   await clearPosted(page);
 
-  await page.locator('#content a.broken-ref').first().hover();
+  await page.locator('#content a.broken-ref').first().hover({ position: { x: 4, y: 6 } });
   await page.locator('.broken-ref-tooltip-fixall').click();
 
   await expect(page.locator('.quick-correct-popover')).toBeVisible();

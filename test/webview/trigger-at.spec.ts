@@ -7,7 +7,7 @@
  * auto-answer), mirroring the real `fileSearchResult` round trip.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor } from './_harness';
+import { openEditor, popupQueryValue } from './_harness';
 
 interface Posted {
   type: string;
@@ -125,6 +125,17 @@ test('bare `@` shows current-document headings only (no file dump), with a level
   expect(searched).toBe(false);
 });
 
+test('a real `@` focuses the popup query input (filter typing lands there, not the editor)', async ({ page }) => {
+  await openEditor(page, 'text');
+  await caretAtStartOfParagraph(page, 'text');
+  await page.keyboard.type('@');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  const focused = await page.evaluate(
+    () => document.activeElement === document.querySelector('.trigger-popup-query-input')
+  );
+  expect(focused).toBe(true);
+});
+
 test('scope tabs are All / Files / Headings / Entities in Advanced mode (default)', async ({ page }) => {
   await openEditor(page, '# Alpha\n\ntext');
   await caretAtStartOfParagraph(page, 'text');
@@ -230,15 +241,18 @@ test('Ctrl+Tab cycles the scope tabs', async ({ page }) => {
   await expect(page.locator('.trigger-popup-pill-active')).toHaveText('Headings');
 });
 
-test('Escape after a collapsed `@filter` is non-destructive: the typed text stays literal', async ({ page }) => {
+test('Escape after a collapsed `@filter` is non-destructive: only the `@` marker stays, the typed filter never enters the editor', async ({ page }) => {
   await openEditor(page, 'text');
   await caretAtStartOfParagraph(page, 'text');
+  // The `@` opens the popup and focuses its input, so the "foo" filter chars land
+  // in the popup input — never in the editor. Only the inline `@` marker remains.
   await page.keyboard.type('@foo');
   await expect(page.locator('.trigger-popup')).toBeVisible();
+  expect(await popupQueryValue(page)).toBe('foo');
   await page.keyboard.press('Escape');
   await expect(page.locator('.trigger-popup')).toBeHidden();
   const text = await page.locator('#content p').first().textContent();
-  expect(text).toBe('@footext');
+  expect(text).toBe('@text');
 });
 
 test('Escape with an active selection preserves the selection and inserts no link', async ({ page }) => {
@@ -279,16 +293,16 @@ test('bug 10: Backspace/typing in a selection-mode `@` popup edits the filter, n
   await selectLinkText(page);
   await page.keyboard.type('@'); // intercepted at keydown → selection mode, filter seeded with the link text
   await expect(page.locator('.trigger-popup')).toBeVisible();
-  await expect(page.locator('.trigger-popup-query-text')).toHaveText('Doc');
+  expect(await popupQueryValue(page)).toBe('Doc');
 
   await page.keyboard.press('Backspace');
-  // Filter loses its last char; the link in the document is untouched.
-  await expect(page.locator('.trigger-popup-query-text')).toHaveText('Do');
+  // Filter (in the focused popup input) loses its last char; the link in the document is untouched.
+  expect(await popupQueryValue(page)).toBe('Do');
   await expect(page.locator('#content a')).toHaveCount(1);
   await expect(page.locator('#content a')).toHaveText('Doc');
 
   await page.keyboard.type('x');
-  await expect(page.locator('.trigger-popup-query-text')).toHaveText('Dox');
+  expect(await popupQueryValue(page)).toBe('Dox');
   await expect(page.locator('#content a')).toHaveText('Doc');
 });
 
@@ -298,16 +312,25 @@ test('bug 9: abandoning a selection-mode `@` popup releases it so the next `@` s
   await page.keyboard.type('@');
   await expect(page.locator('.trigger-popup')).toBeVisible();
 
-  // Abandon the popup by moving the caret off the link (user clicks elsewhere).
+  // Abandon the popup with a real click-away: a mousedown on #content, OUTSIDE
+  // the `.trigger-popup` card (the user clicks elsewhere to pick another link).
   await page.locator('#content').evaluate((content) => {
     const p = content.querySelector('p')!;
+    // The click-away gesture itself (capture-phase mousedown dismiss). onPopupClose
+    // then runs content.focus(), which restores #content's remembered (link)
+    // selection — exactly as in a real browser.
+    content.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    // A real click also lands the caret WHERE it was clicked (native default,
+    // which runs after the capture-phase handler and overrides the restored link
+    // selection); the synthetic mousedown can't, so model that caret placement
+    // here — end of the paragraph, off the link.
+    content.focus();
     const range = document.createRange();
     range.selectNodeContents(p);
-    range.collapse(false); // collapse to end of the paragraph
+    range.collapse(false);
     const sel = window.getSelection()!;
     sel.removeAllRanges();
     sel.addRange(range);
-    document.dispatchEvent(new Event('selectionchange'));
   });
   await expect(page.locator('.trigger-popup')).toBeHidden();
   const owner = await page.evaluate(() => (window as unknown as { __mdInputOwner?: string }).__mdInputOwner ?? null);

@@ -68,7 +68,10 @@ test('picking a leaf caption inserts the leaf id alone as a real link, never the
   await expect(page.locator('.trigger-popup')).toBeHidden();
 
   const refs = await page.locator('#content a.md-entity-ref').allTextContents();
-  expect(refs).toEqual(['UC01', 'BR01']); // the original UC01 reference is untouched; BR01 is a new, separate link.
+  // The original hand-typed UC01 reference (bare code) is untouched; BR01 is a
+  // new, separate link whose display text is `NS_ID label` (Req 21 — the
+  // entity's human name follows the code). Its href stays the clean leaf token.
+  expect(refs).toEqual(['UC01', 'BR01 a nested business rule.']);
   const brHref = await page.locator('#content a.md-entity-ref', { hasText: 'BR01' }).getAttribute('href');
   expect(brHref).toBe('#BR01');
   // The '.' typed to trigger the drill is gone — never written into the document.
@@ -92,6 +95,45 @@ test('picking a heading row drills one level deeper (chevron), re-scoping the po
   await expect(page.locator('.trigger-popup-item')).toHaveCount(1);
   await expect(page.locator('.trigger-popup-group-label')).toHaveText('Captions');
   await expect(page.locator('.trigger-popup-item', { hasText: 'BR01' })).toBeVisible();
+});
+
+// Bug B1 — a Vietnamese IME confirm fires two Enter keydowns from one physical
+// press with no keyup between them. Enter#1 drills into a heading (the scope
+// popup reopens via queueMicrotask); Enter#2 — a separate event after the reopen —
+// used to commit the first caption of the drilled scope, cascading two stages
+// from one keypress. The reopened stage must ignore Enter until the key is
+// released. This flow is fully synchronous (no host round trip), so the cascade
+// is directly reproducible.
+test('bugB1: IME double-Enter on the dot-drill does not cascade heading→caption', async ({ page }) => {
+  await openEditor(page, DOC);
+  await placeCaretAfter(page, 'a.md-entity-ref');
+  await page.keyboard.press('.');
+
+  // Highlight the "Business Rule" heading row (the go-deeper pick), then fire two
+  // Enter keydowns with NO keyup between them.
+  const headingIdx = await page
+    .locator('.trigger-popup-item')
+    .evaluateAll((items) => items.findIndex((el) => el.textContent?.includes('Business Rule')));
+  for (let i = 0; i < headingIdx; i++) await page.keyboard.press('ArrowDown');
+
+  const enterKeydown = () =>
+    page.evaluate(() =>
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    );
+
+  await enterKeydown(); // Enter#1 → drill into Business Rule → scope popup reopens (guarded)
+  await enterKeydown(); // Enter#2 → must be swallowed, NOT commit the BR01 caption
+
+  // Drilled one level (Captions/BR01 visible) but nothing committed: still one link.
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  await expect(page.locator('.trigger-popup-item', { hasText: 'BR01' })).toBeVisible();
+  await expect(page.locator('#content a.md-entity-ref')).toHaveCount(1);
+
+  // Release Enter, then press it deliberately — now BR01 commits.
+  await page.evaluate(() => document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true })));
+  await enterKeydown();
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+  await expect(page.locator('#content a.md-entity-ref')).toHaveCount(2);
 });
 
 test('Escape closes the drill popup without inserting anything', async ({ page }) => {

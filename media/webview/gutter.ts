@@ -37,9 +37,15 @@ import {
   type MarkdownRenderer,
   type TopLevelBlockRange,
 } from './pipeline';
-import { collectHaystack, rangeAt } from './match-utils';
+import { collectHaystack, rangeAt, findMatches } from './match-utils';
+import { CAPTION_CLASS } from './render';
 import { ownOrNestedAttr } from './block-info';
 import { scrollBehavior } from './dom-utils';
+
+/** Transient highlight class flashed on a revealed caption badge (see markdown.css). */
+const REVEAL_FLASH_CLASS = 'entity-reveal-flash';
+/** How long the reveal flash stays on, ms (mirrors ref-nav-flash's ~1.2s window). */
+const REVEAL_FLASH_MS = 1200;
 
 export interface LineGutter {
   /** Dựng lại toàn bộ (số + vị trí) từ chính data-line có sẵn trên DOM — gọi sau renderDocument(). */
@@ -58,6 +64,8 @@ export interface LineGutter {
    * `matchText` (raw markdown đã khớp) là MỎ NEO ưu tiên để định vị đoạn cần select — xem selectWithinBlock.
    */
   scrollToSourceLine(line: number, character?: number, length?: number, matchText?: string): boolean;
+  /** Bug General #1: reveal an entity declaration by whole-doc text search (scroll + flash). Returns true if found. */
+  scrollToText(query: string): boolean;
 }
 
 const NOOP_GUTTER: LineGutter = {
@@ -65,6 +73,7 @@ const NOOP_GUTTER: LineGutter = {
   refreshFromMarkdown: () => {},
   reposition: () => {},
   scrollToSourceLine: () => false,
+  scrollToText: () => false,
 };
 
 /** Block mà chiều cao hiển thị KHÔNG tỉ lệ với số dòng nguồn — cần số ở cả hai mép. */
@@ -370,5 +379,36 @@ export function initLineGutter(
     return true;
   }
 
-  return { refreshFromDom, refreshFromMarkdown, reposition: refreshFromDom, scrollToSourceLine };
+  /**
+   * Bug General #1: reveal an entity declaration by TEXT SEARCH — find the first
+   * occurrence of `query` (e.g. `caption::NS_ID`) anywhere in the rendered doc,
+   * scroll it to the viewport center, and flash its `.md-caption` badge. Used for
+   * entity links instead of line-based reveal because the target file is often
+   * outside the workspace (not indexed) and this is immune to line↔DOM drift.
+   * The declaration renders as a contenteditable=false atom, so a text Selection
+   * can't land inside it — a transient flash stands in (like ref-nav-flash).
+   * Case-insensitive so a differently-cased link fragment still matches.
+   */
+  function scrollToText(query: string): boolean {
+    if (!query) {
+      return false;
+    }
+    const { haystack, segs } = collectHaystack(content);
+    const matches = findMatches(haystack, segs, query, { matchCase: false, wholeWord: false }, 1);
+    const r = matches[0];
+    if (!r) {
+      return false;
+    }
+    const rect = r.getBoundingClientRect();
+    const top = window.scrollY + rect.top - window.innerHeight / 2;
+    window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
+    const badge = (r.startContainer.parentElement?.closest(`.${CAPTION_CLASS}`) as HTMLElement | null) ?? undefined;
+    if (badge) {
+      badge.classList.add(REVEAL_FLASH_CLASS);
+      setTimeout(() => badge.classList.remove(REVEAL_FLASH_CLASS), REVEAL_FLASH_MS);
+    }
+    return true;
+  }
+
+  return { refreshFromDom, refreshFromMarkdown, reposition: refreshFromDom, scrollToSourceLine, scrollToText };
 }

@@ -272,6 +272,10 @@ a:hover {
   font-weight: var(--orca-entity-pill-font-weight);
   color: var(--orca-entity-accent);
   background: var(--orca-entity-pill-fill);
+  /* Req 21: breathing room between the declaration badge and the label text that
+   * follows it on the same line (e.g. `[UC 01] Submit Leave Request`) — a CSS
+   * gap on top of the source space, never an extra space character. */
+  margin-right: 0.3em;
   /* bug_General Mention Declare #6/#7: the badge is a non-editable atom
    * (contenteditable=false in postProcessCaptions) — click to edit its value
    * via the caption-edit popover, never inline. */
@@ -299,6 +303,16 @@ a:hover {
   background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
   outline: 2px solid var(--rp-accent);
   outline-offset: 1px;
+}
+
+/* Bug General #1: transient highlight on the caption declaration an entity link
+ * navigates to (gutter.ts adds/removes .entity-reveal-flash around a ~1.2s
+ * window). The badge is a non-selectable atom, so a flash stands in for a text
+ * selection. Reading-mode-tokenized via --rp-accent, same as ref-nav-flash. */
+#content .md-caption.entity-reveal-flash {
+  background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
+  outline: 2px solid var(--rp-accent);
+  outline-offset: 2px;
 }
 
 a:focus,

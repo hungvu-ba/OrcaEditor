@@ -11,7 +11,7 @@
  * replace-in-place (rewrites the href id, keeps display text) and optionally
  * Fix-all across every same-id occurrence in the current file.
  */
-import { el, encodeLinkPath, positionNear } from './dom-utils';
+import { el, encodeLinkPath, positionNear, relativeLinkPath } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { QUICK_CORRECT_SEARCH_DEBOUNCE_MS } from './constants';
 import { AUTOLINK_PATH_ATTR, ENTITY_REF_CLASS } from './render';
@@ -25,6 +25,8 @@ export interface QuickCorrectController {
    * single pick to every same-id occurrence in the current file.
    */
   open(anchor: HTMLAnchorElement, opts?: { fixAll?: boolean }): void;
+  /** Req 21 — set from `InitConfig.docUri`; used to relativize a corrected entity's declaring-file href (mirrors trigger-at.ts's insert path). */
+  setDocUri(uri: string): void;
   /** Message-handler hook: forward a `fileSearchResult` reply here (own requestId sequence — ignored if stale). */
   notifyFileSearchResult(requestId: number, files: FileSuggestion[]): void;
   /** Message-handler hook: forward an `entityResult` reply here (Req 21 US-21.3, own requestId sequence — ignored if stale). */
@@ -54,13 +56,15 @@ function applyFix(anchor: HTMLAnchorElement, file: FileSuggestion): void {
  * picked entity's full id, LEAVING its display text untouched (US-21.3: "only the
  * target is replaced at each site" / "keeps its own original display text").
  * An entity reference is always a real `[text](#id)`/`[text](path#id)` link, so
- * only the `href` fragment changes — never AUTOLINK_PATH_ATTR (entity refs are
- * never bare-path autolinks).
+ * only the `href` changes — never AUTOLINK_PATH_ATTR (entity refs are never
+ * bare-path autolinks). The file part is recomputed from the PICKED entity's
+ * declaring file relativized against `docUri` (identical to trigger-at.ts's
+ * insert path) — reusing the old href's file part would keep pointing at the old
+ * file when the correct declaration lives elsewhere (bug: correction opened the
+ * old file). Empty relative path → same-file bare `#id`.
  */
-function applyEntityFix(anchor: HTMLAnchorElement, entity: EntitySuggestion): void {
-  const href = anchor.getAttribute('href') ?? '';
-  const hashIdx = href.indexOf('#');
-  const filePart = hashIdx === -1 ? href : href.slice(0, hashIdx);
+function applyEntityFix(anchor: HTMLAnchorElement, entity: EntitySuggestion, docUri: string): void {
+  const filePart = entity.file === docUri ? '' : encodeLinkPath(relativeLinkPath(docUri, entity.file));
   anchor.setAttribute('href', `${filePart}#${entity.namespace}${entity.id}`);
 }
 
@@ -80,6 +84,8 @@ export function initQuickCorrect(vscode: VsCodeApi, content: HTMLElement, onFixe
   document.body.appendChild(popover);
 
   let currentAnchor: HTMLAnchorElement | undefined;
+  /** Req 21 — `InitConfig.docUri`; used to relativize a corrected entity's declaring-file href. */
+  let docUri = '';
   /** Req 21 US-21.3: current anchor is an entity ref → search Entities, not Files. */
   let currentIsEntity = false;
   /** Req 21 US-21.3: the pick applies to every same-id occurrence in the current file. */
@@ -160,11 +166,11 @@ export function initQuickCorrect(vscode: VsCodeApi, content: HTMLElement, onFixe
       const brokenId = (anchor.textContent ?? '').trim();
       for (const a of Array.from(content.querySelectorAll(`a.${ENTITY_REF_CLASS}`)) as HTMLAnchorElement[]) {
         if ((a.textContent ?? '').trim() === brokenId) {
-          applyEntityFix(a, entity);
+          applyEntityFix(a, entity, docUri);
         }
       }
     } else {
-      applyEntityFix(anchor, entity);
+      applyEntityFix(anchor, entity, docUri);
     }
     dismiss.close();
     onFixed();
@@ -211,13 +217,18 @@ export function initQuickCorrect(vscode: VsCodeApi, content: HTMLElement, onFixe
       renderResults([]);
     }
     dismiss.arm();
-    input.focus();
+    // preventScroll: focusing the seeded input must not jump the page to the top —
+    // the broken anchor stays put so the fixed popover keeps its anchored position.
+    input.focus({ preventScroll: true });
     input.select();
     runSearch(input.value);
   }
 
   return {
     open,
+    setDocUri(uri) {
+      docUri = uri;
+    },
     notifyFileSearchResult(requestId, files) {
       if (requestId !== searchSeq || currentIsEntity) {
         return; // stale/superseded, or the popover is in Entities mode — discard.

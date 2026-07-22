@@ -18,6 +18,7 @@
  */
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import { setInputOwner } from './input-ownership';
+import { createDomHelpers } from './dom-utils';
 
 export type TriggerAxis = '@' | '/';
 
@@ -82,14 +83,28 @@ export interface TriggerOpenArgs {
   /** Req 20 US-20.6 — fires when Tab is pressed while the ghost overlay is showing. */
   onGhostAccept?(): void;
   /**
-   * Bug 10 — the shell OWNS the query text for this session: Backspace and
-   * printable single-character keys edit an internal filter buffer (re-running
-   * the query) and are blocked from the editor, instead of the consumer feeding
-   * the query from the editor DOM. Used by the `@` selection mode, where the
-   * editor selection must stay intact (no live editor text backs the query).
-   * ASCII/keydown path only — IME-composed input is not fed into the buffer.
+   * Bug 4/5 — opt-in cancel behaviors for a typed `/`/`@` marker session:
+   * Escape (and an empty-query Space) close the popup AND restore a collapsed
+   * caret right after the still-present marker, reverting it to literal text.
+   * Only the typed-marker entry points set this. Sessions with no literal marker
+   * to revert (toolbar Image/Link where `anchorRange` is a live content selection,
+   * or a re-opened declare sub-step) leave it false so cancel keeps its
+   * prior behavior — the selection isn't collapsed and Space stays filter text.
    */
-  ownsTextInput?: boolean;
+  restoreCaretOnCancel?: boolean;
+  /**
+   * Bug B1 — set by a stage popup that is REOPENED from inside an Enter handler
+   * (the `queueMicrotask(open)` reopen idiom in trigger-slash.ts / trigger-at.ts).
+   * A Vietnamese IME confirm fires TWO Enter keydowns from one physical press
+   * (compose-confirm Enter + real Enter) with no keyup between them; the first
+   * commits and reopens the next stage, and the second — a separate event landing
+   * after the reopen microtask — would immediately commit the freshly-opened
+   * stage, cascading two stages from one keypress. When true, Enter is still
+   * consumed (no leak) but does NOT commit until an intervening `keyup` clears the
+   * guard, so the spurious second keydown is inert. First-open call-sites (typed
+   * `/`/`@`) leave it false — their Enter commits immediately as before.
+   */
+  guardEnterUntilKeyup?: boolean;
 }
 
 export interface TriggerPopupController {
@@ -117,7 +132,7 @@ const ANCHOR_GAP_PX = 4;
 const VIEWPORT_MARGIN_PX = 4;
 
 /** Bug 11 — max visible chars for a result row's label/detail before ellipsis. */
-const RESULT_TEXT_MAX_CHARS = 20;
+const RESULT_TEXT_MAX_CHARS = 30;
 
 /**
  * Bug 11 — cap a result row's displayed label/detail so a long file name /
@@ -151,23 +166,27 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
   // own padding, the query row, scope-row gaps, and the hint row too).
   card.addEventListener('mousedown', (e) => e.preventDefault());
 
-  // Query row = the "type here" surface (Req 20 bug fix): the axis marker
-  // (@ or /), the live query text, and a blinking caret so the user can see
-  // that typing filters here (the editor's own caret is hidden while open, see
-  // `trigger-popup-open` in editor.css — one caret only, in the popup).
+  // Query row = the "type here" surface: the axis marker (@ or /) plus a REAL
+  // focused <input> that owns filtering natively (native caret + native IME).
+  // On open() the input is focused and every filter keystroke lands in it; the
+  // editor keeps only the trigger marker. Built with chained appendChild (never
+  // `.append` — domino trap, MUST-HOLD).
   const queryRow = document.createElement('div');
   queryRow.className = 'trigger-popup-query';
   const queryAxis = document.createElement('span');
   queryAxis.className = 'trigger-popup-query-axis';
-  const queryText = document.createElement('span');
-  queryText.className = 'trigger-popup-query-text';
-  const queryCaret = document.createElement('span');
-  queryCaret.className = 'trigger-popup-query-caret';
-  queryCaret.setAttribute('aria-hidden', 'true');
+  const queryInput = document.createElement('input');
+  queryInput.className = 'trigger-popup-query-input';
+  queryInput.type = 'text';
+  queryInput.setAttribute('autocomplete', 'off');
+  queryInput.setAttribute('spellcheck', 'false');
+  queryInput.setAttribute('aria-label', 'Filter results');
   queryRow.appendChild(queryAxis);
-  queryRow.appendChild(queryText);
-  queryRow.appendChild(queryCaret);
+  queryRow.appendChild(queryInput);
   card.appendChild(queryRow);
+  // Native-IME filter path: the input's own value is the single source of truth
+  // for the query (fires for ASCII keydown AND IME composition alike).
+  queryInput.addEventListener('input', () => runQuery(queryInput.value));
 
   const scopeRow = document.createElement('div');
   scopeRow.className = 'trigger-popup-scope';
@@ -198,6 +217,10 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
   ghost.appendChild(ghostKeycap);
   document.body.appendChild(ghost);
 
+  // Bug 4/5 — caret restore on cancel reuses the shared placement helper
+  // (dom-utils) instead of hand-rolling Selection here.
+  const dom = createDomHelpers(deps.content);
+
   // ---- State ---------------------------------------------------------------
   let isOpenFlag = false;
   let openToken = 0; // bumped per open(); guards a resolve against a since-closed/reopened popup
@@ -207,15 +230,19 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
   let onPickCb: ((item: TriggerPopupItem) => void) | undefined;
   let onCloseCb: (() => void) | undefined;
   let onGhostAcceptCb: (() => void) | undefined;
+  // Bug 4/5 — per-session opt-in for the cancel-path caret restore + Space-cancel.
+  let cancelRestoreEnabled = false;
   let escDisposable: Disposable | undefined;
   let keyDisposable: (() => void) | undefined;
+  // Bug B1 — while true, Enter is consumed but must not commit; cleared by the
+  // Enter keyup after a mid-Enter reopen (see TriggerOpenArgs.guardEnterUntilKeyup).
+  let enterGuardActive = false;
+  // Bug B1 — is an Enter key physically held right now (down, not yet up). A
+  // guarded stage arms its guard only when reopened WHILE Enter is held (a true
+  // IME/autorepeat double-Enter). A stage opened by a click has no held Enter, so
+  // its first Enter must commit — hence the guard must not arm for it.
+  let enterHeld = false;
   let lastQueryText = '';
-
-  // Bug 10 — when true, this session's query text is owned here (Backspace/
-  // printable keys edit `ownedQuery` and never reach the editor), not fed from
-  // the editor DOM by the consumer. Reset per open().
-  let ownsTextInput = false;
-  let ownedQuery = '';
 
   // ---- Req 20 US-20.7: scope tabs (trigger-agnostic — only populated when the
   // consumer passes `scopes`; `/` never does, so its default single "All" pill
@@ -268,6 +295,27 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
       // then commit only when a real enabled row exists.
       e.preventDefault();
       e.stopPropagation();
+      // Bug B1 — a stage reopened mid-Enter refuses to commit until the key that
+      // opened it has been released (keyup clears the guard). This makes the
+      // spurious second Enter keydown of an IME confirm inert while still
+      // consuming it, so it neither commits the new stage nor leaks to #content.
+      if (enterGuardActive) {
+        return;
+      }
+      // Bug B1, secondary defense — an IME compose-confirm Enter (isComposing /
+      // keyCode 229) must never commit: it belongs to confirming the composition,
+      // not to picking a row. The keyup-gate above is the primary guard (it is the
+      // one covered by tests, since synthetic events can't set isComposing); this
+      // additionally neutralizes the compose-confirm keydown regardless of whether
+      // the IME interleaves a keyup between its two Enter keydowns. Mirrors the
+      // Space branch's own `!e.isComposing && keyCode !== 229` gate.
+      if (e.isComposing || e.keyCode === 229) {
+        return;
+      }
+      // Mark Enter as held so a reopen triggered by this commit (its open() runs
+      // in a queueMicrotask, before this key's keyup) arms its guard; cleared on
+      // the Enter keyup.
+      enterHeld = true;
       const item = flatItems[highlightedIdx];
       if (item && !item.disabled) {
         onPickCb?.(item);
@@ -281,6 +329,25 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
       e.preventDefault();
       e.stopPropagation();
       cycleScope(e.shiftKey ? -1 : 1);
+    } else if (
+      e.key === ' ' &&
+      cancelRestoreEnabled &&
+      !e.isComposing &&
+      e.keyCode !== 229 &&
+      queryInput.value.length === 0
+    ) {
+      // Bug 5 — Space on an EMPTY query cancels the popup and reverts the `/`/`@`
+      // to literal text. The marker char stays in the doc; the space is consumed
+      // as the cancel gesture (not inserted), and the caret is restored right
+      // after the marker (same cancel path as Escape). A non-empty query keeps
+      // space as filter text (multi-word labels like "Add reference") — it falls
+      // through to the input natively. IME-composed spaces (isComposing / keyCode
+      // 229) never cancel — they commit the composition instead. Gated to
+      // typed-marker sessions (cancelRestoreEnabled) so a re-opened sub-step with
+      // no marker doesn't abort on a stray space.
+      e.preventDefault();
+      e.stopPropagation();
+      close({ restoreCaret: true });
     } else if (e.key === 'Tab' && !ghost.hidden) {
       // Req 20 US-20.6: ghost-accept beats list-indent/cell-nav — this fires
       // ahead of main.ts's content keydown handler (which already bails via
@@ -289,20 +356,26 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
       e.preventDefault();
       e.stopPropagation();
       onGhostAcceptCb?.();
-    } else if (
-      ownsTextInput &&
-      (e.key === 'Backspace' || (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing))
-    ) {
-      // Bug 10: the shell owns the filter — Backspace trims the buffer, a
-      // printable key appends; either way re-query and keep the key off the
-      // editor so a selection-mode `@` never lets typing/Backspace mutate the
-      // still-selected link. Single-char `e.key` is the ASCII/keydown path;
-      // IME-composed input arrives as composition/`beforeinput`, which
-      // trigger-at blocks separately in selection mode.
+    } else if (e.key === 'Tab') {
+      // Any remaining Tab (plain Tab with no ghost, Shift+Tab, Ctrl+Tab with no
+      // scopes): swallow it. Left to the browser's default, Tab moves focus out
+      // of the query input — the popup is then orphaned (focus can't return) and
+      // Escape/keys, which ride on THIS input's keydown, stop working. Plain Tab
+      // is reserved for ghost-accept above; with no ghost it has no action, so a
+      // no-op that just keeps focus is the intended behavior.
       e.preventDefault();
       e.stopPropagation();
-      ownedQuery = e.key === 'Backspace' ? ownedQuery.slice(0, -1) : ownedQuery + e.key;
-      runQuery(ownedQuery);
+    }
+    // Printable keys / Backspace are handled natively by the focused input,
+    // which drives the query via its own `input` event (see the wiring above).
+  }
+
+  function onKeyUp(e: KeyboardEvent): void {
+    // Bug B1 — the held Enter has lifted: release the commit guard (the next
+    // Enter is a deliberate new press) and clear the held-Enter state.
+    if (e.key === 'Enter') {
+      enterHeld = false;
+      enterGuardActive = false;
     }
   }
 
@@ -535,7 +608,6 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
   function runQuery(q: string): void {
     if (!dataSource) return;
     lastQueryText = q;
-    queryText.textContent = q;
     const rid = ++globalRequestSeq;
     const forToken = openToken;
     const result = dataSource.query(q);
@@ -564,34 +636,60 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
     onPickCb = a.onPick;
     onCloseCb = a.onClose;
     onGhostAcceptCb = a.onGhostAccept;
+    cancelRestoreEnabled = a.restoreCaretOnCancel ?? false;
     currentScopes = a.scopes ?? [];
     currentActiveScopeId = a.activeScopeId ?? currentScopes[0]?.id;
     onScopeChangeCb = a.onScopeChange;
-    ownsTextInput = a.ownsTextInput ?? false;
-    ownedQuery = '';
     openToken++;
     isOpenFlag = true;
+    // Bug B1 — arm the Enter-commit guard only for a mid-Enter reopen: the
+    // caller opted in AND an Enter is physically held right now (so this open()
+    // is running inside the still-down commit Enter's queueMicrotask reopen). A
+    // stage opened by a click has no held Enter → not armed → its first Enter
+    // commits. An unguarded first-open (typed `/`/`@`) also clears any stale
+    // held-Enter state left by a prior commit whose keyup escaped this input.
+    if (a.guardEnterUntilKeyup) {
+      enterGuardActive = enterHeld;
+    } else {
+      enterGuardActive = false;
+      enterHeld = false;
+    }
     frozenTop = undefined; // fresh session — recompute the anchored top on first reposition.
 
     card.dataset.axis = currentAxis;
     queryAxis.textContent = currentAxis;
     renderScopeTabs();
     card.hidden = false;
-    // Suppress the editor's own caret while the popup owns typing, so the only
-    // visible caret is the popup query row's (editor.css `body.trigger-popup-open`).
+    // Pure is-open state hook (editor.css / close-on-rebuild); the editor is no
+    // longer the focused editable while open, so it shows no caret regardless.
     document.body.classList.add('trigger-popup-open');
+    // Focus the query input so all filter typing lands here natively; start empty
+    // (consumers seed real text via updateQuery, e.g. selection-mode link text).
+    queryInput.value = '';
+    queryInput.focus();
 
     setInputOwner('trigger');
     escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.POPUP, () => {
       if (!isOpenFlag) return false;
-      close();
+      // Bug 4 — Escape is an explicit cancel: for a typed-marker session, restore
+      // the editor caret right after the `/`/`@` marker (which stays in the doc
+      // on cancel). Non-marker sessions (toolbar selection, sub-steps) pass false
+      // so Escape keeps its prior no-restore behavior.
+      close({ restoreCaret: cancelRestoreEnabled });
       return true;
     });
-    // ↑↓ navigate / ↵ select — capture phase, ahead of the editor's own (input-
-    // ownership-gated) keydown handlers, so Enter never falls through to insert
-    // a paragraph break in #content while the popup is open.
-    document.addEventListener('keydown', onKeyDown, true);
-    keyDisposable = () => document.removeEventListener('keydown', onKeyDown, true);
+    // ↑↓ navigate / ↵ select / scope-cycle / ghost-accept — bound on the focused
+    // input so they fire while the user is typing the filter. Escape still flows
+    // through the capture-phase escape-stack registration (bubbles from the input).
+    queryInput.addEventListener('keydown', onKeyDown);
+    // Bug B1 — the first keyup after a guarded reopen releases the Enter-commit
+    // guard (the physical Enter that opened this stage has now lifted), so a
+    // subsequent deliberate Enter can commit and advance the flow normally.
+    queryInput.addEventListener('keyup', onKeyUp);
+    keyDisposable = () => {
+      queryInput.removeEventListener('keydown', onKeyDown);
+      queryInput.removeEventListener('keyup', onKeyUp);
+    };
 
     // A freshly (re)opened popup must NOT carry the previous session's rendered
     // items. When the first query is async (a host round-trip), renderGroups
@@ -612,9 +710,9 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
 
   function updateQuery(q: string): void {
     if (!isOpenFlag) return;
-    // Bug 10: seed the owned buffer so subsequent Backspace/printable edits
-    // build on the initial query (e.g. the selection-mode link-text seed).
-    if (ownsTextInput) ownedQuery = q;
+    // Seed the focused input (the query source of truth), then filter. Consumers
+    // call this to seed real text, e.g. the selection-mode link-text seed.
+    queryInput.value = q;
     runQuery(q);
   }
 
@@ -625,20 +723,33 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
   // Single teardown funnel — every path (Escape, pick, re-open, error) goes
   // through here so the input-ownership flag and Escape registration can never
   // leak (which would permanently disable editor input).
-  function close(): void {
+  // `restoreCaret` is set ONLY on explicit-cancel gestures (Escape, empty-query
+  // Space) — commit, re-open and click-away/external closes never pass it, so
+  // they keep today's behavior (commit sets its own post-commit caret; click-away
+  // must not yank focus back — see the selection-mode abandonedSelection rule).
+  function close(opts?: { restoreCaret?: boolean }): void {
     if (!isOpenFlag) return;
     isOpenFlag = false;
     card.hidden = true;
     ghost.hidden = true;
     frozenTop = undefined;
-    // Restore the editor's own caret (mirrors the open() suppression above) —
-    // this is the single teardown funnel, so it can never leak the hidden state.
+    // Clear the is-open state hook (mirrors the open() add) — this is the single
+    // teardown funnel, so the class can never leak past a close.
     document.body.classList.remove('trigger-popup-open');
     escDisposable?.dispose();
     escDisposable = undefined;
     keyDisposable?.();
     keyDisposable = undefined;
     setInputOwner(null);
+    // Bug 4 — cancel-path caret restore: focus #content and drop a collapsed
+    // caret right after the marker (anchorRange spans the `/`/`@`, so its end is
+    // the after-marker position). Runs BEFORE the consumer onClose so a consumer
+    // that owns a richer restore (trigger-at selection mode) still wins.
+    if (opts?.restoreCaret && anchorRange) {
+      const caret = anchorRange.cloneRange();
+      caret.collapse(false);
+      dom.restoreSelection(caret);
+    }
     anchorRange = undefined;
     dataSource = undefined;
     onPickCb = undefined;

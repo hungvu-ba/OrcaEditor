@@ -4,7 +4,7 @@
  * gate's plumbing (provider.ts seed + live `configUpdate`, main.ts's
  * `applyTriggerMode`, and the generic `advancedOnly`-filtering guards in
  * trigger-at.ts/trigger-slash.ts) — no entity-related trigger action exists
- * yet to gate (the `@` Entities scope and `/declare`/`/relate` items are
+ * yet to gate (the `@` Entities scope and `/declare` items are
  * later stories, T5.1/T5.2/T9.1). These tests therefore cover:
  *  - round-trip: `InitConfig.trigger.mode` reaches the webview correctly.
  *  - live toggle: a `configUpdate` from the host re-applies the gate without

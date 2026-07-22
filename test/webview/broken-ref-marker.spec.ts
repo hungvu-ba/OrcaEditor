@@ -117,6 +117,54 @@ test('the reference the caret is currently inside is skipped for that recompute 
   expect(posted.some((m) => m.type === 'checkTargetsExist')).toBe(false);
 });
 
+test('hover tooltip survives the pointer crossing the anchor→tooltip gap (no instant hide)', async ({ page }) => {
+  await openEditor(page, '[Old Setup Guide](./missing.md)\n');
+  await page.waitForSelector('#content a[href]');
+  const req = await waitForCheckTargetsExist(page);
+  await replyTargetsExist(page, req.requestId, req.docVersion, [{ target: './missing.md', exists: false }]);
+  await page.waitForSelector('#content a.broken-ref');
+
+  const tooltipVisible = () =>
+    page.evaluate(() => {
+      const t = document.querySelector('.broken-ref-tooltip') as HTMLElement | null;
+      return !!t && !t.hidden;
+    });
+
+  const rafTick = () =>
+    page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => res(null)))));
+
+  // Hover the anchor's warning triangle → fix popup shows (mousemove-driven).
+  await page.evaluate(() => {
+    const a = document.querySelector('#content a.broken-ref') as HTMLElement;
+    const r = a.getClientRects()[0];
+    a.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 4, clientY: r.top + r.height / 2 }));
+  });
+  await rafTick();
+  expect(await tooltipVisible()).toBe(true);
+
+  // Leave the triangle toward the gap (a mousemove off it schedules the hide),
+  // then enter the tooltip before the grace elapses — hide must be cancelled.
+  await page.evaluate(() => {
+    const content = document.querySelector('#content') as HTMLElement;
+    const r = content.getBoundingClientRect();
+    content.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.right - 4, clientY: r.bottom - 4 }));
+  });
+  await rafTick();
+  await page.evaluate(() => {
+    const t = document.querySelector('.broken-ref-tooltip') as HTMLElement;
+    t.dispatchEvent(new MouseEvent('mouseenter'));
+  });
+  await page.waitForTimeout(300); // > BROKEN_REF_TOOLTIP_HIDE_GRACE_MS
+  expect(await tooltipVisible()).toBe(true);
+
+  // Clicking "Search again →" is now reachable and drives onSearchAgain (quick-correct).
+  await page.evaluate(() => {
+    const action = document.querySelector('.broken-ref-tooltip-action') as HTMLElement;
+    action.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  });
+  expect(await tooltipVisible()).toBe(false);
+});
+
 test('a stale targetsExistResult from a superseded scan is discarded', async ({ page }) => {
   await openEditor(page, '[Old Setup Guide](./missing.md)\n');
   await page.waitForSelector('#content a[href]');

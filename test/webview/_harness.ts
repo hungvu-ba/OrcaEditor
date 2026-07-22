@@ -122,6 +122,22 @@ export async function openEditor(page: Page, markdown: string, configOverrides: 
   await page.locator('#content').waitFor();
 }
 
+/**
+ * Type into the trigger popup's focused query <input> (T0.1 focused-input model).
+ * Types per-keystroke via pressSequentially so the input's own `input` event
+ * fires for each char (that event is what drives runQuery / filtering).
+ */
+export async function typePopupQuery(page: Page, text: string): Promise<void> {
+  const input = page.locator('.trigger-popup-query-input');
+  await input.click();
+  await input.pressSequentially(text);
+}
+
+/** Read the current value of the trigger popup's query input (for assertions). */
+export async function popupQueryValue(page: Page): Promise<string> {
+  return page.locator('.trigger-popup-query-input').inputValue();
+}
+
 /** Clear recorded host messages — call right before the action under test so waitForEdit only sees fresh messages. */
 export async function clearPosted(page: Page): Promise<void> {
   await page.evaluate(() => {

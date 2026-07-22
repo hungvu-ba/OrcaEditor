@@ -86,7 +86,7 @@ test('`/` typed mid-word (no preceding whitespace) does not open the popup', asy
   expect(text).toBe('and/or');
 });
 
-test('selecting "Heading 1" replaces `/heading 1` with an <h1> as a single undo-step edit', async ({ page }) => {
+test('selecting "Heading 1" on an empty line pre-fills selected sample text (Bug #9) as a single undo-step edit', async ({ page }) => {
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/heading 1');
@@ -94,9 +94,12 @@ test('selecting "Heading 1" replaces `/heading 1` with an <h1> as a single undo-
 
   await page.locator('.trigger-popup-item', { hasText: 'Heading 1' }).first().click();
 
-  await page.waitForFunction(() => !!document.querySelector('#content h1'));
+  await page.waitForFunction(() => document.querySelector('#content h1')?.textContent === 'Heading 1');
   const heading = await page.locator('#content h1').first().textContent();
-  expect(heading?.trim()).toBe('');
+  expect(heading).toBe('Heading 1');
+  // Bug #9: the sample text is pre-selected so the next keystroke overwrites it.
+  const selected = await page.evaluate(() => window.getSelection()?.toString());
+  expect(selected).toBe('Heading 1');
   await expect(page.locator('.trigger-popup')).toBeHidden();
 
   // flushPendingSync (prior typing) + the delete+insert itself may each post
@@ -106,6 +109,59 @@ test('selecting "Heading 1" replaces `/heading 1` with an <h1> as a single undo-
   const edits = (await posted(page)).filter((m) => m.type === 'edit');
   expect(edits.length).toBeLessThanOrEqual(2);
   expect(edits.at(-1)?.text).not.toContain('/heading');
+});
+
+test('Bug #10 — `/` at the start of a heading that already has text shows the full Blocks group (same as a blank line)', async ({
+  page,
+}) => {
+  await openEditor(page, '## My Title');
+  await page.waitForFunction(() => document.querySelector('#content h2')?.textContent === 'My Title');
+  await placeCaretIn(page, '#content h2', true);
+  await page.keyboard.type('/');
+
+  const card = page.locator('.trigger-popup');
+  await expect(card).toBeVisible();
+  const groupLabels = await card.locator('.trigger-popup-group-label').allTextContents();
+  expect(groupLabels).toEqual(['Blocks', 'Insert']);
+  const labels = await card.locator('.trigger-popup-item-label').allTextContents();
+  // The full list shows, exactly as on a fresh empty line — converters AND inserts.
+  expect(labels).toContain('Heading 1');
+  expect(labels).toContain('Bulleted list');
+  expect(labels).toContain('Blockquote');
+  expect(labels).toContain('Table');
+  expect(labels).toContain('Horizontal rule');
+});
+
+test('Bug #10 — picking a heading on a line that already has text re-formats it and keeps the text (no sample injected)', async ({
+  page,
+}) => {
+  await openEditor(page, '## My Title');
+  await page.waitForFunction(() => document.querySelector('#content h2')?.textContent === 'My Title');
+  await placeCaretIn(page, '#content h2', true);
+  await page.keyboard.type('/');
+
+  await page.locator('.trigger-popup-item', { hasText: 'Heading 3' }).first().click();
+
+  await page.waitForFunction(() => !!document.querySelector('#content h3'));
+  const heading = await page.locator('#content h3').first().textContent();
+  expect(heading).toBe('My Title');
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+});
+
+test('Bug #10 — picking the level the line ALREADY has keeps it a heading (absolute, not a toggle)', async ({
+  page,
+}) => {
+  await openEditor(page, '## My Title');
+  await page.waitForFunction(() => document.querySelector('#content h2')?.textContent === 'My Title');
+  await placeCaretIn(page, '#content h2', true);
+  await page.keyboard.type('/');
+
+  await page.locator('.trigger-popup-item', { hasText: 'Heading 2' }).first().click();
+
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+  // Must stay an <h2> (absolute pick) — never toggle down to a plain <p>.
+  expect(await page.locator('#content h2').count()).toBe(1);
+  expect(await page.locator('#content h2').first().textContent()).toBe('My Title');
 });
 
 test('"Insert today\'s date" inserts the configured format mid-sentence (group 2, no empty-paragraph requirement)', async ({
@@ -122,17 +178,20 @@ test('"Insert today\'s date" inserts the configured format mid-sentence (group 2
   expect(text).toMatch(/^Today is \d{2}\/\d{2}\/\d{4}$/);
 });
 
-test('`/` + space with an empty filter literalizes: popup closes, `/ ` stays as typed text', async ({ page }) => {
+test('Bug 5 — a space typed into an EMPTY filter cancels the popup and leaves the inline `/`', async ({ page }) => {
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/');
   await expect(page.locator('.trigger-popup')).toBeVisible();
 
+  // Bug 5 reverses the earlier "no `/`+space literalize" decision: a space on an
+  // EMPTY filter is now a cancel gesture — the popup closes, the `/` reverts to
+  // literal text (stays inline), and the space is NOT inserted. (Caret-after-`/`
+  // restore is asserted in trigger-popup-caret.spec.ts.)
   await page.keyboard.type(' ');
   await expect(page.locator('.trigger-popup')).toBeHidden();
-  await page.keyboard.type('b');
   const text = await page.locator('#content p').first().textContent();
-  expect(text).toBe('/ b');
+  expect(text).toBe('/');
 });
 
 test('a space typed with a non-empty filter is an ordinary filter character (does not literalize)', async ({
@@ -148,19 +207,24 @@ test('a space typed with a non-empty filter is an ordinary filter character (doe
   expect(labels).toEqual(['Heading 1']);
 });
 
-test('Backspace past the `/` closes the popup non-destructively', async ({ page }) => {
+test('Backspacing the filter to empty keeps the popup open; Escape is the abandon path (leaves the inline `/`)', async ({ page }) => {
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/tab');
   await expect(page.locator('.trigger-popup')).toBeVisible();
 
+  // Backspace now edits the popup's focused input, not the editor. Emptying the
+  // filter leaves the popup open showing all items (the `/` marker never left
+  // the editor). Escape is the sole abandon path (Decision 1: backspace-to-close
+  // retired).
   await page.keyboard.press('Backspace');
   await page.keyboard.press('Backspace');
   await page.keyboard.press('Backspace');
-  await page.keyboard.press('Backspace'); // deletes the '/' itself
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  await page.keyboard.press('Escape');
   await expect(page.locator('.trigger-popup')).toBeHidden();
   const text = await page.locator('#content p').first().textContent();
-  expect(text).toBe('');
+  expect(text).toBe('/');
 });
 
 test('filter narrows items (diacritic/case-insensitive) and an unmatched filter shows "No matches"', async ({
@@ -170,7 +234,8 @@ test('filter narrows items (diacritic/case-insensitive) and an unmatched filter 
   await focusEmptyParagraph(page);
   await page.keyboard.type('/HEADING');
   let labels = await page.locator('.trigger-popup-item-label').allTextContents();
-  expect(labels.sort()).toEqual(['Heading 1', 'Heading 2', 'Heading 3', 'Heading 4', 'Heading 5', 'Heading 6'].sort());
+  // Heading 4–6 are hidden from the `/` menu (kept in BLOCK_ITEMS data only).
+  expect(labels.sort()).toEqual(['Heading 1', 'Heading 2', 'Heading 3'].sort());
 
   for (let i = 0; i < 'HEADING'.length; i++) {
     await page.keyboard.press('Backspace');
@@ -185,7 +250,7 @@ test('ArrowDown/ArrowUp move the highlight and Enter selects the highlighted ite
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/heading');
-  await expect(page.locator('.trigger-popup-item')).toHaveCount(6);
+  await expect(page.locator('.trigger-popup-item')).toHaveCount(3); // Heading 1–3 (4–6 hidden from menu)
   // Default highlight is the first item (Heading 1).
   await expect(page.locator('.trigger-popup-item').first()).toHaveClass(/trigger-popup-item-active/);
 
@@ -200,14 +265,14 @@ test('ArrowDown/ArrowUp move the highlight and Enter selects the highlighted ite
   await expect(page.locator('.trigger-popup')).toBeHidden();
 });
 
-test('Escape closes the popup non-destructively, leaving the typed `/filter` untouched', async ({ page }) => {
+test('Escape closes the popup non-destructively, leaving only the inline `/` (filter text lived in the popup input)', async ({ page }) => {
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/heading');
   await page.keyboard.press('Escape');
   await expect(page.locator('.trigger-popup')).toBeHidden();
   const text = await page.locator('#content p').first().textContent();
-  expect(text).toBe('/heading');
+  expect(text).toBe('/');
 });
 
 test('Execute group: picking a command posts executeCommand with this document\'s uri and deletes the `/filter` with no textual trace', async ({
@@ -265,13 +330,21 @@ test('typing `/` at the start of a bullet opens the popup (Mention Declare #2)',
   expect(await page.locator('.trigger-popup-item').count()).toBeGreaterThan(0);
 });
 
-/** Build a genuinely empty `<h1>` (caret inside) via the slash command itself. */
+/**
+ * Build a genuinely empty `<h1>` (caret inside). The slash command now pre-fills
+ * selected "Heading 1" sample text (Bug #9), so the sample is cleared afterwards
+ * to leave the empty `<h1><br></h1>` these tests need.
+ */
 async function makeEmptyHeadingWithCaret(page: import('@playwright/test').Page): Promise<void> {
   await openEditor(page, '');
   await focusEmptyParagraph(page);
   await page.keyboard.type('/heading 1');
   await page.locator('.trigger-popup-item', { hasText: 'Heading 1' }).first().click();
   await page.waitForFunction(() => !!document.querySelector('#content h1'));
+  await page.locator('#content h1').first().evaluate((el) => {
+    el.textContent = '';
+    el.appendChild(document.createElement('br'));
+  });
   await placeCaretIn(page, '#content h1', true);
 }
 

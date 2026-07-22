@@ -53,13 +53,6 @@ body {
   outline: none;
 }
 
-/* While a @// trigger popup owns typing, hide the editor's own caret so the
- * only visible caret is the popup query row's (see .trigger-popup-query-caret).
- * Toggled by trigger-popup.ts open()/close(). */
-body.trigger-popup-open #content {
-  caret-color: transparent;
-}
-
 /* --- Gutter số dòng (giống raw text editor) ---
  * body cần position:relative để offsetTop của các block trong #content (và
  * của #line-gutter, đặt absolute) cùng chung một hệ toạ độ (offsetParent).
@@ -2795,14 +2788,30 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   display: none;
 }
 
+/* Input row design tokens (soft ring field). Accent maps to the Reading Mode
+ * per-mode token --rp-accent (Standard = var(--vscode-focusBorder), which already
+ * resolves to the design's dark #0078d4 / light #005fb8 / HC #ffd700 and adapts to
+ * custom themes; Sepia = #8a4b08, Paper = #2554a0) — no re-hardcoded hex table, and
+ * future modes inherit automatically once they declare --rp-accent. */
+:root {
+  --orca-input-outer-padding: 7px 8px;
+  --orca-input-field-height: 28px;
+  --orca-input-field-radius: 6px;
+  --orca-input-field-border-width: 1.5px;
+  --orca-input-field-fill: color-mix(in srgb, var(--rp-fg) 4%, transparent);
+  --orca-input-ring-spread: 3px;
+  --orca-input-accent: var(--rp-accent);
+  --orca-input-ring: color-mix(in srgb, var(--orca-input-accent) 18%, transparent);
+}
+
 .trigger-popup-query {
   flex: none;
-  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: var(--orca-input-outer-padding);
   border-bottom: 1px solid var(--rp-border);
   color: var(--rp-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Axis marker (@ or /) at the head of the query row — carries the trigger accent. */
@@ -2811,36 +2820,43 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   font-weight: 600;
 }
 
-.trigger-popup-query-text {
+/* Real focused query <input> — owns filter typing (native caret + native IME).
+ * Soft ring field: a boxed field (only the input, not the axis marker) that grows
+ * a --rp-accent border + focus-glow ring when focused. */
+.trigger-popup-query-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  height: var(--orca-input-field-height);
+  padding: 0 8px;
+  border: var(--orca-input-field-border-width) solid var(--rp-border);
+  border-radius: var(--orca-input-field-radius);
+  outline: none;
+  background: var(--orca-input-field-fill);
   color: var(--rp-fg);
+  /* Native text caret follows the Reading Mode foreground token (succeeds the
+   * removed fake caret, which was also --rp-fg), so it restyles per mode. */
+  caret-color: var(--rp-fg);
+  font: inherit;
 }
 
-/* Blinking caret so the user sees the query row is where typing filters
- * (the editor's own caret is hidden while open, see body.trigger-popup-open). */
-.trigger-popup-query-caret {
-  display: inline-block;
-  width: 1px;
-  height: 1em;
-  margin-left: 1px;
-  vertical-align: text-bottom;
-  background: var(--rp-fg);
-  animation: trigger-popup-caret-blink 1s step-end infinite;
+/* Focus: accent border + soft glow ring (accent at low opacity). The ring stays
+ * within the row's outer padding, so the card's overflow:hidden never clips it. */
+.trigger-popup-query-input:focus {
+  border-color: var(--orca-input-accent);
+  box-shadow: 0 0 0 var(--orca-input-ring-spread) var(--orca-input-ring);
 }
 
-@keyframes trigger-popup-caret-blink {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0;
-  }
+.trigger-popup-query-input::placeholder {
+  color: var(--rp-muted);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .trigger-popup-query-caret {
-    animation: none;
-  }
+/* Text selection inside the query input follows the Reading Mode selection tokens
+ * (per-mode: Standard/Sepia/Paper), not the browser default, so highlighting the
+ * filter text stays on-theme. */
+.trigger-popup-query-input::selection {
+  background: var(--rp-selection-bg);
+  color: var(--rp-selection-fg);
 }
 
 /* Axis marker: the active scope pill carries the trigger accent (--rp-accent). */

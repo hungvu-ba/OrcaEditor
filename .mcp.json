@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "code-review-graph",
+        "serve"
+      ],
+      "cwd": "/Users/hungvu/Documents/Dev/Markdown Preview VS Code",
+      "type": "stdio"
+    }
+  }
+}

@@ -323,7 +323,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * lại file này sau đó (không qua cross-file-search) sẽ vô tình áp lại vị trí
    * cũ.
    */
-  private pendingReveal = new Map<string, { line: number; character: number; length: number; matchText?: string }>();
+  private pendingReveal = new Map<
+    string,
+    { line: number; character: number; length: number; matchText?: string; searchText?: string }
+  >();
 
   /**
    * US-19.19: đọc ReadabilityConfig từ settings.json rồi ghi đè `zen` bằng
@@ -463,6 +466,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // đường 'update' debounce cho các thay đổi này, để case 'undo'/'redo' tự gửi
     // MỘT update cuối cùng (không debounce) → undo↔redo render đối xứng.
     let undoRedoInProgress = false;
+    // Bug #3: bật quanh applyEditBreakingCoalesce (case 'edit', nhánh nghịch đảo).
+    // Hàm đó áp HAI applyEdit → bắn HAI sự kiện đổi; lastTextFromWebview chỉ giữ
+    // text CUỐI nên sự kiện TRUNG GIAN trượt echo-check, clear guard rồi lên lịch
+    // một 'update' debounce thừa — rebuild #content làm rớt popup trigger đang mở,
+    // rò filter-text xuống editor/namespace. Flag này bỏ qua cả hai sự kiện (edit
+    // vẫn áp đủ vào undo stack — fix bug-2 nguyên vẹn), chỉ chặn echo webview.
+    let breakingEditInProgress = false;
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) {
@@ -479,6 +489,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       void this.restoreUndoneImageDeletions(e.document, text);
       // Undo/redo tự lo gửi update cuối cùng (case bên dưới) — không đi debounce.
       if (undoRedoInProgress) {
+        return;
+      }
+      // Bug #3: bỏ qua cả hai sự kiện của applyEditBreakingCoalesce — không echo
+      // 'update' về webview. Sự kiện cuối trùng lastTextFromWebview sẽ bị chặn ở
+      // dưới, còn sự kiện trung gian mới là thứ trước đây rò ra.
+      if (breakingEditInProgress) {
         return;
       }
       if (text === lastTextFromWebview) {
@@ -598,9 +614,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             const isInverseOfPrev =
               prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
             lastTextFromWebview = text;
-            const ok = isInverseOfPrev
-              ? await this.applyEditBreakingCoalesce(document, text)
-              : await this.applyMinimalEdit(document, text);
+            let ok: boolean;
+            if (isInverseOfPrev) {
+              // Bug #3: chặn echo trong lúc HAI applyEdit của nhánh nghịch đảo bắn
+              // sự kiện đổi (xem breakingEditInProgress). finally để không kẹt cờ.
+              // Dựa vào việc applyEdit bắn onDidChangeTextDocument ĐỒNG BỘ trước khi
+              // promise resolve (giống echo-check lastTextFromWebview đang dùng) → cả
+              // hai sự kiện rơi vào lúc cờ còn true. KHÁC nhánh undo/redo phải chờ
+              // waitForDocChange vì executeCommand('undo') resolve TRƯỚC khi edit áp.
+              breakingEditInProgress = true;
+              try {
+                ok = await this.applyEditBreakingCoalesce(document, text);
+              } finally {
+                breakingEditInProgress = false;
+              }
+            } else {
+              ok = await this.applyMinimalEdit(document, text);
+            }
             if (!ok) {
               lastTextFromWebview = undefined;
             }
@@ -946,13 +976,48 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     // Đường dẫn tương đối so với file hiện tại — không cho thoát ra ngoài
     // thư mục tài liệu / workspace (path traversal qua ../..).
-    const [pathPart] = href.split('#');
+    const [pathPart, fragment] = href.split('#');
     if (!pathPart) {
       return;
     }
-    const target = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(pathPart));
-    if (!(await this.isInsideAllowedRoots(document, target))) {
+    // Cùng quy ước resolve như marker báo hỏng: root-relative trước, fallback
+    // file-relative. Mở ứng viên đầu tiên tồn tại; nếu không có, mở ứng viên
+    // ưu tiên (root) để VS Code tự báo lỗi mở.
+    const candidates = await this.relativeTargetCandidates(document, pathPart);
+    if (candidates.length === 0) {
       void vscode.window.showWarningMessage(`Blocked link pointing outside the workspace: ${href}`);
+      return;
+    }
+    let target = candidates[0];
+    for (const uri of candidates) {
+      try {
+        await vscode.workspace.fs.stat(uri);
+        target = uri;
+        break;
+      } catch {
+        // ứng viên này không tồn tại — thử ứng viên kế.
+      }
+    }
+    // Bug General #1: an entity fragment (`#NAMESPACE_ID`) should scroll to the
+    // `caption::` declaration, not just open the file at the top. Reveal it by
+    // TEXT SEARCH in the opened document (the webview finds "caption::NS_ID",
+    // scrolls to + flashes it) rather than via the entity index: the target file
+    // is frequently OUTSIDE the workspace (e.g. `../../OtherRepo/…`) so it is
+    // never indexed, and text search is also immune to source-line↔DOM drift and
+    // is case-insensitive. A non-entity fragment (e.g. a heading slug) simply
+    // finds no `caption::` match → file opens with no scroll. Reuse the cross-file
+    // open path (Orca-Editor open + allowed-roots guard + panel/pendingReveal).
+    if (fragment) {
+      // Fragment có thể tới ở dạng percent-encoded (markdown-it/serialize có thể
+      // mã hoá id entity non-ASCII, ví dụ namespace tiếng Việt) — decode trước
+      // khi tìm. Chuỗi %-escape hỏng → giữ thô.
+      let token = fragment;
+      try {
+        token = decodeURIComponent(fragment);
+      } catch {
+        // giữ nguyên fragment thô nếu chuỗi %-escape không hợp lệ.
+      }
+      await this.openCrossFileSearchResult(document, target.toString(), 0, 0, 0, undefined, `caption::${token}`);
       return;
     }
     try {
@@ -986,7 +1051,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     line: number,
     character: number,
     length: number,
-    matchText?: string
+    matchText?: string,
+    searchText?: string
   ): Promise<void> {
     try {
       const uri = vscode.Uri.parse(uriStr);
@@ -1017,10 +1083,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             target = existingPanels.values().next().value;
           }
           target?.reveal(target.viewColumn);
-          const msg: HostToWebview = { type: 'scrollToPosition', line, character, length, matchText };
+          const msg: HostToWebview = { type: 'scrollToPosition', line, character, length, matchText, searchText };
           void target?.webview.postMessage(msg);
         } else {
-          this.pendingReveal.set(uri.toString(), { line, character, length, matchText });
+          this.pendingReveal.set(uri.toString(), { line, character, length, matchText, searchText });
           await vscode.commands.executeCommand('vscode.openWith', uri, MarkdownWysiwygProvider.viewType, {
             selection: range,
           });
@@ -1688,6 +1754,40 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * cancelled (superseded by a newer request) — the caller discards a
    * cancelled batch's result rather than posting it.
    */
+  /**
+   * Ứng viên Uri (đã lọc qua allowed-roots) để resolve một href tương đối, theo
+   * thứ tự ưu tiên: workspace-root-relative TRƯỚC (quy ước người dùng viết link
+   * — coi đường dẫn như tính từ gốc dự án), rồi mới document-relative (chuẩn
+   * Markdown, làm fallback). Dùng CHUNG bởi `checkTargetsExist` (marker báo hỏng)
+   * và `openLink` (mở link) để một link được đánh "không hỏng" đúng là link được
+   * mở ra. Href có `#fragment`/`?query` phải được tách trước khi truyền vào.
+   */
+  private async relativeTargetCandidates(
+    document: vscode.TextDocument,
+    relPath: string
+  ): Promise<vscode.Uri[]> {
+    const decoded = decodeURIComponent(relPath);
+    const ordered: vscode.Uri[] = [];
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (folder) {
+      ordered.push(vscode.Uri.joinPath(folder.uri, decoded));
+    }
+    ordered.push(vscode.Uri.joinPath(document.uri, '..', decoded));
+    const seen = new Set<string>();
+    const allowed: vscode.Uri[] = [];
+    for (const uri of ordered) {
+      const key = uri.toString();
+      if (seen.has(key)) {
+        continue; // root === thư mục file (dự án 1 tầng) → 2 ứng viên trùng, bỏ 1.
+      }
+      seen.add(key);
+      if (await this.isInsideAllowedRoots(document, uri)) {
+        allowed.push(uri);
+      }
+    }
+    return allowed;
+  }
+
   private async checkTargetsExist(
     document: vscode.TextDocument,
     targets: readonly string[],
@@ -1699,14 +1799,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         break;
       }
       let exists = false;
-      try {
-        const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(target));
-        if (await this.isInsideAllowedRoots(document, uri)) {
+      // Không hỏng nếu BẤT KỲ ứng viên (root-relative hoặc file-relative) stat được.
+      for (const uri of await this.relativeTargetCandidates(document, target)) {
+        try {
           await vscode.workspace.fs.stat(uri);
           exists = true;
+          break;
+        } catch {
+          // ứng viên này không tồn tại — thử ứng viên kế.
         }
-      } catch {
-        exists = false;
       }
       results.push({ target, exists });
     }
@@ -1734,6 +1835,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       const rows = this.entityIndex.lookup(id);
       let exists = false;
+      let preview = ''; // Req 21 tooltip: only a RESOLVED declaration contributes a preview.
       for (const row of rows) {
         try {
           const uri = vscode.Uri.parse(row.file);
@@ -1742,6 +1844,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           if (await this.isInsideAllowedRoots(document, uri)) {
             await vscode.workspace.fs.stat(uri);
             exists = true;
+            preview = row.preview;
             break;
           }
         } catch {
@@ -1750,7 +1853,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       const canonical = canonicalEntityId(id);
       const occurrences = canonical !== null ? this.occurrenceCache.get(canonical)?.length ?? 0 : 0;
-      results.push({ id, exists, occurrences });
+      results.push({ id, exists, occurrences, preview });
     }
     return results;
   }

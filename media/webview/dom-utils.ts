@@ -283,6 +283,41 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
 }
 
 /**
+ * Text from the start of `block` up to `range`'s start (i.e. everything left of
+ * the caret within `block`). Shared reader for adjacency checks — e.g. the paste
+ * smart-gap in main.ts needs the single char immediately before the caret
+ * (`textBeforeCaret(block, range).slice(-1)`). Consumed by trigger-at/slash and
+ * main.ts; input-rules.ts keeps its own `(block)` variant that resolves the
+ * selection internally (different signature).
+ */
+export function textBeforeCaret(block: Element, range: Range): string {
+  const probe = document.createRange();
+  probe.selectNodeContents(block);
+  try {
+    probe.setEnd(range.startContainer, range.startOffset);
+  } catch {
+    return '';
+  }
+  return probe.toString();
+}
+
+/**
+ * Mirror of `textBeforeCaret`: text from `range`'s start to the end of `block`
+ * (everything right of the caret within `block`). Used to read the char
+ * immediately after the caret (`textAfterCaret(block, range).slice(0, 1)`).
+ */
+export function textAfterCaret(block: Element, range: Range): string {
+  const probe = document.createRange();
+  probe.selectNodeContents(block);
+  try {
+    probe.setStart(range.startContainer, range.startOffset);
+  } catch {
+    return '';
+  }
+  return probe.toString();
+}
+
+/**
  * Tạo một <p><br></p> rỗng — "chỗ thoát" caret / block trống mặc định, dùng ở
  * nhiều nơi (chèn/xoá bảng, input rule hr/fence, đảm bảo có <p> cuối tài liệu).
  * Rule 'emptyParagraph' của turndown bỏ mọi <p> rỗng khi lưu nên KHÔNG đổi Markdown.

@@ -140,6 +140,15 @@ export interface RevealPosition {
   character: number;
   length: number;
   matchText?: string;
+  /**
+   * Bug General #1: when set, reveal by TEXT SEARCH over the opened document
+   * (find this string, scroll to + flash the first match) instead of by
+   * `line`/`character`. Used for entity links (`searchText = "caption::NS_ID"`)
+   * so navigation works even when the target file is outside the workspace /
+   * not in the entity index, and is immune to source-line↔DOM mapping drift.
+   * When present, `line`/`character`/`length` are ignored.
+   */
+  searchText?: string;
 }
 
 /**
@@ -179,6 +188,13 @@ export interface EntityExistResult {
   id: string;
   exists: boolean;
   occurrences: number;
+  /**
+   * Req 21 hover tooltip: short preview of the text following the `caption::NS_ID`
+   * declaration token (from the entity index). Present for a resolved id so a
+   * cross-file mention's tooltip can name what the code refers to; absent/empty
+   * when the id is unknown or nothing follows the declaration.
+   */
+  preview?: string;
 }
 
 /**
@@ -193,6 +209,8 @@ export interface EntitySuggestion {
   file: string;
   line: number;
   title: string;
+  /** Req 21: FULL following text (the entity's human name) — a mention inserts it as the link display text so the pill reads `NS_ID label`; '' when nothing follows. */
+  label: string;
 }
 
 /** Req 21 US-21.2: one namespace + its entity count for the browse/summary view. */

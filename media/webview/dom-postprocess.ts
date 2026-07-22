@@ -598,7 +598,11 @@ export function postProcessEntityRefs(root: ParentNode & Node): void {
     }
     const fragment = href.slice(hashIdx + 1);
     const text = (anchor.textContent ?? '').trim();
-    if (fragment && text === fragment && isValidEntityToken(fragment) && !URL_SCHEME_RE.test(href)) {
+    // Req 21: a mention's display text is either the bare `NS_ID` (no label) OR
+    // `NS_ID label` (the entity's human name follows a single space). Both are
+    // entity references — the fragment carries the clean `#NS_ID` either way.
+    const matchesToken = text === fragment || text.startsWith(`${fragment} `);
+    if (fragment && matchesToken && isValidEntityToken(fragment) && !URL_SCHEME_RE.test(href)) {
       anchor.classList.add(ENTITY_REF_CLASS);
     } else {
       anchor.classList.remove(ENTITY_REF_CLASS);

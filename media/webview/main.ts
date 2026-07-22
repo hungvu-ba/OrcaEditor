@@ -44,7 +44,7 @@ import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
 import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
-import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior } from './dom-utils';
+import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
 import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
@@ -64,7 +64,7 @@ import {
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
-import { hasInputOwner } from './input-ownership';
+import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
 import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
 import { initTriggerSlash } from './trigger-slash';
 import { initTriggerAt } from './trigger-at';
@@ -190,9 +190,14 @@ initToolbarTriggerAt(triggerAt.openFromToolbar);
 // hover parent-context — own `input`/hover wiring, independent of trigger-at's
 // `@` detection (fires on '.' typed right after an already-inserted entity
 // reference, not on '@').
-const entityScope = initEntityScope(content, triggerPopup);
+// Req 21 hover tooltip: id → following-text preview for CROSS-FILE mentions,
+// populated from every `entitiesExistResult` reply (the broken-ref scan already
+// round-trips every mention id through the host). Same-file previews are read
+// straight from the DOM in entity-scope.ts and don't need this cache.
+const entityPreviewById = new Map<string, string>();
+const entityScope = initEntityScope(content, triggerPopup, (id) => entityPreviewById.get(id));
 content.addEventListener('input', (e) => entityScope.onInput(e as InputEvent));
-content.addEventListener('mouseover', (e) => entityScope.onMouseOver(e), true);
+content.addEventListener('mousemove', (e) => entityScope.onMouseMove(e), true);
 content.addEventListener('mouseout', (e) => entityScope.onMouseOut(e), true);
 
 // Req 20 US-20.9 / Req 21 US-21.3: broken-reference marker (file/heading links
@@ -339,13 +344,20 @@ window.addEventListener('message', (event) => {
       // Req 21 US-21.2: the `@` popup's Entities scope also needs docUri, to
       // relativize a picked entity's declaring-file href client-side.
       triggerAt.setDocUri(msg.docUri);
+      // Req 21 bug fix: the quick-correct popover needs docUri to relativize a
+      // corrected entity's declaring-file href (else it keeps the old file).
+      quickCorrect.setDocUri(msg.docUri);
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       renderDocument(msg.text ?? '');
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
       // lưu — chỉ fallback về restoreScroll() cho luồng mở file bình thường.
-      if (msg.reveal) {
+      if (msg.reveal?.searchText) {
+        // Bug General #1: entity link → reveal by whole-doc text search (works
+        // for out-of-workspace targets; immune to line↔DOM drift).
+        lineGutter.scrollToText(msg.reveal.searchText);
+      } else if (msg.reveal) {
         lineGutter.scrollToSourceLine(msg.reveal.line + 1, msg.reveal.character, msg.reveal.length, msg.reveal.matchText);
       } else {
         restoreScroll();
@@ -361,13 +373,17 @@ window.addEventListener('message', (event) => {
       if (msg.text === currentText) {
         break;
       }
-      renderDocument(msg.text ?? '');
-      // Chỉ update từ undo/redo mới kèm caretLine — đặt lại caret về đúng vị trí
-      // vừa đổi (renderDocument dựng lại DOM nên caret bị mất). External edit
-      // không kèm field này → không đụng caret (giữ hành vi cũ).
-      if (msg.caretLine !== undefined) {
-        restoreCaretAtSource(msg.caretLine, msg.caretCol ?? 0);
+      // Bug #3 (filter leak): while a trigger popup (`/`/`@`) owns the editor
+      // keyboard it anchors a Range into #content and keeps its query input
+      // focused. Rebuilding #content NOW would detach that Range and
+      // restoreCaretAtSource would steal focus back to #content — the filter
+      // text typed next then leaks into the editor (+ a stray newline on Enter).
+      // Defer the render until the popup releases input ownership (commit/cancel).
+      if (hasInputOwner()) {
+        pendingUpdate = { text: msg.text ?? '', caretLine: msg.caretLine, caretCol: msg.caretCol, baseText: currentText };
+        break;
       }
+      applyDocumentUpdate(msg.text ?? '', msg.caretLine, msg.caretCol);
       break;
     }
     case 'fileSearchResult': {
@@ -415,13 +431,24 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'entitiesExistResult': {
+      // Cache each id's preview for the cross-file hover tooltip (Req 21).
+      // Set unconditionally (incl. '') so a declaration that lost its following
+      // text — or became unresolved — clears any stale cached preview.
+      for (const r of msg.results) {
+        entityPreviewById.set(r.id, r.preview ?? '');
+      }
       brokenRef.notifyEntitiesResult(msg.requestId, msg.docVersion, msg.results);
       break;
     }
     case 'scrollToPosition': {
       // C6b: file .md đã có panel mở sẵn — host gửi thẳng message này thay vì
       // qua 'init' vì resolveCustomTextEditor không chạy lại trong trường hợp này.
-      lineGutter.scrollToSourceLine(msg.line + 1, msg.character, msg.length, msg.matchText);
+      if (msg.searchText) {
+        // Bug General #1: entity link → reveal by whole-doc text search.
+        lineGutter.scrollToText(msg.searchText);
+      } else {
+        lineGutter.scrollToSourceLine(msg.line + 1, msg.character, msg.length, msg.matchText);
+      }
       break;
     }
     case 'configUpdate': {
@@ -573,6 +600,49 @@ function renderDocument(markdown: string): void {
 }
 
 /**
+ * Bug #3 — a host 'update' that arrived while a trigger popup owned the editor
+ * keyboard, deferred until the popup releases input (see the `update` handler).
+ * `baseText` is `currentText` at defer time: if a local edit (the popup's own
+ * commit) has advanced `currentText` since, the deferred host text is stale and
+ * dropped so the commit's DOM wins.
+ */
+interface PendingUpdate {
+  text: string;
+  caretLine?: number;
+  caretCol?: number;
+  baseText: string;
+}
+let pendingUpdate: PendingUpdate | undefined;
+
+/** Render a host document 'update' and restore the caret (undo/redo carries an
+ * explicit caretLine; a caret-less update snapshots the source caret and restores
+ * it so it doesn't jump to the top of the file). */
+function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): void {
+  const preservedCaret = caretLine === undefined ? captureCaretSource() : undefined;
+  renderDocument(text);
+  if (caretLine !== undefined) {
+    restoreCaretAtSource(caretLine, caretCol ?? 0);
+  } else if (preservedCaret) {
+    restoreCaretAtSource(preservedCaret.line, preservedCaret.col);
+  }
+}
+
+// Flush a deferred update when the trigger popup releases the editor keyboard.
+onInputOwnerRelease(() => {
+  const u = pendingUpdate;
+  pendingUpdate = undefined;
+  if (!u) {
+    return;
+  }
+  // A local edit (e.g. the popup's own commit) advanced the doc since we
+  // deferred → the deferred host text is stale; drop it, the local DOM wins.
+  if (currentText !== u.baseText || u.text === currentText) {
+    return;
+  }
+  applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+});
+
+/**
  * Sau khi render lại vì undo/redo, đặt caret về vị trí nguồn (`line` 1-based,
  * `col` 0-based) vừa đổi — KHÔNG cuộn (renderDocument đã giữ scrollTop). blockMap
  * luôn được dựng trong renderDocument (không phụ thuộc bật/tắt line numbers), nên
@@ -625,6 +695,45 @@ function deepestListItemAt(listEl: Element, line: number): Element | null {
     }
   }
   return best;
+}
+
+/**
+ * Vị trí nguồn (line 1-based, col 0-based) của caret HIỆN TẠI trong #content,
+ * suy từ blockMap của DOM đang hiển thị — nghịch đảo của restoreCaretAtSource.
+ * Dùng để GIỮ caret qua một lần renderDocument mà host KHÔNG kèm caretLine (edit
+ * do host tự ghi: Add reference/lệnh Execute sửa nội dung, hoặc external edit);
+ * nếu không, DOM dựng lại làm caret bay về đầu file. Trả undefined khi không có
+ * caret trong #content hoặc không map được block — khi đó caller không đụng caret.
+ */
+function captureCaretSource(): { line: number; col: number } | undefined {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    return undefined;
+  }
+  const node = sel.focusNode;
+  if (!node || !content.contains(node)) {
+    return undefined;
+  }
+  const entry = blockMap.find((b) => b.el.contains(node));
+  if (!entry) {
+    return undefined;
+  }
+  if (entry.srcRange.start === entry.srcRange.end) {
+    // Block đơn dòng (đoạn văn/heading): cột nguồn = offset ký tự trong text render
+    // + độ dài cú pháp đầu dòng (heading "## ", bullet "- "...) mà render đã bỏ —
+    // đúng nghịch đảo của restoreCaretAtSource (renderedCol = col - sourcePrefixLen).
+    const offset = getOffsetWithin(entry.el, node, sel.focusOffset);
+    if (offset === null) {
+      return { line: entry.srcRange.start, col: 0 };
+    }
+    return { line: entry.srcRange.start, col: offset + sourcePrefixLen(entry.mdSlice) };
+  }
+  // Block đa dòng (list/bảng/blockquote/code): caret trong một <li> mang data-line
+  // riêng → lấy dòng của bullet đó (restoreCaretAtSource tự đặt về đầu bullet);
+  // còn lại lùi về đầu block. Cột không map đơn giản → 0 (đủ để gõ tiếp đúng chỗ).
+  const li = closestElement(node)?.closest('li');
+  const liRange = li && entry.el.contains(li) ? readSrcRange(li) : null;
+  return { line: liRange ? liRange.start : entry.srcRange.start, col: 0 };
 }
 
 function restoreCaretAtSource(line: number, col: number): void {
@@ -1193,20 +1302,82 @@ function pasteFromClipboardApi(): void {
   });
 }
 
+// Bug #8 smart gap: khi dán chữ inline ngay sát một từ có sẵn ("foo" + dán
+// "bar") thì chèn một space ngăn cách để không dính thành "foobar". Chỉ chèn
+// cạnh ký tự "chữ" thực — bỏ qua khi hàng xóm là khoảng trắng hoặc dấu câu
+// (giống thói quen gõ tay: "(x)" không thêm space, "word," không thêm space).
+const SMART_GAP_SUPPRESS_PUNCT = new Set(['(', '[', '{', '"', "'", ')', ']', '}', ',', '.', ';', ':', '!', '?']);
+
+// Thẻ block-level ở tầng trên cùng của fragment vừa render — sự hiện diện của
+// một trong số này nghĩa là dán "block" (heading/list/quote/code/table...),
+// KHÔNG áp smart gap (một space đầu dòng phá cú pháp "# heading").
+const BLOCK_LEVEL_TAGS = new Set([
+  'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'PRE',
+  'BLOCKQUOTE', 'TABLE', 'THEAD', 'TBODY', 'TR', 'HR', 'DIV', 'SECTION', 'FIGURE',
+]);
+
+function isInlinePasteFragment(html: string): boolean {
+  const probe = document.createElement('div');
+  probe.innerHTML = html;
+  return !Array.from(probe.children).some((el) => BLOCK_LEVEL_TAGS.has(el.tagName));
+}
+
+// true nếu `ch` là hàng xóm cần chèn gap: tồn tại, không phải khoảng trắng, và
+// không phải dấu câu trong danh sách suppress.
+function needsSmartGap(ch: string): boolean {
+  return ch !== '' && !/\s/.test(ch) && !SMART_GAP_SUPPRESS_PUNCT.has(ch);
+}
+
+// Block giữ MỘT dòng logic — đọc ký tự kề caret phải giới hạn trong đây, không
+// tràn sang <li>/<td> anh em cùng một <ul>/<table> (leo lên tầng trên cùng của
+// #content sẽ gộp cả list/table thành một "block" và bleed qua ranh giới dòng).
+const GAP_LINE_BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th, dt, dd, blockquote, figcaption';
+
 /**
- * Chèn text vừa dán vào vị trí caret. Render qua markdown-it trước (cùng
- * renderer dùng cho toàn bộ tài liệu) để cú pháp Markdown được hiểu đúng
- * thành nội dung có định dạng, thay vì nằm lại như text thô rồi bị turndown
- * escape ngược khi serialize. Text thường (không có cú pháp Markdown) vẫn ra
- * y hệt như insertText cũ nhờ bước "bóc <p> đơn" bên dưới.
+ * Bug #8: với dán inline tại caret thu gọn (không nằm trong pre/code), thêm một
+ * gap trước/sau chỗ chèn nếu ký tự liền kề caret là "chữ" thực. `text` là chuỗi
+ * dán thô — mép của chính nó cũng phải "chữ" thì mới chèn gap phía đó (dán
+ * ",bar" cạnh "foo" không được thành "foo ,bar"). Dùng NBSP (\u00A0) thay vì
+ * space ASCII vì `execCommand('insertHTML')` của Chromium nuốt một space ASCII
+ * đứng ngay trước caret (xem toolbar.ts runTriggerInsertDate); NBSP không bị
+ * nuốt và `normalizeNbsp` (dom-serialize-prep.ts) chuyển ngược NBSP -> space
+ * ASCII khi lưu, nên .md ra đúng một space thường. Gộp cả gap vào một lần
+ * insertHTML để giữ một bước undo.
  */
+function applySmartGap(html: string, text: string): string {
+  if (!isInlinePasteFragment(html)) {
+    return html;
+  }
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) {
+    return html;
+  }
+  const range = sel.getRangeAt(0);
+  const block = closestElement(range.startContainer)?.closest(GAP_LINE_BLOCK_SELECTOR);
+  if (!block || block.closest('pre, code') || !content.contains(block)) {
+    return html;
+  }
+  const before = textBeforeCaret(block, range).slice(-1);
+  const after = textAfterCaret(block, range).slice(0, 1);
+  const NBSP = '\u00A0';
+  let out = html;
+  // Chỉ chèn gap khi CẢ hàng xóm CẢ mép tương ứng của text dán đều là "chữ".
+  if (needsSmartGap(before) && needsSmartGap(text.charAt(0))) {
+    out = NBSP + out;
+  }
+  if (needsSmartGap(after) && needsSmartGap(text.charAt(text.length - 1))) {
+    out = out + NBSP;
+  }
+  return out;
+}
+
 function insertPastedMarkdown(text: string): void {
   const html = renderPasteHtml(text);
   if (!html) {
     document.execCommand('insertText', false, text);
     return;
   }
-  document.execCommand('insertHTML', false, html);
+  document.execCommand('insertHTML', false, applySmartGap(html, text));
   // Có thể vừa chèn một khối ```mermaid``` mới — dựng SVG cho nó (renderAll
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).

@@ -2279,6 +2279,32 @@ export type TriggerDefineBlockId =
   | 'hr'
   | 'toc';
 
+/**
+ * Bug #9 (bug_General.md) — a `/`-triggered heading pick on an EMPTY line
+ * produces a blank, invisible heading. Pre-fill level-specific sample text
+ * ("Heading 1".."Heading 6") and select it so the next keystroke overwrites it.
+ * Runs ONLY after the trigger-path formatHeading (never the toolbar button) and
+ * ONLY when the heading came out empty — a line that already held text (Bug #10
+ * re-format) keeps that text as the heading content untouched.
+ */
+function prefillEmptyHeadingSample(id: TriggerDefineBlockId): void {
+  const anchor = getAnchorElement();
+  const heading = anchor?.closest('h1, h2, h3, h4, h5, h6') as HTMLElement | null;
+  if (!heading || !content.contains(heading)) {
+    return;
+  }
+  if ((heading.textContent ?? '').trim() !== '') {
+    return; // Bug #10: preserve the existing line text — no sample injection.
+  }
+  const level = id.slice(-1); // 'heading-2' -> '2'
+  heading.textContent = `Heading ${level}`;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(heading);
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
 function runTriggerBlockAction(id: TriggerDefineBlockId): void {
   switch (id) {
     case 'heading-1':
@@ -2286,9 +2312,18 @@ function runTriggerBlockAction(id: TriggerDefineBlockId): void {
     case 'heading-3':
     case 'heading-4':
     case 'heading-5':
-    case 'heading-6':
-      formatHeading(id.replace('heading-', 'h'));
+    case 'heading-6': {
+      const tag = id.replace('heading-', 'h'); // 'heading-2' -> 'h2'
+      // A `/` heading pick is an ABSOLUTE choice, not a toggle: picking the level
+      // the line already has must keep it a heading (formatHeading would toggle
+      // the same tag back to <p>). Only convert when the tag actually differs.
+      const block = getAnchorElement()?.closest('h1, h2, h3, h4, h5, h6, p') as HTMLElement | null;
+      if (!block || block.tagName.toLowerCase() !== tag) {
+        formatHeading(tag);
+      }
+      prefillEmptyHeadingSample(id);
       return;
+    }
     case 'bullet':
       setBulletList();
       return;
@@ -2343,6 +2378,26 @@ function collapseSelectionAfterTriggerDelete(deleteRange: Range): void {
 }
 
 /**
+ * Insert `node` at the current collapsed caret via the live Range and leave the
+ * caret right after it. Used by every trigger commit that adds content (`/date`
+ * text, `@` link/image): a direct Range.insertNode preserves the surrounding
+ * text byte-for-byte, whereas execCommand('insertText'/'insertHTML') drops an
+ * ASCII space that becomes trailing on the preceding text node (Bug #6 / the
+ * date-space trap runTriggerInsertDate documents).
+ */
+function insertNodeAtCaret(node: Node): void {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0) {
+    const range = sel.getRangeAt(0);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+/**
  * Req 20 US-20.2 — run a `/` Define group-1/group-2 insert for the trigger
  * popup: delete the `/`+filter run first, then the toolbar action, bracketed
  * by flushPendingSync/syncNow (same contract as invokeAction) so the whole
@@ -2350,9 +2405,12 @@ function collapseSelectionAfterTriggerDelete(deleteRange: Range): void {
  */
 export function runTriggerDefineInsert(id: TriggerDefineBlockId, deleteRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   collapseSelectionAfterTriggerDelete(deleteRange);
   runTriggerBlockAction(id);
-  content.focus();
   ctx.syncNow();
 }
 
@@ -2364,6 +2422,10 @@ export function runTriggerDefineInsert(id: TriggerDefineBlockId, deleteRange: Ra
  */
 export function runTriggerInsertDate(text: string, deleteRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   collapseSelectionAfterTriggerDelete(deleteRange);
   // Insert the date as a plain text node via the live Range rather than
   // execCommand('insertText'): Chromium's insertText mangles an ASCII space
@@ -2371,17 +2433,7 @@ export function runTriggerInsertDate(text: string, deleteRange: Range): void {
   // collapsible and drops it), so `Today is /date` → date would lose the space
   // between "is" and the date. A direct text-node insert preserves the
   // surrounding text byte-for-byte.
-  const sel = window.getSelection();
-  if (sel && sel.rangeCount > 0) {
-    const range = sel.getRangeAt(0);
-    const node = document.createTextNode(text);
-    range.insertNode(node);
-    range.setStartAfter(node);
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }
-  content.focus();
+  insertNodeAtCaret(document.createTextNode(text));
   ctx.syncNow();
 }
 
@@ -2394,57 +2446,36 @@ export function runTriggerInsertDate(text: string, deleteRange: Range): void {
  */
 export function runTriggerDeleteOnly(deleteRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   collapseSelectionAfterTriggerDelete(deleteRange);
-  content.focus();
   ctx.syncNow();
 }
 
 /**
  * Req 20 US-20.1 — collapsed-caret branch: delete the `@`+filter run (same
  * preamble as runTriggerDefineInsert), then insert a brand-new `<a>` with both
- * display text and href from scratch — mirrors insertLink()'s collapsed
- * branch (`insertHTML`, `escapeAttr`/`escapeHtml`) exactly, no parallel
- * implementation.
+ * display text and href from scratch. Inserts via a live-Range `insertNode`
+ * rather than execCommand('insertHTML'): Chromium's insertHTML drops the ASCII
+ * space that ends the preceding text node when it becomes trailing (Bug #6 —
+ * `Hello @` → pick would eat the space, giving `HelloMyHeading`). A direct
+ * node insert preserves the surrounding text byte-for-byte, same as
+ * runTriggerInsertDate. Building the element via DOM APIs keeps href/text
+ * escaping automatic (no `escapeAttr`/`escapeHtml` string interpolation).
  */
 export function runAtInsertLink(href: string, displayText: string, deleteRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   collapseSelectionAfterTriggerDelete(deleteRange);
-  document.execCommand('insertHTML', false, `<a href="${escapeAttr(href)}">${escapeHtml(displayText)}</a>`);
-  content.focus();
-  ctx.syncNow();
-}
-
-/**
- * Req 21 US-21.4 — `/relate` commit: delete the `/`+filter run (same preamble
- * as runTriggerDefineInsert), then insert the literal "Refers to: " prefix
- * followed by a real markdown link to the picked entity — one-way, single-
- * file, no reverse line (US-21.4). Same delete+insertHTML shape as
- * runAtInsertLink, extended with the fixed prefix text so the whole write
- * lands as one host-side undo unit; never touches the target file.
- */
-export function runTriggerInsertRelateLink(href: string, displayText: string, deleteRange: Range): void {
-  ctx.flushPendingSync();
-  collapseSelectionAfterTriggerDelete(deleteRange);
-  // Insert the "Refers to: " prefix + link via the live Range (a text node
-  // followed by a real <a>) rather than execCommand('insertHTML'): insertHTML
-  // collapses an ASCII space sitting immediately before the caret exactly as
-  // insertText does (see runTriggerInsertDate), so a mid-paragraph
-  // `More text. /relate` commit would lose the space before "Refers to:". A
-  // direct node insert preserves the surrounding text byte-for-byte.
-  const sel = window.getSelection();
-  if (sel && sel.rangeCount > 0) {
-    const range = sel.getRangeAt(0);
-    const link = document.createElement('a');
-    link.setAttribute('href', href);
-    link.textContent = displayText;
-    range.insertNode(link);
-    range.insertNode(document.createTextNode('Refers to: '));
-    range.setStartAfter(link);
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }
-  content.focus();
+  const anchor = document.createElement('a');
+  anchor.setAttribute('href', href);
+  anchor.textContent = displayText;
+  insertNodeAtCaret(anchor);
   ctx.syncNow();
 }
 
@@ -2454,13 +2485,20 @@ export function runTriggerInsertRelateLink(href: string, displayText: string, de
  * `<img>`, mirroring the deleted insertImage() modal exactly (`alt=""`, no
  * alt-text UX invented). `href` arrives already-encoded (trigger-at.ts's
  * targetsById runs `encodeLinkPath` once when building the Files group — same
- * contract runAtInsertLink relies on), so no second encode pass here.
+ * contract runAtInsertLink relies on), so no second encode pass here. Uses the
+ * same space-preserving node insert as runAtInsertLink (Bug #6).
  */
 export function runAtInsertImage(href: string, deleteRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   collapseSelectionAfterTriggerDelete(deleteRange);
-  document.execCommand('insertHTML', false, `<img src="${escapeAttr(href)}" alt="">`);
-  content.focus();
+  const img = document.createElement('img');
+  img.setAttribute('src', href);
+  img.setAttribute('alt', '');
+  insertNodeAtCaret(img);
   ctx.syncNow();
 }
 
@@ -2472,11 +2510,14 @@ export function runAtInsertImage(href: string, deleteRange: Range): void {
  */
 export function runAtSetHrefOnSelection(href: string, selectionRange: Range): void {
   ctx.flushPendingSync();
+  // preventScroll: nothing scrolls away while the popup owns input, so refocusing
+  // the editor here must only restore the caret, never yank the viewport (Bug: exit
+  // jitter). The caret is already in view; a plain focus() would re-center it.
+  content.focus({ preventScroll: true });
   const sel = window.getSelection();
   sel?.removeAllRanges();
   sel?.addRange(selectionRange);
   document.execCommand('createLink', false, href);
-  content.focus();
   ctx.syncNow();
 }
 

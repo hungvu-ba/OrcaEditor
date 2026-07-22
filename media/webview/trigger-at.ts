@@ -16,7 +16,7 @@
  * message shape. `input-rules.ts` stands down on its own via `hasInputOwner()` once the shell's
  * open() calls `setInputOwner('trigger')`, so this module needs no guard for that.
  */
-import { closestElement, encodeLinkPath, relativeLinkPath } from './dom-utils';
+import { closestElement, encodeLinkPath, relativeLinkPath, textBeforeCaret } from './dom-utils';
 import { postProcessEntityRefs } from './dom-postprocess';
 import { normalizeForSearch } from '../../src/text-utils';
 import { slugifyHeadingText } from './broken-ref';
@@ -98,23 +98,6 @@ function matchesFilter(text: string, q: string): boolean {
 function ghostRemainder(q: string, label: string): string {
   if (label.length <= q.length) return '';
   return label.slice(0, q.length).toLowerCase() === q.toLowerCase() ? label.slice(q.length) : '';
-}
-
-/**
- * Text from the start of `block` to `range`'s start — used to judge the
- * "start of word" trigger condition and to locate the `](` run (COPIED, small,
- * from trigger-slash.ts's own private textBeforeCaret — deliberately not shared
- * so a future change to one is a conscious edit in both).
- */
-function textBeforeCaret(block: Element, range: Range): string {
-  const probe = document.createRange();
-  probe.selectNodeContents(block);
-  try {
-    probe.setEnd(range.startContainer, range.startOffset);
-  } catch {
-    return '';
-  }
-  return probe.toString();
 }
 
 export function initTriggerAt(
@@ -307,8 +290,12 @@ export function initTriggerAt(
   function entityItemsFrom(entities: EntitySuggestion[]): TriggerPopupItem[] {
     return entities.map((e) => {
       const id = `${ENTITY_PREFIX}${e.namespace}${e.id}`;
-      targetsById.set(id, { href: entityHref(e), display: `${e.namespace}${e.id}` });
-      return { id, label: `${e.namespace}${e.id}`, detail: e.title || undefined, tint: 'entity' as const };
+      const fullId = `${e.namespace}${e.id}`;
+      // Req 21: a mention inserts `NS_ID label` as its link display text (label =
+      // the entity's human name), so the ref reads `UC01 Submit Leave Request`
+      // — not the bare code. The href fragment stays the clean `#NS_ID`.
+      targetsById.set(id, { href: entityHref(e), display: e.label ? `${fullId} ${e.label}` : fullId });
+      return { id, label: fullId, detail: e.title || undefined, tint: 'entity' as const };
     });
   }
 
@@ -489,7 +476,9 @@ export function initTriggerAt(
         } else {
           deleteRange = capturedRange;
         }
-        openPopup('');
+        // Bug B1 — this reopen runs from inside the previous row's Enter handler;
+        // guard so an IME double-Enter can't auto-commit the narrowed/back step.
+        openPopup('', false, true);
       });
       return;
     }
@@ -497,18 +486,24 @@ export function initTriggerAt(
   }
 
   // ---- Open / close --------------------------------------------------------
-  /** `forImage` (US-20.8): swaps in buildImageDataSource + drops the scope tabs (Files-only, no pills to show). */
-  function openPopup(seed: string, forImage = false): void {
+  /**
+   * `forImage` (US-20.8): swaps in buildImageDataSource + drops the scope tabs (Files-only, no pills to show).
+   * `guardEnter` (Bug B1): set only when reopened from inside an Enter handler (handleAtPick navigation) so the
+   * IME double-Enter can't cascade; first-open call-sites leave it false.
+   */
+  function openPopup(seed: string, forImage = false, guardEnter = false): void {
     committed = false;
     const anchor = (deleteRange ?? savedSelection)?.cloneRange();
     if (!anchor) return;
     popup.open({
       axis: '@',
-      // Bug 10: selection mode has no live editor text backing the query (the
-      // selection stays intact for the href-only commit), so the shell must own
-      // the filter — Backspace/typing edits the popup, never the selected link.
-      ownsTextInput: mode === 'selection',
       anchorRange: anchor,
+      guardEnterUntilKeyup: guardEnter,
+      // Bug 4/5 — only the typed `@` marker modes (mention/bracket) have a literal
+      // `@` to revert on cancel. Selection mode restores its own saved selection in
+      // onPopupClose, and toolbar mode's anchor is a live content selection (a
+      // collapse would discard it) — both leave this false.
+      restoreCaretOnCancel: mode === 'mention' || mode === 'bracket',
       dataSource: { query: (q) => (forImage ? buildImageDataSource(q) : buildAtDataSource(activeScope, q)) },
       onPick: forImage ? (item) => commitById(item.id) : handleAtPick,
       onClose: onPopupClose,
@@ -535,6 +530,14 @@ export function initTriggerAt(
   }
 
   function onPopupClose(): void {
+    // Return focus to the editor: the shell took focus into its query <input> on
+    // open, so on every close path (Escape/commit/click-away) hand it back so the
+    // user keeps typing in #content. Safe on click-away too — the mousedown's own
+    // native default (which runs AFTER this capture-phase handler) re-focuses the
+    // actual click target, overriding this. preventScroll: the viewport never moved
+    // while the popup was open, so restoring focus must not re-center/scroll to the
+    // caret (exit jitter) — the caret is already in view.
+    content.focus({ preventScroll: true });
     if (mode === 'selection' && !committed && !abandonedSelection && savedSelection) {
       // Escape / cancel with an active selection preserves it. NOT on a
       // navigate-away abandon (Bug 9) — the user already moved the caret, so
@@ -675,42 +678,6 @@ export function initTriggerAt(
     return null;
   }
 
-  function updateMentionQuery(): void {
-    if (!deleteRange) return;
-    const sel = window.getSelection();
-    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) {
-      popup.close();
-      return;
-    }
-    const r = sel.getRangeAt(0);
-    let text: string;
-    try {
-      deleteRange.setEnd(r.startContainer, r.startOffset);
-      text = deleteRange.toString();
-    } catch {
-      popup.close();
-      return;
-    }
-    if (mode === 'toolbar') {
-      // US-20.8: no literal '@' was typed — the whole accumulated run since
-      // the button click IS the filter, no leading-char stripping.
-      popup.updateQuery(text);
-      return;
-    }
-    if (!text.startsWith('@')) {
-      popup.close(); // the '@' itself is gone (Backspaced past it).
-      return;
-    }
-    const filter = text.slice(1);
-    if (filter === ' ' || filter.charCodeAt(0) === 0xa0) {
-      // Space-while-empty literalizes the '@' (Notion/Slack pattern). Chromium
-      // commits a lone trailing space as U+00A0, so match that too.
-      popup.close();
-      return;
-    }
-    popup.updateQuery(filter);
-  }
-
   // ---- Wiring --------------------------------------------------------------
   // Selection-aware `@`: intercepted at keydown so it never replaces the
   // selection. Collapsed `@` falls through to the input path (mention flow).
@@ -731,10 +698,12 @@ export function initTriggerAt(
   content.addEventListener('beforeinput', (e) => {
     const ie = e as InputEvent;
     if (popup.isOpen()) {
-      // Bug 10: in selection mode the query is shell-owned and the original
-      // selection must stay intact — block ALL editor input (IME/paste/typing)
-      // so nothing mutates the selected link until the pick commits. Other modes
-      // keep the old behavior (a second '@' is an ordinary filter character).
+      // Selection mode: the very `@` that opened the popup still fires a beforeinput
+      // on #content right AFTER open() moved focus to the query input, so it slips
+      // past the focus change and would overwrite the selected link text (which must
+      // stay intact for the href-only commit). Block editor input while a selection-
+      // mode popup is open (Bug 10). Mention/bracket keep the inline marker, so they
+      // must NOT preventDefault here — only selection mode overwrites live content.
       if (mode === 'selection') e.preventDefault();
       return;
     }
@@ -747,16 +716,10 @@ export function initTriggerAt(
 
   content.addEventListener('input', (e) => {
     const ie = e as InputEvent;
-    // While the popup is open, keep filtering even MID-IME-COMPOSITION. A
-    // Vietnamese IME (Telex/VNI/Unikey) composes every letter, so each keystroke
-    // fires `input` with isComposing=true; bailing on that (as the open-detection
-    // paths below must) would drop every letter's query update — the user sees the
-    // char land in the editor with no filtering, while digits (never composed)
-    // still filter. Reading deleteRange live gives the in-progress composed text.
-    if (popup.isOpen()) {
-      if (mode === 'mention' || mode === 'toolbar') updateMentionQuery();
-      return;
-    }
+    // While the popup is open, the focused query <input> owns filtering natively
+    // (its own `input` event drives runQuery, including mid-IME-composition), so
+    // the editor no longer reads its own text for the query — just bail.
+    if (popup.isOpen()) return;
     if (ie.isComposing) return; // never OPEN a trigger mid-composition
     if (pendingOpen) {
       pendingOpen = false;
@@ -767,55 +730,29 @@ export function initTriggerAt(
     if (ctx) openBracket(ctx.display, ctx.range);
   });
 
-  // Caret moved out of the trigger run (mention/bracket only — selection mode's
-  // caret intentionally stays put on the preserved selection). A NON-collapsed
-  // selection is fine as long as it stays WITHIN the run: the user may select part
-  // of the `@…` text to edit it. Close only when an endpoint leaves the run (check
-  // BOTH ends via comparePoint, not just isCollapsed).
-  document.addEventListener('selectionchange', () => {
-    if (!popup.isOpen()) return;
-    if (mode === 'selection') {
-      // Bug 9: a selection-mode popup has no auto-close of its own. Close it as
-      // soon as the editor selection leaves the saved selection (the user clicked
-      // or arrowed away to pick another link) — otherwise isOpen + the input
-      // owner stay stuck 'trigger' and every later `@` is swallowed. Opening
-      // never moves the selection (the `@` keydown is preventDefault'd), so the
-      // initial state matches savedSelection and this doesn't self-close.
-      const s = window.getSelection();
-      let leftSelection: boolean;
-      if (!s || s.rangeCount === 0 || !savedSelection) {
-        leftSelection = true;
-      } else {
-        const cur = s.getRangeAt(0);
-        leftSelection =
-          cur.startContainer !== savedSelection.startContainer ||
-          cur.startOffset !== savedSelection.startOffset ||
-          cur.endContainer !== savedSelection.endContainer ||
-          cur.endOffset !== savedSelection.endOffset;
+  // Click-away dismiss. The old selectionchange+comparePoint auto-close tracked
+  // the editor caret leaving the trigger run — but with the focused-input model
+  // the caret no longer lives in #content while the popup is open (it sits in the
+  // popup's own <input>), so there is no editor-caret "left the run" event to
+  // watch. The remaining close paths are: commit (onPick), Escape (shell escape-
+  // stack), and this — a pointer press anywhere OUTSIDE the popup card. Bound on
+  // mousedown (not the input's blur) on purpose: the programmatic content.focus()
+  // T0.2 runs at commit-start would fire a blur on the popup input and re-enter
+  // close(), so a blur listener would reintroduce the commit-timing trap.
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!popup.isOpen()) return;
+      if ((e.target as Element | null)?.closest('.trigger-popup')) return; // inside the card — not a dismiss.
+      if (mode === 'selection') {
+        // Navigate-away abandon (Bug 9): onPopupClose must NOT restore the saved
+        // selection (the user is moving the caret elsewhere), so flag it first.
+        abandonedSelection = true;
       }
-      if (leftSelection) {
-        abandonedSelection = true; // navigate-away: onPopupClose must not restore the old selection.
-        popup.close();
-      }
-      return;
-    }
-    if ((mode !== 'mention' && mode !== 'bracket' && mode !== 'toolbar') || !deleteRange) return;
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) {
       popup.close();
-      return;
-    }
-    const r = sel.getRangeAt(0);
-    try {
-      const startIn = deleteRange.comparePoint(r.startContainer, r.startOffset) === 0;
-      const endIn = deleteRange.comparePoint(r.endContainer, r.endOffset) === 0;
-      if (!startIn || !endIn) {
-        popup.close();
-      }
-    } catch {
-      popup.close();
-    }
-  });
+    },
+    true // capture phase, so it runs before the target's own handlers.
+  );
 
   return {
     notifyFileSearchResult(requestId, files): void {

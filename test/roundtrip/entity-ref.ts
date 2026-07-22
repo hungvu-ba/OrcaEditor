@@ -130,10 +130,12 @@ function inspectRefs(innerHtml: string): Array<{ href: string; text: string }> {
   root.innerHTML = '<p><a href="#UC01">UC01</a></p>';
   postProcessEntityRefs(root);
   runner.check('idempotent: marked on 1st pass', root.querySelectorAll(ENTITY_REF_SELECTOR).length === 1, root.innerHTML);
-  // Display text edited (e.g. the user retyped it) so it no longer matches its own fragment.
+  // Display text edited so it no longer starts with its own fragment token.
+  // (Req 21: `UC01 <label>` DOES still qualify — the human name follows the
+  // code — so the divergent text here must NOT begin with `UC01 `.)
   const anchor = root.querySelector('a');
   if (anchor) {
-    anchor.textContent = 'UC01 (renamed)';
+    anchor.textContent = 'Something else';
   }
   postProcessEntityRefs(root);
   runner.check('idempotent: class removed once text no longer matches', root.querySelectorAll(ENTITY_REF_SELECTOR).length === 0, root.innerHTML);
@@ -151,6 +153,24 @@ function inspectRefs(innerHtml: string): Array<{ href: string; text: string }> {
     JSON.stringify(refs)
   );
   runner.check('multi: serialize round-trips', serializeHtml(renderAndTransform(md)) === serializeHtml(renderer.render(md).html));
+}
+
+// ---------------------------------------------------------------------------
+// 9. Req 21: a labeled mention `[NS_ID label](#NS_ID)` — display text is the
+//    entity's human name (starts with the token, then a space + label). It must
+//    still be marked, and the class-only change must not touch the .md.
+// ---------------------------------------------------------------------------
+{
+  const md = 'See [UC01 Submit Leave Request](#UC01) for details.';
+  const before = serializeHtml(renderer.render(md).html);
+  const after = renderAndTransform(md);
+  const refs = inspectRefs(after);
+  runner.check(
+    'label: labeled mention marked, full name kept as text, clean fragment',
+    refs.length === 1 && refs[0]?.text === 'UC01 Submit Leave Request' && refs[0]?.href === '#UC01',
+    JSON.stringify(refs)
+  );
+  runner.check('label: serialize(with class) === serialize(without) — .md untouched', serializeHtml(after) === before);
 }
 
 runner.finish('entity-ref');

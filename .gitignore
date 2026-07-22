@@ -17,3 +17,5 @@ _bmad/
 _bmad-output/
 .claude/
 Wireframe Handoff/
+# Added by code-review-graph
+.code-review-graph/

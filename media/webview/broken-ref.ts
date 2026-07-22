@@ -19,7 +19,7 @@
  * caret is currently inside is skipped for that pass; `http(s)`/other
  * absolute-scheme hrefs are never sent to the host.
  */
-import { BROKEN_REF_RECOMPUTE_DEBOUNCE_MS } from './constants';
+import { BROKEN_REF_RECOMPUTE_DEBOUNCE_MS, BROKEN_REF_TOOLTIP_HIDE_GRACE_MS } from './constants';
 import { el, positionNear, warningTriangleIcon } from './dom-utils';
 import { ENTITY_REF_CLASS } from './render';
 import type { VsCodeApi } from './vscode-api';
@@ -46,6 +46,23 @@ export function slugifyHeadingText(text: string): string {
 /** True for any href with a URL scheme (`http:`, `https:`, `mailto:`, ...) — never checked, per the Broken Reference plan. */
 function hasUrlScheme(href: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(href);
+}
+
+/**
+ * Width of the warning-triangle hover hitzone at a broken-ref anchor's start —
+ * the `::before` marker is a 12px icon + 3px gap (markdown.css), so the fix
+ * popup only opens while the pointer is within this leading strip. Hovering the
+ * link TEXT instead surfaces entity-scope.ts's plain info tooltip.
+ */
+const BROKEN_TRIANGLE_HITZONE_PX = 16;
+
+/** True when (clientX, clientY) sits over a broken-ref anchor's leading warning-triangle marker (first line box only). */
+export function pointerOverBrokenTriangle(anchor: Element, clientX: number, clientY: number): boolean {
+  const r = anchor.getClientRects()[0]; // triangle sits at the start of the FIRST line box even when the anchor wraps.
+  if (!r) {
+    return false;
+  }
+  return clientY >= r.top && clientY <= r.bottom && clientX >= r.left && clientX <= r.left + BROKEN_TRIANGLE_HITZONE_PX;
 }
 
 export interface BrokenRefDeps {
@@ -93,13 +110,33 @@ export function initBrokenRef(deps: BrokenRefDeps): BrokenRefController {
   document.body.appendChild(tooltip);
 
   let tooltipAnchor: HTMLAnchorElement | undefined;
+  let hideTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelHide(): void {
+    if (hideTimer !== undefined) {
+      clearTimeout(hideTimer);
+      hideTimer = undefined;
+    }
+  }
 
   function hideTooltip(): void {
+    cancelHide();
     tooltip.hidden = true;
     tooltipAnchor = undefined;
   }
 
+  /**
+   * Ẩn tooltip sau một khoảng ân hạn thay vì ngay lập tức, để chuột kịp băng qua
+   * khe hở anchor↔tooltip mà bấm "Search again →" (tooltip's `mouseenter` hủy
+   * timer). Ẩn-tức-thì khiến popup biến mất trước khi chuột chạm tới nó.
+   */
+  function scheduleHide(): void {
+    cancelHide();
+    hideTimer = setTimeout(hideTooltip, BROKEN_REF_TOOLTIP_HIDE_GRACE_MS);
+  }
+
   function showTooltip(anchor: HTMLAnchorElement, title: string, description: string, showAction: boolean): void {
+    cancelHide();
     tooltipAnchor = anchor;
     titleText.textContent = title;
     descRow.textContent = description;
@@ -127,48 +164,61 @@ export function initBrokenRef(deps: BrokenRefDeps): BrokenRefController {
     hideTooltip();
   });
 
+  /** Populate + open the fix popup for `anchor` per its broken-ref kind. */
+  function showFor(anchor: HTMLAnchorElement): void {
+    const kind = anchor.dataset.brokenRefKind;
+    if (kind === 'entity') {
+      const target = anchor.dataset.brokenRefTarget ?? '';
+      showTooltip(anchor, `${target} not found`, 'The declaration may have been deleted, renamed, or its namespace changed.', true);
+      // "+N other occurrence(s)" — N excludes the hovered occurrence itself.
+      const n = Math.max(0, Number(anchor.dataset.brokenRefOccurrences ?? '0') - 1);
+      if (n > 0) {
+        fixAllRow.textContent = `+${n} other occurrence${n === 1 ? '' : 's'} found so far — Fix all`;
+        fixAllRow.hidden = false;
+      }
+    } else if (kind === 'heading') {
+      showTooltip(anchor, 'Heading not found', `#${anchor.dataset.brokenRefTarget ?? ''} may have been renamed or removed.`, false);
+    } else {
+      const target = anchor.dataset.brokenRefTarget ?? '';
+      showTooltip(anchor, 'File not found', `${target} may have been moved, renamed, or deleted.`, true);
+    }
+  }
+
+  // The fix popup opens only while the pointer is over the leading warning
+  // triangle (not the link text — that region belongs to entity-scope.ts's
+  // info tooltip). mousemove-driven (not mouseover) so crossing between the
+  // triangle and the text WITHIN one anchor re-evaluates; rAF-coalesced per the
+  // hot-handler layout-read discipline (getClientRects in pointerOverBrokenTriangle).
+  let moveRaf = 0;
+  let moveX = 0;
+  let moveY = 0;
+  let moveTarget: HTMLElement | null = null;
   content.addEventListener(
-    'mouseover',
+    'mousemove',
     (e) => {
-      const anchor = (e.target as HTMLElement).closest<HTMLAnchorElement>(`a.${BROKEN_REF_CLASS}`);
-      if (!anchor || anchor === tooltipAnchor) {
+      moveX = (e as MouseEvent).clientX;
+      moveY = (e as MouseEvent).clientY;
+      moveTarget = e.target as HTMLElement;
+      if (moveRaf !== 0) {
         return;
       }
-      const kind = anchor.dataset.brokenRefKind;
-      if (kind === 'entity') {
-        const target = anchor.dataset.brokenRefTarget ?? '';
-        showTooltip(
-          anchor,
-          `${target} not found`,
-          'The declaration may have been deleted, renamed, or its namespace changed.',
-          true
-        );
-        // "+N other occurrence(s)" — N excludes the hovered occurrence itself.
-        const n = Math.max(0, Number(anchor.dataset.brokenRefOccurrences ?? '0') - 1);
-        if (n > 0) {
-          fixAllRow.textContent = `+${n} other occurrence${n === 1 ? '' : 's'} found so far — Fix all`;
-          fixAllRow.hidden = false;
+      moveRaf = requestAnimationFrame(() => {
+        moveRaf = 0;
+        const anchor = moveTarget?.closest<HTMLAnchorElement>(`a.${BROKEN_REF_CLASS}`) ?? null;
+        if (anchor && pointerOverBrokenTriangle(anchor, moveX, moveY)) {
+          if (anchor === tooltipAnchor) {
+            cancelHide(); // chuột quay lại chính tam giác đang mở popup → hủy lịch ẩn.
+          } else {
+            showFor(anchor);
+          }
+        } else if (tooltipAnchor && hideTimer === undefined) {
+          scheduleHide(); // rời khỏi tam giác (sang text/ra ngoài) → hẹn ẩn (một lần, đủ ân hạn băng sang popup).
         }
-      } else if (kind === 'heading') {
-        showTooltip(anchor, 'Heading not found', `#${anchor.dataset.brokenRefTarget ?? ''} may have been renamed or removed.`, false);
-      } else {
-        const target = anchor.dataset.brokenRefTarget ?? '';
-        showTooltip(anchor, 'File not found', `${target} may have been moved, renamed, or deleted.`, true);
-      }
+      });
     },
     true
   );
-  content.addEventListener(
-    'mouseout',
-    (e) => {
-      const anchor = (e.target as HTMLElement).closest<HTMLAnchorElement>(`a.${BROKEN_REF_CLASS}`);
-      const related = (e as MouseEvent).relatedTarget as Node | null;
-      if (anchor && anchor === tooltipAnchor && !tooltip.contains(related)) {
-        hideTooltip();
-      }
-    },
-    true
-  );
+  tooltip.addEventListener('mouseenter', cancelHide);
   tooltip.addEventListener('mouseleave', hideTooltip);
   // Content re-rendered / scrolled out from under the tooltip → its anchor rect is stale, drop it.
   document.addEventListener('scroll', hideTooltip, true);

@@ -107,5 +107,12 @@ export const PASTE_IMAGE_DEDUPE_MS = 500;
 /** Trễ trước khi quét lại broken-reference marker sau khi tài liệu render lại (broken-ref.ts, Req 20 US-20.9). */
 export const BROKEN_REF_RECOMPUTE_DEBOUNCE_MS = 400;
 
+/**
+ * Ân hạn trước khi ẩn tooltip broken-reference khi chuột rời anchor (broken-ref.ts).
+ * Cho phép chuột băng qua khe hở anchor↔tooltip để bấm "Search again →" mà popup
+ * không biến mất; hủy nếu chuột vào tooltip hoặc quay lại anchor.
+ */
+export const BROKEN_REF_TOOLTIP_HIDE_GRACE_MS = 140;
+
 /** Trễ giữa các phím gõ vào ô tìm "Search again" trước khi hỏi host tìm file lại (quick-correct.ts). */
 export const QUICK_CORRECT_SEARCH_DEBOUNCE_MS = 200;

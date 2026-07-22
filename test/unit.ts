@@ -14,6 +14,8 @@ import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
+  entityFollowingLabel,
+  entityFollowingPreview,
   imageNamePrefix,
   normalizeForSearch,
   relativePath,
@@ -563,8 +565,45 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
 {
   const rows: IndexedEntity[] = parseEntities('file:///a.md', '## Login flow\n\ncaption::UC01\n');
   eq('entity: caption parses namespace/id/title', rows, [
-    { namespace: 'UC', id: '01', file: 'file:///a.md', line: 2, title: 'Login flow' },
+    { namespace: 'UC', id: '01', file: 'file:///a.md', line: 2, title: 'Login flow', preview: '', label: '' },
   ]);
+}
+
+// entityFollowingPreview (Req 21 hover tooltip) — shared truncation rule.
+{
+  eq('preview: short following text passes through trimmed', entityFollowingPreview(' Submit Leave Request'), 'Submit Leave Request');
+  eq('preview: empty when nothing follows', entityFollowingPreview(''), '');
+  eq('preview: whitespace-only follows -> empty', entityFollowingPreview('   '), '');
+  eq('preview: over 20 chars is capped with an ellipsis', entityFollowingPreview(' A very long description here'), 'A very long descript…');
+  eq('preview: stops at a colon (no ellipsis on a delimiter cut)', entityFollowingPreview(' Login: then more'), 'Login');
+  eq('preview: stops at a semicolon', entityFollowingPreview(' Login; then more'), 'Login');
+  eq('preview: stops at a backtick (inline code / command)', entityFollowingPreview(' run `cmd` now'), 'run');
+  eq('preview: stops at a newline', entityFollowingPreview(' first line\nsecond'), 'first line');
+  // Code-point-safe cap: an emoji straddling the 20th unit is not split into a broken half.
+  eq('preview: caps on code points, not UTF-16 units', entityFollowingPreview('1234567890123456789😀X'), '1234567890123456789😀…');
+}
+
+// entityFollowingLabel (Req 21 mention display) — same delimiter rule as the
+// preview but UNCAPPED (the entity's full human name), so a long label is kept.
+{
+  eq('label: passes the full following text through trimmed', entityFollowingLabel(' Submit Leave Request'), 'Submit Leave Request');
+  eq('label: NOT capped at 20 chars (unlike the preview)', entityFollowingLabel(' A very long description here'), 'A very long description here');
+  eq('label: empty when nothing follows', entityFollowingLabel('   '), '');
+  eq('label: stops at the same break delimiters', entityFollowingLabel(' Login: then more'), 'Login');
+}
+
+// parseEntities preview alignment: inline code BEFORE the caption must not shift
+// the following-text slice (stripInlineCode is length-preserving).
+{
+  const rows = parseEntities('file:///pv2.md', 'See `foo()` caption::UC01 The login flow\n');
+  eq('entity: preview correct when inline code precedes the caption', rows.map((r) => `${r.namespace}${r.id}=${r.preview}`), ['UC01=The login flow']);
+}
+
+// parseEntities carries the following-text preview per declaration.
+{
+  const rows = parseEntities('file:///pv.md', 'caption::UC01 Submit Leave Request\ncaption::BR05\n');
+  eq('entity: preview = text following the token', rows.map((r) => r.preview), ['Submit Leave Request', '']);
+  eq('entity: label = full following text (uncapped) per declaration', rows.map((r) => r.label), ['Submit Leave Request', '']);
 }
 
 // id match (both full id and partial) + title match — proves id-OR-title query.
@@ -580,10 +619,30 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('entity: namespace parsed as UC, id 01', q.namespace === 'UC' && q.id === '01');
 }
 
+// Bug C1 — a short token must not match mid-word inside a title. Typing `UC`
+// used to return `BR05`/`NAMESPACE_ID` because their titles contain "strUCtured".
+{
+  const idx = new EntityIndex();
+  idx.build([
+    { uri: 'file:///a.md', text: '# Login flow\ncaption::UC01\n' },
+    { uri: 'file:///b.md', text: '# Structured Entity Reference System\ncaption::BR05\n' },
+    { uri: 'file:///c.md', text: '# 21 Structured Entity Reference\ncaption::NAMESPACE_ID\n' },
+  ]);
+  const uc = idx.query('UC');
+  check('entity: query "UC" excludes mid-word title hits (BR05/NAMESPACE_ID)', uc.length === 1 && uc[0].namespace === 'UC');
+  check('entity: title word-start search still matches ("structured")', idx.query('structured').length === 2);
+}
+
 // Empty/malformed declarations are refused (US-21.1 empty-id).
 {
   const rows = parseEntities('file:///m.md', 'caption::\ncaption::UC02\ncaption::123\n');
   eq('entity: empty id + no-namespace declarations skipped', rows.map((r) => r.namespace + r.id), ['UC02']);
+}
+
+// Trailing punctuation the `\S+` capture absorbed from prose/markdown is stripped.
+{
+  const rows = parseEntities('file:///p.md', 'caption::UC01`,\ncaption::BR05).\ncaption::UC02\n');
+  eq('entity: trailing punctuation stripped from parsed token', rows.map((r) => r.namespace + r.id), ['UC01', 'BR05', 'UC02']);
 }
 
 // nearestEnclosingHeading — nesting, fence-immunity, above-any-heading.
@@ -605,6 +664,28 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
 {
   const rows = parseEntities('file:///f.md', '# H\n\n```\ncaption::UC99\n```\ncaption::UC01\n');
   eq('entity: caption inside a fence is skipped', rows.map((r) => r.id), ['01']);
+}
+
+// Bug D2 — a caption:: written inside an inline code span (backticks) is
+// documentation/example syntax, not a live declaration, so it is NOT indexed
+// (matches the webview's CODE-ancestor skip; PO 2026-07-22). Reproduces the
+// Requirement 21 file's `declare inline (`caption::UC01`)` examples.
+{
+  const rows = parseEntities('file:///d2.md', 'declare a named entity inline (`caption::UC01`) here\n');
+  eq('entity D2: caption inside inline code span is not indexed', rows.map((r) => r.namespace + r.id), []);
+}
+{
+  const rows = parseEntities('file:///d2.md', 'code `caption::UC01` but plain caption::RE02 counts\n');
+  eq('entity D2: only the plain caption on a mixed line is indexed', rows.map((r) => r.namespace + r.id), ['RE02']);
+}
+{
+  const rows = parseEntities('file:///d2.md', 'caption::UC01\n');
+  eq('entity D2: a plain (non-backticked) declaration is still indexed', rows.map((r) => r.namespace + r.id), ['UC01']);
+}
+{
+  // A lone backtick that never closes is not a code span — the token survives.
+  const rows = parseEntities('file:///d2.md', 'caption::UC01`, and more\n');
+  eq('entity D2: unmatched backtick is literal, token still indexed', rows.map((r) => r.namespace + r.id), ['UC01']);
 }
 
 // Incremental update — onFileChanged replaces just that file's rows.
@@ -678,14 +759,109 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   eq('occurrence: links inside a fence are skipped', fenced, [{ id: 'br02', line: 3 }]);
 }
 
-// truncateDisplay — Bug 11: cap @ result label/detail at 20 chars + ellipsis.
+// truncateDisplay — Bug 11: cap @ result label/detail at 30 chars + ellipsis.
 {
   check('truncate: short text unchanged', truncateDisplay('BR02') === 'BR02');
   check('truncate: exactly 20 chars unchanged', truncateDisplay('a'.repeat(20)) === 'a'.repeat(20));
-  eq('truncate: >20 chars → 20 chars + ellipsis', truncateDisplay('Requirement: 21. Structured Entity Reference System'), 'Requirement: 21. Str…');
-  check('truncate: result length is 20 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(20) + '…');
+  eq('truncate: >30 chars → 30 chars + ellipsis', truncateDisplay('Requirement: 21. Structured Entity Reference System'), 'Requirement: 21. Structured En…');
+  check('truncate: result length is 30 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(30) + '…');
   check('truncate: empty string unchanged', truncateDisplay('') === '');
-  check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(30)) === '😀'.repeat(20) + '…');
+  check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(40)) === '😀'.repeat(30) + '…');
+}
+
+// ---------------------------------------------------------------------------
+// Bug #3 — echo-suppression cho applyEditBreakingCoalesce. provider.ts import
+// 'vscode' nên không nạp được ở đây; MÔ PHỎNG đúng quyết định echo của
+// changeSubscription + case 'edit' (giống model applyEdit ở đầu file). Nhánh
+// nghịch đảo áp HAI applyEdit → hai sự kiện đổi; sự kiện TRUNG GIAN mới là thứ
+// rò filter-text nếu không có guard breakingEditInProgress.
+// ---------------------------------------------------------------------------
+{
+  // Bám sát applyEditBreakingCoalesce (src/provider.ts): phát sự kiện đổi cho
+  // trạng thái GIỮA rồi trạng thái CUỐI, đúng cấu trúc nhánh của hàm thật.
+  function emitBreakingChanges(before: string, after: string, onChange: (t: string) => void): void {
+    const diff = computeMinimalEdit(before, after);
+    if (!diff) {
+      return;
+    }
+    const { start, oldEnd, newText: ins } = diff;
+    if (ins === '' && oldEnd - start >= 2) {
+      const mid = start + Math.floor((oldEnd - start) / 2);
+      onChange(before.slice(0, mid) + before.slice(oldEnd)); // xoá nửa sau (giữa)
+      onChange(after); // xoá nửa đầu (cuối)
+      return;
+    }
+    if (ins !== '' && oldEnd > start) {
+      onChange(before.slice(0, start) + before.slice(oldEnd)); // đã xoá, chưa chèn (giữa)
+      onChange(after);
+      return;
+    }
+    onChange(after); // chèn thuần / xoá 1 ký tự: một sự kiện
+  }
+
+  function makeHost(withGuard: boolean) {
+    let lastTextFromWebview: string | undefined;
+    let prevEditBeforeText: string | undefined;
+    let breakingEditInProgress = false;
+    let doc = '';
+    let updatesPosted = 0;
+
+    // changeSubscription: chỉ phần quyết định echo (bỏ nhánh undo/redo).
+    function onChange(newText: string): void {
+      doc = newText;
+      if (withGuard && breakingEditInProgress) {
+        return; // Bug #3 guard
+      }
+      if (newText === lastTextFromWebview) {
+        return; // echo của chính webview (khớp text cuối)
+      }
+      lastTextFromWebview = undefined;
+      updatesPosted++; // lên lịch 'update' debounce → echo về webview
+    }
+
+    // case 'edit'.
+    function edit(text: string): void {
+      const beforeThis = doc;
+      const isInverseOfPrev =
+        prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
+      lastTextFromWebview = text;
+      if (isInverseOfPrev) {
+        breakingEditInProgress = true;
+        try {
+          emitBreakingChanges(beforeThis, text, onChange);
+        } finally {
+          breakingEditInProgress = false;
+        }
+      } else {
+        onChange(text); // applyMinimalEdit: một sự kiện
+      }
+      prevEditBeforeText = beforeThis;
+    }
+
+    return { edit, external: onChange, get updates() { return updatesPosted; } };
+  }
+
+  // Kịch bản rò (Bug #3): sau "foo" gõ "/De" rồi commit trigger xoá "/De" về
+  // "foo". prevEditBeforeText là doc-state TRƯỚC edit liền trước, nên phải seed
+  // "foo" bằng một edit rồi mới gõ "/De" — khi đó commit về "foo" mới là nghịch
+  // đảo chính xác của edit trước → chạy nhánh breaking (HAI applyEdit).
+  function runScenario(withGuard: boolean): number {
+    const h = makeHost(withGuard);
+    h.edit('foo'); // seed
+    h.edit('foo/De'); // gõ trigger + filter (edit thường)
+    h.edit('foo'); // commit delete-only (inverse-of-prev → breaking)
+    return h.updates;
+  }
+  check('bug3: commit nghịch đảo KHÔNG post update khi có guard', runScenario(true) === 0);
+  // Reproduce-first: bỏ guard → ít nhất một 'update' thừa bị lên lịch (sự kiện
+  // trung gian ≠ text cuối vượt echo-check rồi clear lastTextFromWebview). Số
+  // đếm chính xác tuỳ debounce gộp — bất biến then chốt là >0 so với 0 khi có guard.
+  check('bug3: KHÔNG guard → có update thừa bị lên lịch (reproduce)', runScenario(false) > 0);
+
+  // Edit ngoài thật (git/format...) vẫn phải post update.
+  const ext = makeHost(true);
+  ext.external('bar'); // thay đổi không do webview
+  check('bug3: edit ngoài thật vẫn post update (không over-suppress)', ext.updates === 1);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);
