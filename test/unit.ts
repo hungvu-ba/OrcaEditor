@@ -26,6 +26,7 @@ import {
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
+import { isWindowsDrivePath, hasUrlScheme } from '../src/shared/link-scheme';
 import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
 import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
@@ -396,6 +397,24 @@ eq('link: file: bị chặn', classifyLink('file:///etc/passwd'), { kind: 'absol
 eq('link: vscode: bị chặn', classifyLink('vscode://x'), { kind: 'absolute', scheme: 'vscode', safe: false });
 eq('link: đường dẫn tương đối', classifyLink('./other.md#sec'), { kind: 'relative' });
 eq('link: đường dẫn tuyệt đối trong workspace (không scheme)', classifyLink('/docs/a.md'), { kind: 'relative' });
+// X-7: a Windows drive path is a local target, not the unsafe scheme `c:`.
+eq('link: Windows drive path backslash → local (X-7)', classifyLink('C:\\docs\\x.md'), { kind: 'relative' });
+eq('link: Windows drive path forward-slash → local (X-7)', classifyLink('c:/docs/x.md'), { kind: 'relative' });
+
+// ---------------------------------------------------------------------------
+// link-scheme predicates (src/shared/link-scheme.ts) — the ONE answer for X-7
+// ---------------------------------------------------------------------------
+
+eq('drivePath: C:\\ backslash', isWindowsDrivePath('C:\\docs\\x.md'), true);
+eq('drivePath: c:/ forward slash', isWindowsDrivePath('c:/docs/x.md'), true);
+eq('drivePath: http không phải drive', isWindowsDrivePath('http://x'), false);
+eq('drivePath: bare c: (thiếu separator) không match', isWindowsDrivePath('c:foo'), false);
+eq('drivePath: đường dẫn tương đối không phải drive', isWindowsDrivePath('./a.md'), false);
+eq('scheme: http là scheme', hasUrlScheme('http://x'), true);
+eq('scheme: mailto là scheme', hasUrlScheme('mailto:a@b'), true);
+eq('scheme: drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:\\x.md'), false);
+eq('scheme: đường dẫn tương đối KHÔNG phải scheme', hasUrlScheme('./a.md'), false);
+eq('scheme: anchor thuần KHÔNG phải scheme', hasUrlScheme('#heading'), false);
 
 // ---------------------------------------------------------------------------
 // message contract (src/shared/messages.ts) — kiểm tra ở mức TYPE. Nếu hình
@@ -426,13 +445,13 @@ const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommand
 const toWebview: HostToWebview[] = [
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   }, reveal: { line: 0, character: 0, length: 1 } },

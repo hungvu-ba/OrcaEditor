@@ -23,6 +23,7 @@ import { BROKEN_REF_RECOMPUTE_DEBOUNCE_MS, BROKEN_REF_TOOLTIP_HIDE_GRACE_MS } fr
 import { el, positionNear, warningTriangleIcon } from './dom-utils';
 import { ENTITY_REF_CLASS } from './render';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';
+import { hasUrlScheme } from '../../src/shared/link-scheme';
 import type { VsCodeApi } from './vscode-api';
 import type { EntityExistResult, TargetExistsResult } from '../../src/shared/messages';
 
@@ -66,11 +67,6 @@ export function fragmentToHeadingSlug(fragment: string): string {
     decoded = fragment;
   }
   return slugifyHeadingText(decoded);
-}
-
-/** True for any href with a URL scheme (`http:`, `https:`, `mailto:`, ...) — never checked, per the Broken Reference plan. */
-function hasUrlScheme(href: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(href);
 }
 
 /**

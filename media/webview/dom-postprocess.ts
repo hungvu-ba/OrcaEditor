@@ -32,6 +32,7 @@ import {
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';
+import { hasUrlScheme } from '../../src/shared/link-scheme';
 import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 
 /**
@@ -498,9 +499,6 @@ function isValidEntityToken(token: string): boolean {
   return !!nsMatch && nsMatch[0].length < token.length;
 }
 
-/** True for any href with a URL scheme (`http:`, `https:`, `mailto:`, ...) — mirrors broken-ref.ts's hasUrlScheme (never an entity reference). */
-const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
-
 /**
  * Req 21 US-21.1 (bug_General Mention Declare #5/#6/#7): (re)build a
  * CAPTION_CLASS badge's inner structure from a validated `NS_ID` token (NO
@@ -628,7 +626,7 @@ export function postProcessEntityRefs(root: ParentNode & Node): void {
     // `NS_ID label` (the entity's human name follows a single space). Both are
     // entity references — the fragment carries the clean `#NS_ID` either way.
     const matchesToken = text === fragment || text.startsWith(`${fragment} `);
-    if (fragment && matchesToken && isValidEntityToken(fragment) && !URL_SCHEME_RE.test(href)) {
+    if (fragment && matchesToken && isValidEntityToken(fragment) && !hasUrlScheme(href)) {
       anchor.classList.add(ENTITY_REF_CLASS);
     } else {
       anchor.classList.remove(ENTITY_REF_CLASS);

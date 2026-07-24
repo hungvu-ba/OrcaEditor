@@ -90,6 +90,12 @@ export interface InitConfig {
   fontFamily: string;
   autoOpenToc: boolean;
   showLineNumbers: boolean;
+  /**
+   * X-12: whether the host filesystem is case-insensitive (Windows, macOS).
+   * Threaded so `normalizeHrefKey` folds the path body identically host-side
+   * (References dedup) and webview-side (ref-nav body match).
+   */
+  caseInsensitiveFs: boolean;
   /** Giá trị mặc định ban đầu của dropdown scope trong popover tìm xuyên file. */
   crossFileSearchScope: CrossFileSearchScope;
   /** Trạng thái Reading Mode ban đầu (US-19.x). */

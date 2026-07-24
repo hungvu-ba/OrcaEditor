@@ -25,6 +25,7 @@ const DEFAULT_CONFIG: InitConfig = {
   fontFamily: 'sans-serif',
   autoOpenToc: false,
   showLineNumbers: false,
+  caseInsensitiveFs: false,
   crossFileSearchScope: 'markdown',
   readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
   trigger: { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' },

@@ -104,6 +104,9 @@ const plantumlView = initPlantuml(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
+// X-12: filesystem case-sensitivity, from InitConfig — folds the ref-nav key so
+// a case-differing body occurrence matches on Windows/macOS. Host default off.
+let caseInsensitiveFs = false;
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
@@ -340,6 +343,7 @@ window.addEventListener('message', (event) => {
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
+      caseInsensitiveFs = cfg.caseInsensitiveFs === true;
       crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
       // US-2.8: engine PlantUML nạp lười lúc chạy — webview không tự dựng được
       // URI webview lẫn nonce CSP, nên nhận sẵn từ host. Phải set TRƯỚC
@@ -1597,10 +1601,10 @@ function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
     openLink(anchor.getAttribute('href') ?? '');
     return;
   }
-  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '');
+  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '', caseInsensitiveFs);
   const sectionAnchors = referencesSectionAnchors();
   const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
-    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '') === key
+    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '', caseInsensitiveFs) === key
   );
   if (!bodyAnchor) {
     return;

@@ -4,6 +4,8 @@
  * trực tiếp). Không import 'vscode' ở đây — chỉ chuỗi/số học thuần (finding C6).
  */
 
+import { isWindowsDrivePath } from './shared/link-scheme';
+
 /** Kết quả diff nhỏ nhất: thay đoạn [start, oldEnd) của oldText bằng newText. */
 export interface MinimalEdit {
   /** Offset (theo mã UTF-16) bắt đầu khác nhau trong oldText. */
@@ -69,6 +71,9 @@ export interface LinkClassification {
 export function classifyLink(href: string): LinkClassification {
   if (!href) {
     return { kind: 'empty' };
+  }
+  if (isWindowsDrivePath(href)) {
+    return { kind: 'relative' }; // X-7: `C:\…` is a local path, not scheme `c:` — resolve as a file target.
   }
   const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
   if (schemeMatch) {

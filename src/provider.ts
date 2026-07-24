@@ -32,6 +32,7 @@ import {
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
+import { isWindowsDrivePath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
@@ -608,6 +609,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+              // X-12: same value drives host dedup + webview ref-nav so both fold identically.
+              caseInsensitiveFs: CASE_INSENSITIVE_FS,
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-2.8: webview không tự gọi asWebviewUri/sinh nonce được, nên
               // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
@@ -848,7 +851,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // Let the trigger-text delete edit commit first, then read the text.
             await editChain;
             const text = document.getText();
-            const plan = planReferences(text);
+            const plan = planReferences(text, CASE_INSENSITIVE_FS);
             if (plan.candidates.length === 0) {
               void vscode.window.showInformationMessage('No new references to add.');
               break;
@@ -1813,6 +1816,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     relPath: string
   ): Promise<vscode.Uri[]> {
     const decoded = decodeURIComponent(relPath);
+    if (isWindowsDrivePath(decoded)) {
+      // X-7: an absolute drive path (`C:\…`) is NOT relative to the doc/workspace
+      // — resolve it directly as a file URI, still gated by allowed-roots, so
+      // click / inline marker / References all agree on one answer.
+      // `path.win32.normalize` collapses `.`/`..` FIRST: unlike the relative
+      // branch below (built via `joinPath`, which normalizes at the Uri layer),
+      // `vscode.Uri.file` does NOT resolve `..`, and `isInsideAllowedRoots`'
+      // lexical guard assumes normalized input — so a raw `C:\root\..\..\outside`
+      // href would otherwise `startsWith` the root string and slip past.
+      const uri = vscode.Uri.file(path.win32.normalize(decoded));
+      return (await this.isInsideAllowedRoots(document, uri)) ? [uri] : [];
+    }
     const ordered: vscode.Uri[] = [];
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (folder) {
@@ -1919,17 +1934,27 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   ): Promise<Set<string>> {
     const missing = new Set<string>();
     for (const candidate of candidates) {
-      const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(candidate.fileSegment));
-      if (!(await this.isInsideAllowedRoots(document, uri))) {
-        continue; // unknown / out of scope — do not mark.
-      }
-      try {
-        await vscode.workspace.fs.stat(uri);
-      } catch (err) {
-        if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
-          missing.add(candidate.key);
+      // X-10: resolve with the SAME candidate set as `openLink`/`checkTargetsExist`
+      // (workspace-root-relative first, then document-relative) instead of a
+      // second document-relative-only join — a root-relative link that opens
+      // fine must never get a false ⚠️. Outside allowed roots → no candidates →
+      // unknown → not marked (as before).
+      let exists = false;
+      let notFound = false;
+      for (const uri of await this.relativeTargetCandidates(document, candidate.fileSegment)) {
+        try {
+          await vscode.workspace.fs.stat(uri);
+          exists = true;
+          break;
+        } catch (err) {
+          if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
+            notFound = true;
+          }
+          // Any other error → unknown → does not by itself mark missing.
         }
-        // Any other error → unknown → no mark.
+      }
+      if (!exists && notFound) {
+        missing.add(candidate.key);
       }
     }
     return missing;

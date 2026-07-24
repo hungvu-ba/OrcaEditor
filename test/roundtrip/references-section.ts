@@ -32,6 +32,13 @@ runner.eq('key: Windows drive lower-cased, kept as path', normalizeHrefKey('C:\\
 runner.eq('key: two anchors of one file collapse', normalizeHrefKey('path.md#a') === normalizeHrefKey('path.md#b'), true);
 runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalizeHrefKey('a.md'), true);
 
+// ---- X-12: path-body case-fold is opt-in (caseInsensitive) ----
+runner.eq('key(X-12): default keeps body case (case-sensitive FS)', normalizeHrefKey('Docs/Spec.md'), 'Docs/Spec.md');
+runner.eq('key(X-12): default — case-differing keys stay distinct', normalizeHrefKey('Docs/Spec.md') === normalizeHrefKey('docs/spec.md'), false);
+runner.eq('key(X-12): caseInsensitive folds the body', normalizeHrefKey('Docs/Spec.md', true), 'docs/spec.md');
+runner.eq('key(X-12): caseInsensitive — case-differing keys collapse', normalizeHrefKey('Docs/Spec.md', true) === normalizeHrefKey('docs/spec.md', true), true);
+runner.eq('key(X-12): drive letter still folded regardless of flag', normalizeHrefKey('C:\\Dir\\X.md', false), 'c:/Dir/X.md');
+
 // ---- create: no section → appended at EOD, exact format + single trailing newline ----
 {
   const md = 'See [Guide](guide.md) for details.\n';
@@ -149,6 +156,19 @@ runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalize
   const out = render(md);
   runner.eq('windows: drive-letter path is local, gathered', out,
     '[win](C:/notes/x.md)\n\n## References\n\n- [win](C:/notes/x.md)\n');
+}
+
+// ---- X-7: a backslash drive-path link is a local candidate (not skipped as external) ----
+{
+  const md = '[win](C:\\dir\\x.md)';
+  runner.eq('X-7: backslash drive path gathered as a candidate', planReferences(md).candidates.length, 1);
+}
+
+// ---- X-12: case-insensitive dedup collapses case-differing links to one entry ----
+{
+  const md = '[A](Docs/Spec.md) and [B](docs/spec.md)';
+  runner.eq('X-12: case-sensitive default keeps both candidates', planReferences(md).candidates.length, 2);
+  runner.eq('X-12: caseInsensitive collapses to one candidate', planReferences(md, true).candidates.length, 1);
 }
 
 // ---- #anchor consolidation: two anchors of one file → one entry (first display/href) ----

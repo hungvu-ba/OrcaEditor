@@ -424,3 +424,4 @@
 | 0.9.0 | 2026-07-24 | Fix: an entity mention with a non-ASCII (Vietnamese) namespace no longer always renders broken — the fragment is decoded+NFC-reconciled at the four classify/lookup/scan boundaries via one shared helper (X-5). |
 | 0.9.0 | 2026-07-24 | Change: the Table of Contents now defaults to H1–H2–H3 (was H1–H2), and a dense doc (>20 H1–H3 headings) now falls back to H2 (was H1-only); saved per-tab depth still wins. |
 | 0.9.0 | 2026-07-24 | Fix: a Vietnamese heading `#fragment` link no longer breaks across NFC vs NFD authoring forms — `slugifyHeadingText` now NFC-normalizes and both consumers slugify the fragment side via one shared helper (X-4). |
+| 0.9.0 | 2026-07-24 | Fix: unify link classify/resolve — `C:\…` is one consistent local target (X-7), References reuses openLink's resolver (X-10), href keys case-fold on case-insensitive filesystems to avoid duplicate entries (X-12). |
