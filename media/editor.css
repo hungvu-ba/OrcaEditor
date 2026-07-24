@@ -342,6 +342,18 @@ body.dd-dragging .dd-handle {
   background: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.15));
 }
 
+/* Drop caret: thin vertical bar at the exact insertion point while dragging an
+ * external file over normal (non-cell) content — position:fixed, driven by
+ * viewport rects in external-drop.ts, so it needs no positioned ancestor. */
+.dd-drop-caret {
+  position: fixed;
+  width: 2px;
+  background: var(--vscode-focusBorder, #007acc);
+  pointer-events: none;
+  z-index: 40;
+  display: none;
+}
+
 /* --- List item drag & drop + indent/outdent (HLR section 17, US-17.5, M3) ---
  * .dd-li-handle reuses .dd-handle's look; positioned relative to the hovered
  * <li>'s own (indented) left edge, not a fixed gutter offset like the block

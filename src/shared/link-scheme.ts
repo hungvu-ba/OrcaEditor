@@ -9,12 +9,16 @@
 
 /**
  * A Windows drive-letter path (`C:\dir\x.md` or `C:/dir/x.md`) — a LOCAL
- * filesystem target, NOT a URL scheme. The single `[\\/]` after the colon is
+ * filesystem target, NOT a URL scheme. The separator right after the colon is
  * what distinguishes it from a real scheme like `c:` (which is never followed
- * by a separator as its first char in practice).
+ * by a separator as its first char in practice). The separator is matched in
+ * RAW (`\` `/`) AND percent-encoded (`%5C` `%2F`) form, because markdown-it's
+ * normalizeLink encodes a backslash href — an authored `[x](C:\d\x.md)` renders
+ * `href="C:%5Cd%5Cx.md"`, and that is the string the click / inline-marker paths
+ * classify (X-7 follow-up: the raw-only regex misfired it into scheme `c:`).
  */
 export function isWindowsDrivePath(href: string): boolean {
-  return /^[a-zA-Z]:[\\/]/.test(href);
+  return /^[a-zA-Z]:([\\/]|%5c|%2f)/i.test(href);
 }
 
 /**

@@ -591,6 +591,46 @@ td[align='right'] {
   box-sizing: border-box;
 }
 
+/* US-19.24: thanh cuộn ngang NỔI cho bảng rộng (table-sticky-header.ts). Ghim đáy
+ * viewport, khớp mép trái + bề rộng khung bảng đang xem. Là "scroll-proxy": khung
+ * overflow-x:auto + 1 spacer con rộng đúng scrollWidth của bảng → sinh scrollbar
+ * native (kéo được) mà khỏi tự vẽ thumb. pointer-events:auto (KHÁC header dính
+ * pointer-events:none) vì phải kéo được. Ngoài #content → roundtrip-safe. */
+#sticky-table-scrollbar {
+  position: fixed;
+  bottom: 0;
+  z-index: 90;
+  display: none;
+  height: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  pointer-events: auto;
+  background: var(--rp-bg, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.12);
+}
+#sticky-table-scrollbar.visible {
+  display: block;
+}
+/* Spacer chỉ để bơm chiều rộng nội dung = scrollWidth của bảng (đặt inline từ JS);
+ * cao 1px, không hiện gì, chỉ để khung ngoài có thứ để cuộn ngang. */
+#sticky-table-scrollbar > div {
+  height: 1px;
+}
+/* Thumb theo TOKEN palette `--rp-scrollbar-thumb` (đã định nghĩa ở :root với
+ * fallback VS Code slider, và override mỗi reading palette — xem editor.css cho
+ * scrollbar chung). Không hardcode `--vscode-scrollbarSlider-*` vì rule ID này
+ * đè lên rule reading-mode chung → sẽ lệch tông thumb khi bật palette. */
+#sticky-table-scrollbar::-webkit-scrollbar {
+  height: 14px;
+}
+#sticky-table-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--rp-scrollbar-thumb);
+  border-radius: 7px;
+}
+#sticky-table-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--rp-scrollbar-thumb-hover);
+}
+
 /* US-17.7: breathing room between a block's own text and its edge, so the
  * drag-and-drop hover outline (.dd-hover-outline, editor.css) — an `outline`
  * drawn tight around the block's own box — doesn't sit flush against the

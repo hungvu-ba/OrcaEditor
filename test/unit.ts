@@ -510,6 +510,10 @@ eq('link: đường dẫn tuyệt đối trong workspace (không scheme)', class
 // X-7: a Windows drive path is a local target, not the unsafe scheme `c:`.
 eq('link: Windows drive path backslash → local (X-7)', classifyLink('C:\\docs\\x.md'), { kind: 'relative' });
 eq('link: Windows drive path forward-slash → local (X-7)', classifyLink('c:/docs/x.md'), { kind: 'relative' });
+// X-7 follow-up: the REAL runtime href — markdown-it encodes `\`→`%5C`, so the
+// click/marker path classifies `C:%5C…`, which must still be local, not scheme c:.
+eq('link: drive path %5C-encoded (markdown-it href) → local (X-7)', classifyLink('C:%5Cdocs%5Cx.md'), { kind: 'relative' });
+eq('link: drive path %2F-encoded → local (X-7)', classifyLink('C:%2Fdocs%2Fx.md'), { kind: 'relative' });
 
 // ---------------------------------------------------------------------------
 // link-scheme predicates (src/shared/link-scheme.ts) — the ONE answer for X-7
@@ -517,12 +521,15 @@ eq('link: Windows drive path forward-slash → local (X-7)', classifyLink('c:/do
 
 eq('drivePath: C:\\ backslash', isWindowsDrivePath('C:\\docs\\x.md'), true);
 eq('drivePath: c:/ forward slash', isWindowsDrivePath('c:/docs/x.md'), true);
+eq('drivePath: %5C-encoded backslash (markdown-it href) match (X-7)', isWindowsDrivePath('C:%5Cdocs%5Cx.md'), true);
+eq('drivePath: %2F-encoded forward slash match (X-7)', isWindowsDrivePath('c:%2Fdocs%2Fx.md'), true);
 eq('drivePath: http không phải drive', isWindowsDrivePath('http://x'), false);
 eq('drivePath: bare c: (thiếu separator) không match', isWindowsDrivePath('c:foo'), false);
 eq('drivePath: đường dẫn tương đối không phải drive', isWindowsDrivePath('./a.md'), false);
 eq('scheme: http là scheme', hasUrlScheme('http://x'), true);
 eq('scheme: mailto là scheme', hasUrlScheme('mailto:a@b'), true);
 eq('scheme: drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:\\x.md'), false);
+eq('scheme: %5C-encoded drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:%5Cx.md'), false);
 eq('scheme: đường dẫn tương đối KHÔNG phải scheme', hasUrlScheme('./a.md'), false);
 eq('scheme: anchor thuần KHÔNG phải scheme', hasUrlScheme('#heading'), false);
 
