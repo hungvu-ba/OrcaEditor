@@ -22,12 +22,16 @@ import {
   classifyLink,
   computeMinimalEdit,
   imageNamePrefix,
+  driveMismatchHint,
+  isPathTooLongError,
   normalizeAssetName,
+  normalizeCustomFolderPath,
   normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
   referencedAssetBasenames,
   relativePath,
+  sameDocumentUri,
   sanitizeDroppedFileName,
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
@@ -1248,8 +1252,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..').path;
     const scored: Array<{ score: number; nameLength: number; uri: vscode.Uri; name: string }> = [];
     for (const uri of uris) {
-      if (uri.toString() === document.uri.toString()) {
-        continue; // không gợi ý link tới chính file đang mở
+      if (sameDocumentUri(uri.toString(), document.uri.toString(), CASE_INSENSITIVE_FS)) {
+        continue; // không gợi ý link tới chính file đang mở (case-fold trên FS không phân biệt hoa thường — X-8)
       }
       const segments = uri.path.split('/');
       const name = segments[segments.length - 1];
@@ -1274,7 +1278,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return scored.slice(0, MarkdownWysiwygProvider.FILE_SEARCH_MAX_RESULTS).map((item) => {
       const rel = vscode.workspace.asRelativePath(item.uri, false);
       return {
-        path: relativePath(documentDir, item.uri.path),
+        path: relativePath(documentDir, item.uri.path, CASE_INSENSITIVE_FS),
         name: item.name,
         dir: rel.slice(0, Math.max(0, rel.length - item.name.length - 1)) || '.',
       };
@@ -1335,8 +1339,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       let truncated = uris.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES;
 
       for (const uri of uris) {
-        if (uri.toString() === document.uri.toString()) {
-          continue; // loại trừ hoàn toàn file đang mở, không tính vào cap
+        if (sameDocumentUri(uri.toString(), document.uri.toString(), CASE_INSENSITIVE_FS)) {
+          continue; // loại trừ hoàn toàn file đang mở, không tính vào cap (case-fold — X-8)
         }
         if (groups.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_GROUPS) {
           truncated = true;
@@ -1463,12 +1467,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
     const location = cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder');
-    const customFolderPath = cfg.get<string>('customFolderPath', '').trim();
+    const customFolderPath = normalizeCustomFolderPath(cfg.get<string>('customFolderPath', ''));
 
     if (location === 'customFolder' && customFolderPath) {
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
       const base = workspaceFolder?.uri ?? documentDir;
-      return path.isAbsolute(customFolderPath)
+      // Detect an absolute path cross-OS (X-8): a Windows drive path (`c:/…`) is
+      // NOT absolute per `path.isAbsolute` on macOS/Linux, so a Settings-Sync'd
+      // Windows setting would otherwise be joined and create a bogus `c:/…` dir.
+      const isAbsolute = isWindowsDrivePath(customFolderPath) || customFolderPath.startsWith('/');
+      return isAbsolute
         ? vscode.Uri.file(customFolderPath)
         : vscode.Uri.joinPath(base, customFolderPath);
     }
@@ -1484,6 +1492,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
     const dir = this.resolveAssetsDir(document);
     return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+  }
+
+  /**
+   * A specific hint to append to the "outside the allowed workspace" error when
+   * a custom asset folder was refused because it is on a different drive than
+   * the workspace (X-8) — a relative link across drives is impossible, so the
+   * generic message is confusing. '' when the setting isn't an absolute
+   * customFolderPath or the drives match (caller keeps the plain message).
+   */
+  private customFolderRejectionHint(document: vscode.TextDocument): string {
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
+    if (cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder') !== 'customFolder') {
+      return '';
+    }
+    const custom = normalizeCustomFolderPath(cfg.get<string>('customFolderPath', ''));
+    const workspaceUri = vscode.workspace.getWorkspaceFolder(document.uri)?.uri
+      ?? vscode.Uri.joinPath(document.uri, '..');
+    return driveMismatchHint(custom, workspaceUri.path);
   }
 
   /**
@@ -1519,7 +1545,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const targetDir = await this.resolveAllowedAssetsDir(document);
     if (!targetDir) {
-      return { error: 'Configured paste-image folder is outside the allowed workspace.' };
+      return { error: `Configured paste-image folder is outside the allowed workspace.${this.customFolderRejectionHint(document)}` };
     }
 
     const prefix = this.imagePrefixFor(document);
@@ -1534,7 +1560,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return { error: 'Failed to save pasted image.' };
     }
 
-    return { relativePath: relativePath(documentDir.path, targetUri.path) };
+    return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
   }
 
   /**
@@ -1556,7 +1582,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const targetDir = await this.resolveAllowedAssetsDir(document);
     if (!targetDir) {
-      return { error: 'Configured assets folder is outside the allowed workspace.' };
+      return { error: `Configured assets folder is outside the allowed workspace.${this.customFolderRejectionHint(document)}` };
     }
 
     try {
@@ -1564,9 +1590,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
       this.trackDroppedAsset(document, path.basename(targetUri.path));
-      return { relativePath: relativePath(documentDir.path, targetUri.path) };
+      return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
     } catch (err) {
       MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
+      if (isPathTooLongError(err)) {
+        return {
+          error:
+            'Failed to save dropped file: the resulting path is too long for this system. ' +
+            'Shorten the file name, or enable Windows long paths (LongPathsEnabled).',
+        };
+      }
       return { error: 'Failed to save dropped file.' };
     }
   }
@@ -1966,11 +1999,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
 
-    // Windows: case khác nhau giữa các đoạn path (ổ đĩa "c:\" vs "C:\", hoặc
-    // case gốc trên đĩa do git checkout/rename) không nên khiến so sánh fail.
+    // Case khác nhau giữa các đoạn path (ổ đĩa "c:\" vs "C:\", hoặc case gốc
+    // trên đĩa do git checkout/rename) không nên khiến so sánh fail trên MỌI
+    // filesystem không phân biệt hoa thường — Windows VÀ macOS/APFS (X-8). Trước
+    // đây chỉ fold trên win32, nên một customFolderPath lệch case bị báo nhầm là
+    // "ngoài workspace" trên macOS.
     const forCompare = (p: string): string => {
       const withForwardSlashes = p.replace(/\\/g, '/');
-      return process.platform === 'win32' ? withForwardSlashes.toLowerCase() : withForwardSlashes;
+      return CASE_INSENSITIVE_FS ? withForwardSlashes.toLowerCase() : withForwardSlashes;
     };
 
     // Kiểm tra lexical (không đụng filesystem): candidate luôn được dựng qua

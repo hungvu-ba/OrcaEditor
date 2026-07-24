@@ -16,6 +16,12 @@
   "categories": [
     "Other"
   ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": "limited"
+    }
+  },
   "main": "./dist/extension.js",
   "contributes": {
     "customEditors": [

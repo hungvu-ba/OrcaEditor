@@ -559,20 +559,20 @@ const toolbarItems: ToolbarItem[] = [
   // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
   // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
   // execCommand('undo') here would skip those changes and desync the stacks.
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z / Ctrl+Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z / Ctrl+Shift+Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
+  { label: 'B', title: 'Bold (⌘B / Ctrl+B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
+  { label: 'I', title: 'Italic (⌘I / Ctrl+I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
   {
     label: 'S',
-    title: 'Strikethrough (⌘⇧X)',
+    title: 'Strikethrough (⌘⇧X / Ctrl+Shift+X)',
     action: () => document.execCommand('strikeThrough'),
     id: 'fmt-strike',
     collapsePriority: 10,
   },
   {
     label: '</>',
-    title: 'Inline code (⌘E)',
+    title: 'Inline code (⌘E / Ctrl+E)',
     action: toggleInlineCode,
     id: 'fmt-inline-code',
     collapsePriority: 9,

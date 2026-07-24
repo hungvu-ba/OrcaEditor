@@ -14,15 +14,19 @@ import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
+  driveMismatchHint,
   entityFollowingLabel,
   entityFollowingPreview,
   imageNamePrefix,
+  isPathTooLongError,
   normalizeAssetName,
+  normalizeCustomFolderPath,
   normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
   referencedAssetBasenames,
   relativePath,
+  sameDocumentUri,
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
@@ -254,6 +258,68 @@ eq('rel: đi lên nhiều cấp', relativePath('/w/a/b/c', '/w/x.md'), '../../..
 eq('rel: khác nhánh', relativePath('/w/a/b', '/w/c/d/e.md'), '../../c/d/e.md');
 eq('rel: from là gốc', relativePath('/', '/w/a.md'), 'w/a.md');
 
+// relativePath case-fold (X-8) — chỉ fold khi so khớp prefix, output GIỮ casing gốc.
+// Default (case-sensitive) giữ nguyên hành vi Linux/byte-identical.
+eq('rel[X-8]: default không fold — C: vs c: khác nhánh',
+  relativePath('/C:/Proj/docs', '/c:/Proj/assets/img.png'),
+  '../../../c:/Proj/assets/img.png');
+eq('rel[X-8]: caseInsensitive fold C:/c: → path đúng, giữ casing gốc của target',
+  relativePath('/C:/Proj/docs', '/c:/Proj/assets/img.png', true),
+  '../assets/img.png');
+eq('rel[X-8]: fold lệch case ở nhánh giữa',
+  relativePath('/Users/h/Proj/Docs', '/users/h/proj/Assets/x.png', true),
+  '../Assets/x.png');
+eq('rel[X-8]: fold nhưng output vẫn nguyên hoa/thường segment cuối',
+  relativePath('/w/a', '/W/A/Report.PDF', true),
+  'Report.PDF');
+eq('rel[X-8]: caseInsensitive không đổi kết quả khi đã cùng case',
+  relativePath('/w/docs', '/w/docs/sub/a.md', true),
+  'sub/a.md');
+
+// ---------------------------------------------------------------------------
+// normalizeCustomFolderPath (X-8) — chuẩn hoá setting customFolderPath khi đọc
+// ---------------------------------------------------------------------------
+
+eq('normCFP: backslash → forward-slash', normalizeCustomFolderPath('c:\\users\\h\\assets'), 'c:/users/h/assets');
+eq('normCFP: bỏ separator cuối', normalizeCustomFolderPath('c:/a/b/'), 'c:/a/b');
+eq('normCFP: bỏ nhiều separator cuối + trim', normalizeCustomFolderPath('  assets\\\\  '), 'assets');
+eq('normCFP: idempotent', normalizeCustomFolderPath(normalizeCustomFolderPath('C:\\A\\B\\')), 'C:/A/B');
+eq('normCFP: rỗng', normalizeCustomFolderPath('   '), '');
+// Drive-root / POSIX-root must survive the trailing-separator strip, else a bare
+// `c:` is misread as a relative folder named "c:" inside the workspace (review).
+eq('normCFP: drive-root c:\\ giữ được là c:/', normalizeCustomFolderPath('c:\\'), 'c:/');
+eq('normCFP: drive-root c:/ giữ nguyên', normalizeCustomFolderPath('c:/'), 'c:/');
+eq('normCFP: gõ bare drive c: → thành c:/', normalizeCustomFolderPath('c:'), 'c:/');
+eq('normCFP: POSIX root / giữ nguyên', normalizeCustomFolderPath('/'), '/');
+
+// ---------------------------------------------------------------------------
+// driveMismatchHint (X-8) — gợi ý cụ thể khi custom folder khác ổ đĩa
+// ---------------------------------------------------------------------------
+
+eq('driveHint: khác ổ đĩa (Windows) → nêu D: vs C:',
+  driveMismatchHint('d:/assets', '/c:/Proj'),
+  ' It is on drive D: but the workspace is on drive C:; choose a folder on the same drive.');
+eq('driveHint: cùng ổ đĩa (khác case) → rỗng',
+  driveMismatchHint('C:/Proj/assets', '/c:/Proj'), '');
+eq('driveHint: custom có drive, workspace không (path Windows trên macOS) → nêu là Windows path',
+  driveMismatchHint('c:/users/x/assets', '/Users/h/Proj'),
+  ' It looks like a Windows path (drive C:) that is not inside this workspace.');
+eq('driveHint: cả hai không có drive → rỗng',
+  driveMismatchHint('/Users/h/other', '/Users/h/Proj'), '');
+
+// ---------------------------------------------------------------------------
+// sameDocumentUri (X-8) — loại trừ file đang mở khỏi gợi ý, fold trên FS không phân biệt hoa thường
+// ---------------------------------------------------------------------------
+
+eq('sameUri: fold=false, khác case → KHÔNG bằng',
+  sameDocumentUri('file:///w/Doc.md', 'file:///w/doc.md', false), false);
+eq('sameUri: fold=true, khác case → bằng (cùng file trên FS không phân biệt hoa thường)',
+  sameDocumentUri('file:///w/Doc.md', 'file:///w/doc.md', true), true);
+eq('sameUri: fold=true, thật sự khác file → KHÔNG bằng',
+  sameDocumentUri('file:///w/a.md', 'file:///w/b.md', true), false);
+eq('sameUri: fold=false, trùng khít → bằng',
+  sameDocumentUri('file:///w/a.md', 'file:///w/a.md', false), true);
+
 // ---------------------------------------------------------------------------
 // imageNamePrefix — prefix tên ảnh dán (C4: dọn ảnh mồ côi khi save)
 // ---------------------------------------------------------------------------
@@ -381,6 +447,37 @@ check(
 eq('dropFileName: dấu chấm dẫn đầu (hidden file / thư mục hiện tại) bị bỏ', sanitizeDroppedFileName('.htaccess'), 'htaccess');
 eq('dropFileName: rỗng sau khi làm sạch → fallback "file"', sanitizeDroppedFileName('...'), 'file');
 eq('dropFileName: rỗng ngay từ đầu → fallback "file"', sanitizeDroppedFileName(''), 'file');
+
+// X-9 — a 100+ char browser-supplied name crosses MAX_PATH under a long
+// OneDrive root; the stem is capped, the extension preserved.
+eq(
+  'dropFileName[X-9]: stem dài bị cắt còn 60 ký tự, giữ nguyên đuôi',
+  sanitizeDroppedFileName('a'.repeat(120) + '.pdf'),
+  'a'.repeat(60) + '.pdf'
+);
+eq(
+  'dropFileName[X-9]: tên ngắn không bị đụng vào',
+  sanitizeDroppedFileName('short-report.pdf'),
+  'short-report.pdf'
+);
+eq(
+  'dropFileName[X-9]: không có đuôi → toàn bộ là stem, cắt còn 60',
+  sanitizeDroppedFileName('b'.repeat(80)),
+  'b'.repeat(60)
+);
+eq(
+  'dropFileName[X-9]: dấu chấm ở đầu (đuôi giả) vẫn được cắt như stem',
+  sanitizeDroppedFileName('c'.repeat(70) + '.tar.gz'),
+  'c'.repeat(60) + '.gz'
+);
+
+// X-9 — path-length failures are recognized so a specific message can name
+// MAX_PATH / LongPathsEnabled instead of a generic "Failed to save".
+check('pathTooLong[X-9]: ENAMETOOLONG code', isPathTooLongError({ code: 'ENAMETOOLONG' }));
+check('pathTooLong[X-9]: ERROR_PATH_NOT_FOUND code', isPathTooLongError({ code: 'ERROR_PATH_NOT_FOUND' }));
+check('pathTooLong[X-9]: message text', isPathTooLongError(new Error('ENAMETOOLONG: name too long')));
+check('pathTooLong[X-9]: lỗi thường không khớp', !isPathTooLongError({ code: 'EACCES' }));
+check('pathTooLong[X-9]: null an toàn', !isPathTooLongError(null));
 
 // ---------------------------------------------------------------------------
 // classifyLink — allowlist scheme

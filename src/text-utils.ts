@@ -116,10 +116,43 @@ export function imageNamePrefix(baseName: string): string {
  * be trusted as a path: strips every `/`/`\` (no directory traversal
  * survives) and leading dots (no hidden file / relative-`..` trick), falling
  * back to a generic name if nothing safe is left.
+ *
+ * The stem is capped at DROPPED_STEM_MAX chars (X-9): a browser-supplied
+ * `file.name` can be 100+ chars, and under a long OneDrive root that crosses
+ * Windows' 260-char MAX_PATH so `writeFile` throws. The extension is preserved;
+ * the uniqueness suffix (`(2)`, `(3)`…) is added later by `uniqueAssetUri`, so
+ * it stays outside this cap.
  */
+export const DROPPED_STEM_MAX = 60;
+
+/**
+ * Whether a caught filesystem error is a path/name-length failure (X-9). Covers
+ * both the POSIX code (`ENAMETOOLONG`) and the two Windows codes a MAX_PATH
+ * overrun surfaces as (`ERROR_PATH_NOT_FOUND`, or `ENOENT` when a too-long path
+ * is reported as "not found"), reading `err.code` from either a Node error or a
+ * `vscode.FileSystemError` and falling back to the message text.
+ */
+export function isPathTooLongError(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code ?? '') : '';
+  if (code === 'ENAMETOOLONG' || code === 'ERROR_PATH_NOT_FOUND') {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /ENAMETOOLONG|ERROR_PATH_NOT_FOUND|path.*too long|name too long/i.test(msg);
+}
+
 export function sanitizeDroppedFileName(name: string): string {
   const safe = name.replace(/[\\/]/g, '_').replace(/^\.+/, '').trim();
-  return safe || 'file';
+  if (!safe) {
+    return 'file';
+  }
+  // Split off a trailing extension (last dot not at position 0, reasonably
+  // short) so truncation never eats it; a name with no such dot is all stem.
+  const dot = safe.lastIndexOf('.');
+  const hasExt = dot > 0 && safe.length - dot <= 11;
+  const stem = hasExt ? safe.slice(0, dot) : safe;
+  const ext = hasExt ? safe.slice(dot) : '';
+  return (stem.length > DROPPED_STEM_MAX ? stem.slice(0, DROPPED_STEM_MAX) : stem) + ext;
 }
 
 /**
@@ -253,14 +286,84 @@ export function entityFollowingPreview(following: string): string {
   return points.slice(0, ENTITY_PREVIEW_MAX).join('').trimEnd() + '…';
 }
 
-/** Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file). */
-export function relativePath(fromDir: string, toFile: string): string {
+/**
+ * Đường dẫn tương đối từ thư mục fromDir tới file toFile (cùng scheme file).
+ * When `caseInsensitive` is set (win32/darwin, X-8), segments are folded ONLY
+ * for the common-prefix comparison — the emitted path keeps `toFile`'s original
+ * casing — so a `C:` vs `c:` (or any case-variant) prefix no longer produces a
+ * bogus `../../../c:/…` link. Default false keeps case-sensitive (Linux) output
+ * byte-identical.
+ */
+export function relativePath(fromDir: string, toFile: string, caseInsensitive = false): string {
   const from = fromDir.split('/').filter(Boolean);
   const to = toFile.split('/').filter(Boolean);
+  const fold = (s: string): string => (caseInsensitive ? s.toLowerCase() : s);
   let common = 0;
-  while (common < from.length && common < to.length && from[common] === to[common]) {
+  while (common < from.length && common < to.length && fold(from[common]) === fold(to[common])) {
     common++;
   }
   const up: string[] = new Array(from.length - common).fill('..');
   return [...up, ...to.slice(common)].join('/');
+}
+
+/**
+ * Leading drive letter of a path, lower-cased and without the colon (`c`), or
+ * '' if there is none. Tolerates a leading `/` (Uri.path form `/C:/…`) and
+ * either slash after the colon. Pure helper for X-8's cross-OS path handling.
+ */
+function driveLetterOf(pathLike: string): string {
+  const m = /^\/?([a-zA-Z]):[\\/]/.exec(pathLike);
+  return m ? m[1].toLowerCase() : '';
+}
+
+/**
+ * Normalize the `assetsPaste.customFolderPath` setting once on read (X-8):
+ * trim, `\` → `/`, and strip trailing separators. Idempotent. A Windows-style
+ * absolute path (`c:\a\b\`) becomes `c:/a/b`, so drive detection and Uri.file
+ * work the same regardless of the host OS the setting was authored on.
+ */
+export function normalizeCustomFolderPath(raw: string): string {
+  const forward = raw.trim().replace(/\\/g, '/');
+  const stripped = forward.replace(/\/+$/, '');
+  // Keep a bare root the strip would otherwise erase: a Windows drive-root
+  // (`c:/` — `c:` alone is not recognized by isWindowsDrivePath and would read
+  // as a relative folder literally named "c:"), or POSIX root (`/`).
+  if (/^[a-zA-Z]:$/.test(stripped)) {
+    return stripped + '/';
+  }
+  if (stripped === '' && forward.startsWith('/')) {
+    return '/';
+  }
+  return stripped;
+}
+
+/**
+ * A specific hint appended to the "outside the allowed workspace" error (X-8)
+ * when a custom folder is refused because its drive differs from the workspace's
+ * — a relative link across drives is impossible, so the generic message is
+ * confusing. Returns '' when there is no drive mismatch (caller keeps the plain
+ * message). Both inputs are expected already `normalizeCustomFolderPath`-shaped
+ * (or a `Uri.path`). Pure — unit-tested in isolation.
+ */
+export function driveMismatchHint(customPathNorm: string, workspacePathNorm: string): string {
+  const custom = driveLetterOf(customPathNorm);
+  const workspace = driveLetterOf(workspacePathNorm);
+  if (!custom || custom === workspace) {
+    return '';
+  }
+  return workspace
+    ? ` It is on drive ${custom.toUpperCase()}: but the workspace is on drive ${workspace.toUpperCase()}:; choose a folder on the same drive.`
+    : ` It looks like a Windows path (drive ${custom.toUpperCase()}:) that is not inside this workspace.`;
+}
+
+/**
+ * Identity comparison of two `Uri.toString()` strings for the SAME document,
+ * case-folded on case-insensitive filesystems (X-8) so a file opened as
+ * `Doc.md` and enumerated by `findFiles` as `doc.md` is recognized as itself
+ * (and thus excluded from its own link suggestions). Percent-encoding uses
+ * uppercase hex on both sides, so folding stays consistent. Default (false)
+ * keeps exact equality on case-sensitive filesystems.
+ */
+export function sameDocumentUri(aStr: string, bStr: string, caseInsensitive: boolean): boolean {
+  return caseInsensitive ? aStr.toLowerCase() === bStr.toLowerCase() : aStr === bStr;
 }
