@@ -12,11 +12,12 @@ import {
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
   MERMAID_CLASS,
-  MERMAID_SOURCE_CLASS,
+  PLANTUML_CLASS,
   AUTOLINK_PATH_ATTR,
   EMPTY_LINK_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
+import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import {
   HEADING_STYLE_ATTR,
@@ -449,12 +450,13 @@ export function createTurndown(): TurndownService {
   //     trong .md-mermaid-source (giữ nguyên logic fence với fencedCodeWithLang) ---
   td.addRule('mermaidDiagram', {
     filter: (node) => (node as HTMLElement).classList?.contains(MERMAID_CLASS) ?? false,
-    replacement: (_content, node) => {
-      const code = (node as HTMLElement).querySelector(`.${MERMAID_SOURCE_CLASS} code`);
-      const text = (code?.textContent ?? '').replace(/\n$/, '');
-      const fence = pickFence(text);
-      return `\n\n${fence}mermaid\n${text}\n${fence}\n\n`;
-    },
+    replacement: (_content, node) => diagramFence(node as HTMLElement, MERMAID_FRAME),
+  });
+
+  // US-2.8: PlantUML frame → back to its ```plantuml fence, same contract.
+  td.addRule('plantumlDiagram', {
+    filter: (node) => (node as HTMLElement).classList?.contains(PLANTUML_CLASS) ?? false,
+    replacement: (_content, node) => diagramFence(node as HTMLElement, PLANTUML_FRAME),
   });
 
   // --- front matter ---
@@ -724,6 +726,18 @@ function outerHtmlFallback(el: HTMLElement, content: string): string {
     return content;
   }
   return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+}
+
+/**
+ * Serialize one diagram frame (Mermaid / PlantUML) back to its fenced block.
+ * Reads the source `<pre>` only — the toolbar and the rendered SVG in the chart
+ * container are presentation, never part of the `.md`.
+ */
+function diagramFence(node: HTMLElement, spec: DiagramFrameSpec): string {
+  const code = node.querySelector(`.${spec.sourceClass} code`);
+  const text = (code?.textContent ?? '').replace(/\n$/, '');
+  const fence = pickFence(text);
+  return `\n\n${fence}${spec.language}\n${text}\n${fence}\n\n`;
 }
 
 // Pick a code fence long enough that `text` cannot close it early.

@@ -223,11 +223,13 @@ const toWebview: HostToWebview[] = [
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
     crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
+    plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
     crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
+    plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
@@ -446,9 +448,13 @@ const providerSrc = fs.readFileSync(path.join(process.cwd(), 'src/provider.ts'),
 
 // CSP lock — mọi nới lỏng directive phải sửa test này một cách CÓ CHỦ ĐÍCH,
 // không thể vô tình lọt qua.
+// US-2.8: script-src thêm 'wasm-unsafe-eval' CÓ CHỦ ĐÍCH — engine PlantUML
+// client-side (Viz.js = Graphviz qua Emscripten) cần biên dịch WebAssembly. Pin
+// nguyên chuỗi đầy đủ chứ không chỉ phần 'nonce-...': includes() khớp chuỗi con,
+// nên nếu chỉ pin phần nonce thì mọi lần nới lỏng thêm sau này đều lọt qua.
 const REQUIRED_CSP_DIRECTIVES = [
   "default-src 'none'",
-  "script-src 'nonce-${nonce}'",
+  "script-src 'nonce-${nonce}' 'wasm-unsafe-eval'",
   "base-uri ${webview.cspSource}",
   "form-action 'none'",
   "frame-src 'none'",
@@ -456,6 +462,13 @@ const REQUIRED_CSP_DIRECTIVES = [
 for (const directive of REQUIRED_CSP_DIRECTIVES) {
   check(`security: CSP giữ directive "${directive}"`, providerSrc.includes(directive));
 }
+// 'wasm-unsafe-eval' chỉ cho phép biên dịch WASM. 'unsafe-eval' (bật eval()/
+// new Function() cho JS) là chuyện khác hẳn và phải luôn vắng mặt — regex loại
+// trừ đúng token 'wasm-unsafe-eval' để không tự khớp nhầm phần đuôi của nó.
+check(
+  'security: script-src KHÔNG có "unsafe-eval" (chỉ wasm-unsafe-eval mới được phép)',
+  !/script-src[^\n]*(?<!wasm-)'unsafe-eval'/.test(providerSrc)
+);
 check(
   'security: img-src KHÔNG có "https:" (chặn ảnh remote/exfil qua .md độc hại)',
   /img-src[^\n]*data:/.test(providerSrc) && !/img-src[^\n]*https:/.test(providerSrc)

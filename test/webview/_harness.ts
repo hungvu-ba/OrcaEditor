@@ -28,6 +28,10 @@ const DEFAULT_CONFIG: InitConfig = {
   crossFileSearchScope: 'markdown',
   readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
   trigger: { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' },
+  // US-2.8: the harness serves dist/webview over file://, so the engine bundle
+  // sits right beside main.js; no nonce is enforced here (no CSP meta).
+  plantumlEngineUri: 'plantuml-engine.js',
+  scriptNonce: '',
 };
 
 /** Default docUri echoed back to the harness's fake acquireVsCodeApi (Req 20 US-20.3). */

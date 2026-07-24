@@ -10,7 +10,13 @@
  * (drag-drop, comment...) nên đọc từ đây thay vì tự chế cơ chế khớp cục bộ
  * (bài học gutter.ts trước khi có module này — xem design-log mục 6).
  */
-import { FRONT_MATTER_CLASS, MATH_BLOCK_CLASS, MERMAID_CLASS, type LineRange } from './render';
+import {
+  FRONT_MATTER_CLASS,
+  MATH_BLOCK_CLASS,
+  MERMAID_CLASS,
+  PLANTUML_CLASS,
+  type LineRange,
+} from './render';
 import { readSrcRange } from './block-info';
 
 /** Bản chiếu tra-ngược nhanh trên DOM — mảng BlockEntry trong JS mới là bản chính. */
@@ -34,6 +40,9 @@ function freshBlockId(): string {
 function classifyBlockType(el: HTMLElement): string {
   if (el.classList.contains(MERMAID_CLASS)) {
     return 'mermaid';
+  }
+  if (el.classList.contains(PLANTUML_CLASS)) {
+    return 'plantuml';
   }
   if (el.classList.contains(MATH_BLOCK_CLASS)) {
     return 'math';

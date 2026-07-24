@@ -17,6 +17,7 @@ import {
   normalizeMarkdown,
   postProcessMathDom,
   postProcessMermaidDom,
+  postProcessPlantumlDom,
   postProcessCodeHeaders,
   postProcessRelativePathLinks,
   postProcessCaptions,
@@ -38,6 +39,7 @@ import { initBrokenRef, slugifyHeadingText } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid } from './mermaid';
+import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
@@ -95,6 +97,7 @@ const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
 const toc = initToc(content, vscode);
 const mermaidView = initMermaid(content);
+const plantumlView = initPlantuml(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
@@ -137,7 +140,10 @@ const readability = initReadability({
   onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
   onReadingModeChange: (state) => postToHost({ type: 'readingModeChanged', ...state }),
   // bug_General #7: khi commit 1 bộ style, Mermaid dựng lại nếu nền sáng/tối lật.
-  onStyleApplied: () => mermaidView.refreshTheme(),
+  onStyleApplied: () => {
+    mermaidView.refreshTheme();
+    plantumlView.refreshTheme();
+  },
 });
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
@@ -333,6 +339,17 @@ window.addEventListener('message', (event) => {
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
+      // US-2.8: engine PlantUML nạp lười lúc chạy — webview không tự dựng được
+      // URI webview lẫn nonce CSP, nên nhận sẵn từ host. Phải set TRƯỚC
+      // renderDocument bên dưới (lần render đầu có thể đã cần dựng biểu đồ).
+      // Gate on the URI only: a nonce can legitimately be empty (a host page
+      // without a CSP), and an empty string there is harmless on the <script>.
+      if (cfg.plantumlEngineUri) {
+        setPlantumlEngineConfig({
+          engineUri: cfg.plantumlEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
       if (cfg.readability) {
         readability.applyFromHost(cfg.readability);
       }
@@ -557,6 +574,7 @@ function renderDocument(markdown: string): void {
   content.innerHTML = html;
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
+  postProcessPlantumlDom(content, document);
   postProcessCodeHeaders(content, document);
   postProcessRelativePathLinks(content, document);
   postProcessCaptions(content, document);
@@ -565,6 +583,7 @@ function renderDocument(markdown: string): void {
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
+  plantumlView.renderAll();
   table.hideTableToolbar();
   // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
   // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
@@ -800,7 +819,7 @@ function restoreCaretAtSource(line: number, col: number): void {
  * sync/diff giả.
  */
 const TRAILING_TRAP_SELECTOR =
-  '.md-mermaid, .md-math-block, .md-front-matter, pre, table, hr, [contenteditable="false"]';
+  '.md-mermaid, .md-plantuml, .md-math-block, .md-front-matter, pre, table, hr, [contenteditable="false"]';
 
 function ensureTrailingParagraph(): void {
   const last = content.lastElementChild;
@@ -819,7 +838,7 @@ function ensureTrailingParagraph(): void {
  * cũng là một khối bẫy caret (hoặc không có phần tử kế tiếp — trường hợp con
  * cuối của blockquote/li, nơi ensureTrailingParagraph không với tới).
  */
-const ATOM_BLOCK_SELECTOR = '.md-mermaid, .md-math-block';
+const ATOM_BLOCK_SELECTOR = '.md-mermaid, .md-plantuml, .md-math-block';
 
 /**
  * Đảm bảo SAU MỖI khối Mermaid/math block đều có chỗ đặt caret: nếu phần tử
@@ -1382,6 +1401,7 @@ function insertPastedMarkdown(text: string): void {
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
   mermaidView.renderAll();
+  plantumlView.renderAll();
 }
 
 /**
@@ -1410,6 +1430,7 @@ function insertMarkdownAtCaret(text: string): void {
     ensureCaretSpotAfterAtomBlocks();
   }
   mermaidView.renderAll();
+  plantumlView.renderAll();
 }
 
 /**
@@ -1433,6 +1454,7 @@ function renderPasteHtml(text: string): string {
   tmp.innerHTML = html;
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
+  postProcessPlantumlDom(tmp, document);
   postProcessCodeHeaders(tmp, document);
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;

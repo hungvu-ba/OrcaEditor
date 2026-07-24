@@ -412,3 +412,4 @@
 | 0.9.0 | 2026-07-22 | Release: bumped version to 0.9.0, consolidating the `@` mention / `/` define-execute triggers, entity declare/index/reference system, broken-reference detection, and Reading Mode 3-mode redesign (Req 20/21, US-19.23/19.24) into one [0.9.0] entry in CHANGELOG.md. |
 | 0.9.0 | 2026-07-24 | Fix: workspace-boundary check falsely blocked/broke valid new-file links on Windows due to a case-sensitive path prefix compare mismatched between realpath and fsPath fallback. |
 | 0.9.0 | 2026-07-24 | Fix: workspace-boundary check now compares lexical paths first (realpath only as best-effort fallback) so OneDrive/junction reparse points no longer falsely block valid cross-folder links on Windows. |
+| 0.9.0 | 2026-07-24 | Feature: ```plantuml``` blocks render as diagrams in the preview, client-side and offline via @plantuml/core, lazy-loaded so diagram-free files pay nothing (US-2.8). |

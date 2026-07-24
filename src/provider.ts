@@ -429,7 +429,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const initialReadability = this.resolveReadability(
       vscode.workspace.getConfiguration('orcaEditor', document.uri)
     );
-    webview.html = this.getHtml(webview, documentDir, initialReadability);
+    // US-2.8: nonce sinh ở đây thay vì trong getHtml, vì webview cũng cần nó —
+    // plantuml.ts tự chèn <script> nạp engine PlantUML lúc chạy (lazy-load), và
+    // script đó phải mang đúng nonce của trang mới qua được CSP. Gửi kèm trong
+    // 'init' (xem case 'ready').
+    const scriptNonce = getNonce();
+    const plantumlEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'plantuml-engine.js')
+      )
+      .toString();
+    webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
@@ -587,6 +597,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
+              // US-2.8: webview không tự gọi asWebviewUri/sinh nonce được, nên
+              // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
+              plantumlEngineUri,
+              scriptNonce,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
@@ -1947,12 +1961,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private getHtml(
     webview: vscode.Webview,
     documentDir: vscode.Uri,
-    readability: ReadabilityConfig
+    readability: ReadabilityConfig,
+    nonce: string
   ): string {
     const distUri = (...parts: string[]) =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', ...parts));
 
-    const nonce = getNonce();
     const baseHref = `${webview.asWebviewUri(documentDir)}/`;
 
     const csp = [
@@ -1966,7 +1980,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // và không chạy script được vì script-src chỉ nhận nonce.
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource} data:`,
-      `script-src 'nonce-${nonce}'`,
+      // US-2.8: 'wasm-unsafe-eval' cho phép biên dịch WebAssembly — bắt buộc để
+      // engine PlantUML client-side chạy (Viz.js 3.x = Graphviz qua Emscripten,
+      // .wasm nhúng sẵn dạng base64 data: URI nên KHÔNG cần quyền mạng nào).
+      // Nới lỏng có chủ đích, phạm vi hẹp: nó KHÔNG bật eval()/new Function()
+      // (đó là 'unsafe-eval', vẫn bị chặn) và không mở thêm cửa vào nào — muốn
+      // chạy bất kỳ script nào vẫn phải có nonce, script-src không có
+      // 'unsafe-inline'. Khoá lại bằng tripwire trong test/unit.ts.
+      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
       // chặn <base> tiêm từ nội dung markdown đổi gốc phân giải tài nguyên
       `base-uri ${webview.cspSource}`,
       // S1: chặn submit form (không có backend hợp lệ nào để gửi tới)

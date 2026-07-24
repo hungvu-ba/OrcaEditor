@@ -458,16 +458,16 @@ td {
   padding: 5px 10px;
   /* US-19.3: sàn 14ch chặn cột co tới mức wrap thành "2 ký tự × 25 dòng" khi
    * panel hẹp — chạm ngưỡng này thì bảng scroll ngang trong "đảo riêng" thay vì
-   * bóp cột wrap từng từ (bug report 2026-07-15 mục 3; 8ch cũ vẫn quá nhỏ). Trần
-   * ~40ch để cột quá rộng thì wrap thay vì ăn hết không gian ngang; overflow-wrap
-   * normal để từ dài hơn sàn tự nới (min-content), KHÔNG cắt giữa từ.
+   * bóp cột wrap từng từ (bug report 2026-07-15 mục 3; 8ch cũ vẫn quá nhỏ).
+   * Không có trần: cột rộng bao nhiêu theo nội dung cũng được, bảng tự scroll
+   * ngang (table { max-width: 100%; overflow-x: auto } ở trên) thay vì ép wrap.
+   * overflow-wrap/word-break normal để không cắt giữa từ.
    * Sàn 14ch này chỉ là TRẦN cho cột có nội dung thật sự dài — fitTableColumns()
    * (table.ts) đo bề rộng tự nhiên từng cột sau mỗi lần render/sửa bảng rồi ghi
    * đè min-width (inline, min(14ch, tự nhiên)) để cột nội dung ngắn (vd "#") co
    * vừa nội dung thay vì bị ép rộng bằng cột dài nhất (bug report 2026-07-15
    * mục ảnh bảng nghiệp vụ). */
   min-width: 14ch;
-  max-width: 40ch;
   overflow-wrap: normal;
   word-break: normal;
 }
@@ -1010,7 +1010,7 @@ body.reading-mode #content > :is(h1, h2, h3, h4, h5, h6) {
  * với prose. max-width:100% = px của #content (không dùng `ch` của block → không
  * dính font mono/serif). Bảng nhỏ vẫn co theo nội dung (width:max-content ở rule
  * `table`), chỉ chạm 100% mới scroll trong "đảo riêng" (US-19.3). */
-body.reading-mode #content > :is(table, pre, .md-math-block, .md-mermaid) {
+body.reading-mode #content > :is(table, pre, .md-math-block, .md-mermaid, .md-plantuml) {
   max-width: 100%;
   margin-left: 0;
   margin-right: 0;

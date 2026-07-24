@@ -96,6 +96,17 @@ export interface InitConfig {
   readability: ReadabilityConfig;
   /** Req 20 US-20.2/20.3: seed for the `/` Define+Execute trigger popup. */
   trigger: TriggerConfig;
+  /**
+   * US-2.8: webview URI of the lazily-loaded PlantUML engine bundle
+   * (`dist/webview/plantuml-engine.js`). Resolved host-side because the webview
+   * cannot call `asWebviewUri` itself.
+   */
+  plantumlEngineUri: string;
+  /**
+   * US-2.8: the page's CSP nonce. Needed so the webview can inject the engine
+   * `<script>` at runtime — `script-src` accepts nonced scripts only.
+   */
+  scriptNonce: string;
 }
 
 /**

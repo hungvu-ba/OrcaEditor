@@ -245,7 +245,7 @@
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release",
-  "check:css-comments": "node scripts/check-css-comments.js"
+    "check:css-comments": "node scripts/check-css-comments.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
@@ -263,6 +263,7 @@
     "typescript-eslint": "^8.44.0"
   },
   "dependencies": {
+    "@plantuml/core": "^1.2026.6",
     "@vscode/markdown-it-katex": "^1.1.1",
     "highlight.js": "^11.10.0",
     "katex": "^0.16.11",

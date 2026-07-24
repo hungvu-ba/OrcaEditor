@@ -13,11 +13,7 @@ import {
   MATH_TOGGLE_CLASS,
   MATH_RENDER_CLASS,
   MERMAID_CLASS,
-  MERMAID_TOOLBAR_CLASS,
-  MERMAID_TOGGLE_CLASS,
-  MERMAID_ZOOM_CLASS,
-  MERMAID_CHART_CLASS,
-  MERMAID_SOURCE_CLASS,
+  PLANTUML_CLASS,
   MD_CODE_HEADER_CLASS,
   MD_CODE_LANG_CLASS,
   MD_CODE_COPY_CLASS,
@@ -35,6 +31,7 @@ import {
 } from './render';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
+import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 
 /**
  * @param mathBlockRanges range dòng nguồn (1-based, bao gồm) của từng khối
@@ -175,44 +172,61 @@ export function extractTex(katexEl: Element): string {
  * thực sự nằm ở media/webview/mermaid.ts (chỉ chạy trong webview, cần DOM
  * trình duyệt thật).
  */
-export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): void {
-  const blocks = Array.from(root.querySelectorAll('pre > code.language-mermaid'));
+function postProcessDiagramDom(
+  root: ParentNode & Node,
+  doc: Document,
+  spec: DiagramFrameSpec
+): void {
+  const blocks = Array.from(root.querySelectorAll(`pre > code.language-${spec.language}`));
   for (const code of blocks) {
     const pre = code.parentElement;
     if (!pre?.parentElement) {
       continue;
     }
     const wrapper = doc.createElement('div');
-    wrapper.className = MERMAID_CLASS;
-    wrapper.setAttribute('data-mermaid-view', 'chart');
+    wrapper.className = spec.wrapperClass;
+    wrapper.setAttribute(spec.viewAttr, 'chart');
 
     const toolbar = createToolbarToggle(doc, {
-      toolbarClass: MERMAID_TOOLBAR_CLASS,
-      toggleClass: MERMAID_TOGGLE_CLASS,
-      title: 'Toggle between chart and Mermaid source',
+      toolbarClass: spec.toolbarClass,
+      toggleClass: spec.toggleClass,
+      title: `Toggle between chart and ${spec.label} source`,
     });
 
     // "Zoom" button opens the diagram in the fullscreen lightbox (bug_General #6).
-    // Shown only in chart view (hidden via CSS when data-mermaid-view='code').
+    // Shown only in chart view (hidden via CSS when the view attr is 'code').
     // Domino has no ParentNode.append → use appendChild.
     const zoom = doc.createElement('button');
     zoom.setAttribute('type', 'button');
-    zoom.className = MERMAID_ZOOM_CLASS;
+    zoom.className = spec.zoomClass;
     zoom.setAttribute('contenteditable', 'false');
     zoom.setAttribute('title', 'Zoom diagram');
     toolbar.appendChild(zoom);
 
     const chart = doc.createElement('div');
-    chart.className = MERMAID_CHART_CLASS;
+    chart.className = spec.chartClass;
     chart.setAttribute('contenteditable', 'false');
-    chart.textContent = 'Rendering Mermaid chart…';
+    chart.textContent = `Rendering ${spec.label} chart…`;
 
-    pre.classList.add(MERMAID_SOURCE_CLASS);
+    pre.classList.add(spec.sourceClass);
     pre.parentElement.replaceChild(wrapper, pre);
     wrapper.appendChild(toolbar);
     wrapper.appendChild(chart);
     wrapper.appendChild(pre);
   }
+}
+
+export function postProcessMermaidDom(root: ParentNode & Node, doc: Document): void {
+  postProcessDiagramDom(root, doc, MERMAID_FRAME);
+}
+
+/**
+ * US-2.8: same treatment for ```plantuml``` blocks. Structure only — the actual
+ * SVG is produced by media/webview/plantuml.ts, which loads the engine lazily
+ * and therefore only runs in a real webview, never under domino.
+ */
+export function postProcessPlantumlDom(root: ParentNode & Node, doc: Document): void {
+  postProcessDiagramDom(root, doc, PLANTUML_FRAME);
 }
 
 /**
@@ -275,11 +289,14 @@ export function postProcessCodeHeaders(root: ParentNode & Node, doc: Document): 
     if (!pre) {
       continue;
     }
-    // Skip mermaid/math source (their <pre> was moved inside a wrapper).
+    // Skip mermaid/plantuml/math source (their <pre> was moved inside a wrapper).
     if (
       hasAncestor(code, (el) => {
         const cl = el.classList;
-        return !!cl && (cl.contains(MERMAID_CLASS) || cl.contains(MATH_BLOCK_CLASS));
+        return (
+          !!cl &&
+          (cl.contains(MERMAID_CLASS) || cl.contains(PLANTUML_CLASS) || cl.contains(MATH_BLOCK_CLASS))
+        );
       })
     ) {
       continue;
@@ -371,7 +388,11 @@ function inSkippedContext(node: Node): boolean {
     const cl = el.classList;
     return (
       !!cl &&
-      (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS) || cl.contains(MERMAID_CLASS) || cl.contains(CAPTION_CLASS))
+      (cl.contains(MATH_INLINE_CLASS) ||
+        cl.contains(MATH_BLOCK_CLASS) ||
+        cl.contains(MERMAID_CLASS) ||
+        cl.contains(PLANTUML_CLASS) ||
+        cl.contains(CAPTION_CLASS))
     );
   });
 }

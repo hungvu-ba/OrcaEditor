@@ -28,10 +28,12 @@
  * còn bỏ cả tài liệu như trước (HLR mục 18, US-18.1, GĐ1 Block-Indexed
  * Architecture — refreshFromMarkdown giờ là consumer đầu tiên hưởng lợi).
  */
+import { MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import {
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   MERMAID_CLASS,
+  PLANTUML_CLASS,
   MATH_BLOCK_CLASS,
   type LineRange,
   type MarkdownRenderer,
@@ -84,7 +86,10 @@ function isDualBoundaryBlock(el: Element): boolean {
   if (el.classList.contains(MERMAID_CLASS)) {
     // Ở view "code" (bấm nút chuyển đổi), khối hiện lại y hệt một code block
     // bình thường (1 dòng nguồn = 1 dòng hiển thị) — không cần số ở mép dưới.
-    return el.getAttribute('data-mermaid-view') !== 'code';
+    return el.getAttribute(MERMAID_FRAME.viewAttr) !== 'code';
+  }
+  if (el.classList.contains(PLANTUML_CLASS)) {
+    return el.getAttribute(PLANTUML_FRAME.viewAttr) !== 'code';
   }
   return false;
 }
