@@ -639,7 +639,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // ở trạng thái giữa (xem prevEditBeforeText).
             const isInverseOfPrev =
               prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
-            lastTextFromWebview = text;
+            // X-2 (caret half): the webview's serialize() is always LF, but
+            // applyMinimalEdit reconciles it to the document's EOL before writing.
+            // Store the echo key at the SAME EOL, else on a CRLF document
+            // getText() (CRLF) never equals this (LF) → echo-check below fails →
+            // a full 'update' re-render on every keystroke → lost caret.
+            lastTextFromWebview = normalizeEol(text, document.eol === vscode.EndOfLine.CRLF);
             let ok: boolean;
             if (isInverseOfPrev) {
               // Bug #3: chặn echo trong lúc HAI applyEdit của nhánh nghịch đảo bắn
@@ -673,7 +678,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
           // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
           if (msg.pendingText !== undefined) {
-            lastTextFromWebview = msg.pendingText;
+            // Same EOL reconciliation as case 'edit' — pendingText is LF too.
+            lastTextFromWebview = normalizeEol(msg.pendingText, document.eol === vscode.EndOfLine.CRLF);
             await this.applyMinimalEdit(document, msg.pendingText);
           }
           const before = document.getText();

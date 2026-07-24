@@ -174,6 +174,63 @@ eq('eol: mixed \\r\\n + \\n -> all CRLF', normalizeEol('a\r\nb\nc', true), 'a\r\
   check('eol[X-2]: result has no bare LF', !/(^|[^\r])\n/.test(rebuilt), `  got: ${JSON.stringify(rebuilt)}`);
 }
 
+// X-2 (caret half): the echo-suppression key must match the document's EOL.
+// provider.ts import 'vscode' → can't load here; MODEL the echo decision of
+// case 'edit' + changeSubscription. The webview always posts LF; applyMinimalEdit
+// writes the reconciled (CRLF-on-a-CRLF-doc) text. If `lastTextFromWebview` keeps
+// the raw LF, getText() (CRLF) never equals it → a full 'update' re-renders
+// #content on EVERY keystroke → lost caret. Reconciling the key suppresses it.
+{
+  function makeCrlfHost(reconcileEchoKey: boolean) {
+    const useCrlf = true;
+    let doc = '# A\r\n\r\nB\r\n'; // CRLF document (tool-generated / Windows file)
+    let lastTextFromWebview: string | undefined;
+    let updatesPosted = 0; // each one = a full renderDocument() → caret loss
+
+    // changeSubscription: echo-check only (provider.ts:522).
+    function onChange(newDocText: string): void {
+      doc = newDocText;
+      if (newDocText === lastTextFromWebview) {
+        return; // echo of our own edit → no re-render
+      }
+      lastTextFromWebview = undefined;
+      updatesPosted++;
+    }
+
+    // case 'edit' (provider.ts:642 + applyMinimalEdit). `text` is the LF serialize.
+    function edit(lfText: string): void {
+      lastTextFromWebview = reconcileEchoKey ? normalizeEol(lfText, useCrlf) : lfText;
+      const reconciled = normalizeEol(lfText, useCrlf); // applyMinimalEdit always writes this
+      const diff = computeMinimalEdit(doc, reconciled);
+      onChange(diff ? applyEdit(doc, diff) : doc);
+    }
+    return {
+      edit,
+      external: onChange, // git/format/external editor: a change with no matching echo key
+      get updates() { return updatesPosted; },
+      get docText() { return doc; },
+    };
+  }
+
+  // Reproduce-first: raw LF key → every keystroke on a CRLF doc posts an update.
+  const buggy = makeCrlfHost(false);
+  buggy.edit('# A\n\nB!\n'); // type "!" after B
+  buggy.edit('# A\n\nB!?\n'); // type "?" — a second keystroke
+  check('eol[X-2 caret]: raw LF echo-key → update on every keystroke (bug)', buggy.updates === 2, `  updates=${buggy.updates}`);
+
+  // Fix: reconcile the echo key → no update echoed back → no re-render → caret kept.
+  const fixed = makeCrlfHost(true);
+  fixed.edit('# A\n\nB!\n');
+  fixed.edit('# A\n\nB!?\n');
+  check('eol[X-2 caret]: reconciled echo-key → zero echo updates (fix)', fixed.updates === 0, `  updates=${fixed.updates}`);
+  eq('eol[X-2 caret]: document stays CRLF through the edits', fixed.docText, '# A\r\n\r\nB!?\r\n');
+
+  // Regression guard: a genuine external edit (git/format) must still post an update.
+  const ext = makeCrlfHost(true);
+  ext.external('# A\r\n\r\nC\r\n');
+  check('eol[X-2 caret]: real external edit still posts update (no over-suppress)', ext.updates === 1);
+}
+
 // ---------------------------------------------------------------------------
 // normalizeForSearch
 // ---------------------------------------------------------------------------
