@@ -18,6 +18,7 @@ import {
   entityFollowingPreview,
   imageNamePrefix,
   normalizeAssetName,
+  normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
   referencedAssetBasenames,
@@ -129,6 +130,48 @@ for (const c of editCases) {
     }
   }
   check('edit: fuzz 500 cặp — áp diff luôn tái tạo newText', ok);
+}
+
+// ---------------------------------------------------------------------------
+// normalizeEol + reconcile before diffing (X-2: a CRLF document is not rewritten).
+// ---------------------------------------------------------------------------
+
+// Pure behavior of normalizeEol.
+eq('eol: LF pass-through when !useCrlf', normalizeEol('# A\n\nB\n', false), '# A\n\nB\n');
+eq('eol: LF -> CRLF when useCrlf', normalizeEol('# A\n\nB\n', true), '# A\r\n\r\nB\r\n');
+eq('eol: idempotent — existing CRLF not doubled to \\r\\r\\n', normalizeEol('# A\r\n\r\nB\r\n', true), '# A\r\n\r\nB\r\n');
+eq('eol: mixed \\r\\n + \\n -> all CRLF', normalizeEol('a\r\nb\nc', true), 'a\r\nb\r\nc');
+
+// Core X-2: same CRLF-doc vs LF-newText pair.
+// - WITHOUT reconcile → the diff mismatches at the first \r → span ~= whole document (bug).
+// - WITH reconcile → minimal span around "B"->"B!", and reapplying stays all-CRLF.
+{
+  const crlfDoc = '# A\r\n\r\nB\r\n';
+  const lfNewText = '# A\n\nB!\n'; // webview serialize() is always LF, only appends '!' after B.
+
+  // Control (no normalize): reproduces the bug — the edit spans almost the whole document.
+  const buggy = computeMinimalEdit(crlfDoc, lfNewText);
+  const buggySpan = buggy ? buggy.oldEnd - buggy.start : 0;
+  check(
+    'eol[X-2]: NO reconcile → span = whole-doc (bug)',
+    buggySpan > crlfDoc.length / 2,
+    `  span=${buggySpan} / docLen=${crlfDoc.length}`
+  );
+
+  // Fix: reconcile the LF newText to CRLF before diffing.
+  const reconciled = normalizeEol(lfNewText, true);
+  const fixed = computeMinimalEdit(crlfDoc, reconciled);
+  const fixedSpan = fixed ? fixed.oldEnd - fixed.start : 0;
+  check(
+    'eol[X-2]: reconcile → minimal span (no whole-file rewrite)',
+    fixed !== null && fixedSpan <= 2,
+    `  span=${fixedSpan} diff=${JSON.stringify(fixed)}`
+  );
+
+  // Reapplying the reconciled edit → result is still all-CRLF, no bare LF mixed in.
+  const rebuilt = fixed ? applyEdit(crlfDoc, fixed) : crlfDoc;
+  eq('eol[X-2]: reapply keeps CRLF', rebuilt, '# A\r\n\r\nB!\r\n');
+  check('eol[X-2]: result has no bare LF', !/(^|[^\r])\n/.test(rebuilt), `  got: ${JSON.stringify(rebuilt)}`);
 }
 
 // ---------------------------------------------------------------------------

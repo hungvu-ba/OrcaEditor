@@ -23,6 +23,7 @@ import {
   computeMinimalEdit,
   imageNamePrefix,
   normalizeAssetName,
+  normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
   referencedAssetBasenames,
@@ -927,7 +928,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /** Áp dụng newText bằng một edit nhỏ nhất (common prefix/suffix diff). */
   private async applyMinimalEdit(document: vscode.TextDocument, newText: string): Promise<boolean> {
-    const diff = computeMinimalEdit(document.getText(), newText);
+    const reconciled = normalizeEol(newText, document.eol === vscode.EndOfLine.CRLF);
+    const diff = computeMinimalEdit(document.getText(), reconciled);
     if (!diff) {
       return true;
     }
@@ -956,7 +958,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * chính xác của edit liền trước (xem prevEditBeforeText).
    */
   private async applyEditBreakingCoalesce(document: vscode.TextDocument, newText: string): Promise<boolean> {
-    const diff = computeMinimalEdit(document.getText(), newText);
+    const reconciled = normalizeEol(newText, document.eol === vscode.EndOfLine.CRLF);
+    const diff = computeMinimalEdit(document.getText(), reconciled);
     if (!diff) {
       return true;
     }

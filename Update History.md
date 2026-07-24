@@ -416,3 +416,4 @@
 | 0.9.0 | 2026-07-24 | Fix: multiple PlantUML diagrams in one document left all-but-one stuck on "Rendering…" — the single-threaded engine's concurrent renders clashed; renders are now serialized through a queue. |
 | 0.9.0 | 2026-07-24 | Fix: PlantUML diagrams (dark-on-transparent, not theme-aware) were invisible on dark themes — gave the chart + zoom a light canvas, using the Reading Mode palette surface in reading modes. |
 | 0.9.0 | 2026-07-24 | Fix: orphan-asset cleanup no longer hard-deletes dropped files whose names contain spaces, parens, `&`, or diacritics (encoded-href + NFC/NFD mismatch); classify and undo-restore now share one normalizer (X-1). |
+| 0.9.0 | 2026-07-24 | Fix: editing a CRLF document no longer rewrites the whole file to LF on the first keystroke — the host now reconciles serialized text to the document's EOL before diffing (X-2). |

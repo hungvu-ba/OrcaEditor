@@ -37,6 +37,17 @@ export function computeMinimalEdit(oldText: string, newText: string): MinimalEdi
   return { start, oldEnd, newText: newText.slice(start, newEnd) };
 }
 
+/**
+ * Normalize the line endings of `text` to the document's EOL before diffing.
+ * The webview serialize() always emits LF; for a CRLF document a raw LF-vs-CRLF
+ * diff mismatches at offset 0 → a whole-document edit (X-2). When `useCrlf`, turn
+ * every `\r\n`/`\n` into `\r\n`. The `/\r\n|\n/g` form (not `/\n/g`) is idempotent
+ * when a `\r\n` already survives.
+ */
+export function normalizeEol(text: string, useCrlf: boolean): string {
+  return useCrlf ? text.replace(/\r\n|\n/g, '\r\n') : text;
+}
+
 /** Các scheme URL tuyệt đối được phép mở ra ngoài — chặn command:, vscode:, ... */
 export const SAFE_LINK_SCHEMES: ReadonlySet<string> = new Set(['http', 'https', 'mailto']);
 
