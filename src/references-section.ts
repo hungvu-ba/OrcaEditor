@@ -372,7 +372,10 @@ export function renderReferences(text: string, plan: RefPlan, brokenKeys: Readon
     return text.slice(0, at) + '\n' + block + text.slice(at);
   }
   // No section — create one at the very end of the body, exactly one trailing newline.
-  const body = text.replace(/\n+$/, '');
+  // Strip trailing blank lines EOL-agnostically: a bare `/\n+$/` on CRLF text leaves a
+  // lone `\r` behind, and normalizeEol (`/\r\n|\n/g`) can't reconcile it, so a stray ^M
+  // would survive into the document before the ## References heading (X-3).
+  const body = text.replace(/(\r?\n)+$/, '');
   const prefix = body === '' ? '' : body + '\n\n';
   return prefix + '## References\n\n' + block + '\n';
 }

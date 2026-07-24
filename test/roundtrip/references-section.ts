@@ -192,4 +192,25 @@ runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalize
     '```\n## References\n```\n\n[A](a.md)\n\n## References\n\n- [A](a.md)\n');
 }
 
+// ---- X-3: CRLF body → new-section trailing strip must not leave a lone \r ----
+// renderReferences emits LF by design (the host choke point reconciles to the
+// document EOL later); the bug was `text.replace(/\n+$/, '')` stripping only the
+// `\n` of a trailing `\r\n`, leaving a stray `\r` that normalizeEol can't fix.
+{
+  const md = '[A](a.md)\r\n';
+  const out = render(md);
+  runner.eq('crlf: single trailing CRLF stripped, no lone \\r', out,
+    '[A](a.md)\n\n## References\n\n- [A](a.md)\n');
+  runner.eq('crlf: output carries no lone \\r', out !== null && !out.includes('\r'), true);
+}
+
+// ---- X-3: CRLF body with a trailing blank line (\r\n\r\n) collapses cleanly ----
+{
+  const md = '[A](a.md)\r\n\r\n';
+  const out = render(md);
+  runner.eq('crlf: double trailing CRLF stripped, single blank before heading', out,
+    '[A](a.md)\n\n## References\n\n- [A](a.md)\n');
+  runner.eq('crlf: double-CRLF output carries no lone \\r', out !== null && !out.includes('\r'), true);
+}
+
 runner.finish('references-section');
