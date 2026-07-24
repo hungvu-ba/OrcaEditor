@@ -95,13 +95,15 @@ const search = initSearch(content);
 // truyền accessor isOpen() của search thay vì cả controller để giữ phụ thuộc tối thiểu.
 const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
-const toc = initToc(content, vscode);
+const dom = createDomHelpers(content);
+// initToc needs placeCaretIn to set the caret at a heading on TOC-link click
+// (so closing the panel reveals that heading, not the stale document-top caret).
+const toc = initToc(content, vscode, dom.placeCaretIn);
 const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
-const dom = createDomHelpers(content);
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
