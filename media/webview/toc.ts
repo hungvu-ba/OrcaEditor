@@ -59,7 +59,7 @@ const TOC_SHRINK_RATIO = 0.35;
 /** Preferred width when the user hasn't resized (mirrors --toc-width in editor.css). */
 const TOC_DEFAULT_WIDTH = 300;
 
-/** US-10.6: heading-level filter — số heading tối đa (level <= 2) trước khi mặc định thu về H1-only. */
+/** US-10.6: heading-level filter — số heading tối đa (level <= 3, khớp default) trước khi mặc định thu về H2. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -148,9 +148,9 @@ export function initToc(
   header.appendChild(stats);
 
   // --- US-10.6: heading-level filter (1=H1 only, 2=H1–H2, 3=H1–H2–H3) ---
-  // maxLevel mặc định = 2; maxLevelInitialized đánh dấu heuristic >20 heading
-  // (xem build()) đã chạy — chỉ chạy 1 lần cho mỗi tab, không re-run ở rebuild sau.
-  let maxLevel: 1 | 2 | 3 = 2;
+  // maxLevel mặc định = 3 (hiện H1–H2–H3); maxLevelInitialized đánh dấu heuristic
+  // >20 heading (xem build()) đã chạy — chỉ chạy 1 lần cho mỗi tab, không re-run ở rebuild sau.
+  let maxLevel: 1 | 2 | 3 = 3;
   let maxLevelInitialized = false;
   const savedMaxLevel = vscode?.getState()?.tocMaxLevel;
   if (savedMaxLevel === 1 || savedMaxLevel === 2 || savedMaxLevel === 3) {
@@ -361,9 +361,11 @@ export function initToc(
     // never re-run on later rebuilds (content edits) so the filter never jumps
     // out from under a value the user set (or implicitly kept).
     if (!maxLevelInitialized) {
-      const level12Count = allHeadings.filter((h) => headingLevel(h) <= 2).length;
-      if (level12Count > TOC_FILTER_DEFAULT_MAX_COUNT) {
-        maxLevel = 1;
+      // Count the headings the H1–H2–H3 default would show; if that's too dense,
+      // step the default down one level to H2 (hides the H3s) rather than H1.
+      const defaultLevelCount = allHeadings.filter((h) => headingLevel(h) <= 3).length;
+      if (defaultLevelCount > TOC_FILTER_DEFAULT_MAX_COUNT) {
+        maxLevel = 2;
         updateDepthButtons();
       }
       maxLevelInitialized = true;

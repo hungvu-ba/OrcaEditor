@@ -35,7 +35,7 @@ import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
-import { initBrokenRef, slugifyHeadingText } from './broken-ref';
+import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid } from './mermaid';
@@ -1539,12 +1539,17 @@ function openLink(href: string): void {
 }
 
 function scrollToAnchor(fragment: string): void {
-  const decoded = decodeURIComponent(fragment).toLowerCase();
+  // X-4: slugify the fragment side (shared with broken-ref.ts) so a Vietnamese
+  // heading resolves regardless of NFC/NFD authoring form, not a raw decoded compare.
+  const target = fragmentToHeadingSlug(fragment);
+  if (!target) {
+    return; // a punctuation-only fragment slugs to '' — don't scroll to a random empty-slug heading.
+  }
   const headings = content.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (const h of Array.from(headings)) {
     // Same slugify rule broken-ref.ts uses to resolve a #heading link's
     // existence (Req 20 US-20.9) — shared so the two never drift apart.
-    if (slugifyHeadingText(h.textContent ?? '') === decoded) {
+    if (slugifyHeadingText(h.textContent ?? '') === target) {
       h.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       return;
     }

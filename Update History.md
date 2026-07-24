@@ -421,3 +421,6 @@
 | 0.9.0 | 2026-07-24 | Fix: typing in a CRLF document no longer loses the caret on every keystroke — the echo-suppression key is now reconciled to the document's EOL, so an edit isn't mistaken for an external change and re-rendered (X-2). |
 | 0.9.0 | 2026-07-24 | Fix: on Windows/Linux, AltGr+Shift+X / AltGr+Shift+Z no longer fire strikethrough / a destructive redo (and swallow the typed character) — both shortcuts now require `!altKey` (X-6). |
 | 0.9.0 | 2026-07-24 | Fix: toggling the Table of Contents now keeps the focused line in place (anchor-pinned across the reflow), clicking a TOC row sets the caret at its heading (no jump to top on close) and leaves no focus ring. |
+| 0.9.0 | 2026-07-24 | Fix: an entity mention with a non-ASCII (Vietnamese) namespace no longer always renders broken — the fragment is decoded+NFC-reconciled at the four classify/lookup/scan boundaries via one shared helper (X-5). |
+| 0.9.0 | 2026-07-24 | Change: the Table of Contents now defaults to H1–H2–H3 (was H1–H2), and a dense doc (>20 H1–H3 headings) now falls back to H2 (was H1-only); saved per-tab depth still wins. |
+| 0.9.0 | 2026-07-24 | Fix: a Vietnamese heading `#fragment` link no longer breaks across NFC vs NFD authoring forms — `slugifyHeadingText` now NFC-normalizes and both consumers slugify the fragment side via one shared helper (X-4). |

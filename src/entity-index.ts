@@ -7,6 +7,7 @@
  * feeds already-read text into the pure methods here.
  */
 import { entityFollowingLabel, entityFollowingPreview, normalizeForSearch } from './text-utils';
+import { decodeEntityFragment } from './shared/entity-fragment';
 
 /**
  * One indexed entity, flattened per declaration with its namespace carried on
@@ -323,12 +324,18 @@ export class EntityIndex {
    * case-insensitively (per US-21.2) and whose id matches exactly.
    */
   lookup(fullId: string): IndexedEntity[] {
-    const nsMatch = NAMESPACE_RE.exec(fullId);
+    // X-5: the mention fragment can arrive percent-encoded (`Y%C3%Aau01`) and in
+    // NFD — decode+NFC it so it meets an NFC-authored declaration in one spelling
+    // (a Vietnamese namespace no longer fails `NAMESPACE_RE` on `%`). An
+    // NFD-authored declaration is a separate concern (parseEntities mis-splits it
+    // at the combining mark) — deferred to the NFC normalizer work, see X-4.
+    const normalized = decodeEntityFragment(fullId);
+    const nsMatch = NAMESPACE_RE.exec(normalized);
     if (!nsMatch) {
       return [];
     }
     const ns = nsMatch[0].toLowerCase();
-    const id = fullId.slice(nsMatch[0].length);
+    const id = normalized.slice(nsMatch[0].length);
     if (id === '') {
       return [];
     }

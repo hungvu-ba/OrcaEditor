@@ -31,6 +31,7 @@ import {
 } from './render';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
+import { decodeEntityFragment } from '../../src/shared/entity-fragment';
 import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 
 /**
@@ -617,8 +618,12 @@ export function postProcessEntityRefs(root: ParentNode & Node): void {
     if (hashIdx === -1) {
       continue;
     }
-    const fragment = href.slice(hashIdx + 1);
-    const text = (anchor.textContent ?? '').trim();
+    // X-5: markdown-it percent-encodes a non-ASCII fragment in the rendered
+    // href while the display text stays decoded — decode+NFC the fragment (and
+    // NFC the text) so `NS_ID` in a Vietnamese namespace matches, instead of
+    // comparing `#Y%C3%Aau01` against `Yêu01` and never stamping the class.
+    const fragment = decodeEntityFragment(href.slice(hashIdx + 1));
+    const text = (anchor.textContent ?? '').trim().normalize('NFC');
     // Req 21: a mention's display text is either the bare `NS_ID` (no label) OR
     // `NS_ID label` (the entity's human name follows a single space). Both are
     // entity references — the fragment carries the clean `#NS_ID` either way.

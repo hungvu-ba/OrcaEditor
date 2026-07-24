@@ -59,12 +59,28 @@ async function expectActiveDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
   await expect(page.locator(`.toc-depth-btn[data-level="${level}"]`)).toHaveAttribute('aria-pressed', 'true');
 }
 
-test('defaults to H1-H2 (level 2) when heading count is below the smart-fallback threshold', async ({ page }) => {
+test('defaults to H1-H2-H3 (level 3) when heading count is below the smart-fallback threshold', async ({ page }) => {
   await openToc(page);
+  await expectActiveDepth(page, 3);
+  // All five headings visible at the H1–H2–H3 default: H1 A, H2 A1, H3 A1a, H2 A2, H1 B.
+  await expect(page.locator('.toc-item')).toHaveCount(5);
+  await expect(page.locator('.toc-item.toc-level-3')).toHaveCount(1);
+});
+
+test('smart-fallback: a dense doc (>20 H1–H3 headings) defaults to H2, not H1 or H3', async ({ page }) => {
+  // 1 H1 + 10 H2 + 10 H3 = 21 headings at level<=3 (>20) but only 11 at
+  // level<=2. So the fallback must key off the level<=3 count and step the
+  // default down to H2 — showing the H1+H2 (11) and hiding every H3.
+  const dense =
+    `# Top\n\n${filler('T', 2)}\n\n` +
+    Array.from({ length: 10 }, (_, i) => `## Sec ${i + 1}\n\n${filler('S', 2)}\n\n### Sub ${i + 1}\n\n${filler('s', 2)}`).join(
+      '\n\n'
+    );
+  await openToc(page, dense);
+
   await expectActiveDepth(page, 2);
-  // H1 A, H2 A1, H2 A2, H1 B visible; H3 A1a hidden.
-  await expect(page.locator('.toc-item')).toHaveCount(4);
   await expect(page.locator('.toc-item.toc-level-3')).toHaveCount(0);
+  await expect(page.locator('.toc-item')).toHaveCount(11); // 1 H1 + 10 H2
 });
 
 test('clicking each depth pill filters visible .toc-item entries by level', async ({ page }) => {
@@ -86,6 +102,8 @@ test('clicking each depth pill filters visible .toc-item entries by level', asyn
 
 test('scrolling to an H3 while filtered to H1-H2 highlights the nearest visible ancestor', async ({ page }) => {
   await openToc(page);
+  // H1–H2–H3 is the default now, so narrow to H1–H2 to hide the H3 under test.
+  await setDepth(page, 2);
   await expectActiveDepth(page, 2);
 
   await page.locator('h3', { hasText: 'H3 A1a' }).evaluate((el) => el.scrollIntoView({ block: 'start' }));

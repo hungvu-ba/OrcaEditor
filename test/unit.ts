@@ -977,6 +977,29 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   eq('occurrence: links inside a fence are skipped', fenced, [{ id: 'br02', line: 3 }]);
 }
 
+// X-5: a non-ASCII namespace can reach the host percent-encoded (markdown-it /
+// turndown persist it that way) and in either Unicode form — the host must
+// decode+NFC before NAMESPACE_RE, on both the occurrence and the lookup paths.
+{
+  const canon = 'Yêu01'.normalize('NFC').toLowerCase();
+  // canonicalEntityId decodes a percent-encoded fragment before parsing the ns
+  // (raw `Y%C3%Aau01` would otherwise let NAMESPACE_RE match only the leading `Y`).
+  eq('occurrence x5: canonical decodes percent-encoded non-ASCII ns', canonicalEntityId('Y%C3%Aau01'), canon);
+  // Scan-key (from raw .md) and query key (from the webview id) both go through
+  // canonicalEntityId, so a percent-encoded link is found under the same key.
+  eq('occurrence x5: percent-encoded non-ASCII link found', scanEntityOccurrences('See [Yêu01](#Y%C3%Aau01) here.\n'), [
+    { id: canon, line: 0 },
+  ]);
+
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::Yêu01\n' }]);
+  check('entity x5: lookup resolves a percent-encoded non-ASCII query', idx.lookup('Y%C3%Aau01').length === 1);
+  // An NFD-form mention query resolves against the NFC-authored declaration
+  // (decodeEntityFragment folds the query to NFC). An NFD-authored *declaration*
+  // is out of scope — parseEntities mis-splits it at the combining mark; deferred.
+  check('entity x5: lookup resolves an NFD query against an NFC declaration', idx.lookup('Yêu01'.normalize('NFD')).length === 1);
+}
+
 // truncateDisplay — Bug 11: cap @ result label/detail at 30 chars + ellipsis.
 {
   check('truncate: short text unchanged', truncateDisplay('BR02') === 'BR02');
