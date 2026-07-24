@@ -1895,28 +1895,49 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
 
-    // Chỉ phân giải symlink cho scheme file; scheme khác giữ path chuẩn hóa.
-    const canonical = async (uri: vscode.Uri): Promise<string> => {
-      const normalized = uri.path.replace(/\/+$/, '');
+    // Windows: case khác nhau giữa các đoạn path (ổ đĩa "c:\" vs "C:\", hoặc
+    // case gốc trên đĩa do git checkout/rename) không nên khiến so sánh fail.
+    const forCompare = (p: string): string => {
+      const withForwardSlashes = p.replace(/\\/g, '/');
+      return process.platform === 'win32' ? withForwardSlashes.toLowerCase() : withForwardSlashes;
+    };
+
+    // Kiểm tra lexical (không đụng filesystem): candidate luôn được dựng qua
+    // vscode.Uri.joinPath (xem relativeTargetCandidates), nên các đoạn `..`
+    // đã được chuẩn hóa ở tầng Uri — đây là hàng rào chính chặn traversal ra
+    // ngoài workspace, và không bị ảnh hưởng bởi reparse point/junction
+    // (OneDrive Files On-Demand, Known Folder Move...) làm fs.realpath()
+    // trả về một path khác cấu trúc so với root dù file vẫn nằm trong cây
+    // workspace thật.
+    const lexicalPath = (uri: vscode.Uri): string => forCompare(uri.fsPath.replace(/[/\\]+$/, '') + '/');
+    const targetLexical = lexicalPath(target);
+    if (roots.some((root) => targetLexical.startsWith(lexicalPath(root)))) {
+      return true;
+    }
+
+    // Fallback: symlink thật sự có thể khiến path lexical rơi ra ngoài root
+    // dù sau khi resolve vẫn nằm trong workspace (hoặc ngược lại) — thử
+    // realpath() như một kiểm tra bổ sung, best-effort (không bắt buộc phải
+    // thành công, vì OneDrive/junction có thể khiến nó lệch hoặc lỗi).
+    const canonical = async (uri: vscode.Uri): Promise<string | null> => {
       if (uri.scheme !== 'file') {
-        return normalized;
+        return null;
       }
       try {
-        // Cố ý: chính hàm canonical() cần phân giải symlink của đường dẫn để
-        // so khớp allowlist openLink; fsPath đến từ vscode.Uri (không phải input
-        // thô của người dùng), không có chèn shell/lệnh nào ở đây.
         // eslint-disable-next-line security/detect-non-literal-fs-filename
-        return await fs.promises.realpath(uri.fsPath);
+        return forCompare((await fs.promises.realpath(uri.fsPath)) + '/');
       } catch {
-        // File chưa tồn tại — dùng path gốc đã chuẩn hóa làm fallback.
-        return uri.fsPath.replace(/[/\\]+$/, '');
+        return null;
       }
     };
 
-    const targetPath = (await canonical(target)) + '/';
+    const targetReal = await canonical(target);
+    if (targetReal === null) {
+      return false;
+    }
     for (const root of roots) {
-      const rootPath = (await canonical(root)) + '/';
-      if (targetPath.startsWith(rootPath)) {
+      const rootReal = await canonical(root);
+      if (rootReal !== null && targetReal.startsWith(rootReal)) {
         return true;
       }
     }
