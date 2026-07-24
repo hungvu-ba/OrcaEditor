@@ -35,6 +35,25 @@ test('a ```plantuml fence renders an SVG diagram', async ({ page }) => {
   await expect(page.locator('.md-plantuml-chart')).not.toHaveClass(/md-plantuml-error/);
 });
 
+test('multiple diagrams in one document all render (single-threaded engine is serialized)', async ({ page }) => {
+  test.slow();
+  // renderAll() fires every frame at once, but the TeaVM engine renders one at a
+  // time — concurrent renderToString calls used to leave all-but-one hung on the
+  // "Rendering…" placeholder. Graphviz-backed kinds (class/usecase/…) are the ones
+  // that clashed, so cover a mix of them alongside a plain sequence diagram.
+  const doc =
+    '```plantuml\n@startuml\nAlice -> Bob : Hi\n@enduml\n```\n\n' +
+    '```plantuml\n@startuml\nclass A\nclass B\nA --> B\n@enduml\n```\n\n' +
+    '```plantuml\n@startuml\nactor U\nU -- (UC1)\n@enduml\n```\n\n' +
+    '```plantuml\n@startuml\n[*] --> S1\nS1 --> [*]\n@enduml\n```\n\n' +
+    '```plantuml\n@startuml\ncomponent C1\ncomponent C2\nC1 --> C2\n@enduml\n```\n';
+  await openEditor(page, doc);
+
+  // Every frame must end up with an SVG and none stuck on the placeholder or errored.
+  await expect(page.locator('.md-plantuml-chart svg')).toHaveCount(5, { timeout: 60000 });
+  await expect(page.locator('.md-plantuml-chart.md-plantuml-error')).toHaveCount(0);
+});
+
 test('toggle flips between chart and source, and re-renders on the way back', async ({ page }) => {
   test.slow();
   await openEditor(page, SIMPLE);
@@ -84,6 +103,9 @@ test('Zoom opens the diagram in the shared lightbox; Esc closes it', async ({ pa
   const lightbox = page.locator('#md-lightbox');
   await expect(lightbox).toBeVisible();
   await expect(lightbox.locator('#md-lightbox-stage svg')).toHaveCount(1);
+  // The engine draws dark-on-transparent, so the zoom stage must carry the
+  // light-canvas marker to stay readable over the dark overlay (see lightbox CSS).
+  await expect(page.locator('#md-lightbox-stage')).toHaveAttribute('data-canvas', 'light');
 
   await page.keyboard.press('Escape');
   await expect(lightbox).toBeHidden();

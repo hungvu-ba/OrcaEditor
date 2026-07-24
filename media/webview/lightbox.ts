@@ -12,7 +12,10 @@
 
 export type LightboxContent =
   | { kind: 'image'; src: string; alt?: string }
-  | { kind: 'svg'; svg: string };
+  // canvas:'light' forces a light backdrop behind the SVG (for engines like
+  // PlantUML that draw dark-on-transparent); omitted, the stage uses the
+  // editor-background card (right for theme-aware Mermaid). See lightbox CSS.
+  | { kind: 'svg'; svg: string; canvas?: 'light' };
 
 let overlay: HTMLDivElement | undefined;
 let stage: HTMLDivElement | undefined;
@@ -142,6 +145,11 @@ export function openLightbox(content: LightboxContent): void {
 
   stage.textContent = ''; // clear previous content
   stage.setAttribute('data-kind', content.kind);
+  if (content.kind === 'svg' && content.canvas === 'light') {
+    stage.setAttribute('data-canvas', 'light');
+  } else {
+    stage.removeAttribute('data-canvas');
+  }
   if (content.kind === 'image') {
     const img = document.createElement('img');
     img.src = content.src;

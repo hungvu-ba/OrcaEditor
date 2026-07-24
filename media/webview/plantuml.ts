@@ -106,20 +106,35 @@ function loadEngine(): Promise<PlantumlEngine> {
   return enginePromise;
 }
 
-/** Bọc API callback của engine thành Promise. */
+// Engine PlantUML (TeaVM) dựng ĐƠN LUỒNG: gọi renderToString khi một lần dựng
+// trước chưa xong sẽ giẫm chân nhau — chỉ callback của lời gọi cuối cùng chạy,
+// các lời gọi kia treo vĩnh viễn. renderAll bắn tất cả biểu đồ cùng lúc, nên
+// phải XẾP HÀNG: mỗi lần dựng chờ lần trước kết thúc rồi mới gọi engine.
+let renderChain: Promise<unknown> = Promise.resolve();
+
+/** Bọc API callback của engine thành Promise, nối vào hàng đợi dựng đơn luồng. */
 function renderSvg(engine: PlantumlEngine, source: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    engine.renderToString(
-      source.split(/\r\n|\r|\n/),
-      (svg) => resolve(svg),
-      (message) => reject(new Error(message))
-    );
-  });
+  const run = renderChain.then(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        engine.renderToString(
+          source.split(/\r\n|\r|\n/),
+          (svg) => resolve(svg),
+          (message) => reject(new Error(message))
+        );
+      })
+  );
+  // Nuốt lỗi ở nhánh giữ chuỗi (không phải nhánh trả về): một lần dựng lỗi vẫn
+  // để lần kế tiếp trong hàng đợi chạy, thay vì kẹt cả chuỗi.
+  renderChain = run.catch(() => undefined);
+  return run;
 }
 
 export function initPlantuml(content: HTMLElement): PlantumlController {
   initDiagramFrameToolbar(content, PLANTUML_FRAME, {
-    onZoom: (chart) => openLightbox({ kind: 'svg', svg: chart.innerHTML }),
+    // canvas:'light' — engine dựng nét đen trên nền trong suốt, cần nền sáng để
+    // đọc được trên lớp phủ tối của lightbox (xem CSS #md-lightbox-stage).
+    onZoom: (chart) => openLightbox({ kind: 'svg', svg: chart.innerHTML, canvas: 'light' }),
     onShowChart(wrapper) {
       // Mã nguồn có thể vừa được sửa ở view code — dựng lại theo nội dung mới nhất.
       void renderDiagram(wrapper);

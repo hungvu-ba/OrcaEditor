@@ -1130,6 +1130,14 @@ body.reading-mode:not(.reading-zen) #content {
   height: auto;
 }
 
+/* PlantUML engine dựng nét/chữ gần đen trên nền TRONG SUỐT và không theme-aware
+ * như mermaid (mermaid tự đổi sang light-on-dark ở theme tối). Cho vùng biểu đồ
+ * một nền sáng cố định để lifeline/mũi tên/chữ luôn đọc được ở mọi theme VS Code.
+ * Reading mode thay bằng bề mặt palette bên dưới (~L2660). */
+.md-plantuml-chart {
+  background: #ffffff;
+}
+
 .md-mermaid-chart.md-mermaid-error,
 .md-plantuml-chart.md-plantuml-error {
   justify-content: flex-start;
@@ -2657,6 +2665,11 @@ body[class*='reading-mode-'] .md-plantuml-toolbar {
   background: var(--rp-bg);
   border-bottom-color: var(--rp-embed-border);
 }
+/* PlantUML chart canvas: thay nền trắng cố định (đặt ở ~L1132) bằng bề mặt nổi
+ * của palette, để biểu đồ nằm trên nền sepia/paper thay vì tấm trắng chói lệch tông. */
+body[class*='reading-mode-'] .md-plantuml-chart {
+  background: var(--rp-elev-bg);
+}
 
 /* Front matter (khối YAML gấp gọn, viền dashed). */
 body[class*='reading-mode-'] .md-front-matter {
@@ -2769,6 +2782,14 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   padding: 24px;
   background: var(--vscode-editor-background, #fff);
   border-radius: 6px;
+}
+/* PlantUML zoom (data-canvas='light'): engine dựng nét đen, nên cần nền sáng cố
+ * định thay cho editor-background (tối ở theme tối). Reading mode dùng bề mặt palette. */
+#md-lightbox-stage[data-canvas='light'] {
+  background: #ffffff;
+}
+body[class*='reading-mode-'] #md-lightbox-stage[data-canvas='light'] {
+  background: var(--rp-elev-bg);
 }
 #md-lightbox-hint {
   position: fixed;

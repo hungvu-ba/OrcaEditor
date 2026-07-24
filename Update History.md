@@ -413,4 +413,6 @@
 | 0.9.0 | 2026-07-24 | Fix: workspace-boundary check falsely blocked/broke valid new-file links on Windows due to a case-sensitive path prefix compare mismatched between realpath and fsPath fallback. |
 | 0.9.0 | 2026-07-24 | Fix: workspace-boundary check now compares lexical paths first (realpath only as best-effort fallback) so OneDrive/junction reparse points no longer falsely block valid cross-folder links on Windows. |
 | 0.9.0 | 2026-07-24 | Feature: ```plantuml``` blocks render as diagrams in the preview, client-side and offline via @plantuml/core, lazy-loaded so diagram-free files pay nothing (US-2.8). |
+| 0.9.0 | 2026-07-24 | Fix: multiple PlantUML diagrams in one document left all-but-one stuck on "Rendering…" — the single-threaded engine's concurrent renders clashed; renders are now serialized through a queue. |
+| 0.9.0 | 2026-07-24 | Fix: PlantUML diagrams (dark-on-transparent, not theme-aware) were invisible on dark themes — gave the chart + zoom a light canvas, using the Reading Mode palette surface in reading modes. |
 | 0.9.0 | 2026-07-24 | Fix: orphan-asset cleanup no longer hard-deletes dropped files whose names contain spaces, parens, `&`, or diacritics (encoded-href + NFC/NFD mismatch); classify and undo-restore now share one normalizer (X-1). |
