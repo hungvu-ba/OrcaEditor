@@ -215,7 +215,12 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       // surrounding prose/markdown (e.g. `caption::UC01`, → `` UC01`, ``;
       // `caption::UC01).` → `UC01).`). Strip that trailing non-alphanumeric run
       // so the parsed id stays a clean token; a punctuation-only token drops out.
-      const token = match[1].replace(/[^\p{L}\p{N}]+$/u, '');
+      // X-5 (deferred follow-up): NFC-normalize FIRST so an NFD-authored
+      // namespace (e.g. `Yêu01` with `ê` = e + U+0302) recomposes before
+      // NAMESPACE_RE (`/^\p{L}+/u`) — otherwise the split stops at the combining
+      // mark → namespace `Ye`, id `̂u01`. The mention/query side already NFCs
+      // (canonicalEntityId → decodeEntityFragment), so this makes both agree.
+      const token = match[1].normalize('NFC').replace(/[^\p{L}\p{N}]+$/u, '');
       if (token === '') {
         continue; // nothing left after trimming trailing punctuation.
       }

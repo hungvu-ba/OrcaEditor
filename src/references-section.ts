@@ -17,7 +17,7 @@
  * `[![alt](img.png)](file.md)` links are handled correctly.
  */
 
-import { hasUrlScheme } from './shared/link-scheme';
+import { hasUrlScheme, isWindowsUncPath } from './shared/link-scheme';
 
 /** One in-scope body link, keyed for dedup/present-check and nav matching. */
 export interface RefCandidate {
@@ -81,6 +81,18 @@ export function normalizeHrefKey(href: string, caseInsensitive = false): string 
     decoded = decodeURIComponent(s);
   } catch {
     decoded = s;
+  }
+  if (isWindowsUncPath(decoded)) {
+    // X-7: `\\server\share\x.md` is a UNC network path, NOT workspace-absolute.
+    // Keep a DISTINCT key (a bare posix-normalize collapses `\\`→`/` and would
+    // collide it with a `/server/share/x.md` workspace-absolute ref, merging two
+    // unrelated targets into one References entry). The `//` prefix preserves the
+    // UNC authority and keeps it apart from a single-slash absolute path.
+    const parts = decoded
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter((p) => p !== '' && p !== '.');
+    return '//' + parts.map((p) => (caseInsensitive ? p.toLowerCase() : p)).join('/');
   }
   decoded = decoded.replace(/\\/g, '/');
   let drive = '';

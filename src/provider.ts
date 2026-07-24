@@ -36,11 +36,18 @@ import {
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
-import { isWindowsDrivePath } from './shared/link-scheme';
+import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 
-/** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
-const UNDO_SETTLE_MS = 200;
+/**
+ * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
+ * coi là no-op. X-17: đây là TRẦN CỨNG chỉ bị chạm khi (a) undo-stack rỗng thật
+ * hoặc (b) I/O bị bóp (Defender + OneDrive quét) khiến edit lớn về chậm. 200ms
+ * quá sát cho case (b) → undo im lặng không làm gì; nâng lên 500ms để có headroom
+ * mà case (a) rỗng vẫn không giật thấy rõ (không phân biệt được (a) với (b) nên
+ * mọi giá trị đều bị cả hai case trả — 500ms là điểm cân bằng).
+ */
+const UNDO_SETTLE_MS = 500;
 
 /**
  * Whether the host filesystem is case-insensitive (Windows, macOS/APFS). Used
@@ -151,11 +158,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
     });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
-    const reindex = (uri: vscode.Uri): void => void provider.reindexFile(uri);
+    // X-16: coalesce OneDrive/cloud sync bursts (many events for one file) and
+    // ignore synced build/deps dirs — reindexFile is cheap but a `node_modules`
+    // full of .md or a sync storm would otherwise reindex-storm. Delete stays
+    // immediate (drop the file's rows now; cancel any pending reindex for it).
+    const reindex = (uri: vscode.Uri): void => provider.scheduleReindex(uri);
     const watcherSubs = [
       watcher.onDidChange(reindex),
       watcher.onDidCreate(reindex),
-      watcher.onDidDelete((uri) => provider.entityIndex.onFileChanged(uri.toString(), '')),
+      watcher.onDidDelete((uri) => provider.forgetIndexedFile(uri)),
       watcher,
     ];
     // Req 21 US-21.3: session-only occurrence cache — every markdown file the
@@ -226,6 +237,53 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     const bytes = await vscode.workspace.fs.readFile(uri);
     return new TextDecoder().decode(bytes);
+  }
+
+  /**
+   * X-16: watcher debounce window per URI, and the build/deps dir names to skip
+   * (mirrors FILE_SEARCH_EXCLUDE's dir list — same folders the initial index
+   * build already excludes via findFiles).
+   */
+  private static readonly WATCHER_DEBOUNCE_MS = 300;
+  private static readonly WATCHER_EXCLUDE_DIRS = new Set([
+    'node_modules',
+    '.git',
+    'dist',
+    'out',
+    'build',
+    '.next',
+    'coverage',
+  ]);
+  private readonly reindexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** X-16: debounced, dir-scoped entry point for watcher change/create events. */
+  private scheduleReindex(uri: vscode.Uri): void {
+    if (uri.path.split('/').some((seg) => MarkdownWysiwygProvider.WATCHER_EXCLUDE_DIRS.has(seg))) {
+      return;
+    }
+    const key = uri.toString();
+    const existing = this.reindexTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.reindexTimers.set(
+      key,
+      setTimeout(() => {
+        this.reindexTimers.delete(key);
+        void this.reindexFile(uri);
+      }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
+    );
+  }
+
+  /** X-16: watcher delete — cancel any pending reindex, then drop the file's rows now. */
+  private forgetIndexedFile(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const existing = this.reindexTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      this.reindexTimers.delete(key);
+    }
+    this.entityIndex.onFileChanged(key, '');
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
@@ -1519,7 +1577,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * qua document đó (không đủ cơ sở xác định ảnh nào thuộc về nó).
    */
   private imagePrefixFor(document: vscode.TextDocument): string {
-    return imageNamePrefix(path.basename(document.fileName, path.extname(document.fileName)));
+    // X-21: fold to the FS's case-sensitivity so `Report.md`/`report.md` don't
+    // share a prefix on Linux (each would treat the other's images as orphans).
+    return imageNamePrefix(path.basename(document.fileName, path.extname(document.fileName)), CASE_INSENSITIVE_FS);
   }
 
   /**
@@ -1537,6 +1597,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     mime: string,
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
+    // X-20: an untitled/virtual doc has no base dir to resolve `assets/` against;
+    // the lexical guard passes on `untitled:/assets` and writeFile throws a
+    // generic NoProvider → "Failed to save pasted image." Guard up front with a
+    // specific message (mirrors the addReference scheme guard).
+    if (document.uri.scheme !== 'file' || document.isUntitled) {
+      return { error: 'Save the file first to paste images into it.' };
+    }
     const ext = MarkdownWysiwygProvider.PASTE_IMAGE_EXTENSIONS[mime];
     if (!ext) {
       return { error: `Unsupported clipboard image type: ${mime}` };
@@ -1579,6 +1646,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     name: string,
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
+    // X-20: same untitled/virtual-doc guard as savePastedImage — no base dir to
+    // resolve `assets/` against, so fail with a specific message instead of a
+    // generic writeFile NoProvider throw.
+    if (document.uri.scheme !== 'file' || document.isUntitled) {
+      return { error: 'Save the file first to drop files into it.' };
+    }
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const targetDir = await this.resolveAllowedAssetsDir(document);
     if (!targetDir) {
@@ -1605,16 +1678,33 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /** First non-colliding "name.ext" / "name (2).ext" / "name (3).ext"... under `dir`. */
+  /**
+   * X-18: names handed out by uniqueAssetUri but not yet written to disk. Two
+   * files dropped in one gesture (external-drop.ts fires each independently) both
+   * `stat` `report (2).pdf`, both miss, and one overwrites the other; OneDrive
+   * placeholder-stat latency widens the window. Reserving the chosen name
+   * synchronously before the await returns closes it — the second call skips the
+   * reserved candidate and takes `report (3).pdf`. Session-scoped; a name whose
+   * write later fails simply stays reserved (a skipped suffix, never an
+   * overwrite), which is the conservative failure mode.
+   */
+  private readonly reservedAssetUris = new Set<string>();
+
   private async uniqueAssetUri(dir: vscode.Uri, fileName: string): Promise<vscode.Uri> {
     const ext = path.extname(fileName);
     const stem = fileName.slice(0, fileName.length - ext.length);
     for (let n = 1; ; n++) {
       const candidate = n === 1 ? fileName : `${stem} (${n})${ext}`;
       const uri = vscode.Uri.joinPath(dir, candidate);
+      const key = uri.toString();
+      if (this.reservedAssetUris.has(key)) {
+        continue; // in-flight sibling drop already claimed this name
+      }
       try {
         await vscode.workspace.fs.stat(uri);
       } catch {
-        return uri; // stat threw → doesn't exist yet
+        this.reservedAssetUris.add(key); // reserve before returning → no concurrent double-win
+        return uri;
       }
     }
   }
@@ -1793,7 +1883,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
-    const imagesDir = this.resolveAssetsDir(document);
+    // X-15: same allowed-roots guard as every other writer (savePastedImage /
+    // saveDroppedFile / cleanupOrphanImages) — a mis-configured customFolderPath
+    // must not let undo write a restored file outside the workspace. Skip when
+    // the dir is refused; the bytes stay cached for a later, in-bounds restore.
+    const imagesDir = await this.resolveAllowedAssetsDir(document);
+    if (!imagesDir) {
+      return;
+    }
     // Same normalizer as cleanupOrphanImages: match the normalized name against
     // the link/image/HTML targets so undo restores the right file even when its
     // name has diacritics / spaces / parens (X-1).
@@ -1849,15 +1946,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     relPath: string
   ): Promise<vscode.Uri[]> {
     const decoded = decodeURIComponent(relPath);
-    if (isWindowsDrivePath(decoded)) {
-      // X-7: an absolute drive path (`C:\…`) is NOT relative to the doc/workspace
-      // — resolve it directly as a file URI, still gated by allowed-roots, so
-      // click / inline marker / References all agree on one answer.
-      // `path.win32.normalize` collapses `.`/`..` FIRST: unlike the relative
-      // branch below (built via `joinPath`, which normalizes at the Uri layer),
-      // `vscode.Uri.file` does NOT resolve `..`, and `isInsideAllowedRoots`'
-      // lexical guard assumes normalized input — so a raw `C:\root\..\..\outside`
-      // href would otherwise `startsWith` the root string and slip past.
+    if (isWindowsDrivePath(decoded) || isWindowsUncPath(decoded)) {
+      // X-7: an absolute drive path (`C:\…`) or UNC path (`\\server\share\…`) is
+      // NOT relative to the doc/workspace — resolve it directly as a file URI,
+      // still gated by allowed-roots, so click / inline marker / References all
+      // agree on one answer (a UNC target outside the workspace is refused, not
+      // mis-joined onto the workspace root as the relative branch would do).
+      // `path.win32.normalize` collapses `.`/`..` FIRST (and preserves the UNC
+      // `\\` prefix): unlike the relative branch below (built via `joinPath`,
+      // which normalizes at the Uri layer), `vscode.Uri.file` does NOT resolve
+      // `..`, and `isInsideAllowedRoots`' lexical guard assumes normalized input
+      // — so a raw `C:\root\..\..\outside` href would otherwise `startsWith` the
+      // root string and slip past.
       const uri = vscode.Uri.file(path.win32.normalize(decoded));
       return (await this.isInsideAllowedRoots(document, uri)) ? [uri] : [];
     }

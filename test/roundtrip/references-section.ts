@@ -39,6 +39,16 @@ runner.eq('key(X-12): caseInsensitive folds the body', normalizeHrefKey('Docs/Sp
 runner.eq('key(X-12): caseInsensitive — case-differing keys collapse', normalizeHrefKey('Docs/Spec.md', true) === normalizeHrefKey('docs/spec.md', true), true);
 runner.eq('key(X-12): drive letter still folded regardless of flag', normalizeHrefKey('C:\\Dir\\X.md', false), 'c:/Dir/X.md');
 
+// ---- X-7: UNC network path kept DISTINCT from a workspace-absolute path ----
+runner.eq('key(X-7): UNC path keeps the `//server` authority (not workspace-absolute)',
+  normalizeHrefKey('\\\\server\\share\\x.md'), '//server/share/x.md');
+runner.eq('key(X-7): UNC does NOT collide with a single-slash absolute path',
+  normalizeHrefKey('\\\\server\\share\\x.md') === normalizeHrefKey('/server/share/x.md'), false);
+runner.eq('key(X-7): UNC strips #fragment like any key',
+  normalizeHrefKey('\\\\server\\share\\x.md#heading'), '//server/share/x.md');
+runner.eq('key(X-7): UNC body case-folds under caseInsensitive',
+  normalizeHrefKey('\\\\Server\\Share\\X.md', true), '//server/share/x.md');
+
 // ---- create: no section → appended at EOD, exact format + single trailing newline ----
 {
   const md = 'See [Guide](guide.md) for details.\n';

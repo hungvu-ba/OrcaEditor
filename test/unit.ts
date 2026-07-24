@@ -30,7 +30,7 @@ import {
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
-import { isWindowsDrivePath, hasUrlScheme } from '../src/shared/link-scheme';
+import { isWindowsDrivePath, isWindowsUncPath, hasUrlScheme } from '../src/shared/link-scheme';
 import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
 import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
@@ -329,6 +329,19 @@ eq('prefix: bỏ dấu tiếng Việt như normalizeForSearch', imageNamePrefix(
 eq('prefix: chỉ ký tự CJK → rỗng (fallback không prefix)', imageNamePrefix('日本語'), '');
 check('prefix: giới hạn độ dài 40 ký tự', imageNamePrefix('a'.repeat(100)).length === 40);
 
+// X-21: default (caseInsensitive) lowercases as before; on a case-sensitive FS
+// case is preserved so `Report` and `report` no longer alias to one prefix.
+eq('prefix X-21: mặc định caseInsensitive → lowercase như cũ', imageNamePrefix('Report'), 'report');
+eq('prefix X-21: caseInsensitive=true tường minh → lowercase', imageNamePrefix('Report', true), 'report');
+eq('prefix X-21: case-sensitive → giữ hoa', imageNamePrefix('Report', false), 'Report');
+check('prefix X-21: case-sensitive không alias Report vs report',
+  imageNamePrefix('Report', false) !== imageNamePrefix('report', false));
+eq('prefix X-21: case-sensitive vẫn bỏ dấu (đ/Đ→d/D, giữ hoa)',
+  imageNamePrefix('Đăng Ký', false), 'Dang-Ky');
+// normalizeForSearch output must stay byte-identical after the core extraction.
+eq('normalizeForSearch: bất biến sau tách core (hoa+dấu)', normalizeForSearch('Đăng Ký Sự Kiện'), 'dang-ky-su-kien');
+eq('normalizeForSearch: bất biến (ký tự đặc biệt)', normalizeForSearch('A_B[1]*C'), 'a-b-1-c');
+
 // ---------------------------------------------------------------------------
 // orphanAssetNames (X-1) — orphan-cleanup classifier. A tracked asset whose
 // on-disk name is percent-encoded / NFC≠NFD in the .md href must NOT be seen
@@ -512,6 +525,15 @@ eq('scheme: mailto là scheme', hasUrlScheme('mailto:a@b'), true);
 eq('scheme: drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:\\x.md'), false);
 eq('scheme: đường dẫn tương đối KHÔNG phải scheme', hasUrlScheme('./a.md'), false);
 eq('scheme: anchor thuần KHÔNG phải scheme', hasUrlScheme('#heading'), false);
+
+// X-7 (deferred follow-up): UNC network path `\\server\share\…` is a local
+// absolute target, not a URL scheme and not workspace-relative.
+eq('unc: \\\\server\\share match', isWindowsUncPath('\\\\server\\share\\x.md'), true);
+eq('unc: single backslash không phải UNC', isWindowsUncPath('\\server\\x.md'), false);
+eq('unc: forward-slash //server KHÔNG phải UNC (protocol-relative URL)', isWindowsUncPath('//server/share/x.md'), false);
+eq('unc: drive path không phải UNC', isWindowsUncPath('C:\\x.md'), false);
+eq('unc: đường dẫn tương đối không phải UNC', isWindowsUncPath('./a.md'), false);
+eq('scheme: UNC KHÔNG phải scheme', hasUrlScheme('\\\\server\\share\\x.md'), false);
 
 // ---------------------------------------------------------------------------
 // message contract (src/shared/messages.ts) — kiểm tra ở mức TYPE. Nếu hình
@@ -1111,9 +1133,27 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   idx.build([{ uri: 'file:///a.md', text: 'caption::Yêu01\n' }]);
   check('entity x5: lookup resolves a percent-encoded non-ASCII query', idx.lookup('Y%C3%Aau01').length === 1);
   // An NFD-form mention query resolves against the NFC-authored declaration
-  // (decodeEntityFragment folds the query to NFC). An NFD-authored *declaration*
-  // is out of scope — parseEntities mis-splits it at the combining mark; deferred.
+  // (decodeEntityFragment folds the query to NFC).
   check('entity x5: lookup resolves an NFD query against an NFC declaration', idx.lookup('Yêu01'.normalize('NFD')).length === 1);
+
+  // X-5 (deferred follow-up): an NFD-authored DECLARATION now parses correctly —
+  // parseEntities NFCs the token before NAMESPACE_RE, so `caption::Yêu01` written
+  // in NFD recomposes to namespace `Yêu`, id `01` instead of splitting at the
+  // combining mark (namespace `Ye`). Both NFC and NFD queries then resolve it.
+  {
+    const nfdDecl = new EntityIndex();
+    nfdDecl.build([{ uri: 'file:///nfd.md', text: `caption::${'Yêu01'.normalize('NFD')}\n` }]);
+    const rows = nfdDecl.lookup('Yêu01');
+    check('entity x5: NFD declaration parses namespace whole (NFC query resolves)', rows.length === 1);
+    check('entity x5: NFD declaration namespace recomposed to "Yêu"', rows[0]?.namespace === 'Yêu' && rows[0]?.id === '01');
+    check('entity x5: NFD declaration resolves an NFD query too', nfdDecl.lookup('Yêu01'.normalize('NFD')).length === 1);
+  }
+  // A parseEntities-level check on the stored row shape (namespace not split at
+  // the combining mark).
+  {
+    const rows = parseEntities('file:///nfd2.md', `caption::${'Đăng01'.normalize('NFD')} label\n`);
+    eq('entity x5: NFD declaration stored namespace is NFC-whole', rows.map((r) => r.namespace + r.id), ['Đăng01']);
+  }
 }
 
 // truncateDisplay — Bug 11: cap @ result label/detail at 30 chars + ellipsis.

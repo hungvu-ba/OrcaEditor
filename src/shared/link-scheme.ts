@@ -18,6 +18,17 @@ export function isWindowsDrivePath(href: string): boolean {
 }
 
 /**
+ * A Windows UNC network path (`\\server\share\x.md`) — an absolute LOCAL/network
+ * filesystem target, NOT a URL scheme and NOT workspace-relative. Two leading
+ * backslashes followed by a server name (X-7 deferred follow-up). The single
+ * forward-slash form `//server/share` is intentionally excluded: in an href it
+ * reads as a protocol-relative URL, not a filesystem path.
+ */
+export function isWindowsUncPath(href: string): boolean {
+  return /^\\\\[^\\]/.test(href);
+}
+
+/**
  * True iff `href` starts with a real URL scheme (`http:`, `https:`, `mailto:`,
  * `vscode:`…) and is NOT a Windows drive path. `C:\…` is local, not scheme `c:`.
  */

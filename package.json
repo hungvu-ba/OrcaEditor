@@ -240,6 +240,7 @@
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
     "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
+    "test:roundtrip:bare-url-decode": "node esbuild.js --test && node dist/test/roundtrip/bare-url-decode.js",
     "test:roundtrip:caption-insert": "node esbuild.js --test && node dist/test/roundtrip/caption-insert.js",
     "test:roundtrip:entity-ref": "node esbuild.js --test && node dist/test/roundtrip/entity-ref.js",
     "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",

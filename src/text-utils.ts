@@ -84,17 +84,27 @@ export function classifyLink(href: string): LinkClassification {
 }
 
 /**
- * Chuẩn hóa chuỗi để so khớp tên file: thường hóa, bỏ dấu tiếng Việt
- * (kể cả đ→d vì NFD không tách được), mọi ký tự khác chữ/số thành '-'.
+ * Case-preserving core của chuẩn hoá tên file: bỏ dấu tiếng Việt (kể cả đ/Đ→d/D
+ * vì NFD không tách được), mọi ký tự khác chữ/số thành '-'. Tách riêng để
+ * imageNamePrefix (X-21) dùng bản GIỮ HOA/THƯỜNG trên filesystem phân biệt
+ * hoa/thường (Linux) mà không đụng normalizeForSearch của các consumer tìm kiếm.
  */
-export function normalizeForSearch(s: string): string {
+function normalizeNameCore(s: string): string {
   return s
-    .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/g, 'd')
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/Đ/g, 'D')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+// X-21: case-folding version for search consumers (searchWorkspaceFiles,
+// EntityIndex.query, @-trigger filter). Byte-identical output to the previous
+// implementation (lowercase then NFD/strip/đ→d): folding after the core
+// collapses the same characters.
+export function normalizeForSearch(s: string): string {
+  return normalizeNameCore(s).toLowerCase();
 }
 
 /**
@@ -104,9 +114,15 @@ export function normalizeForSearch(s: string): string {
  * file .md khác trong thư mục. Rỗng nếu basename không còn ký tự chữ/số nào
  * sau chuẩn hoá (vd toàn CJK) — caller tự fallback về không prefix (ảnh đó
  * nằm ngoài phạm vi cleanup tự động).
+ *
+ * X-21: trên filesystem phân biệt hoa/thường (Linux, caseInsensitive=false) giữ
+ * nguyên hoa/thường để `Report.md` và `report.md` không cùng prefix (mỗi file coi
+ * ảnh của file kia là mồ côi). Mặc định true (macOS/Windows) → lowercase như cũ,
+ * nên tên ảnh dán đã ghi từ trước không đổi.
  */
-export function imageNamePrefix(baseName: string): string {
-  return normalizeForSearch(baseName).slice(0, 40);
+export function imageNamePrefix(baseName: string, caseInsensitive = true): string {
+  const normalized = caseInsensitive ? normalizeForSearch(baseName) : normalizeNameCore(baseName);
+  return normalized.slice(0, 40);
 }
 
 /**

@@ -416,6 +416,14 @@ export function createTurndown(): TurndownService {
       if (node.nodeName !== 'A') {
         return false;
       }
+      // An empty-text link `[](url)` carries display text that postProcessEmptyLinks
+      // INJECTED (the decoded file name) — it must serialize via the `emptyLink`
+      // rule, never as a bare URL. Before X-19's decodeURIComponent fix this was
+      // masked (decodeURI left `%26` etc. encoded, so the injected text rarely
+      // equalled the href); now it can match, so exclude stamped empty links.
+      if ((node as HTMLElement).hasAttribute?.(EMPTY_LINK_ATTR) ?? false) {
+        return false;
+      }
       const href = (node as HTMLElement).getAttribute('href') ?? '';
       const text = node.textContent ?? '';
       if (!href) {
@@ -710,9 +718,17 @@ function blockLike(el: HTMLElement): boolean {
   );
 }
 
+// X-19: inverse of encodeLinkPath (dom-utils.ts), which encodes each `/`-segment
+// with encodeURIComponent. decodeURI (the old impl) leaves `; / ? : @ & = + $ , #`
+// encoded by spec, so `Tài liệu R&D.md` stays `…R%26D.md` and never equals the
+// bare-link text → serialized as `[](…)` instead of bare. Decode segment-wise
+// with decodeURIComponent to match the encode; try/catch keeps a lone `%` safe.
 function decodeSafe(s: string): string {
   try {
-    return decodeURI(s);
+    return s
+      .split('/')
+      .map((seg) => decodeURIComponent(seg))
+      .join('/');
   } catch {
     return s;
   }
