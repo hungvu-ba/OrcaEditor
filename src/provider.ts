@@ -22,7 +22,10 @@ import {
   classifyLink,
   computeMinimalEdit,
   imageNamePrefix,
+  normalizeAssetName,
   normalizeForSearch,
+  orphanAssetNames,
+  referencedAssetBasenames,
   relativePath,
   sanitizeDroppedFileName,
 } from './text-utils';
@@ -32,6 +35,14 @@ import { planReferences, renderReferences, type RefCandidate } from './reference
 
 /** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
 const UNDO_SETTLE_MS = 200;
+
+/**
+ * Whether the host filesystem is case-insensitive (Windows, macOS/APFS). Used
+ * to case-fold asset-name comparison in orphan cleanup so `Report.png` and
+ * `report.png` are treated as the same file (X-1). Linux (ext4) is
+ * case-sensitive, so no fold there.
+ */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
 
 /**
  * Promise resolve khi `document` đổi lần kế tiếp, hoặc sau `timeoutMs` nếu không
@@ -1664,17 +1675,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
     }
 
-    // Còn xuất hiện trong nội dung vừa lưu ⇒ đang dùng, bỏ. Chỉ đọc sibling khi
-    // thật sự còn ứng viên mồ côi (tránh quét thư mục khi không cần).
-    const orphans = [...pool].filter((name) => !text.includes(name));
+    // Still referenced by a link/image/HTML target in the just-saved content ⇒
+    // in use, keep. Compare NORMALIZED names (href-decode + NFC + case-fold), not
+    // a raw substring: the .md href is percent-encoded and may differ in NFC/NFD
+    // from the on-disk name (X-1). Only read siblings when orphans actually remain.
+    const orphans = orphanAssetNames(pool, text, CASE_INSENSITIVE_FS);
     if (orphans.length === 0) {
       return;
     }
 
     const siblingTexts = await this.readSiblingMdTexts(document);
+    const siblingReferenced = new Set<string>();
+    for (const sibling of siblingTexts) {
+      for (const ref of referencedAssetBasenames(sibling, CASE_INSENSITIVE_FS)) {
+        siblingReferenced.add(ref);
+      }
+    }
     for (const name of orphans) {
       // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
-      if (siblingTexts.some((sibling) => sibling.includes(name))) {
+      if (siblingReferenced.has(normalizeAssetName(name, CASE_INSENSITIVE_FS))) {
         continue;
       }
       await this.deleteOrphanImage(imagesDir, name);
@@ -1730,8 +1749,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
     const imagesDir = this.resolveAssetsDir(document);
+    // Same normalizer as cleanupOrphanImages: match the normalized name against
+    // the link/image/HTML targets so undo restores the right file even when its
+    // name has diacritics / spaces / parens (X-1).
+    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
-      if (!text.includes(fileName)) {
+      if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;
       }
       this.recentlyDeletedImages.delete(fileName);

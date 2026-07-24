@@ -106,6 +106,101 @@ export function sanitizeDroppedFileName(name: string): string {
   return safe || 'file';
 }
 
+/**
+ * Canonical form of a RAW on-disk asset basename for orphan-cleanup comparison
+ * (X-1): `.normalize('NFC')` (macOS dir entries are NFD, typed links NFC) plus
+ * an optional case-fold on case-insensitive filesystems (win32/darwin — the
+ * safe direction, since a fold can only spare a file from deletion, never cause
+ * one). Deliberately does NOT percent-decode: an on-disk name is already
+ * literal, so decoding it would turn a real `%20` in the name into a space and
+ * diverge from the href (which round-trips back to `%20`). Decoding belongs on
+ * the href side only — see `referencedAssetBasenames`.
+ */
+export function normalizeAssetName(name: string, caseInsensitive = false): string {
+  const nfc = name.normalize('NFC');
+  return caseInsensitive ? nfc.toLowerCase() : nfc;
+}
+
+/**
+ * A link/href TARGET → normalized asset basename, or null if it has no usable
+ * basename. Strips the `<...>` form, a ` "title"` suffix (already excluded by
+ * the caller's capture) and any `?query`/`#frag`, then percent-decodes once
+ * (guarded — a malformed `%` keeps the raw string) so an encoded href converges
+ * with its raw on-disk name.
+ */
+function targetToAssetName(target: string, caseInsensitive: boolean): string | null {
+  let t = target;
+  if (t.startsWith('<') && t.endsWith('>')) {
+    t = t.slice(1, -1);
+  }
+  t = t.split(/[?#]/)[0];
+  if (!t) {
+    return null;
+  }
+  const base = t.split('/').pop();
+  if (!base) {
+    return null;
+  }
+  let decoded = base;
+  try {
+    decoded = decodeURIComponent(base);
+  } catch {
+    // Malformed percent-sequence in the href — compare against the raw form.
+  }
+  return normalizeAssetName(decoded, caseInsensitive);
+}
+
+/**
+ * Normalized basenames of the assets a document references — via markdown
+ * link/image targets, HTML `<img src>` / `<a href>` (the editor writes sized
+ * and table-cell images as raw `<img … width>` HTML, kept verbatim in the .md
+ * by turndown), and reference-style `[label]: target` definitions. Used by
+ * orphan cleanup to know which tracked assets are still in use. The reference
+ * is the TARGET, never the display text.
+ */
+export function referencedAssetBasenames(text: string, caseInsensitive = false): Set<string> {
+  const set = new Set<string>();
+  const add = (target: string | undefined): void => {
+    if (target == null) {
+      return;
+    }
+    const name = targetToAssetName(target, caseInsensitive);
+    if (name) {
+      set.add(name);
+    }
+  };
+  // Every markdown inline `](target)` — images, links, and nested/linked images
+  // (`[![](inner)](outer)` yields two `](` hits, so both targets are captured).
+  const md = /\]\(\s*(<[^>]*>|[^)\s]*)/g;
+  // Reference-style definition `[label]: target`.
+  const ref = /^[ \t]*\[(?:[^\]\\]|\\.)*\]:[ \t]*(<[^>]*>|\S+)/gm;
+  // HTML src/href attribute value (single/double-quoted or bare).
+  const html = /\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = md.exec(text))) {
+    add(m[1]);
+  }
+  while ((m = ref.exec(text))) {
+    add(m[1]);
+  }
+  while ((m = html.exec(text))) {
+    add(m[1] ?? m[2] ?? m[3]);
+  }
+  return set;
+}
+
+/**
+ * Pure classifier for orphan-asset cleanup (X-1): the pool names NOT referenced
+ * by any link/image/HTML target in `text`. Compares full basenames through one
+ * shared normalizer, so `img.png` never matches a longer `myimg.png` (the old
+ * `text.includes(name)` substring bug) and an encoded/NFD href still matches
+ * its raw/NFC on-disk name.
+ */
+export function orphanAssetNames(pool: Iterable<string>, text: string, caseInsensitive = false): string[] {
+  const referenced = referencedAssetBasenames(text, caseInsensitive);
+  return [...pool].filter((name) => !referenced.has(normalizeAssetName(name, caseInsensitive)));
+}
+
 /** Max chars of following text shown in an entity mention's hover preview (Req 21). */
 const ENTITY_PREVIEW_MAX = 20;
 

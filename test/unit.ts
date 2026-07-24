@@ -17,7 +17,10 @@ import {
   entityFollowingLabel,
   entityFollowingPreview,
   imageNamePrefix,
+  normalizeAssetName,
   normalizeForSearch,
+  orphanAssetNames,
+  referencedAssetBasenames,
   relativePath,
   sanitizeDroppedFileName,
   type MinimalEdit,
@@ -158,6 +161,108 @@ eq('prefix: basename thường', imageNamePrefix('Requirement Doc'), 'requiremen
 eq('prefix: bỏ dấu tiếng Việt như normalizeForSearch', imageNamePrefix('Đăng ký sự kiện'), 'dang-ky-su-kien');
 eq('prefix: chỉ ký tự CJK → rỗng (fallback không prefix)', imageNamePrefix('日本語'), '');
 check('prefix: giới hạn độ dài 40 ký tự', imageNamePrefix('a'.repeat(100)).length === 40);
+
+// ---------------------------------------------------------------------------
+// orphanAssetNames (X-1) — orphan-cleanup classifier. A tracked asset whose
+// on-disk name is percent-encoded / NFC≠NFD in the .md href must NOT be seen
+// as orphan and hard-deleted. Compares normalized basenames, not substrings.
+// ---------------------------------------------------------------------------
+
+// Diacritic + space + parens: dropped `Tài liệu (2).pdf` → encoded href. Kept.
+eq(
+  'orphan: diacritic+space+parens encoded href → referenced (kept)',
+  orphanAssetNames(['Tài liệu (2).pdf'], '[x](assets/T%C3%A0i%20li%E1%BB%87u%20%282%29.pdf)'),
+  [],
+);
+// `&` force-encoded to %26 by encodeLinkPath. Kept.
+eq(
+  'orphan: & in name (%26) → referenced (kept)',
+  orphanAssetNames(['R&D.png'], '![x](assets/R%26D.png)'),
+  [],
+);
+// macOS dir entry is NFD, typed link is NFC — same file, must match.
+eq(
+  'orphan: NFD on-disk vs NFC href → referenced (kept)',
+  orphanAssetNames(['Đăng.png'.normalize('NFD')], '[x](assets/Đăng.png)'.normalize('NFC')),
+  [],
+);
+// Genuinely unreferenced → still deleted (no hoarding regression).
+eq(
+  'orphan: unreferenced name → orphan (deleted)',
+  orphanAssetNames(['old.png'], '[keep](assets/new.png)'),
+  ['old.png'],
+);
+// Basename set, not substring: `img.png` must not be spared by `myimg.png`.
+eq(
+  'orphan: substring false-match guard (img.png vs myimg.png)',
+  orphanAssetNames(['img.png'], '[x](assets/myimg.png)'),
+  ['img.png'],
+);
+// Malformed percent in the raw pool name → guarded decode keeps it; converges.
+eq(
+  'orphan: malformed % in name → referenced (kept, no throw)',
+  orphanAssetNames(['50%off.png'], '[x](assets/50%25off.png)'),
+  [],
+);
+// Display text repeating the raw name must NOT keep the file — only the target.
+eq(
+  'orphan: reference is the target, not display text',
+  orphanAssetNames(['gone.png'], '[gone.png](assets/other.png)'),
+  ['gone.png'],
+);
+// referencedAssetBasenames: <angle> target and " title" suffix are tolerated.
+eq(
+  'orphan: angle-bracket target + title parsed to basename',
+  [...referencedAssetBasenames('[x](<assets/a b.png> "t")')],
+  ['a b.png'],
+);
+// normalizeAssetName: case-fold only when caseInsensitive is set.
+eq('orphan: normalizeAssetName folds case when asked', normalizeAssetName('Report.PNG', true), 'report.png');
+eq('orphan: normalizeAssetName keeps case by default', normalizeAssetName('Report.PNG', false), 'Report.PNG');
+// Case-insensitive FS: differently-cased href still spares the file.
+eq(
+  'orphan: case-insensitive fold → Report.png kept by report.png href',
+  orphanAssetNames(['Report.png'], '[x](assets/report.png)', true),
+  [],
+);
+// Pasted/sized image is stored as raw <img src width> HTML, not markdown — must
+// still be recognized as referenced (else hard-deleted on next save).
+eq(
+  'orphan: <img src width> HTML reference → kept',
+  orphanAssetNames(['doc-pasted-image-abc.png'], '<img src="assets/doc-pasted-image-abc.png" alt="" width="800">'),
+  [],
+);
+// Table-cell drop uses style="width:100%" — same raw-HTML path.
+eq(
+  'orphan: <img src style> (table cell) → kept',
+  orphanAssetNames(['x-pasted-image-y.png'], '<img src="assets/x-pasted-image-y.png" alt="" style="width:100%">'),
+  [],
+);
+// <a href> to a tracked file is a reference too.
+eq(
+  'orphan: <a href> HTML reference → kept',
+  orphanAssetNames(['file.pdf'], '<a href="assets/file.pdf">doc</a>'),
+  [],
+);
+// Linked image [![](inner)](outer): BOTH targets must be captured.
+eq(
+  'orphan: nested linked image captures inner + outer',
+  orphanAssetNames(['inner.png', 'outer.png'], '[![a](assets/inner.png)](assets/outer.png)'),
+  [],
+);
+// Reference-style definition [label]: target.
+eq(
+  'orphan: reference-style definition → kept',
+  orphanAssetNames(['ref.png'], '[r]: assets/ref.png'),
+  [],
+);
+// Dropped name with a literal, valid-hex %NN: on-disk name is NOT decoded, so
+// it converges with the href (encodeLinkPath emitted %2520 → decodes to %20).
+eq(
+  'orphan: literal %20 in dropped name → kept (pool side not decoded)',
+  orphanAssetNames(['report%20final.pdf'], '[x](assets/report%2520final.pdf)'),
+  [],
+);
 
 // ---------------------------------------------------------------------------
 // sanitizeDroppedFileName (US-17.6, M4) — client-controlled File.name must
