@@ -419,3 +419,4 @@
 | 0.9.0 | 2026-07-24 | Fix: editing a CRLF document no longer rewrites the whole file to LF on the first keystroke — the host now reconciles serialized text to the document's EOL before diffing (X-2). |
 | 0.9.0 | 2026-07-24 | Fix: creating a `## References` section in a CRLF document no longer leaves a stray `\r` before the heading — the trailing-blank-line strip in `renderReferences` is now EOL-agnostic (X-3). |
 | 0.9.0 | 2026-07-24 | Fix: typing in a CRLF document no longer loses the caret on every keystroke — the echo-suppression key is now reconciled to the document's EOL, so an edit isn't mistaken for an external change and re-rendered (X-2). |
+| 0.9.0 | 2026-07-24 | Fix: on Windows/Linux, AltGr+Shift+X / AltGr+Shift+Z no longer fire strikethrough / a destructive redo (and swallow the typed character) — both shortcuts now require `!altKey` (X-6). |

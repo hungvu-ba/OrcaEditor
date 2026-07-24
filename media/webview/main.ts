@@ -1705,12 +1705,17 @@ content.addEventListener('keydown', (e) => {
         return;
     }
   }
-  if (mod && e.shiftKey && e.key.toLowerCase() === 'x') {
+  // !e.altKey: trên Windows/Linux, AltGr đặt ctrlKey=true VÀ altKey=true, nên
+  // AltGr+Shift+X (ký tự thật trên layout VN/PL/DE/BR) sẽ vô tình chạy gạch
+  // ngang và nuốt ký tự. Cùng bảo vệ như nhánh mod-only ở trên và search.ts.
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'x') {
     applyInlineFormat(e, () => document.execCommand('strikeThrough'));
     return;
   }
   // Ctrl/Cmd+Shift+Z = redo (quy ước Mac, song song với Ctrl+Y ở trên).
-  if (mod && e.shiftKey && e.key.toLowerCase() === 'z') {
+  // !e.altKey: chặn AltGr+Shift+Z (ctrl+alt trên Windows/Linux) kích hoạt redo
+  // phá huỷ khi người dùng chỉ đang gõ một ký tự AltGr.
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     postToHost({ type: 'redo', pendingText: takePendingSync() });
     return;
