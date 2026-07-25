@@ -4,6 +4,22 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[0.10.0\] - 2026-07-25
+
+### Added
+
+-   `plantuml` code blocks now render as diagrams in the preview, entirely offline — including a toolbar quick-insert button and `/` command (Activity, Sequence, Class, State), alongside the existing Mermaid support.
+-   New "Table Fit Width" mode (on by default) shrinks and word-wraps table columns to fit the panel instead of forcing horizontal scroll.
+
+### Changed
+
+-   Table of Contents now shows up to three heading levels by default (was two); very long documents still collapse to fewer levels automatically.
+
+### Fixed
+
+-   Various cross-OS (Windows/Linux) compatibility fixes.
+-   General quality and stability improvements.
+
 ## \[0.9.0\] - 2026-07-22
 
 ### Added
