@@ -139,7 +139,7 @@
         },
         "orcaEditor.table.fitMode": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Table Fit Width: shrink and wrap table columns to fit the panel width (capping columns dominated by one very long cell) instead of scrolling horizontally. This is the initial default; toggle it live per session with the 'Toggle Table Fit Width' command (global across all open Markdown tabs, not persisted)."
         },
         "orcaEditor.crossFileSearch.scope": {

@@ -712,7 +712,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
               // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
-              tableFitMode: this.globalTableFitMode ?? wysiwygCfg.get<boolean>('table.fitMode', false),
+              tableFitMode: this.globalTableFitMode ?? wysiwygCfg.get<boolean>('table.fitMode', true),
               // US-2.8: webview không tự gọi asWebviewUri/sinh nonce được, nên
               // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
               plantumlEngineUri,

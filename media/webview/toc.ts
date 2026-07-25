@@ -518,6 +518,13 @@ export function initToc(
         break;
       }
     }
+    // Scrolled to the true bottom: the last heading is the only thing left on
+    // screen even if its trailing content is shorter than the viewport (so its
+    // top never crosses the threshold line above) — force-select it instead of
+    // leaving the threshold scan stuck on the heading above.
+    if (window.scrollY + window.innerHeight >= getDocHeight() - 1) {
+      found = allHeadings.length - 1;
+    }
     if (found < 0) {
       // Chưa cuộn tới heading đầu tiên → vẫn coi mục đầu là đang đọc.
       setActive(0);
