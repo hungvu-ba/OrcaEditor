@@ -104,6 +104,19 @@ function isMarkdownUri(uri: vscode.Uri): boolean {
 }
 
 /**
+ * One cached workspace file for the file-link search (P7). `baseNorm`/`dirNorm`
+ * are per-FILE data (independent of the typed query) — precomputed once when the
+ * URI list cache refreshes so `searchWorkspaceFiles` does not re-normalize every
+ * URI on each keystroke.
+ */
+interface WorkspaceFileEntry {
+  uri: vscode.Uri;
+  name: string;
+  baseNorm: string;
+  dirNorm: string;
+}
+
+/**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
  *
@@ -1316,20 +1329,32 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
   private static readonly FILE_SEARCH_CACHE_TTL_MS = 4000;
-  private fileListCache: { uris: readonly vscode.Uri[]; expires: number } | undefined;
+  private fileListCache: { entries: readonly WorkspaceFileEntry[]; expires: number } | undefined;
 
-  private async getWorkspaceFileList(): Promise<readonly vscode.Uri[]> {
+  private async getWorkspaceFileEntries(): Promise<readonly WorkspaceFileEntry[]> {
     const now = Date.now();
     if (this.fileListCache && this.fileListCache.expires > now) {
-      return this.fileListCache.uris;
+      return this.fileListCache.entries;
     }
     const uris = await vscode.workspace.findFiles(
       '**/*',
       MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
       MarkdownWysiwygProvider.FILE_SEARCH_MAX_SCAN
     );
-    this.fileListCache = { uris, expires: now + MarkdownWysiwygProvider.FILE_SEARCH_CACHE_TTL_MS };
-    return uris;
+    // Normalization là dữ liệu theo-FILE, không theo-query → tính 1 lần khi cache
+    // refresh thay vì lặp lại cho mỗi phím gõ (P7).
+    const entries: WorkspaceFileEntry[] = uris.map((uri) => {
+      const segments = uri.path.split('/');
+      const name = segments[segments.length - 1];
+      return {
+        uri,
+        name,
+        baseNorm: normalizeForSearch(name.replace(/\.[^.]*$/, '')),
+        dirNorm: normalizeForSearch(segments.slice(0, -1).join(' ')),
+      };
+    });
+    this.fileListCache = { entries, expires: now + MarkdownWysiwygProvider.FILE_SEARCH_CACHE_TTL_MS };
+    return entries;
   }
 
   /**
@@ -1351,18 +1376,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return [];
     }
     const phrase = tokens.join('-');
-    const uris = await this.getWorkspaceFileList();
+    const entries = await this.getWorkspaceFileEntries();
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..').path;
     const scored: Array<{ score: number; nameLength: number; uri: vscode.Uri; name: string }> = [];
-    for (const uri of uris) {
+    for (const { uri, name, baseNorm, dirNorm } of entries) {
       if (sameDocumentUri(uri.toString(), document.uri.toString(), CASE_INSENSITIVE_FS)) {
         continue; // không gợi ý link tới chính file đang mở (case-fold trên FS không phân biệt hoa thường — X-8)
       }
-      const segments = uri.path.split('/');
-      const name = segments[segments.length - 1];
-      const baseNorm = normalizeForSearch(name.replace(/\.[^.]*$/, ''));
-      const dirNorm = normalizeForSearch(segments.slice(0, -1).join(' '));
       const inBase = tokens.filter((t) => baseNorm.includes(t)).length;
       const inDir = tokens.filter((t) => dirNorm.includes(t)).length;
       if (inBase === 0 && inDir < tokens.length) {
@@ -1430,6 +1451,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES
     );
 
+    // Cache text theo request (P8): whole-word miss ⇒ fallback gọi `scan` lần 2
+    // trên CÙNG danh sách file. Không có cache thì cả corpus bị đọc + decode lại
+    // từ đĩa lần nữa trong cùng round-trip. `null` = lần đọc trước lỗi (không thử
+    // lại trong request này). Cache chỉ sống trong 1 lần crossFileSearch — nội
+    // dung file có thể đổi giữa các request nên KHÔNG persist qua request.
+    const textCache = new Map<string, string | null>();
+
     // Một lượt quét theo `opts` — giữ NGUYÊN mọi cap/exclusion/đọc buffer/loại
     // trừ file hiện tại; chỉ thay primitive so khớp (indexOf phẳng → lõi chung
     // findTextMatches, để logic ranh giới từ Unicode-aware khớp hệt webview).
@@ -1451,20 +1479,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
 
+        const uriKey = uri.toString();
         let text: string;
-        try {
-          const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
-          if (openDoc) {
-            text = openDoc.getText();
-          } else {
-            const bytes = await vscode.workspace.fs.readFile(uri);
-            text = new TextDecoder().decode(bytes);
+        const cachedText = textCache.get(uriKey);
+        if (cachedText === null) {
+          continue; // lần đọc trước đã lỗi — không thử lại trong cùng request (P8)
+        } else if (cachedText !== undefined) {
+          text = cachedText; // đã đọc/decode ở lượt scan trước → tái dùng (P8)
+        } else {
+          try {
+            const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uriKey);
+            if (openDoc) {
+              text = openDoc.getText();
+            } else {
+              const bytes = await vscode.workspace.fs.readFile(uri);
+              text = new TextDecoder().decode(bytes);
+            }
+          } catch (err) {
+            // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
+            // làm hỏng cả lượt tìm — bỏ qua file đó, log lại rồi tiếp tục.
+            MarkdownWysiwygProvider.log(`crossFileSearch: could not read ${uriKey}`, err);
+            textCache.set(uriKey, null);
+            continue;
           }
-        } catch (err) {
-          // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
-          // làm hỏng cả lượt tìm — bỏ qua file đó, log lại rồi tiếp tục.
-          MarkdownWysiwygProvider.log(`crossFileSearch: could not read ${uri.toString()}`, err);
-          continue;
+          textCache.set(uriKey, text);
         }
 
         const lines = text.split(/\r\n|\r|\n/);

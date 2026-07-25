@@ -440,3 +440,5 @@
 | 0.9.0 | 2026-07-25 | Perf: rAF-coalesce webview hover detection so drag-handle and table row/column hover no longer force layout on every mousemove; fixes a stuck-handle-on-leave regression (P3/P4). |
 | 0.9.0 | 2026-07-25 | Feature: PlantUML quick-insert — toolbar split button (default Activity + 4-type dropdown Activity/Sequence/Class/State) and a "PlantUML diagram" slash-command entry, mirroring Mermaid (US-4.30). |
 | 0.9.0 | 2026-07-25 | Change: Table Fit Width (fit-mode) now defaults ON — tables shrink/wrap columns to fit the panel out of the box instead of scrolling; still toggleable live per session (US-19.25). |
+| 0.9.0 | 2026-07-25 | Perf: cache normalized file-name entries so file-link search no longer re-normalizes 5000 URIs per keystroke, and request-scope cross-file text so whole-word fallback stops re-reading the corpus (P7/P8). |
+| 0.9.0 | 2026-07-25 | Perf: rAF-coalesce table scroll handle-repositioning and the selectionchange table-toolbar update so they no longer force layout per scroll tick / keystroke (P6; P5 sticky-header already coalesced). |
