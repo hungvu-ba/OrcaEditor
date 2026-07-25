@@ -88,6 +88,10 @@ Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-pr
 
 - **Throttle layout-forcing reads in hot handlers.** Any `getBoundingClientRect`/`offsetHeight`/`offsetWidth`/`scrollWidth` read inside a `mousemove`/`scroll`/`pointermove`/drag handler must be rAF-coalesced or throttled — follow the existing pattern in `match-utils.ts`/`search.ts` (`SELECT_OVERVIEW_THROTTLE_MS`) or `toc.ts`'s `onScroll`, not the uncoalesced version.
 
+**Cross-platform trap (macOS vs Windows):**
+
+- **Never compare paths/filenames/text with a raw `===`/`startsWith`/`includes`.** Windows vs macOS differ in path separator, filesystem case-sensitivity, filename Unicode form (NFC/NFD), and line ending (CRLF/LF) — a raw comparison usually coincides on macOS and silently breaks on Windows. Route file/entity-name comparisons through a shared normalizer (decode → NFC → normalize separator → optional case-fold) and reconcile text to `document.eol` before diffing/writing. Keyboard-shortcut handlers must test both `metaKey` and `ctrlKey`; shortcut labels shown in UI must not hardcode `⌘`. See [Plan/Cross-Environment Defects — Audit.md](Plan/Cross-Environment%20Defects%20%E2%80%94%20Audit.md) for the full defect family and fix patterns.
+
 ## Mandatory Rule: Git Workflow
 
 For any git operation (branch, commit, merge, PR, release, hotfix, worktree...), read and follow [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — it defines branch structure, commit conventions, feature/release/hotfix lifecycle, and presentation style (explain for newcomers + a status sitemap after each commit).

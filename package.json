@@ -264,7 +264,8 @@
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release",
-    "check:css-comments": "node scripts/check-css-comments.js"
+    "check:css-comments": "node scripts/check-css-comments.js",
+    "check:cross-platform": "node scripts/check-cross-platform.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

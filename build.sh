@@ -121,6 +121,10 @@ do_release() {
     npm run lint
     ok "Lint sạch"
 
+    step "Cross-platform check (macOS/Windows traps)"
+    npm run check:cross-platform
+    ok "Cross-platform check sạch"
+
     step "Test (round-trip + unit)"
     npm test | tail -2
     ok "Test pass"

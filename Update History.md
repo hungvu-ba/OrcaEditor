@@ -451,3 +451,4 @@
 | 0.9.0 | 2026-07-25 | Fix: "Copy `@file` reference" / "View raw Markdown source" no longer dirty the file on a doc with a pre-existing render/reserialize drift — both are now `viewOnly`, matching Reading Mode/Focus/TOC. |
 | 0.9.0 | 2026-07-25 | Fix (security): bump transitive dev dependency `fast-uri` to 3.1.4, patching a host-confusion parser desync (CVE-2026-16221). |
 | 0.9.0 | 2026-07-25 | Fix (security): pin `brace-expansion` to 5.0.8 via npm `overrides` and bump eslint/eslint-plugin-security, closing a DoS advisory (GHSA-mh99-v99m-4gvg) unreachable via a plain audit fix. |
+| 0.10.0 | 2026-07-25 | Feature: add `check:cross-platform` script (metaKey/ctrlKey symmetry, `⌘`/`Ctrl` labels, CRLF/NFD/Windows-path fixtures) run automatically by `build.sh release`. |
