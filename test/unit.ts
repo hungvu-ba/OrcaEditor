@@ -1063,6 +1063,16 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('entity: emptied file drops all its rows', idx.query('UC02').length === 0);
 }
 
+// P2 — search haystacks are rebuilt on incremental update: a diacritic-stripped
+// query must match a Vietnamese-diacritic title introduced via onFileChanged.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '# H\ncaption::UC01\n' }]);
+  idx.onFileChanged('file:///a.md', '# UC-02 Đăng nhập hệ thống\ncaption::UC-02 Đăng nhập hệ thống\n');
+  const hits = idx.query('dang-nhap');
+  check('entity P2: diacritic-stripped query matches title after incremental re-parse', hits.length === 1 && hits[0].id === '-02');
+}
+
 // Indexing state — isReady() false before build, true after.
 {
   const idx = new EntityIndex();

@@ -434,3 +434,4 @@
 | 0.9.0 | 2026-07-24 | Feature: external file/image drop now shows a drop-caret highlight at the exact insertion point while dragging, and falls back to end-of-file when the point resolves no caret (instead of a stale caret). |
 | 0.9.0 | 2026-07-24 | Feature: pressing Escape during an external file/image drag cancels it — clears the drop highlight and swallows the drop so nothing is inserted (registered on the shared Escape arbiter at DRAG priority). |
 | 0.9.0 | 2026-07-24 | Feature: wide tables get a floating horizontal scrollbar pinned to the viewport bottom, column-aligned and two-way synced, so you no longer scroll to the table's bottom to reach it (US-19.24). |
+| 0.9.0 | 2026-07-25 | Fix: entity index now debounces open-buffer re-parse and precomputes search haystacks (perf P1/P2); host pushes broken-ref recheck after each reindex so markers converge. |

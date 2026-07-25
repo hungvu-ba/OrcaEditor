@@ -405,6 +405,14 @@ export type HostToWebview =
   /** Req 21 US-21.3: reply to `checkEntitiesExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
   | { type: 'entitiesExistResult'; requestId: number; docVersion: number; results: EntityExistResult[] }
   /**
+   * P1 follow-up: the entity index just absorbed a (debounced) reindex or a
+   * file-delete drop. Broadcast to every open panel so broken-ref markers
+   * re-check against the fresh index — the webview's own edit echo is
+   * suppressed, so without this push a marker computed against the pre-reindex
+   * index would persist until the next mutation.
+   */
+  | { type: 'entityIndexUpdated' }
+  /**
    * Req 21 US-21.2: reply to `entitySearch`. `ready` carries the indexing state
    * — when false the initial background build is still running, so the popup
    * shows "indexing…" instead of reading an empty `entities` as "nothing

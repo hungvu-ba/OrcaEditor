@@ -147,14 +147,18 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
     // declarations) live. Provider-level (not per-panel) so it covers every
     // markdown doc, open or not:
-    //  - onDidChangeTextDocument: open/unsaved buffers, re-parse on each edit.
+    //  - onDidChangeTextDocument: open/unsaved buffers, debounced reindex (P1:
+    //    routed through scheduleReindex so a keystroke burst parses once).
     //  - FileSystemWatcher: on-disk changes to files with no open editor
     //    (change/create -> re-read + re-parse; delete -> drop that file's rows).
     // The initial full scan is kicked off fire-and-forget so it never blocks
     // activation (isReady() stays false until it finishes — the "indexing" state).
     const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
       if (isMarkdownUri(e.document.uri)) {
-        provider.entityIndex.onFileChanged(e.document.uri.toString(), e.document.getText());
+        // P1: reuse the watcher's per-URI 300 ms debounce instead of a full
+        // O(doc) parse on every keystroke; reindexFile reads the open buffer
+        // at fire time so unsaved edits are still captured.
+        provider.scheduleReindex(e.document.uri);
       }
     });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
@@ -284,14 +288,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       this.reindexTimers.delete(key);
     }
     this.entityIndex.onFileChanged(key, '');
+    this.notifyEntityIndexUpdated();
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
   private async reindexFile(uri: vscode.Uri): Promise<void> {
     try {
       this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+      this.notifyEntityIndexUpdated();
     } catch (err) {
       MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+    }
+  }
+
+  /**
+   * P1 follow-up: tell every open panel (all URIs — a declaration in file A
+   * affects refs shown in file B) that the index changed, so broken-ref markers
+   * re-check instead of staying stale until the next mutation. Panel bursts are
+   * absorbed by the webview's own recompute debounce.
+   */
+  private notifyEntityIndexUpdated(): void {
+    for (const panels of this.panelsByUri.values()) {
+      for (const panel of panels) {
+        void panel.webview.postMessage({ type: 'entityIndexUpdated' } satisfies HostToWebview);
+      }
     }
   }
 

@@ -463,6 +463,13 @@ window.addEventListener('message', (event) => {
       brokenRef.notifyEntitiesResult(msg.requestId, msg.docVersion, msg.results);
       break;
     }
+    case 'entityIndexUpdated': {
+      // P1 follow-up: the host's entity index just absorbed a debounced reindex
+      // (or a delete drop). Re-run the broken-ref check so markers converge —
+      // our own edit echo is suppressed, so no re-render would trigger it.
+      brokenRef.refresh();
+      break;
+    }
     case 'scrollToPosition': {
       // C6b: file .md đã có panel mở sẵn — host gửi thẳng message này thay vì
       // qua 'init' vì resolveCustomTextEditor không chạy lại trong trường hợp này.
