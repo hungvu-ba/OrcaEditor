@@ -8,6 +8,7 @@ import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } f
 import { TABLE_TOOLBAR_HIDE_MS } from './constants';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { isValidSiblingGap } from './sibling-move';
+import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 
 export interface TableContext {
@@ -237,24 +238,166 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
 
 /** Class tạm dùng để đo bề rộng tự nhiên (không wrap) của ô — xem markdown.css. */
 const MEASURE_CLASS = 'md-table-col-fit-measuring';
+/** US-19.25: class tạm ép cột về min-content (từ dài nhất) để đo sàn vật lý. */
+const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
+/** US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap). */
+const FIT_CLASS = 'md-table-fit';
+
+// US-19.25 — hằng số thuật toán fit-mode (chốt PO 2026-07-24).
+const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
+const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
+const FIT_COMFORT_FLOOR_CH = 30; // không cắt cột lệch xuống dưới ngần này
+
+/** US-19.25: cờ Fit-mode global (đặt bởi main.ts từ InitConfig/broadcast). */
+let fitModeEnabled = false;
+export function setTableFitMode(on: boolean): void {
+  fitModeEnabled = on;
+}
 
 /**
- * Co từng cột về vừa nội dung khi nội dung ngắn hơn sàn 14ch mặc định (thay vì
- * mọi cột đều bị ép rộng bằng cột dài nhất — bug report 2026-07-15, ảnh bảng
- * nghiệp vụ với cột "#" rộng bằng cột "Mô tả"). Với mỗi cột: đo bề rộng tự
- * nhiên (1 dòng, không wrap) của ô rộng nhất trong cột, rồi ghi min-width =
- * nhỏ hơn giữa sàn CSS 14ch và bề rộng đó — cột ngắn co vừa nội dung, cột dài
- * vẫn giữ sàn 14ch (chống wrap vụn thành "2 ký tự × N dòng", US-19.3).
+ * Phân vị `p` (0–100) theo NEAREST-RANK (`ceil`), để 1 ô lệch (nằm ở đỉnh sau khi
+ * sort) KHÔNG kéo p75 lên bằng max ở bảng ít dòng — nếu dùng `floor` thì n≤4 sẽ
+ * cho p75 = max và outlier cap không bao giờ kích hoạt.
  */
-export function fitTableColumns(table: HTMLTableElement): void {
-  const rows = Array.from(table.rows);
-  if (rows.length === 0) {
-    return;
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/**
+ * Bề rộng px của `n` ký tự `ch` theo font của ô bảng. Đo bằng 1 span cô lập gắn
+ * vào <body> (KHÔNG gắn vào table — nếu gắn vào table thì table-layout:auto ép
+ * bề rộng probe = bề rộng cột chứa nó, sai lệch khỏi n·ch cần đo).
+ */
+function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number): number {
+  const span = document.createElement('span');
+  span.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;display:inline-block;padding:0;border:0;';
+  span.style.width = `${n}ch`;
+  if (sampleCell) {
+    const cs = getComputedStyle(sampleCell);
+    span.style.fontFamily = cs.fontFamily;
+    span.style.fontSize = cs.fontSize;
+    span.style.fontWeight = cs.fontWeight;
+    span.style.fontStyle = cs.fontStyle;
+    span.style.letterSpacing = cs.letterSpacing;
+  }
+  document.body.appendChild(span);
+  const px = span.getBoundingClientRect().width;
+  span.remove();
+  return px;
+}
+
+/**
+ * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
+ * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
+ * `false` để caller rơi về hành vi mặc định (scroll) — khi hết đường co
+ * (`Σ min-content > W`) hoặc không đo được khung.
+ */
+function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
+  const parent = table.parentElement;
+  if (!parent) {
+    return false;
+  }
+  const pcs = getComputedStyle(parent);
+  const budgetW = parent.clientWidth - parseFloat(pcs.paddingLeft || '0') - parseFloat(pcs.paddingRight || '0');
+  if (!(budgetW > 0)) {
+    return false;
+  }
+  const colCount = Math.max(...rows.map((r) => r.cells.length));
+  // Ô mẫu để lấy font/padding — dòng đầu có thể rỗng (ragged/đang dựng), tìm ô
+  // thật đầu tiên; không có ô nào → không đo được, rơi về mặc định.
+  const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
+  if (!sampleCell) {
+    return false;
+  }
+  const comfortFloorPx = measureChWidth(sampleCell, FIT_COMFORT_FLOOR_CH);
+
+  // Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
+  // cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
+  const ccs = getComputedStyle(sampleCell);
+  const padBorderX =
+    parseFloat(ccs.paddingLeft || '0') +
+    parseFloat(ccs.paddingRight || '0') +
+    parseFloat(ccs.borderLeftWidth || '0') +
+    parseFloat(ccs.borderRightWidth || '0');
+
+  // Pass 1 (nowrap): max-content TỪNG Ô qua Range — độc lập bề rộng cột (đo nội
+  // dung thật 1 dòng, không phải bề rộng cột chung của table-layout:auto).
+  table.classList.add(MEASURE_CLASS);
+  const range = document.createRange();
+  const colWidths: number[][] = Array.from({ length: colCount }, () => []);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      range.selectNodeContents(row.cells[i]);
+      colWidths[i].push(range.getBoundingClientRect().width + padBorderX);
+    }
+  }
+  table.classList.remove(MEASURE_CLASS);
+
+  // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
+  table.classList.add(MIN_MEASURE_CLASS);
+  const minByCol: number[] = new Array(colCount).fill(0);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      minByCol[i] = Math.max(minByCol[i], row.cells[i].getBoundingClientRect().width);
+    }
+  }
+  table.classList.remove(MIN_MEASURE_CLASS);
+
+  // comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max].
+  const comf: number[] = new Array(colCount);
+  for (let i = 0; i < colCount; i++) {
+    const maxI = colWidths[i].length ? Math.max(...colWidths[i]) : minByCol[i];
+    const p75I = percentile(colWidths[i], 75);
+    const capI = maxI > FIT_OUTLIER_K * p75I ? Math.min(maxI, Math.max(comfortFloorPx, p75I * FIT_CAP_M)) : maxI;
+    comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
   }
 
+  const desired = comf.reduce((a, b) => a + b, 0);
+  let widths: number[];
+  if (desired <= budgetW) {
+    widths = comf; // ① vừa khung → dùng comfortable (không kéo giãn full-width)
+  } else {
+    const sumMin = minByCol.reduce((a, b) => a + b, 0);
+    const totalSlack = comf.reduce((a, c, i) => a + (c - minByCol[i]), 0);
+    if (sumMin >= budgetW || totalSlack <= 0) {
+      return false; // ② hết đường co → rơi về scroll (native + thanh nổi US-19.24)
+    }
+    const deficit = desired - budgetW;
+    widths = comf.map((c, i) => c - (c - minByCol[i]) * (deficit / totalSlack));
+  }
+
+  // Áp: table-layout:fixed (FIT_CLASS) + width/max-width inline mỗi ô. Chỉ chạy
+  // cho bảng đơn giản (caller đã lọc) → serialize ra pipe, không rò .md. Dùng
+  // FLOOR (không ceil) để tổng bề rộng KHÔNG vượt budgetW vài px → không sinh
+  // scrollbar dư ở nhánh ②.
+  const finalW = widths.map((w) => Math.max(1, Math.floor(w)));
+  table.classList.add(FIT_CLASS);
+  table.style.width = `${finalW.reduce((a, b) => a + b, 0)}px`;
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      const cell = row.cells[i];
+      cell.style.boxSizing = 'border-box';
+      const w = `${finalW[i]}px`;
+      cell.style.width = w;
+      cell.style.maxWidth = w;
+    }
+  }
+  return true;
+}
+
+/**
+ * Hành vi mặc định (scroll-mode, US-19.3): co từng cột về vừa nội dung khi ngắn
+ * hơn sàn 14ch (cột ngắn không bị ép rộng bằng cột dài nhất), còn lại giữ sàn
+ * 14ch và scroll ngang khi tràn.
+ */
+function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowElement[]): void {
   // Sàn CSS (14ch + padding + box model hiện tại) đo qua 1 <td> rỗng tạm thêm
-  // vào bảng — hưởng ĐÚNG CSS mặc định (th,td { min-width: 14ch }) nên khỏi
-  // phải tính lại padding/box-sizing thủ công.
+  // vào bảng — hưởng ĐÚNG CSS mặc định (th,td { min-width: 14ch }).
   const probeRow = document.createElement('tr');
   probeRow.style.visibility = 'hidden';
   probeRow.appendChild(document.createElement('td'));
@@ -265,18 +408,7 @@ export function fitTableColumns(table: HTMLTableElement): void {
     return; // không đo được (bảng đang ẩn...) — giữ nguyên sàn CSS mặc định
   }
 
-  // Bề rộng tự nhiên từng cột — gỡ tạm sàn/trần + cấm wrap (đồng bộ, không
-  // nháy hình vì chưa có khung hình nào vẽ ra giữa lúc thêm/gỡ class).
   table.classList.add(MEASURE_CLASS);
-  // Clear previously-set inline min-width first — otherwise it outranks the
-  // class-selector override and the measurement pass can never go below a
-  // width set by an earlier fit, so columns could only grow, never shrink
-  // back after content got shorter.
-  for (const row of rows) {
-    for (const cell of Array.from(row.cells)) {
-      cell.style.removeProperty('min-width');
-    }
-  }
   const colCount = Math.max(...rows.map((r) => r.cells.length));
   const naturalByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
@@ -298,6 +430,37 @@ export function fitTableColumns(table: HTMLTableElement): void {
       cell.style.minWidth = `${Math.ceil(Math.min(floorPx, naturalByCol[i]))}px`;
     }
   }
+}
+
+/**
+ * Chỉnh bề rộng cột bảng sau mỗi render/sửa/resize. Fit-mode BẬT (US-19.25) và
+ * bảng ĐƠN GIẢN (serialize ra pipe, không rò style/class vào .md) → co/wrap vừa
+ * panel (`applyFitColumns`); còn lại (fit tắt, bảng phức tạp, hoặc hết đường co)
+ * → hành vi mặc định scroll-mode (`applyDefaultColumnWidths`, US-19.3).
+ */
+export function fitTableColumns(table: HTMLTableElement): void {
+  const rows = Array.from(table.rows);
+  if (rows.length === 0) {
+    return;
+  }
+
+  // Dọn mọi bề rộng inline + fit-class trước (để đo sạch VÀ để tắt fit-mode
+  // khôi phục scroll gọn gàng). Inline width outranks class-selector nên bắt
+  // buộc gỡ trước khi đo lại.
+  table.classList.remove(FIT_CLASS);
+  table.style.removeProperty('width');
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      cell.style.removeProperty('min-width');
+      cell.style.removeProperty('width');
+      cell.style.removeProperty('max-width');
+    }
+  }
+
+  if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows)) {
+    return;
+  }
+  applyDefaultColumnWidths(table, rows);
 }
 
 function emptyCell(tag: 'td' | 'th'): HTMLTableCellElement {

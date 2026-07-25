@@ -143,6 +143,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       vscode.commands.registerCommand('orcaEditor.openToc', () =>
         provider.postToActivePanel({ type: 'runCommand', command: 'openToc' })
       ),
+      vscode.commands.registerCommand('orcaEditor.toggleTableFitMode', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleTableFitMode' })
+      ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
     // declarations) live. Provider-level (not per-panel) so it covers every
@@ -412,6 +415,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private globalReadingMode: { enabled: boolean; mode: ReadingMode } | undefined;
 
   /**
+   * US-19.25: table Fit-mode là trạng thái GLOBAL in-session giống hệt `globalZen`
+   * — bật/tắt ở 1 tab lan sang mọi tab .md, seed tab mới trong phiên. `undefined`
+   * = chưa tab nào đổi → seed theo setting `orcaEditor.table.fitMode`. KHÔNG persist
+   * Settings (mở lại VS Code về default).
+   */
+  private globalTableFitMode: boolean | undefined;
+
+  /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
    * (panel .md CHƯA tồn tại), đọc + xoá đúng 1 lần khi resolveCustomTextEditor
    * gửi message 'init' cho document đó. Dùng một lần: nếu không xoá ngay, mở
@@ -453,6 +464,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     exclude: vscode.WebviewPanel
   ): void {
     this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
+  }
+
+  /** US-19.25: cùng cơ chế broadcastZen, cho Fit-mode bảng. */
+  private broadcastTableFitMode(on: boolean, exclude: vscode.WebviewPanel): void {
+    this.broadcastToOtherPanels(exclude, { type: 'tableFitModeChanged', on });
   }
 
   /** Post `message` to every open .md panel (all uris) except `exclude`. */
@@ -694,6 +710,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               // X-12: same value drives host dedup + webview ref-nav so both fold identically.
               caseInsensitiveFs: CASE_INSENSITIVE_FS,
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
+              // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
+              // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
+              tableFitMode: this.globalTableFitMode ?? wysiwygCfg.get<boolean>('table.fitMode', false),
               // US-2.8: webview không tự gọi asWebviewUri/sinh nonce được, nên
               // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
               plantumlEngineUri,
@@ -849,6 +868,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // mở sau đó) rồi phát cho mọi panel .md khác đang mở.
           this.globalZen = msg.zen;
           this.broadcastZen(msg.zen, webviewPanel);
+          break;
+        }
+        case 'tableFitModeChanged': {
+          // US-19.25: Fit-mode bảng global in-session (cùng mô hình zenChanged) —
+          // nhớ trong bộ nhớ process rồi phát cho mọi panel .md khác đang mở.
+          this.globalTableFitMode = msg.on;
+          this.broadcastTableFitMode(msg.on, webviewPanel);
           break;
         }
         case 'readingModeChanged': {

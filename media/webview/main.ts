@@ -63,7 +63,7 @@ import {
   syncBrokenRefBadge,
   initToolbarTriggerAt,
 } from './toolbar';
-import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
+import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns, setTableFitMode } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
@@ -133,6 +133,42 @@ const externalDrop = initExternalDrop(content, {
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
+
+// US-19.25: Fit-mode bảng — cờ GLOBAL (mirror Zen). applyTableFitMode đặt cờ cho
+// table.ts (fitTableColumns đọc), gắn class marker trên body, rồi re-fit mọi bảng
+// đang render + refresh sticky header (bề rộng cột đổi).
+let tableFitModeOn = false;
+function applyTableFitMode(on: boolean): void {
+  tableFitModeOn = on;
+  setTableFitMode(on);
+  document.body.classList.toggle('table-fit-mode', on);
+  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+  stickyTableHeader.refresh();
+}
+// US-19.25: đổi bề rộng panel (#content) → re-fit khi Fit-mode bật. Chỉ phản ứng
+// khi WIDTH đổi (không re-fit oan mỗi lần #content cao lên do gõ thêm dòng);
+// rAF-coalesce theo mẫu gutter.ts (Known Traps — throttle layout reads).
+let lastFitContentWidth = 0;
+let fitReflowRaf: number | undefined;
+const fitReflowObserver = new ResizeObserver((entries) => {
+  if (!tableFitModeOn) {
+    return;
+  }
+  const w = Math.round(entries[0]?.contentRect.width ?? content.clientWidth);
+  if (w === lastFitContentWidth) {
+    return;
+  }
+  lastFitContentWidth = w;
+  if (fitReflowRaf !== undefined) {
+    return;
+  }
+  fitReflowRaf = requestAnimationFrame(() => {
+    fitReflowRaf = undefined;
+    content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+    stickyTableHeader.refresh();
+  });
+});
+fitReflowObserver.observe(content);
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
@@ -372,6 +408,21 @@ window.addEventListener('message', (event) => {
       quickCorrect.setDocUri(msg.docUri);
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
+      // US-19.25: seed Fit-mode TRƯỚC render đầu để bảng dựng thẳng ở fit-mode
+      // (fitTableColumns trong renderDocument đọc cờ này). Ghi lastFitContentWidth
+      // để ResizeObserver không re-fit oan ngay sau render.
+      tableFitModeOn = cfg.tableFitMode === true;
+      setTableFitMode(tableFitModeOn);
+      document.body.classList.toggle('table-fit-mode', tableFitModeOn);
+      // Seed bằng CONTENT-BOX width (trừ padding) để khớp `entries[0].contentRect
+      // .width` của ResizeObserver — nếu không, callback đầu tiên thấy width "đổi"
+      // (clientWidth gồm padding) và re-fit thừa ngay sau render.
+      {
+        const ics = getComputedStyle(content);
+        lastFitContentWidth = Math.round(
+          content.clientWidth - parseFloat(ics.paddingLeft || '0') - parseFloat(ics.paddingRight || '0')
+        );
+      }
       renderDocument(msg.text ?? '');
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
@@ -510,6 +561,12 @@ window.addEventListener('message', (event) => {
       readability.applyZenFromHost(msg.zen);
       break;
     }
+    case 'tableFitModeChanged': {
+      // US-19.25: Fit-mode vừa đổi ở TAB KHÁC, host broadcast lại — apply cục bộ,
+      // KHÔNG post ngược lại (tránh vòng lặp broadcast).
+      applyTableFitMode(msg.on);
+      break;
+    }
     case 'readingModeChanged': {
       // Bug 0716 #2: enabled/mode vừa đổi ở TAB KHÁC, host broadcast
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
@@ -531,6 +588,11 @@ window.addEventListener('message', (event) => {
       } else if (msg.command === 'openToc') {
         toc.toggle();
         syncTocButton();
+      } else if (msg.command === 'toggleTableFitMode') {
+        // US-19.25: lật cờ, apply cục bộ + báo host để nhớ global + broadcast
+        // sang tab khác (cùng mô hình toggleZen → onZenChange).
+        applyTableFitMode(!tableFitModeOn);
+        postToHost({ type: 'tableFitModeChanged', on: tableFitModeOn });
       }
       break;
     }

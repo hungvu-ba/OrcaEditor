@@ -63,12 +63,18 @@
         "command": "orcaEditor.openToc",
         "title": "Show/Hide Table of Contents",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.toggleTableFitMode",
+        "title": "Toggle Table Fit Width",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
       "orcaEditor.toggleReadingMode",
       "orcaEditor.toggleZen",
-      "orcaEditor.openToc"
+      "orcaEditor.openToc",
+      "orcaEditor.toggleTableFitMode"
     ],
     "menus": {
       "commandPalette": [
@@ -130,6 +136,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
+        },
+        "orcaEditor.table.fitMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Table Fit Width: shrink and wrap table columns to fit the panel width (capping columns dominated by one very long cell) instead of scrolling horizontally. This is the initial default; toggle it live per session with the 'Toggle Table Fit Width' command (global across all open Markdown tabs, not persisted)."
         },
         "orcaEditor.crossFileSearch.scope": {
           "type": "string",

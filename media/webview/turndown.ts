@@ -623,7 +623,43 @@ function safeOuterHtml(el: HTMLElement): string {
       child.removeAttribute(attr);
     }
   }
+  stripTablePresentation(copy);
   return collapseBlankLines(copy.outerHTML);
+}
+
+/**
+ * US-19.25: gỡ mọi tàn dư TRÌNH BÀY bề rộng cột (do fitTableColumns/fit-mode ghi
+ * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `md-table-fit`
+ * class + `width` trên <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML.
+ * Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp (vd lồng
+ * list trong ô) sẽ đi đường raw-HTML và rò các style/class này vào `.md`. Chỉ gỡ
+ * các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
+ */
+function stripTablePresentation(copy: HTMLElement): void {
+  const tables = copy.tagName === 'TABLE' ? [copy] : [];
+  for (const t of Array.from(copy.querySelectorAll('table'))) {
+    tables.push(t as HTMLElement);
+  }
+  for (const t of tables) {
+    t.classList.remove('md-table-fit');
+    if (t.getAttribute('class') === '') {
+      t.removeAttribute('class');
+    }
+    t.style.removeProperty('width');
+    if (t.getAttribute('style') === '') {
+      t.removeAttribute('style');
+    }
+  }
+  for (const cell of Array.from(copy.querySelectorAll('th, td'))) {
+    const c = cell as HTMLElement;
+    c.style.removeProperty('min-width');
+    c.style.removeProperty('width');
+    c.style.removeProperty('max-width');
+    c.style.removeProperty('box-sizing');
+    if (c.getAttribute('style') === '') {
+      c.removeAttribute('style');
+    }
+  }
 }
 
 /**

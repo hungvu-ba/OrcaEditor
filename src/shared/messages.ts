@@ -98,6 +98,12 @@ export interface InitConfig {
   caseInsensitiveFs: boolean;
   /** Giá trị mặc định ban đầu của dropdown scope trong popover tìm xuyên file. */
   crossFileSearchScope: CrossFileSearchScope;
+  /**
+   * US-19.25: trạng thái Fit-mode bảng ban đầu (global in-session như Zen). Bật
+   * → cột co/wrap vừa panel thay vì scroll ngang. Bake từ `globalTableFitMode`
+   * của provider để tab mới trong phiên kế thừa; KHÔNG persist Settings.
+   */
+  tableFitMode: boolean;
   /** Trạng thái Reading Mode ban đầu (US-19.x). */
   readability: ReadabilityConfig;
   /** Req 20 US-20.2/20.3: seed for the `/` Define+Execute trigger popup. */
@@ -239,6 +245,9 @@ export interface NamespaceSummary {
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
 export type ZenChangedMessage = { type: 'zenChanged'; zen: boolean };
 
+/** US-19.25: table Fit-mode change — same shape both directions (webview↔host). */
+export type TableFitModeChangedMessage = { type: 'tableFitModeChanged'; on: boolean };
+
 /** Reading-mode change — same shape in both directions (webview↔host). */
 export type ReadingModeChangedMessage = {
   type: 'readingModeChanged';
@@ -285,6 +294,12 @@ export type WebviewToHost =
    * độc lập với `readingModeChanged` (enabled/mode).
    */
   | ZenChangedMessage
+  /**
+   * US-19.25: Fit-mode bảng vừa đổi Ở CHÍNH TAB NÀY — host giữ lại làm state
+   * global-in-memory (KHÔNG persist Settings, cùng mô hình zenChanged) rồi phát
+   * cho MỌI panel .md khác đang mở.
+   */
+  | TableFitModeChangedMessage
   /**
    * Bug 0716 #2 (reversal 2026-07-16): enabled/mode vừa đổi Ở CHÍNH
    * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
@@ -388,6 +403,8 @@ export type HostToWebview =
   | ({ type: 'dropFileResult' } & AssetSaveResult)
   /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
   | ZenChangedMessage
+  /** US-19.25: broadcast lại Fit-mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | TableFitModeChangedMessage
   /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
   | ReadingModeChangedMessage
   /**
@@ -399,7 +416,7 @@ export type HostToWebview =
    * implementation); reading/zen keep reporting back via `readingModeChanged`/
    * `zenChanged` exactly as when driven from the toolbar.
    */
-  | { type: 'runCommand'; command: 'toggleReadingMode' | 'toggleZen' | 'openToc' }
+  | { type: 'runCommand'; command: 'toggleReadingMode' | 'toggleZen' | 'openToc' | 'toggleTableFitMode' }
   /** Req 20 US-20.9: reply to `checkTargetsExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
   | { type: 'targetsExistResult'; requestId: number; docVersion: number; results: TargetExistsResult[] }
   /** Req 21 US-21.3: reply to `checkEntitiesExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */

@@ -27,6 +27,37 @@ const domCases: DomCase[] = [
     expect: (md) => !md.includes('<br>') && /\|\s*\| x \|/.test(md),
   },
   {
+    name: 'US-19.25: bảng đơn giản mang class/inline-width Fit-mode → pipe sạch, KHÔNG rò .md',
+    html:
+      '<table class="md-table-fit" style="width: 300px;">' +
+      '<thead><tr><th style="width: 100px; max-width: 100px; box-sizing: border-box;">A</th>' +
+      '<th style="width: 200px; max-width: 200px;">B</th></tr></thead>' +
+      '<tbody><tr><td style="width: 100px; max-width: 100px;">1</td>' +
+      '<td style="width: 200px; max-width: 200px;">2</td></tr></tbody></table>',
+    expect: (md) =>
+      md.includes('| A | B |') &&
+      md.includes('| 1 | 2 |') &&
+      !md.includes('md-table-fit') &&
+      !md.includes('width') &&
+      !md.includes('style') &&
+      !md.includes('class'),
+  },
+  {
+    name: 'US-19.25: bảng PHỨC TẠP (list phân cấp trong ô) mang tàn dư Fit-mode → raw-HTML strip sạch, KHÔNG rò .md',
+    html:
+      '<table class="md-table-fit" style="width: 300px;">' +
+      '<thead><tr><th style="width: 100px; max-width: 100px; box-sizing: border-box;">Cột</th></tr></thead>' +
+      '<tbody><tr><td style="width: 100px; max-width: 100px; box-sizing: border-box;">' +
+      '<ul><li>cha 1<ul><li>con 1.1</li></ul></li><li>cha 2</li></ul>' +
+      '</td></tr></tbody></table>',
+    expect: (md) =>
+      md.trimStart().startsWith('<table') && // đi đúng đường raw-HTML (list phân cấp)
+      md.includes('con 1.1') &&
+      !md.includes('md-table-fit') &&
+      !md.includes('width') &&
+      !md.includes('box-sizing'),
+  },
+  {
     name: 'th mới chỉ chứa <br> → header rỗng hợp lệ',
     html:
       '<table><thead><tr><th><br></th><th>B</th></tr></thead>' +
