@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A fast, clean WYSIWYG editor for .md — drag-and-drop reorder, project-wide search, and a rich toolbar, all while keeping your Markdown source pristine and diff-friendly.",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -16,6 +16,12 @@
   "categories": [
     "Other"
   ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": "limited"
+    }
+  },
   "main": "./dist/extension.js",
   "contributes": {
     "customEditors": [
@@ -57,12 +63,18 @@
         "command": "orcaEditor.openToc",
         "title": "Show/Hide Table of Contents",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.toggleTableFitMode",
+        "title": "Toggle Table Fit Width",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
       "orcaEditor.toggleReadingMode",
       "orcaEditor.toggleZen",
-      "orcaEditor.openToc"
+      "orcaEditor.openToc",
+      "orcaEditor.toggleTableFitMode"
     ],
     "menus": {
       "commandPalette": [
@@ -124,6 +136,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
+        },
+        "orcaEditor.table.fitMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Table Fit Width: shrink and wrap table columns to fit the panel width (capping columns dominated by one very long cell) instead of scrolling horizontally. This is the initial default; toggle it live per session with the 'Toggle Table Fit Width' command (global across all open Markdown tabs, not persisted)."
         },
         "orcaEditor.crossFileSearch.scope": {
           "type": "string",
@@ -234,10 +251,12 @@
     "test:roundtrip:paste-image": "node esbuild.js --test && node dist/test/roundtrip/paste-image.js",
     "test:roundtrip:style-preservation": "node esbuild.js --test && node dist/test/roundtrip/style-preservation.js",
     "test:roundtrip:autolink-path": "node esbuild.js --test && node dist/test/roundtrip/autolink-path.js",
+    "test:roundtrip:bare-url-decode": "node esbuild.js --test && node dist/test/roundtrip/bare-url-decode.js",
     "test:roundtrip:caption-insert": "node esbuild.js --test && node dist/test/roundtrip/caption-insert.js",
     "test:roundtrip:entity-ref": "node esbuild.js --test && node dist/test/roundtrip/entity-ref.js",
     "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
     "test:roundtrip:paste-text": "node esbuild.js --test && node dist/test/roundtrip/paste-text.js",
+    "test:roundtrip:links": "node esbuild.js --test && node dist/test/roundtrip/links.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
@@ -245,9 +264,10 @@
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "release": "./build.sh release",
-  "check:css-comments": "node scripts/check-css-comments.js"
+    "check:css-comments": "node scripts/check-css-comments.js"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
@@ -255,14 +275,15 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.25.0",
-    "eslint": "^9.36.0",
-    "eslint-plugin-security": "^3.0.1",
+    "eslint": "^10.8.0",
+    "eslint-plugin-security": "^4.0.1",
     "jscpd": "^5.0.12",
-    "ts-prune": "^0.10.3",
+    "ts-prune": "^0.9.1",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.44.0"
   },
   "dependencies": {
+    "@plantuml/core": "^1.2026.6",
     "@vscode/markdown-it-katex": "^1.1.1",
     "highlight.js": "^11.10.0",
     "katex": "^0.16.11",
@@ -272,5 +293,8 @@
     "mermaid": "^11.16.0",
     "turndown": "^7.2.0",
     "turndown-plugin-gfm": "^1.0.2"
+  },
+  "overrides": {
+    "brace-expansion": "^5.0.8"
   }
 }

@@ -19,3 +19,6 @@ _bmad-output/
 Wireframe Handoff/
 # Added by code-review-graph
 .code-review-graph/
+.vscode/
+.github/
+.images/

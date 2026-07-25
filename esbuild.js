@@ -33,6 +33,32 @@ const webviewConfig = {
 };
 
 /**
+ * PlantUML engine (@plantuml/core) as its own bundle instead of part of main.js:
+ * it is ~8.5 MB of TeaVM-compiled JavaScript, so folding it into the webview
+ * bundle would make every .md preview pay that cost even with no diagram in the
+ * document. plantuml.ts injects this file as a <script> only when a ```plantuml
+ * block actually needs rendering. Shipped in every build (not --test gated).
+ *
+ * external: ['url'] — viz-global.js is a UMD with a Node-only branch
+ * (`typeof document === 'undefined' && typeof location === 'undefined'`) that
+ * calls require('url'). The branch is dead in a browser, but esbuild still
+ * resolves it statically; marking it external leaves the dead call untouched.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const plantumlEngineConfig = {
+  entryPoints: ['media/webview/plantuml-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/plantuml-engine.js',
+  format: 'iife',
+  globalName: 'OrcaPlantumlEngine',
+  platform: 'browser',
+  target: 'es2020',
+  external: ['url'],
+  sourcemap: !production,
+  minify: production,
+};
+
+/**
  * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
  * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
  * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
@@ -166,7 +192,7 @@ function copyAssets() {
 
 async function main() {
   copyAssets();
-  const configs = [extensionConfig, webviewConfig];
+  const configs = [extensionConfig, webviewConfig, plantumlEngineConfig];
   if (buildTest)
     configs.push(
       testConfig,

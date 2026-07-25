@@ -41,6 +41,13 @@ export const MERMAID_TOGGLE_CLASS = 'md-mermaid-toggle';
 export const MERMAID_ZOOM_CLASS = 'md-mermaid-zoom';
 export const MERMAID_CHART_CLASS = 'md-mermaid-chart';
 export const MERMAID_SOURCE_CLASS = 'md-mermaid-source';
+/** US-2.8: PlantUML diagram frame — same chart⇄source structure as Mermaid above, rendered by a different engine. */
+export const PLANTUML_CLASS = 'md-plantuml';
+export const PLANTUML_TOOLBAR_CLASS = 'md-plantuml-toolbar';
+export const PLANTUML_TOGGLE_CLASS = 'md-plantuml-toggle';
+export const PLANTUML_ZOOM_CLASS = 'md-plantuml-zoom';
+export const PLANTUML_CHART_CLASS = 'md-plantuml-chart';
+export const PLANTUML_SOURCE_CLASS = 'md-plantuml-source';
 /** Per-code-block header bar (language label + Copy) injected inside <pre>, before <code> (Document Blocks item 8). */
 export const MD_CODE_HEADER_CLASS = 'md-code-header';
 /** Language-name label inside the code-block header. */
@@ -157,6 +164,13 @@ export class MarkdownRenderer {
     // Giống VS Code (markdownEngine.ts): không linkify domain trần kiểu "google.com",
     // chỉ URL có scheme hoặc www. — tránh round-trip biến text thành link.
     this.md.linkify.set({ fuzzyLink: false });
+
+    // Same as VS Code (markdownEngine.ts): disable markdown-it's default
+    // normalizeLink — it percent-encodes characters "invalid in a URL" (including
+    // `\`, e.g. a UNC href "\\server\share" gets encoded to "%5Cserver%5Cshare"),
+    // which makes turndown re-serialize different bytes than the source → the
+    // file gets marked dirty even though nothing was edited (X-7 UNC round-trip).
+    this.md.normalizeLink = (link) => link;
 
     addAlignAttrToTables(this.md);
     fixRenderInlineAsText(this.md);

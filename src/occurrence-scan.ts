@@ -13,6 +13,8 @@
  * declarations) — those are the sites Fix-all cares about.
  */
 
+import { decodeEntityFragment } from './shared/entity-fragment';
+
 /** A fenced-code opener/closer: 3+ backticks or tildes (marker char captured). */
 const FENCE_RE = /^(`{3,}|~{3,})/;
 /** Leading Unicode-letter run of an entity token = its namespace. */
@@ -38,11 +40,15 @@ function fenceMarkerOf(trimmed: string): string | null {
  * checkEntitiesExist derives from a webview-sent fragment.
  */
 export function canonicalEntityId(token: string): string | null {
-  const nsMatch = NAMESPACE_RE.exec(token);
-  if (!nsMatch || nsMatch[0].length >= token.length) {
+  // X-5: a non-ASCII fragment persisted percent-encoded (`Y%C3%Aau01`) would let
+  // NAMESPACE_RE match only the leading ASCII letter — decode+NFC first so the
+  // namespace parses whole and scan-key/query keys agree (both go through here).
+  const normalized = decodeEntityFragment(token);
+  const nsMatch = NAMESPACE_RE.exec(normalized);
+  if (!nsMatch || nsMatch[0].length >= normalized.length) {
     return null; // no namespace letters, or empty id half — not a valid entity token.
   }
-  return nsMatch[0].toLowerCase() + token.slice(nsMatch[0].length);
+  return nsMatch[0].toLowerCase() + normalized.slice(nsMatch[0].length);
 }
 
 /**

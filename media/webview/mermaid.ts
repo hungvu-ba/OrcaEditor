@@ -10,14 +10,9 @@
  * file người dùng có thể không đáng tin (mở từ đâu đó), nên không nới lỏng.
  */
 import mermaid from 'mermaid';
-import {
-  MERMAID_CLASS,
-  MERMAID_CHART_CLASS,
-  MERMAID_SOURCE_CLASS,
-  MERMAID_TOGGLE_CLASS,
-  MERMAID_ZOOM_CLASS,
-} from './pipeline';
+import { MERMAID_CLASS, MERMAID_CHART_CLASS, MERMAID_SOURCE_CLASS } from './pipeline';
 import { openLightbox } from './lightbox';
+import { MERMAID_FRAME, hashSource, initDiagramFrameToolbar, isDarkBackground } from './diagram-frame';
 
 export interface MermaidController {
   /** Dựng lại mọi biểu đồ Mermaid hiện có trong #content — gọi sau mỗi renderDocument. */
@@ -48,22 +43,6 @@ let renderSeq = 0;
 // changes (bug_General #7, matrix G2): theme flips light↔dark, OR same
 // brightness but a different-colored palette (e.g. sepia → paper). undefined = not yet init'd.
 let lastColorSignature: string | undefined;
-
-/**
- * bug_General #7: nền hiệu dụng của biểu đồ là do READING MODE quyết định (nếu
- * đang bật), KHÔNG chỉ theme VS Code. US-19.24: các mode màu (sepia/paper) đều
- * là nền SÁNG — không còn dark reading mode. Không có mode màu (standard/reading
- * off) → rơi về theme VS Code như cũ.
- */
-function isDarkBackground(): boolean {
-  const cls = document.body.classList;
-  for (const c of cls) {
-    if (c.startsWith('reading-mode-')) {
-      return false; // mọi reading mode màu (sepia/paper) là nền sáng
-    }
-  }
-  return cls.contains('vscode-dark') || cls.contains('vscode-high-contrast');
-}
 
 /**
  * Read the resolved --rp-* color tokens (matrix G2) — the diagram's color
@@ -121,55 +100,17 @@ function ensureTheme(): string {
   return signature;
 }
 
-/** Hash chuỗi đơn giản (djb2) — không cần dependency ngoài. */
-function hashSource(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  }
-  return h.toString(36);
-}
-
 export function initMermaid(content: HTMLElement): MermaidController {
   // Theme được set khi render đầu tiên (ensureTheme, theo nền hiệu dụng lúc đó)
   // thay vì cứng ở đây — nền có thể do reading palette quyết định (bug_General #7).
 
-  // mousedown + preventDefault để không mất selection trong #content, giống các nút toolbar khác.
-  content.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest(`.${MERMAID_TOGGLE_CLASS}, .${MERMAID_ZOOM_CLASS}`)) {
-      e.preventDefault();
-    }
-  });
-
-  content.addEventListener('click', (e) => {
-    const target = e.target as HTMLElement;
-
+  initDiagramFrameToolbar(content, MERMAID_FRAME, {
     // Zoom button: open the diagram in the fullscreen lightbox (bug_General #6).
-    const zoom = target.closest(`.${MERMAID_ZOOM_CLASS}`);
-    if (zoom) {
-      const wrapper = zoom.closest(`.${MERMAID_CLASS}`) as HTMLElement | null;
-      const chart = wrapper?.querySelector(`.${MERMAID_CHART_CLASS}`) as HTMLElement | null;
-      const svg = chart?.querySelector('svg');
-      if (svg) {
-        openLightbox({ kind: 'svg', svg: chart!.innerHTML });
-      }
-      return;
-    }
-
-    const toggle = target.closest(`.${MERMAID_TOGGLE_CLASS}`);
-    if (!toggle) {
-      return;
-    }
-    const wrapper = toggle.closest(`.${MERMAID_CLASS}`) as HTMLElement | null;
-    if (!wrapper) {
-      return;
-    }
-    const next = wrapper.getAttribute('data-mermaid-view') === 'chart' ? 'code' : 'chart';
-    wrapper.setAttribute('data-mermaid-view', next);
-    if (next === 'chart') {
-      // Mã nguồn có thể vừa được sửa ở view code — dựng lại theo nội dung mới nhất.
+    onZoom: (chart) => openLightbox({ kind: 'svg', svg: chart.innerHTML }),
+    // Mã nguồn có thể vừa được sửa ở view code — dựng lại theo nội dung mới nhất.
+    onShowChart(wrapper) {
       void renderDiagram(wrapper);
-    }
+    },
   });
 
   function renderAll(): void {

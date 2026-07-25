@@ -35,6 +35,20 @@ interface TocEntry {
 
 const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
 
+/** Keys that scroll the page — the only keydowns that should cancel the toggle
+ *  anchor-pin (typing/modifiers/IME composition must not). `' '` is Space. */
+const SCROLL_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End',
+  ' ',
+]);
+
 /** Giới hạn bề rộng panel khi kéo (px). Max còn bị kẹp thêm theo viewport lúc kéo. */
 const TOC_MIN_WIDTH = 200;
 const TOC_MAX_WIDTH = 600;
@@ -45,7 +59,7 @@ const TOC_SHRINK_RATIO = 0.35;
 /** Preferred width when the user hasn't resized (mirrors --toc-width in editor.css). */
 const TOC_DEFAULT_WIDTH = 300;
 
-/** US-10.6: heading-level filter — số heading tối đa (level <= 2) trước khi mặc định thu về H1-only. */
+/** US-10.6: heading-level filter — số heading tối đa (level <= 3, khớp default) trước khi mặc định thu về H2. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -95,7 +109,11 @@ function createProgressRing(): SVGElement {
   return svg;
 }
 
-export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): TocController {
+export function initToc(
+  content: HTMLElement,
+  vscode: VsCodeApi | undefined,
+  placeCaretIn: (el: Element) => void
+): TocController {
   // --- Panel bên phải ---
   // Không dùng thuộc tính `hidden` — show/hide panel giờ chạy bằng transition
   // CSS (width/opacity/visibility, xem #toc-panel trong editor.css) để có hiệu
@@ -130,9 +148,9 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   header.appendChild(stats);
 
   // --- US-10.6: heading-level filter (1=H1 only, 2=H1–H2, 3=H1–H2–H3) ---
-  // maxLevel mặc định = 2; maxLevelInitialized đánh dấu heuristic >20 heading
-  // (xem build()) đã chạy — chỉ chạy 1 lần cho mỗi tab, không re-run ở rebuild sau.
-  let maxLevel: 1 | 2 | 3 = 2;
+  // maxLevel mặc định = 3 (hiện H1–H2–H3); maxLevelInitialized đánh dấu heuristic
+  // >20 heading (xem build()) đã chạy — chỉ chạy 1 lần cho mỗi tab, không re-run ở rebuild sau.
+  let maxLevel: 1 | 2 | 3 = 3;
   let maxLevelInitialized = false;
   const savedMaxLevel = vscode?.getState()?.tocMaxLevel;
   if (savedMaxLevel === 1 || savedMaxLevel === 2 || savedMaxLevel === 3) {
@@ -268,6 +286,10 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   }
 
   function scrollToHeading(heading: HTMLElement): void {
+    // A deliberate jump supersedes any in-flight toggle anchor-pin (opening the
+    // panel then clicking a row within the pin window would otherwise fight this
+    // scroll) — see pinAnchorAcrossReflow.
+    cancelReflowPin();
     const top = heading.getBoundingClientRect().top + window.scrollY - toolbarHeight() - 8;
     window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
   }
@@ -339,9 +361,11 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
     // never re-run on later rebuilds (content edits) so the filter never jumps
     // out from under a value the user set (or implicitly kept).
     if (!maxLevelInitialized) {
-      const level12Count = allHeadings.filter((h) => headingLevel(h) <= 2).length;
-      if (level12Count > TOC_FILTER_DEFAULT_MAX_COUNT) {
-        maxLevel = 1;
+      // Count the headings the H1–H2–H3 default would show; if that's too dense,
+      // step the default down one level to H2 (hides the H3s) rather than H1.
+      const defaultLevelCount = allHeadings.filter((h) => headingLevel(h) <= 3).length;
+      if (defaultLevelCount > TOC_FILTER_DEFAULT_MAX_COUNT) {
+        maxLevel = 2;
         updateDepthButtons();
       }
       maxLevelInitialized = true;
@@ -438,6 +462,13 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
         if (link.scrollWidth > link.clientWidth) showTooltip(link, text);
       });
       link.addEventListener('blur', hideTooltip);
+      // A mouse click must not leave the focus-visible ring on the row: pointer
+      // focus paints the .toc-item:focus-visible outline (palette accent in
+      // reading mode) that should be keyboard-only. preventDefault on mousedown
+      // stops the <a> from grabbing focus on pointer interaction; the click
+      // event still fires, and keyboard Tab (which never goes through mousedown)
+      // still focuses the row so the a11y ring survives.
+      link.addEventListener('mousedown', (e) => e.preventDefault());
       // preventDefault + stopPropagation: preload của VS Code webview có listener
       // click ở document sẽ phân giải href qua <base> (https://file+.vscode-resource…)
       // rồi mở ra BROWSER nếu sự kiện lọt tới nó — kể cả khi đã preventDefault.
@@ -445,6 +476,12 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       link.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        // Set the caret at the heading first (focuses #content), so when the
+        // panel is later closed the toolbar's post-action content.focus()
+        // (toolbar.ts invokeAction) reveals THIS heading rather than scrolling
+        // the stale document-top caret back into view. placeCaretIn runs before
+        // scrollToHeading so the smooth scroll is the last, authoritative scroll.
+        placeCaretIn(heading);
         scrollToHeading(heading);
       });
       list.appendChild(link);
@@ -480,6 +517,13 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
       } else {
         break;
       }
+    }
+    // Scrolled to the true bottom: the last heading is the only thing left on
+    // screen even if its trailing content is shorter than the viewport (so its
+    // top never crosses the threshold line above) — force-select it instead of
+    // leaving the threshold scan stuck on the heading above.
+    if (window.scrollY + window.innerHeight >= getDocHeight() - 1) {
+      found = allHeadings.length - 1;
     }
     if (found < 0) {
       // Chưa cuộn tới heading đầu tiên → vẫn coi mục đầu là đang đọc.
@@ -554,7 +598,128 @@ export function initToc(content: HTMLElement, vscode: VsCodeApi | undefined): To
   // Bật / tắt + refresh
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Keep the focused line in place when toggling the panel
+  // -------------------------------------------------------------------------
+
+  /** How long to keep re-pinning the anchor — a hair over body's 0.3s
+   *  padding-right transition (editor.css) so the pin outlasts the reflow. */
+  const TOC_REFLOW_PIN_MS = 350;
+  /** A between-frame scrollY jump larger than this is a foreign scroll (a wheel
+   *  the listener missed, a programmatic scrollIntoView, a link jump) — the pin
+   *  yields to it instead of dragging it back. The gradual reflow the pin itself
+   *  corrects moves scrollY only a few px per frame, well under this. */
+  const TOC_FOREIGN_SCROLL_PX = 40;
+
+  /**
+   * The block whose on-screen position should be held across a toggle: the
+   * caret's line when the selection sits in #content and that line is on screen
+   * (the "focused line" the user is reading), otherwise the top-most block still
+   * visible below the toolbar. Returns it together with its current viewport
+   * top so pinAnchorAcrossReflow can restore that top after the reflow.
+   */
+  function pickScrollAnchor(): { el: HTMLElement; top: number } | undefined {
+    const threshold = toolbarHeight();
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const start = sel.getRangeAt(0).startContainer;
+      let block: HTMLElement | null = start instanceof HTMLElement ? start : start.parentElement;
+      // Climb to the direct child of #content (a stable top-level block whose
+      // rect is meaningful), bailing out if the selection isn't inside #content.
+      while (block && block.parentElement !== content) {
+        block = block.parentElement;
+      }
+      if (block && block.parentElement === content) {
+        const top = block.getBoundingClientRect().top;
+        if (top >= threshold - 4 && top <= window.innerHeight) {
+          return { el: block, top };
+        }
+      }
+    }
+    for (const child of Array.from(content.children) as HTMLElement[]) {
+      const rect = child.getBoundingClientRect();
+      if (rect.bottom > threshold + 1) {
+        return { el: child, top: rect.top };
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Opening/closing the panel eases body's padding-right over 0.3s, reflowing
+   * #content; a single post-toggle scrollBy (measured at t=0) sees no drift yet.
+   * So capture the anchor's viewport top BEFORE the class flip, then re-assert it
+   * every frame for the transition's length — the read line stays fixed on screen
+   * through the whole slide, in both directions.
+   */
+  // Token identifying the current pin loop. Bumping it makes any running loop
+  // exit on its next frame — used to supersede an old pin (re-toggle) and to let
+  // a deliberate scroll (scrollToHeading) cancel the pin instead of fighting it.
+  let pinToken = 0;
+
+  function cancelReflowPin(): void {
+    pinToken++;
+  }
+
+  function pinAnchorAcrossReflow(): void {
+    const anchor = pickScrollAnchor();
+    if (!anchor) {
+      cancelReflowPin();
+      return;
+    }
+    const token = ++pinToken;
+    const start = performance.now();
+    // The pin's own window.scrollBy fires no 'wheel', so a real wheel during the
+    // pin window means the user wants to move — yield instead of dragging the
+    // viewport back (a wheel right after opening must scroll, see
+    // toc-reading-stats/toc-filter). Keydown yields ONLY for the keys that scroll
+    // the page — typing/modifiers/IME composition must NOT abort the pin (this is
+    // a heavy-IME editor), and non-scroll keys don't move the reading line anyway.
+    const onUserWheel = (): void => cancelReflowPin();
+    const onUserKey = (e: KeyboardEvent): void => {
+      if (SCROLL_KEYS.has(e.key)) {
+        cancelReflowPin();
+      }
+    };
+    window.addEventListener('wheel', onUserWheel, { passive: true });
+    window.addEventListener('keydown', onUserKey);
+    const cleanup = (): void => {
+      window.removeEventListener('wheel', onUserWheel);
+      window.removeEventListener('keydown', onUserKey);
+    };
+    // Also catch programmatic jumps (scrollIntoView, a link jump) that don't emit
+    // wheel/keydown: any scrollY move between frames that the pin didn't make is
+    // foreign, so back off. lastPinScrollY = -1 marks the first frame, which
+    // absorbs the reflow (and any near-bottom clamp) before the guard arms.
+    let lastPinScrollY = -1;
+    const step = (): void => {
+      if (token !== pinToken) {
+        cleanup();
+        return;
+      }
+      if (lastPinScrollY >= 0 && Math.abs(window.scrollY - lastPinScrollY) > TOC_FOREIGN_SCROLL_PX) {
+        cancelReflowPin();
+        cleanup();
+        return;
+      }
+      const drift = anchor.el.getBoundingClientRect().top - anchor.top;
+      if (drift !== 0) {
+        window.scrollBy(0, drift);
+      }
+      lastPinScrollY = window.scrollY;
+      if (performance.now() - start < TOC_REFLOW_PIN_MS) {
+        requestAnimationFrame(step);
+      } else {
+        cleanup();
+      }
+    };
+    requestAnimationFrame(step);
+  }
+
   function toggle(): void {
+    // Capture the anchor at the current (pre-reflow) layout, then flip the class
+    // so the padding transition starts; the pin loop holds the anchor afterwards.
+    pinAnchorAcrossReflow();
     open = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {

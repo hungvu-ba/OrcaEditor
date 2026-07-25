@@ -90,12 +90,35 @@ export interface InitConfig {
   fontFamily: string;
   autoOpenToc: boolean;
   showLineNumbers: boolean;
+  /**
+   * X-12: whether the host filesystem is case-insensitive (Windows, macOS).
+   * Threaded so `normalizeHrefKey` folds the path body identically host-side
+   * (References dedup) and webview-side (ref-nav body match).
+   */
+  caseInsensitiveFs: boolean;
   /** Giá trị mặc định ban đầu của dropdown scope trong popover tìm xuyên file. */
   crossFileSearchScope: CrossFileSearchScope;
+  /**
+   * US-19.25: trạng thái Fit-mode bảng ban đầu (global in-session như Zen). Bật
+   * → cột co/wrap vừa panel thay vì scroll ngang. Bake từ `globalTableFitMode`
+   * của provider để tab mới trong phiên kế thừa; KHÔNG persist Settings.
+   */
+  tableFitMode: boolean;
   /** Trạng thái Reading Mode ban đầu (US-19.x). */
   readability: ReadabilityConfig;
   /** Req 20 US-20.2/20.3: seed for the `/` Define+Execute trigger popup. */
   trigger: TriggerConfig;
+  /**
+   * US-2.8: webview URI of the lazily-loaded PlantUML engine bundle
+   * (`dist/webview/plantuml-engine.js`). Resolved host-side because the webview
+   * cannot call `asWebviewUri` itself.
+   */
+  plantumlEngineUri: string;
+  /**
+   * US-2.8: the page's CSP nonce. Needed so the webview can inject the engine
+   * `<script>` at runtime — `script-src` accepts nonced scripts only.
+   */
+  scriptNonce: string;
 }
 
 /**
@@ -222,6 +245,9 @@ export interface NamespaceSummary {
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
 export type ZenChangedMessage = { type: 'zenChanged'; zen: boolean };
 
+/** US-19.25: table Fit-mode change — same shape both directions (webview↔host). */
+export type TableFitModeChangedMessage = { type: 'tableFitModeChanged'; on: boolean };
+
 /** Reading-mode change — same shape in both directions (webview↔host). */
 export type ReadingModeChangedMessage = {
   type: 'readingModeChanged';
@@ -268,6 +294,12 @@ export type WebviewToHost =
    * độc lập với `readingModeChanged` (enabled/mode).
    */
   | ZenChangedMessage
+  /**
+   * US-19.25: Fit-mode bảng vừa đổi Ở CHÍNH TAB NÀY — host giữ lại làm state
+   * global-in-memory (KHÔNG persist Settings, cùng mô hình zenChanged) rồi phát
+   * cho MỌI panel .md khác đang mở.
+   */
+  | TableFitModeChangedMessage
   /**
    * Bug 0716 #2 (reversal 2026-07-16): enabled/mode vừa đổi Ở CHÍNH
    * TAB NÀY — host giữ lại làm state global-in-memory (KHÔNG persist Settings,
@@ -371,6 +403,8 @@ export type HostToWebview =
   | ({ type: 'dropFileResult' } & AssetSaveResult)
   /** US-19.19: broadcast lại Zen mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
   | ZenChangedMessage
+  /** US-19.25: broadcast lại Fit-mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
+  | TableFitModeChangedMessage
   /** Bug 0716 #2: broadcast lại Reading Mode mới (do 1 tab KHÁC vừa đổi) — webview chỉ apply cục bộ, không gửi ngược lại (tránh vòng lặp). */
   | ReadingModeChangedMessage
   /**
@@ -382,11 +416,19 @@ export type HostToWebview =
    * implementation); reading/zen keep reporting back via `readingModeChanged`/
    * `zenChanged` exactly as when driven from the toolbar.
    */
-  | { type: 'runCommand'; command: 'toggleReadingMode' | 'toggleZen' | 'openToc' }
+  | { type: 'runCommand'; command: 'toggleReadingMode' | 'toggleZen' | 'openToc' | 'toggleTableFitMode' }
   /** Req 20 US-20.9: reply to `checkTargetsExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
   | { type: 'targetsExistResult'; requestId: number; docVersion: number; results: TargetExistsResult[] }
   /** Req 21 US-21.3: reply to `checkEntitiesExist`, same `requestId`/`docVersion` echoed back for the staleness check described there. */
   | { type: 'entitiesExistResult'; requestId: number; docVersion: number; results: EntityExistResult[] }
+  /**
+   * P1 follow-up: the entity index just absorbed a (debounced) reindex or a
+   * file-delete drop. Broadcast to every open panel so broken-ref markers
+   * re-check against the fresh index — the webview's own edit echo is
+   * suppressed, so without this push a marker computed against the pre-reindex
+   * index would persist until the next mutation.
+   */
+  | { type: 'entityIndexUpdated' }
   /**
    * Req 21 US-21.2: reply to `entitySearch`. `ready` carries the indexing state
    * — when false the initial background build is still running, so the popup

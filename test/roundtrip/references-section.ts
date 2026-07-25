@@ -32,6 +32,23 @@ runner.eq('key: Windows drive lower-cased, kept as path', normalizeHrefKey('C:\\
 runner.eq('key: two anchors of one file collapse', normalizeHrefKey('path.md#a') === normalizeHrefKey('path.md#b'), true);
 runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalizeHrefKey('a.md'), true);
 
+// ---- X-12: path-body case-fold is opt-in (caseInsensitive) ----
+runner.eq('key(X-12): default keeps body case (case-sensitive FS)', normalizeHrefKey('Docs/Spec.md'), 'Docs/Spec.md');
+runner.eq('key(X-12): default — case-differing keys stay distinct', normalizeHrefKey('Docs/Spec.md') === normalizeHrefKey('docs/spec.md'), false);
+runner.eq('key(X-12): caseInsensitive folds the body', normalizeHrefKey('Docs/Spec.md', true), 'docs/spec.md');
+runner.eq('key(X-12): caseInsensitive — case-differing keys collapse', normalizeHrefKey('Docs/Spec.md', true) === normalizeHrefKey('docs/spec.md', true), true);
+runner.eq('key(X-12): drive letter still folded regardless of flag', normalizeHrefKey('C:\\Dir\\X.md', false), 'c:/Dir/X.md');
+
+// ---- X-7: UNC network path kept DISTINCT from a workspace-absolute path ----
+runner.eq('key(X-7): UNC path keeps the `//server` authority (not workspace-absolute)',
+  normalizeHrefKey('\\\\server\\share\\x.md'), '//server/share/x.md');
+runner.eq('key(X-7): UNC does NOT collide with a single-slash absolute path',
+  normalizeHrefKey('\\\\server\\share\\x.md') === normalizeHrefKey('/server/share/x.md'), false);
+runner.eq('key(X-7): UNC strips #fragment like any key',
+  normalizeHrefKey('\\\\server\\share\\x.md#heading'), '//server/share/x.md');
+runner.eq('key(X-7): UNC body case-folds under caseInsensitive',
+  normalizeHrefKey('\\\\Server\\Share\\X.md', true), '//server/share/x.md');
+
 // ---- create: no section → appended at EOD, exact format + single trailing newline ----
 {
   const md = 'See [Guide](guide.md) for details.\n';
@@ -151,6 +168,19 @@ runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalize
     '[win](C:/notes/x.md)\n\n## References\n\n- [win](C:/notes/x.md)\n');
 }
 
+// ---- X-7: a backslash drive-path link is a local candidate (not skipped as external) ----
+{
+  const md = '[win](C:\\dir\\x.md)';
+  runner.eq('X-7: backslash drive path gathered as a candidate', planReferences(md).candidates.length, 1);
+}
+
+// ---- X-12: case-insensitive dedup collapses case-differing links to one entry ----
+{
+  const md = '[A](Docs/Spec.md) and [B](docs/spec.md)';
+  runner.eq('X-12: case-sensitive default keeps both candidates', planReferences(md).candidates.length, 2);
+  runner.eq('X-12: caseInsensitive collapses to one candidate', planReferences(md, true).candidates.length, 1);
+}
+
 // ---- #anchor consolidation: two anchors of one file → one entry (first display/href) ----
 {
   const md = '[Sec A](doc.md#a) then [Sec B](doc.md#b)';
@@ -190,6 +220,27 @@ runner.eq('key: ./a.md and a.md agree', normalizeHrefKey('./a.md') === normalize
   const out = render(md);
   runner.eq('fence: ## References inside a fence is not the section → creates one', out,
     '```\n## References\n```\n\n[A](a.md)\n\n## References\n\n- [A](a.md)\n');
+}
+
+// ---- X-3: CRLF body → new-section trailing strip must not leave a lone \r ----
+// renderReferences emits LF by design (the host choke point reconciles to the
+// document EOL later); the bug was `text.replace(/\n+$/, '')` stripping only the
+// `\n` of a trailing `\r\n`, leaving a stray `\r` that normalizeEol can't fix.
+{
+  const md = '[A](a.md)\r\n';
+  const out = render(md);
+  runner.eq('crlf: single trailing CRLF stripped, no lone \\r', out,
+    '[A](a.md)\n\n## References\n\n- [A](a.md)\n');
+  runner.eq('crlf: output carries no lone \\r', out !== null && !out.includes('\r'), true);
+}
+
+// ---- X-3: CRLF body with a trailing blank line (\r\n\r\n) collapses cleanly ----
+{
+  const md = '[A](a.md)\r\n\r\n';
+  const out = render(md);
+  runner.eq('crlf: double trailing CRLF stripped, single blank before heading', out,
+    '[A](a.md)\n\n## References\n\n- [A](a.md)\n');
+  runner.eq('crlf: double-CRLF output carries no lone \\r', out !== null && !out.includes('\r'), true);
 }
 
 runner.finish('references-section');

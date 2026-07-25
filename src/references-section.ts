@@ -17,6 +17,8 @@
  * `[![alt](img.png)](file.md)` links are handled correctly.
  */
 
+import { hasUrlScheme, isWindowsUncPath } from './shared/link-scheme';
+
 /** One in-scope body link, keyed for dedup/present-check and nav matching. */
 export interface RefCandidate {
   /** `normalizeHrefKey(fileSegment)` — the comparison key (host dedup + webview nav). */
@@ -58,11 +60,13 @@ interface LinkMatch {
  * Strips `#fragment` then `?query`, `decodeURIComponent`s, converts `\` to `/`,
  * lower-cases a leading Windows drive letter (`C:` → `c:`, kept as a path — not
  * treated as a URL scheme), and posix-normalizes the relative segments
- * (resolving `.`/`..`). The path body is NOT case-folded (filesystem case
- * sensitivity is unknown in a pure module); only the drive letter, which is
- * conventionally case-insensitive, is folded.
+ * (resolving `.`/`..`). The path body is case-folded only when `caseInsensitive`
+ * is set (X-12): the pure module can't know the filesystem's case sensitivity,
+ * so the host passes its `CASE_INSENSITIVE_FS` and the webview the same value
+ * via `InitConfig`. Default `false` = today's behaviour (drive letter still
+ * folded, body verbatim), so existing pure-module tests stay valid.
  */
-export function normalizeHrefKey(href: string): string {
+export function normalizeHrefKey(href: string, caseInsensitive = false): string {
   let s = href;
   const hashIdx = s.indexOf('#');
   if (hashIdx !== -1) {
@@ -77,6 +81,18 @@ export function normalizeHrefKey(href: string): string {
     decoded = decodeURIComponent(s);
   } catch {
     decoded = s;
+  }
+  if (isWindowsUncPath(decoded)) {
+    // X-7: `\\server\share\x.md` is a UNC network path, NOT workspace-absolute.
+    // Keep a DISTINCT key (a bare posix-normalize collapses `\\`→`/` and would
+    // collide it with a `/server/share/x.md` workspace-absolute ref, merging two
+    // unrelated targets into one References entry). The `//` prefix preserves the
+    // UNC authority and keeps it apart from a single-slash absolute path.
+    const parts = decoded
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter((p) => p !== '' && p !== '.');
+    return '//' + parts.map((p) => (caseInsensitive ? p.toLowerCase() : p)).join('/');
   }
   decoded = decoded.replace(/\\/g, '/');
   let drive = '';
@@ -99,7 +115,7 @@ export function normalizeHrefKey(href: string): string {
       }
       continue;
     }
-    out.push(part);
+    out.push(caseInsensitive ? part.toLowerCase() : part);
   }
   return drive + (isAbsolute ? '/' : '') + out.join('/');
 }
@@ -219,14 +235,6 @@ function scanInlineLinks(line: string, masked: string): LinkMatch[] {
   return out;
 }
 
-/** True for an href with a URL scheme (`https:`, `mailto:`…) that is NOT a Windows drive-letter path. */
-function isExternalHref(href: string): boolean {
-  if (/^[a-zA-Z]:[\\/]/.test(href)) {
-    return false; // Windows drive-letter path — local, not a scheme.
-  }
-  return /^[a-z][a-z0-9+.-]*:/i.test(href);
-}
-
 /** The raw file part of an href (minus `?query`/`#fragment`), or '' if none. */
 function fileSegmentOf(href: string): string {
   let s = href;
@@ -242,24 +250,29 @@ function fileSegmentOf(href: string): string {
 }
 
 /** Inclusion filter (US-20.5): local, non-image, has a file segment, not a `caption:`-scheme entity. */
-function toCandidate(match: LinkMatch): RefCandidate | undefined {
+function toCandidate(match: LinkMatch, caseInsensitive: boolean): RefCandidate | undefined {
   const { display, href } = match;
-  if (isExternalHref(href)) {
-    return undefined; // external scheme (incl. v1 `caption:` entity refs) — skip.
+  if (hasUrlScheme(href)) {
+    return undefined; // external scheme (incl. v1 `caption:` entity refs) — skip. `C:\…` is NOT a scheme (X-7) → kept as local.
   }
   const fileSegment = fileSegmentOf(href);
   if (fileSegment === '') {
     return undefined; // pure `#anchor` or empty `[t]()` — no file to reference.
   }
-  return { key: normalizeHrefKey(fileSegment), href, fileSegment, display };
+  return { key: normalizeHrefKey(fileSegment, caseInsensitive), href, fileSegment, display };
 }
 
 const REFERENCES_HEADING_RE = /^##\s+references\s*$/i;
 const SAME_OR_HIGHER_HEADING_RE = /^#{1,2}\s/;
 const FENCE_OPEN_RE = /^(\s*)(`{3,}|~{3,})/;
 
-/** SINGLE-PASS body scan → dedup/present sets + section boundaries (US-20.5). */
-export function planReferences(text: string): RefPlan {
+/**
+ * SINGLE-PASS body scan → dedup/present sets + section boundaries (US-20.5).
+ * `caseInsensitive` (X-12) folds the comparison-key path body so two case-
+ * differing links to one file dedupe to a single entry on a case-insensitive
+ * filesystem; the host passes `CASE_INSENSITIVE_FS`. Default `false` = today's.
+ */
+export function planReferences(text: string, caseInsensitive = false): RefPlan {
   const lines = text.split('\n');
   const candidates: RefCandidate[] = [];
   const seen = new Set<string>();
@@ -304,7 +317,7 @@ export function planReferences(text: string): RefPlan {
           section.insertOffset = lineEnd;
         }
         for (const match of scanInlineLinks(line, maskInlineCode(line))) {
-          const cand = toCandidate(match);
+          const cand = toCandidate(match, caseInsensitive);
           if (cand) {
             presentKeys.add(cand.key);
           }
@@ -325,7 +338,7 @@ export function planReferences(text: string): RefPlan {
 
     // ---- Body line ----
     for (const match of scanInlineLinks(line, maskInlineCode(line))) {
-      const cand = toCandidate(match);
+      const cand = toCandidate(match, caseInsensitive);
       if (cand && !seen.has(cand.key)) {
         seen.add(cand.key);
         candidates.push(cand);
@@ -372,7 +385,10 @@ export function renderReferences(text: string, plan: RefPlan, brokenKeys: Readon
     return text.slice(0, at) + '\n' + block + text.slice(at);
   }
   // No section — create one at the very end of the body, exactly one trailing newline.
-  const body = text.replace(/\n+$/, '');
+  // Strip trailing blank lines EOL-agnostically: a bare `/\n+$/` on CRLF text leaves a
+  // lone `\r` behind, and normalizeEol (`/\r\n|\n/g`) can't reconcile it, so a stray ^M
+  // would survive into the document before the ## References heading (X-3).
+  const body = text.replace(/(\r?\n)+$/, '');
   const prefix = body === '' ? '' : body + '\n\n';
   return prefix + '## References\n\n' + block + '\n';
 }

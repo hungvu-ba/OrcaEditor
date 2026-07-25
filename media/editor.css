@@ -342,6 +342,18 @@ body.dd-dragging .dd-handle {
   background: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.15));
 }
 
+/* Drop caret: thin vertical bar at the exact insertion point while dragging an
+ * external file over normal (non-cell) content — position:fixed, driven by
+ * viewport rects in external-drop.ts, so it needs no positioned ancestor. */
+.dd-drop-caret {
+  position: fixed;
+  width: 2px;
+  background: var(--vscode-focusBorder, #007acc);
+  pointer-events: none;
+  z-index: 40;
+  display: none;
+}
+
 /* --- List item drag & drop + indent/outdent (HLR section 17, US-17.5, M3) ---
  * .dd-li-handle reuses .dd-handle's look; positioned relative to the hovered
  * <li>'s own (indented) left edge, not a fixed gutter offset like the block
@@ -1047,16 +1059,20 @@ body.reading-mode:not(.reading-zen) #content {
   color: var(--vscode-button-foreground);
 }
 
-/* --- Mermaid: khối ```mermaid``` hiển thị biểu đồ, có nút chuyển sang xem mã
- * nguồn. Khung ngoài đóng vai trò "card" (giống front-matter). --- */
-.md-mermaid {
+/* --- Diagram frames: khối ```mermaid``` (US-2.6) và ```plantuml``` (US-2.8)
+ * hiển thị biểu đồ, có nút chuyển sang xem mã nguồn. Khung ngoài đóng vai trò
+ * "card" (giống front-matter). Hai engine dùng chung bộ style này, chỉ khác
+ * attribute lưu view hiện tại. --- */
+.md-mermaid,
+.md-plantuml {
   margin: 16px 0;
   border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
   border-radius: 4px;
   overflow: hidden;
 }
 
-.md-mermaid-toolbar {
+.md-mermaid-toolbar,
+.md-plantuml-toolbar {
   display: flex;
   justify-content: flex-end;
   padding: 4px 6px;
@@ -1065,7 +1081,9 @@ body.reading-mode:not(.reading-zen) #content {
 }
 
 .md-mermaid-toggle,
-.md-mermaid-zoom {
+.md-mermaid-zoom,
+.md-plantuml-toggle,
+.md-plantuml-zoom {
   font-family: inherit;
   /* em relative to #content (embedded-block chrome, not a --reading-ui-*
    * bucket). 0.785714em × 14px Standard base ≈ 11px (unchanged). */
@@ -1081,29 +1099,36 @@ body.reading-mode:not(.reading-zen) #content {
 }
 
 .md-mermaid-toggle:hover,
-.md-mermaid-zoom:hover {
+.md-mermaid-zoom:hover,
+.md-plantuml-toggle:hover,
+.md-plantuml-zoom:hover {
   opacity: 1;
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
 }
 
-.md-mermaid-toggle::after {
+.md-mermaid-toggle::after,
+.md-plantuml-toggle::after {
   content: 'View source';
 }
 
-.md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after {
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-toggle::after,
+.md-plantuml[data-plantuml-view='code'] .md-plantuml-toggle::after {
   content: 'View chart';
 }
 
-.md-mermaid-zoom::after {
+.md-mermaid-zoom::after,
+.md-plantuml-zoom::after {
   content: 'Zoom';
 }
 
 /* Zoom only makes sense while viewing the chart — hide it in source view. */
-.md-mermaid[data-mermaid-view='code'] .md-mermaid-zoom {
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-zoom,
+.md-plantuml[data-plantuml-view='code'] .md-plantuml-zoom {
   display: none;
 }
 
-.md-mermaid-chart {
+.md-mermaid-chart,
+.md-plantuml-chart {
   display: flex;
   justify-content: center;
   padding: 16px;
@@ -1111,27 +1136,40 @@ body.reading-mode:not(.reading-zen) #content {
   cursor: default;
 }
 
-.md-mermaid-chart svg {
+.md-mermaid-chart svg,
+.md-plantuml-chart svg {
   max-width: 100%;
   height: auto;
 }
 
-.md-mermaid-chart.md-mermaid-error {
+/* PlantUML engine dựng nét/chữ gần đen trên nền TRONG SUỐT và không theme-aware
+ * như mermaid (mermaid tự đổi sang light-on-dark ở theme tối). Cho vùng biểu đồ
+ * một nền sáng cố định để lifeline/mũi tên/chữ luôn đọc được ở mọi theme VS Code.
+ * Reading mode thay bằng bề mặt palette bên dưới (~L2660). */
+.md-plantuml-chart {
+  background: #ffffff;
+}
+
+.md-mermaid-chart.md-mermaid-error,
+.md-plantuml-chart.md-plantuml-error {
   justify-content: flex-start;
   color: var(--vscode-errorForeground, #f14c4c);
   font-size: 0.9em;
   white-space: pre-wrap;
 }
 
-.md-mermaid[data-mermaid-view='chart'] .md-mermaid-source {
+.md-mermaid[data-mermaid-view='chart'] .md-mermaid-source,
+.md-plantuml[data-plantuml-view='chart'] .md-plantuml-source {
   display: none;
 }
 
-.md-mermaid[data-mermaid-view='code'] .md-mermaid-chart {
+.md-mermaid[data-mermaid-view='code'] .md-mermaid-chart,
+.md-plantuml[data-plantuml-view='code'] .md-plantuml-chart {
   display: none;
 }
 
-.md-mermaid-source {
+.md-mermaid-source,
+.md-plantuml-source {
   margin: 0;
   border: none;
   border-radius: 0;
@@ -2616,22 +2654,33 @@ body[class*='reading-mode-'] .md-math-toggle {
 }
 body[class*='reading-mode-'] .md-math-toggle:hover,
 body[class*='reading-mode-'] .md-mermaid-toggle:hover,
-body[class*='reading-mode-'] .md-mermaid-zoom:hover {
+body[class*='reading-mode-'] .md-mermaid-zoom:hover,
+body[class*='reading-mode-'] .md-plantuml-toggle:hover,
+body[class*='reading-mode-'] .md-plantuml-zoom:hover {
   background: var(--rp-chrome-hover);
 }
 body[class*='reading-mode-'] .md-mermaid-toggle,
-body[class*='reading-mode-'] .md-mermaid-zoom {
+body[class*='reading-mode-'] .md-mermaid-zoom,
+body[class*='reading-mode-'] .md-plantuml-toggle,
+body[class*='reading-mode-'] .md-plantuml-zoom {
   color: var(--rp-fg);
 }
 
-/* Mermaid card: viền ngoài + dải toolbar tách nền với vùng biểu đồ. */
-body[class*='reading-mode-'] .md-mermaid {
+/* Diagram card: viền ngoài + dải toolbar tách nền với vùng biểu đồ. */
+body[class*='reading-mode-'] .md-mermaid,
+body[class*='reading-mode-'] .md-plantuml {
   background: var(--rp-elev-bg);
   border-color: var(--rp-embed-border);
 }
-body[class*='reading-mode-'] .md-mermaid-toolbar {
+body[class*='reading-mode-'] .md-mermaid-toolbar,
+body[class*='reading-mode-'] .md-plantuml-toolbar {
   background: var(--rp-bg);
   border-bottom-color: var(--rp-embed-border);
+}
+/* PlantUML chart canvas: thay nền trắng cố định (đặt ở ~L1132) bằng bề mặt nổi
+ * của palette, để biểu đồ nằm trên nền sepia/paper thay vì tấm trắng chói lệch tông. */
+body[class*='reading-mode-'] .md-plantuml-chart {
+  background: var(--rp-elev-bg);
 }
 
 /* Front matter (khối YAML gấp gọn, viền dashed). */
@@ -2745,6 +2794,14 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   padding: 24px;
   background: var(--vscode-editor-background, #fff);
   border-radius: 6px;
+}
+/* PlantUML zoom (data-canvas='light'): engine dựng nét đen, nên cần nền sáng cố
+ * định thay cho editor-background (tối ở theme tối). Reading mode dùng bề mặt palette. */
+#md-lightbox-stage[data-canvas='light'] {
+  background: #ffffff;
+}
+body[class*='reading-mode-'] #md-lightbox-stage[data-canvas='light'] {
+  background: var(--rp-elev-bg);
 }
 #md-lightbox-hint {
   position: fixed;

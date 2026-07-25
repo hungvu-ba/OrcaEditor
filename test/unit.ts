@@ -14,14 +14,23 @@ import * as path from 'path';
 import {
   classifyLink,
   computeMinimalEdit,
+  driveMismatchHint,
   entityFollowingLabel,
   entityFollowingPreview,
   imageNamePrefix,
+  isPathTooLongError,
+  normalizeAssetName,
+  normalizeCustomFolderPath,
+  normalizeEol,
   normalizeForSearch,
+  orphanAssetNames,
+  referencedAssetBasenames,
   relativePath,
+  sameDocumentUri,
   sanitizeDroppedFileName,
   type MinimalEdit,
 } from '../src/text-utils';
+import { isWindowsDrivePath, isWindowsUncPath, hasUrlScheme } from '../src/shared/link-scheme';
 import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
 import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
@@ -129,6 +138,105 @@ for (const c of editCases) {
 }
 
 // ---------------------------------------------------------------------------
+// normalizeEol + reconcile before diffing (X-2: a CRLF document is not rewritten).
+// ---------------------------------------------------------------------------
+
+// Pure behavior of normalizeEol.
+eq('eol: LF pass-through when !useCrlf', normalizeEol('# A\n\nB\n', false), '# A\n\nB\n');
+eq('eol: LF -> CRLF when useCrlf', normalizeEol('# A\n\nB\n', true), '# A\r\n\r\nB\r\n');
+eq('eol: idempotent — existing CRLF not doubled to \\r\\r\\n', normalizeEol('# A\r\n\r\nB\r\n', true), '# A\r\n\r\nB\r\n');
+eq('eol: mixed \\r\\n + \\n -> all CRLF', normalizeEol('a\r\nb\nc', true), 'a\r\nb\r\nc');
+
+// Core X-2: same CRLF-doc vs LF-newText pair.
+// - WITHOUT reconcile → the diff mismatches at the first \r → span ~= whole document (bug).
+// - WITH reconcile → minimal span around "B"->"B!", and reapplying stays all-CRLF.
+{
+  const crlfDoc = '# A\r\n\r\nB\r\n';
+  const lfNewText = '# A\n\nB!\n'; // webview serialize() is always LF, only appends '!' after B.
+
+  // Control (no normalize): reproduces the bug — the edit spans almost the whole document.
+  const buggy = computeMinimalEdit(crlfDoc, lfNewText);
+  const buggySpan = buggy ? buggy.oldEnd - buggy.start : 0;
+  check(
+    'eol[X-2]: NO reconcile → span = whole-doc (bug)',
+    buggySpan > crlfDoc.length / 2,
+    `  span=${buggySpan} / docLen=${crlfDoc.length}`
+  );
+
+  // Fix: reconcile the LF newText to CRLF before diffing.
+  const reconciled = normalizeEol(lfNewText, true);
+  const fixed = computeMinimalEdit(crlfDoc, reconciled);
+  const fixedSpan = fixed ? fixed.oldEnd - fixed.start : 0;
+  check(
+    'eol[X-2]: reconcile → minimal span (no whole-file rewrite)',
+    fixed !== null && fixedSpan <= 2,
+    `  span=${fixedSpan} diff=${JSON.stringify(fixed)}`
+  );
+
+  // Reapplying the reconciled edit → result is still all-CRLF, no bare LF mixed in.
+  const rebuilt = fixed ? applyEdit(crlfDoc, fixed) : crlfDoc;
+  eq('eol[X-2]: reapply keeps CRLF', rebuilt, '# A\r\n\r\nB!\r\n');
+  check('eol[X-2]: result has no bare LF', !/(^|[^\r])\n/.test(rebuilt), `  got: ${JSON.stringify(rebuilt)}`);
+}
+
+// X-2 (caret half): the echo-suppression key must match the document's EOL.
+// provider.ts import 'vscode' → can't load here; MODEL the echo decision of
+// case 'edit' + changeSubscription. The webview always posts LF; applyMinimalEdit
+// writes the reconciled (CRLF-on-a-CRLF-doc) text. If `lastTextFromWebview` keeps
+// the raw LF, getText() (CRLF) never equals it → a full 'update' re-renders
+// #content on EVERY keystroke → lost caret. Reconciling the key suppresses it.
+{
+  function makeCrlfHost(reconcileEchoKey: boolean) {
+    const useCrlf = true;
+    let doc = '# A\r\n\r\nB\r\n'; // CRLF document (tool-generated / Windows file)
+    let lastTextFromWebview: string | undefined;
+    let updatesPosted = 0; // each one = a full renderDocument() → caret loss
+
+    // changeSubscription: echo-check only (provider.ts:522).
+    function onChange(newDocText: string): void {
+      doc = newDocText;
+      if (newDocText === lastTextFromWebview) {
+        return; // echo of our own edit → no re-render
+      }
+      lastTextFromWebview = undefined;
+      updatesPosted++;
+    }
+
+    // case 'edit' (provider.ts:642 + applyMinimalEdit). `text` is the LF serialize.
+    function edit(lfText: string): void {
+      lastTextFromWebview = reconcileEchoKey ? normalizeEol(lfText, useCrlf) : lfText;
+      const reconciled = normalizeEol(lfText, useCrlf); // applyMinimalEdit always writes this
+      const diff = computeMinimalEdit(doc, reconciled);
+      onChange(diff ? applyEdit(doc, diff) : doc);
+    }
+    return {
+      edit,
+      external: onChange, // git/format/external editor: a change with no matching echo key
+      get updates() { return updatesPosted; },
+      get docText() { return doc; },
+    };
+  }
+
+  // Reproduce-first: raw LF key → every keystroke on a CRLF doc posts an update.
+  const buggy = makeCrlfHost(false);
+  buggy.edit('# A\n\nB!\n'); // type "!" after B
+  buggy.edit('# A\n\nB!?\n'); // type "?" — a second keystroke
+  check('eol[X-2 caret]: raw LF echo-key → update on every keystroke (bug)', buggy.updates === 2, `  updates=${buggy.updates}`);
+
+  // Fix: reconcile the echo key → no update echoed back → no re-render → caret kept.
+  const fixed = makeCrlfHost(true);
+  fixed.edit('# A\n\nB!\n');
+  fixed.edit('# A\n\nB!?\n');
+  check('eol[X-2 caret]: reconciled echo-key → zero echo updates (fix)', fixed.updates === 0, `  updates=${fixed.updates}`);
+  eq('eol[X-2 caret]: document stays CRLF through the edits', fixed.docText, '# A\r\n\r\nB!?\r\n');
+
+  // Regression guard: a genuine external edit (git/format) must still post an update.
+  const ext = makeCrlfHost(true);
+  ext.external('# A\r\n\r\nC\r\n');
+  check('eol[X-2 caret]: real external edit still posts update (no over-suppress)', ext.updates === 1);
+}
+
+// ---------------------------------------------------------------------------
 // normalizeForSearch
 // ---------------------------------------------------------------------------
 
@@ -150,6 +258,68 @@ eq('rel: đi lên nhiều cấp', relativePath('/w/a/b/c', '/w/x.md'), '../../..
 eq('rel: khác nhánh', relativePath('/w/a/b', '/w/c/d/e.md'), '../../c/d/e.md');
 eq('rel: from là gốc', relativePath('/', '/w/a.md'), 'w/a.md');
 
+// relativePath case-fold (X-8) — chỉ fold khi so khớp prefix, output GIỮ casing gốc.
+// Default (case-sensitive) giữ nguyên hành vi Linux/byte-identical.
+eq('rel[X-8]: default không fold — C: vs c: khác nhánh',
+  relativePath('/C:/Proj/docs', '/c:/Proj/assets/img.png'),
+  '../../../c:/Proj/assets/img.png');
+eq('rel[X-8]: caseInsensitive fold C:/c: → path đúng, giữ casing gốc của target',
+  relativePath('/C:/Proj/docs', '/c:/Proj/assets/img.png', true),
+  '../assets/img.png');
+eq('rel[X-8]: fold lệch case ở nhánh giữa',
+  relativePath('/Users/h/Proj/Docs', '/users/h/proj/Assets/x.png', true),
+  '../Assets/x.png');
+eq('rel[X-8]: fold nhưng output vẫn nguyên hoa/thường segment cuối',
+  relativePath('/w/a', '/W/A/Report.PDF', true),
+  'Report.PDF');
+eq('rel[X-8]: caseInsensitive không đổi kết quả khi đã cùng case',
+  relativePath('/w/docs', '/w/docs/sub/a.md', true),
+  'sub/a.md');
+
+// ---------------------------------------------------------------------------
+// normalizeCustomFolderPath (X-8) — chuẩn hoá setting customFolderPath khi đọc
+// ---------------------------------------------------------------------------
+
+eq('normCFP: backslash → forward-slash', normalizeCustomFolderPath('c:\\users\\h\\assets'), 'c:/users/h/assets');
+eq('normCFP: bỏ separator cuối', normalizeCustomFolderPath('c:/a/b/'), 'c:/a/b');
+eq('normCFP: bỏ nhiều separator cuối + trim', normalizeCustomFolderPath('  assets\\\\  '), 'assets');
+eq('normCFP: idempotent', normalizeCustomFolderPath(normalizeCustomFolderPath('C:\\A\\B\\')), 'C:/A/B');
+eq('normCFP: rỗng', normalizeCustomFolderPath('   '), '');
+// Drive-root / POSIX-root must survive the trailing-separator strip, else a bare
+// `c:` is misread as a relative folder named "c:" inside the workspace (review).
+eq('normCFP: drive-root c:\\ giữ được là c:/', normalizeCustomFolderPath('c:\\'), 'c:/');
+eq('normCFP: drive-root c:/ giữ nguyên', normalizeCustomFolderPath('c:/'), 'c:/');
+eq('normCFP: gõ bare drive c: → thành c:/', normalizeCustomFolderPath('c:'), 'c:/');
+eq('normCFP: POSIX root / giữ nguyên', normalizeCustomFolderPath('/'), '/');
+
+// ---------------------------------------------------------------------------
+// driveMismatchHint (X-8) — gợi ý cụ thể khi custom folder khác ổ đĩa
+// ---------------------------------------------------------------------------
+
+eq('driveHint: khác ổ đĩa (Windows) → nêu D: vs C:',
+  driveMismatchHint('d:/assets', '/c:/Proj'),
+  ' It is on drive D: but the workspace is on drive C:; choose a folder on the same drive.');
+eq('driveHint: cùng ổ đĩa (khác case) → rỗng',
+  driveMismatchHint('C:/Proj/assets', '/c:/Proj'), '');
+eq('driveHint: custom có drive, workspace không (path Windows trên macOS) → nêu là Windows path',
+  driveMismatchHint('c:/users/x/assets', '/Users/h/Proj'),
+  ' It looks like a Windows path (drive C:) that is not inside this workspace.');
+eq('driveHint: cả hai không có drive → rỗng',
+  driveMismatchHint('/Users/h/other', '/Users/h/Proj'), '');
+
+// ---------------------------------------------------------------------------
+// sameDocumentUri (X-8) — loại trừ file đang mở khỏi gợi ý, fold trên FS không phân biệt hoa thường
+// ---------------------------------------------------------------------------
+
+eq('sameUri: fold=false, khác case → KHÔNG bằng',
+  sameDocumentUri('file:///w/Doc.md', 'file:///w/doc.md', false), false);
+eq('sameUri: fold=true, khác case → bằng (cùng file trên FS không phân biệt hoa thường)',
+  sameDocumentUri('file:///w/Doc.md', 'file:///w/doc.md', true), true);
+eq('sameUri: fold=true, thật sự khác file → KHÔNG bằng',
+  sameDocumentUri('file:///w/a.md', 'file:///w/b.md', true), false);
+eq('sameUri: fold=false, trùng khít → bằng',
+  sameDocumentUri('file:///w/a.md', 'file:///w/a.md', false), true);
+
 // ---------------------------------------------------------------------------
 // imageNamePrefix — prefix tên ảnh dán (C4: dọn ảnh mồ côi khi save)
 // ---------------------------------------------------------------------------
@@ -158,6 +328,121 @@ eq('prefix: basename thường', imageNamePrefix('Requirement Doc'), 'requiremen
 eq('prefix: bỏ dấu tiếng Việt như normalizeForSearch', imageNamePrefix('Đăng ký sự kiện'), 'dang-ky-su-kien');
 eq('prefix: chỉ ký tự CJK → rỗng (fallback không prefix)', imageNamePrefix('日本語'), '');
 check('prefix: giới hạn độ dài 40 ký tự', imageNamePrefix('a'.repeat(100)).length === 40);
+
+// X-21: default (caseInsensitive) lowercases as before; on a case-sensitive FS
+// case is preserved so `Report` and `report` no longer alias to one prefix.
+eq('prefix X-21: mặc định caseInsensitive → lowercase như cũ', imageNamePrefix('Report'), 'report');
+eq('prefix X-21: caseInsensitive=true tường minh → lowercase', imageNamePrefix('Report', true), 'report');
+eq('prefix X-21: case-sensitive → giữ hoa', imageNamePrefix('Report', false), 'Report');
+check('prefix X-21: case-sensitive không alias Report vs report',
+  imageNamePrefix('Report', false) !== imageNamePrefix('report', false));
+eq('prefix X-21: case-sensitive vẫn bỏ dấu (đ/Đ→d/D, giữ hoa)',
+  imageNamePrefix('Đăng Ký', false), 'Dang-Ky');
+// normalizeForSearch output must stay byte-identical after the core extraction.
+eq('normalizeForSearch: bất biến sau tách core (hoa+dấu)', normalizeForSearch('Đăng Ký Sự Kiện'), 'dang-ky-su-kien');
+eq('normalizeForSearch: bất biến (ký tự đặc biệt)', normalizeForSearch('A_B[1]*C'), 'a-b-1-c');
+
+// ---------------------------------------------------------------------------
+// orphanAssetNames (X-1) — orphan-cleanup classifier. A tracked asset whose
+// on-disk name is percent-encoded / NFC≠NFD in the .md href must NOT be seen
+// as orphan and hard-deleted. Compares normalized basenames, not substrings.
+// ---------------------------------------------------------------------------
+
+// Diacritic + space + parens: dropped `Tài liệu (2).pdf` → encoded href. Kept.
+eq(
+  'orphan: diacritic+space+parens encoded href → referenced (kept)',
+  orphanAssetNames(['Tài liệu (2).pdf'], '[x](assets/T%C3%A0i%20li%E1%BB%87u%20%282%29.pdf)'),
+  [],
+);
+// `&` force-encoded to %26 by encodeLinkPath. Kept.
+eq(
+  'orphan: & in name (%26) → referenced (kept)',
+  orphanAssetNames(['R&D.png'], '![x](assets/R%26D.png)'),
+  [],
+);
+// macOS dir entry is NFD, typed link is NFC — same file, must match.
+eq(
+  'orphan: NFD on-disk vs NFC href → referenced (kept)',
+  orphanAssetNames(['Đăng.png'.normalize('NFD')], '[x](assets/Đăng.png)'.normalize('NFC')),
+  [],
+);
+// Genuinely unreferenced → still deleted (no hoarding regression).
+eq(
+  'orphan: unreferenced name → orphan (deleted)',
+  orphanAssetNames(['old.png'], '[keep](assets/new.png)'),
+  ['old.png'],
+);
+// Basename set, not substring: `img.png` must not be spared by `myimg.png`.
+eq(
+  'orphan: substring false-match guard (img.png vs myimg.png)',
+  orphanAssetNames(['img.png'], '[x](assets/myimg.png)'),
+  ['img.png'],
+);
+// Malformed percent in the raw pool name → guarded decode keeps it; converges.
+eq(
+  'orphan: malformed % in name → referenced (kept, no throw)',
+  orphanAssetNames(['50%off.png'], '[x](assets/50%25off.png)'),
+  [],
+);
+// Display text repeating the raw name must NOT keep the file — only the target.
+eq(
+  'orphan: reference is the target, not display text',
+  orphanAssetNames(['gone.png'], '[gone.png](assets/other.png)'),
+  ['gone.png'],
+);
+// referencedAssetBasenames: <angle> target and " title" suffix are tolerated.
+eq(
+  'orphan: angle-bracket target + title parsed to basename',
+  [...referencedAssetBasenames('[x](<assets/a b.png> "t")')],
+  ['a b.png'],
+);
+// normalizeAssetName: case-fold only when caseInsensitive is set.
+eq('orphan: normalizeAssetName folds case when asked', normalizeAssetName('Report.PNG', true), 'report.png');
+eq('orphan: normalizeAssetName keeps case by default', normalizeAssetName('Report.PNG', false), 'Report.PNG');
+// Case-insensitive FS: differently-cased href still spares the file.
+eq(
+  'orphan: case-insensitive fold → Report.png kept by report.png href',
+  orphanAssetNames(['Report.png'], '[x](assets/report.png)', true),
+  [],
+);
+// Pasted/sized image is stored as raw <img src width> HTML, not markdown — must
+// still be recognized as referenced (else hard-deleted on next save).
+eq(
+  'orphan: <img src width> HTML reference → kept',
+  orphanAssetNames(['doc-pasted-image-abc.png'], '<img src="assets/doc-pasted-image-abc.png" alt="" width="800">'),
+  [],
+);
+// Table-cell drop uses style="width:100%" — same raw-HTML path.
+eq(
+  'orphan: <img src style> (table cell) → kept',
+  orphanAssetNames(['x-pasted-image-y.png'], '<img src="assets/x-pasted-image-y.png" alt="" style="width:100%">'),
+  [],
+);
+// <a href> to a tracked file is a reference too.
+eq(
+  'orphan: <a href> HTML reference → kept',
+  orphanAssetNames(['file.pdf'], '<a href="assets/file.pdf">doc</a>'),
+  [],
+);
+// Linked image [![](inner)](outer): BOTH targets must be captured.
+eq(
+  'orphan: nested linked image captures inner + outer',
+  orphanAssetNames(['inner.png', 'outer.png'], '[![a](assets/inner.png)](assets/outer.png)'),
+  [],
+);
+// Reference-style definition [label]: target.
+eq(
+  'orphan: reference-style definition → kept',
+  orphanAssetNames(['ref.png'], '[r]: assets/ref.png'),
+  [],
+);
+// Dropped name with a literal, valid-hex %NN: on-disk name is NOT decoded, so
+// it converges with the href (encodeLinkPath emitted %2520 → decodes to %20).
+eq(
+  'orphan: literal %20 in dropped name → kept (pool side not decoded)',
+  orphanAssetNames(['report%20final.pdf'], '[x](assets/report%2520final.pdf)'),
+  [],
+);
 
 // ---------------------------------------------------------------------------
 // sanitizeDroppedFileName (US-17.6, M4) — client-controlled File.name must
@@ -176,6 +461,37 @@ eq('dropFileName: dấu chấm dẫn đầu (hidden file / thư mục hiện t�
 eq('dropFileName: rỗng sau khi làm sạch → fallback "file"', sanitizeDroppedFileName('...'), 'file');
 eq('dropFileName: rỗng ngay từ đầu → fallback "file"', sanitizeDroppedFileName(''), 'file');
 
+// X-9 — a 100+ char browser-supplied name crosses MAX_PATH under a long
+// OneDrive root; the stem is capped, the extension preserved.
+eq(
+  'dropFileName[X-9]: stem dài bị cắt còn 60 ký tự, giữ nguyên đuôi',
+  sanitizeDroppedFileName('a'.repeat(120) + '.pdf'),
+  'a'.repeat(60) + '.pdf'
+);
+eq(
+  'dropFileName[X-9]: tên ngắn không bị đụng vào',
+  sanitizeDroppedFileName('short-report.pdf'),
+  'short-report.pdf'
+);
+eq(
+  'dropFileName[X-9]: không có đuôi → toàn bộ là stem, cắt còn 60',
+  sanitizeDroppedFileName('b'.repeat(80)),
+  'b'.repeat(60)
+);
+eq(
+  'dropFileName[X-9]: dấu chấm ở đầu (đuôi giả) vẫn được cắt như stem',
+  sanitizeDroppedFileName('c'.repeat(70) + '.tar.gz'),
+  'c'.repeat(60) + '.gz'
+);
+
+// X-9 — path-length failures are recognized so a specific message can name
+// MAX_PATH / LongPathsEnabled instead of a generic "Failed to save".
+check('pathTooLong[X-9]: ENAMETOOLONG code', isPathTooLongError({ code: 'ENAMETOOLONG' }));
+check('pathTooLong[X-9]: ERROR_PATH_NOT_FOUND code', isPathTooLongError({ code: 'ERROR_PATH_NOT_FOUND' }));
+check('pathTooLong[X-9]: message text', isPathTooLongError(new Error('ENAMETOOLONG: name too long')));
+check('pathTooLong[X-9]: lỗi thường không khớp', !isPathTooLongError({ code: 'EACCES' }));
+check('pathTooLong[X-9]: null an toàn', !isPathTooLongError(null));
+
 // ---------------------------------------------------------------------------
 // classifyLink — allowlist scheme
 // ---------------------------------------------------------------------------
@@ -191,6 +507,46 @@ eq('link: file: bị chặn', classifyLink('file:///etc/passwd'), { kind: 'absol
 eq('link: vscode: bị chặn', classifyLink('vscode://x'), { kind: 'absolute', scheme: 'vscode', safe: false });
 eq('link: đường dẫn tương đối', classifyLink('./other.md#sec'), { kind: 'relative' });
 eq('link: đường dẫn tuyệt đối trong workspace (không scheme)', classifyLink('/docs/a.md'), { kind: 'relative' });
+// X-7: a Windows drive path is a local target, not the unsafe scheme `c:`.
+eq('link: Windows drive path backslash → local (X-7)', classifyLink('C:\\docs\\x.md'), { kind: 'relative' });
+eq('link: Windows drive path forward-slash → local (X-7)', classifyLink('c:/docs/x.md'), { kind: 'relative' });
+// X-7 follow-up: the REAL runtime href — markdown-it encodes `\`→`%5C`, so the
+// click/marker path classifies `C:%5C…`, which must still be local, not scheme c:.
+eq('link: drive path %5C-encoded (markdown-it href) → local (X-7)', classifyLink('C:%5Cdocs%5Cx.md'), { kind: 'relative' });
+eq('link: drive path %2F-encoded → local (X-7)', classifyLink('C:%2Fdocs%2Fx.md'), { kind: 'relative' });
+
+// ---------------------------------------------------------------------------
+// link-scheme predicates (src/shared/link-scheme.ts) — the ONE answer for X-7
+// ---------------------------------------------------------------------------
+
+eq('drivePath: C:\\ backslash', isWindowsDrivePath('C:\\docs\\x.md'), true);
+eq('drivePath: c:/ forward slash', isWindowsDrivePath('c:/docs/x.md'), true);
+eq('drivePath: %5C-encoded backslash (markdown-it href) match (X-7)', isWindowsDrivePath('C:%5Cdocs%5Cx.md'), true);
+eq('drivePath: %2F-encoded forward slash match (X-7)', isWindowsDrivePath('c:%2Fdocs%2Fx.md'), true);
+eq('drivePath: http không phải drive', isWindowsDrivePath('http://x'), false);
+eq('drivePath: bare c: (thiếu separator) không match', isWindowsDrivePath('c:foo'), false);
+eq('drivePath: đường dẫn tương đối không phải drive', isWindowsDrivePath('./a.md'), false);
+eq('scheme: http là scheme', hasUrlScheme('http://x'), true);
+eq('scheme: mailto là scheme', hasUrlScheme('mailto:a@b'), true);
+eq('scheme: drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:\\x.md'), false);
+eq('scheme: %5C-encoded drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:%5Cx.md'), false);
+eq('scheme: đường dẫn tương đối KHÔNG phải scheme', hasUrlScheme('./a.md'), false);
+eq('scheme: anchor thuần KHÔNG phải scheme', hasUrlScheme('#heading'), false);
+
+// X-7 (root cause B): UNC network path `\\server\share\…` is a local absolute
+// target, not a URL scheme and not workspace-relative. Both 1 AND 2 leading
+// backslashes must match — CommonMark's backslash-escape rule collapses a
+// hand-typed `\\server\...` (2 raw chars) down to 1 backslash in the parsed
+// href, so requiring exactly 2 here would never classify a naturally-authored
+// UNC link as UNC (see render.ts's normalizeLink override + turndown.ts's
+// linkHrefBackslashEscape rule, which together keep the doubled form stable
+// across round-trips when the DOM genuinely holds 2 backslashes).
+eq('unc: \\\\server\\share (2 backslash, doubled-in-DOM case) match', isWindowsUncPath('\\\\server\\share\\x.md'), true);
+eq('unc: \\server\\x.md (1 backslash, hand-typed-then-CommonMark-collapsed case) match', isWindowsUncPath('\\server\\x.md'), true);
+eq('unc: forward-slash //server KHÔNG phải UNC (protocol-relative URL)', isWindowsUncPath('//server/share/x.md'), false);
+eq('unc: drive path không phải UNC', isWindowsUncPath('C:\\x.md'), false);
+eq('unc: đường dẫn tương đối không phải UNC', isWindowsUncPath('./a.md'), false);
+eq('scheme: UNC KHÔNG phải scheme', hasUrlScheme('\\\\server\\share\\x.md'), false);
 
 // ---------------------------------------------------------------------------
 // message contract (src/shared/messages.ts) — kiểm tra ở mức TYPE. Nếu hình
@@ -221,13 +577,15 @@ const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommand
 const toWebview: HostToWebview[] = [
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
+    crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
+    plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
-    crossFileSearchScope: 'markdown', readability: readabilityFixture, trigger: triggerFixture,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
+    crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
+    plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
@@ -446,9 +804,13 @@ const providerSrc = fs.readFileSync(path.join(process.cwd(), 'src/provider.ts'),
 
 // CSP lock — mọi nới lỏng directive phải sửa test này một cách CÓ CHỦ ĐÍCH,
 // không thể vô tình lọt qua.
+// US-2.8: script-src thêm 'wasm-unsafe-eval' CÓ CHỦ ĐÍCH — engine PlantUML
+// client-side (Viz.js = Graphviz qua Emscripten) cần biên dịch WebAssembly. Pin
+// nguyên chuỗi đầy đủ chứ không chỉ phần 'nonce-...': includes() khớp chuỗi con,
+// nên nếu chỉ pin phần nonce thì mọi lần nới lỏng thêm sau này đều lọt qua.
 const REQUIRED_CSP_DIRECTIVES = [
   "default-src 'none'",
-  "script-src 'nonce-${nonce}'",
+  "script-src 'nonce-${nonce}' 'wasm-unsafe-eval'",
   "base-uri ${webview.cspSource}",
   "form-action 'none'",
   "frame-src 'none'",
@@ -456,6 +818,13 @@ const REQUIRED_CSP_DIRECTIVES = [
 for (const directive of REQUIRED_CSP_DIRECTIVES) {
   check(`security: CSP giữ directive "${directive}"`, providerSrc.includes(directive));
 }
+// 'wasm-unsafe-eval' chỉ cho phép biên dịch WASM. 'unsafe-eval' (bật eval()/
+// new Function() cho JS) là chuyện khác hẳn và phải luôn vắng mặt — regex loại
+// trừ đúng token 'wasm-unsafe-eval' để không tự khớp nhầm phần đuôi của nó.
+check(
+  'security: script-src KHÔNG có "unsafe-eval" (chỉ wasm-unsafe-eval mới được phép)',
+  !/script-src[^\n]*(?<!wasm-)'unsafe-eval'/.test(providerSrc)
+);
 check(
   'security: img-src KHÔNG có "https:" (chặn ảnh remote/exfil qua .md độc hại)',
   /img-src[^\n]*data:/.test(providerSrc) && !/img-src[^\n]*https:/.test(providerSrc)
@@ -700,6 +1069,16 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('entity: emptied file drops all its rows', idx.query('UC02').length === 0);
 }
 
+// P2 — search haystacks are rebuilt on incremental update: a diacritic-stripped
+// query must match a Vietnamese-diacritic title introduced via onFileChanged.
+{
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: '# H\ncaption::UC01\n' }]);
+  idx.onFileChanged('file:///a.md', '# UC-02 Đăng nhập hệ thống\ncaption::UC-02 Đăng nhập hệ thống\n');
+  const hits = idx.query('dang-nhap');
+  check('entity P2: diacritic-stripped query matches title after incremental re-parse', hits.length === 1 && hits[0].id === '-02');
+}
+
 // Indexing state — isReady() false before build, true after.
 {
   const idx = new EntityIndex();
@@ -757,6 +1136,47 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   ]);
   const fenced = scanEntityOccurrences('```\n[UC01](#UC01)\n```\n[BR02](#BR02)\n');
   eq('occurrence: links inside a fence are skipped', fenced, [{ id: 'br02', line: 3 }]);
+}
+
+// X-5: a non-ASCII namespace can reach the host percent-encoded (markdown-it /
+// turndown persist it that way) and in either Unicode form — the host must
+// decode+NFC before NAMESPACE_RE, on both the occurrence and the lookup paths.
+{
+  const canon = 'Yêu01'.normalize('NFC').toLowerCase();
+  // canonicalEntityId decodes a percent-encoded fragment before parsing the ns
+  // (raw `Y%C3%Aau01` would otherwise let NAMESPACE_RE match only the leading `Y`).
+  eq('occurrence x5: canonical decodes percent-encoded non-ASCII ns', canonicalEntityId('Y%C3%Aau01'), canon);
+  // Scan-key (from raw .md) and query key (from the webview id) both go through
+  // canonicalEntityId, so a percent-encoded link is found under the same key.
+  eq('occurrence x5: percent-encoded non-ASCII link found', scanEntityOccurrences('See [Yêu01](#Y%C3%Aau01) here.\n'), [
+    { id: canon, line: 0 },
+  ]);
+
+  const idx = new EntityIndex();
+  idx.build([{ uri: 'file:///a.md', text: 'caption::Yêu01\n' }]);
+  check('entity x5: lookup resolves a percent-encoded non-ASCII query', idx.lookup('Y%C3%Aau01').length === 1);
+  // An NFD-form mention query resolves against the NFC-authored declaration
+  // (decodeEntityFragment folds the query to NFC).
+  check('entity x5: lookup resolves an NFD query against an NFC declaration', idx.lookup('Yêu01'.normalize('NFD')).length === 1);
+
+  // X-5 (deferred follow-up): an NFD-authored DECLARATION now parses correctly —
+  // parseEntities NFCs the token before NAMESPACE_RE, so `caption::Yêu01` written
+  // in NFD recomposes to namespace `Yêu`, id `01` instead of splitting at the
+  // combining mark (namespace `Ye`). Both NFC and NFD queries then resolve it.
+  {
+    const nfdDecl = new EntityIndex();
+    nfdDecl.build([{ uri: 'file:///nfd.md', text: `caption::${'Yêu01'.normalize('NFD')}\n` }]);
+    const rows = nfdDecl.lookup('Yêu01');
+    check('entity x5: NFD declaration parses namespace whole (NFC query resolves)', rows.length === 1);
+    check('entity x5: NFD declaration namespace recomposed to "Yêu"', rows[0]?.namespace === 'Yêu' && rows[0]?.id === '01');
+    check('entity x5: NFD declaration resolves an NFD query too', nfdDecl.lookup('Yêu01'.normalize('NFD')).length === 1);
+  }
+  // A parseEntities-level check on the stored row shape (namespace not split at
+  // the combining mark).
+  {
+    const rows = parseEntities('file:///nfd2.md', `caption::${'Đăng01'.normalize('NFD')} label\n`);
+    eq('entity x5: NFD declaration stored namespace is NFC-whole', rows.map((r) => r.namespace + r.id), ['Đăng01']);
+  }
 }
 
 // truncateDisplay — Bug 11: cap @ result label/detail at 30 chars + ellipsis.

@@ -23,6 +23,7 @@
  * is unaffected.
  */
 import { dataUrlToBase64, encodeLinkPath, readAsDataUrl, showToast } from './dom-utils';
+import { ESCAPE_PRIORITY, registerEscapeHandler } from './escape-stack';
 import type { PasteImageController } from './paste-image';
 import type { VsCodeApi } from './vscode-api';
 
@@ -44,9 +45,43 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
   let seq = 0;
   const pending = new Map<number, { range: Range | undefined; name: string }>();
   let dropTargetCell: Element | null = null;
+  let dropCaret: HTMLElement | null = null;
+  // dragover fires continuously; coalesce the layout-forcing highlight recompute
+  // (caretRangeFromPoint + getBoundingClientRect) into one per frame — same
+  // throttle discipline as match-utils/toc onScroll (Known Traps: performance).
+  let rafId = 0;
+  let pendingXY: { x: number; y: number } | null = null;
+  // A file drag is currently hovering #content (drives the Escape-to-cancel
+  // handler; false while no drag is over us so Escape falls through).
+  let dragActive = false;
+  // Escape was pressed mid-drag: swallow the rest of THIS gesture (no highlight,
+  // no drop) until it leaves/ends, so releasing the mouse inserts nothing.
+  let cancelled = false;
 
   function caretRangeAt(clientX: number, clientY: number): Range | undefined {
     return document.caretRangeFromPoint?.(clientX, clientY) ?? undefined;
+  }
+
+  /**
+   * The range the drop WILL use — same value drives the highlight, so what the
+   * user sees is exactly where the file lands (WYSIWYG). Falls back to the end
+   * of the file when the point yields no caret (dropping into the empty margin
+   * below the last block, or over an atomic element), instead of the stale
+   * pre-drag caret the old code silently reused.
+   */
+  function dropRangeAt(clientX: number, clientY: number): Range {
+    const at = caretRangeAt(clientX, clientY);
+    if (at) {
+      return at;
+    }
+    const range = document.createRange();
+    if (content.lastChild) {
+      range.setStartAfter(content.lastChild);
+    } else {
+      range.selectNodeContents(content);
+    }
+    range.collapse(false);
+    return range;
   }
 
   function cellAt(range: Range | undefined): Element | null {
@@ -63,16 +98,89 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
     dropTargetCell = null;
   }
 
-  /** F8 (US-17.4 AC): highlight the destination cell while dragging an external image over it. */
-  function highlightCellAt(clientX: number, clientY: number): void {
-    const cell = cellAt(caretRangeAt(clientX, clientY));
-    if (cell === dropTargetCell) {
+  function hideDropCaret(): void {
+    if (dropCaret) {
+      dropCaret.style.display = 'none';
+    }
+  }
+
+  function clearHighlight(): void {
+    clearCellHighlight();
+    hideDropCaret();
+  }
+
+  /** Drop the current drag's transient state (highlight, queued frame, hover point). */
+  function resetDragState(): void {
+    dragActive = false;
+    pendingXY = null;
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+    clearHighlight();
+  }
+
+  /** Escape while a file drag is over #content: kill the highlight and arm `cancelled` so the eventual drop inserts nothing. */
+  function cancelDrag(): void {
+    resetDragState();
+    cancelled = true;
+  }
+
+  /** Collapsed-range caret rect; empty blocks / end-of-file give a zero rect, so fall back to the containing element's box collapsed to its trailing edge. */
+  function caretRect(range: Range): { left: number; top: number; height: number } | null {
+    const r = range.getBoundingClientRect();
+    if (r.height > 0) {
+      return { left: r.left, top: r.top, height: r.height };
+    }
+    const node = range.startContainer;
+    const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+    const er = el?.getBoundingClientRect();
+    if (er && er.height > 0) {
+      return { left: er.left, top: er.top, height: er.height };
+    }
+    return null;
+  }
+
+  /** Thin vertical caret marking the exact insertion point for a non-cell drop. */
+  function showDropCaretAt(range: Range): void {
+    const rect = caretRect(range);
+    if (!rect) {
+      hideDropCaret();
       return;
     }
-    clearCellHighlight();
+    if (!dropCaret) {
+      dropCaret = document.createElement('div');
+      dropCaret.className = 'dd-drop-caret';
+      document.body.appendChild(dropCaret);
+    }
+    dropCaret.style.display = 'block';
+    dropCaret.style.left = `${rect.left}px`;
+    dropCaret.style.top = `${rect.top}px`;
+    dropCaret.style.height = `${rect.height}px`;
+  }
+
+  /**
+   * F8 (US-17.4 AC): highlight the destination cell while dragging over a table
+   * cell; otherwise show the drop caret at the insertion point. Both track the
+   * SAME dropRangeAt the drop handler uses.
+   */
+  function updateHighlight(): void {
+    rafId = 0;
+    if (!pendingXY) {
+      return;
+    }
+    const range = dropRangeAt(pendingXY.x, pendingXY.y);
+    const cell = cellAt(range);
     if (cell) {
-      cell.classList.add('dd-drop-target-cell');
-      dropTargetCell = cell;
+      hideDropCaret();
+      if (cell !== dropTargetCell) {
+        clearCellHighlight();
+        cell.classList.add('dd-drop-target-cell');
+        dropTargetCell = cell;
+      }
+    } else {
+      clearCellHighlight();
+      showDropCaretAt(range);
     }
   }
 
@@ -82,25 +190,44 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
     if (!e.dataTransfer?.types.includes('Files')) {
       return;
     }
+    // Escape already cancelled this gesture: refuse to be a drop target (no
+    // preventDefault) and show nothing, until the drag leaves/ends.
+    if (cancelled) {
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    highlightCellAt(e.clientX, e.clientY);
+    dragActive = true;
+    pendingXY = { x: e.clientX, y: e.clientY };
+    if (!rafId) {
+      rafId = requestAnimationFrame(updateHighlight);
+    }
   });
 
   content.addEventListener('dragleave', (e) => {
     if (!(e.relatedTarget instanceof Node) || !content.contains(e.relatedTarget)) {
-      clearCellHighlight();
+      // Gesture left #content — reset both flags so a fresh drag re-arms cleanly.
+      resetDragState();
+      cancelled = false;
     }
   });
 
   content.addEventListener('drop', (e) => {
     const files = e.dataTransfer?.files;
-    clearCellHighlight();
+    const wasCancelled = cancelled;
+    resetDragState();
+    cancelled = false;
     if (!files || files.length === 0) {
       return;
     }
     e.preventDefault();
-    const range = caretRangeAt(e.clientX, e.clientY);
+    // Escape-cancelled: preventDefault above suppresses the browser's default
+    // file-open, but insert nothing.
+    if (wasCancelled) {
+      return;
+    }
+    const range = dropRangeAt(e.clientX, e.clientY);
     const fillCell = cellAt(range) !== null;
     for (const file of files) {
       if (file.type.startsWith('image/')) {
@@ -109,6 +236,17 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
         void requestDropFile(file, range);
       }
     }
+  });
+
+  // Escape cancels an in-flight file drag (shared capture-phase arbiter, DRAG
+  // priority — same tier as internal block/li drag). Returns false when no file
+  // drag is over us so the key falls through to popups/Zen/etc.
+  registerEscapeHandler(ESCAPE_PRIORITY.DRAG, () => {
+    if (!dragActive) {
+      return false;
+    }
+    cancelDrag();
+    return true;
   });
 
   async function requestDropFile(file: File, range: Range | undefined): Promise<void> {

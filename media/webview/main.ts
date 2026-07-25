@@ -17,6 +17,7 @@ import {
   normalizeMarkdown,
   postProcessMathDom,
   postProcessMermaidDom,
+  postProcessPlantumlDom,
   postProcessCodeHeaders,
   postProcessRelativePathLinks,
   postProcessCaptions,
@@ -34,10 +35,11 @@ import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
-import { initBrokenRef, slugifyHeadingText } from './broken-ref';
+import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid } from './mermaid';
+import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
@@ -61,7 +63,7 @@ import {
   syncBrokenRefBadge,
   initToolbarTriggerAt,
 } from './toolbar';
-import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns } from './table';
+import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns, setTableFitMode } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
@@ -93,12 +95,18 @@ const search = initSearch(content);
 // truyền accessor isOpen() của search thay vì cả controller để giữ phụ thuộc tối thiểu.
 const selectHighlight = initSelectHighlight(content, () => search.isOpen());
 const crossFileSearch = initCrossFileSearch(content, vscode);
-const toc = initToc(content, vscode);
+const dom = createDomHelpers(content);
+// initToc needs placeCaretIn to set the caret at a heading on TOC-link click
+// (so closing the panel reveals that heading, not the stale document-top caret).
+const toc = initToc(content, vscode, dom.placeCaretIn);
 const mermaidView = initMermaid(content);
+const plantumlView = initPlantuml(content);
 initMathEdit(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
-const dom = createDomHelpers(content);
+// X-12: filesystem case-sensitivity, from InitConfig — folds the ref-nav key so
+// a case-differing body occurrence matches on Windows/macOS. Host default off.
+let caseInsensitiveFs = false;
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
@@ -125,6 +133,76 @@ const externalDrop = initExternalDrop(content, {
 const table = initTable(content, toolbarEl, { scheduleSync, dom });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
+
+// US-19.25: Fit-mode bảng — cờ GLOBAL (mirror Zen). applyTableFitMode đặt cờ cho
+// table.ts (fitTableColumns đọc), gắn class marker trên body, rồi re-fit mọi bảng
+// đang render + refresh sticky header (bề rộng cột đổi).
+let tableFitModeOn = false;
+function applyTableFitMode(on: boolean): void {
+  tableFitModeOn = on;
+  setTableFitMode(on);
+  document.body.classList.toggle('table-fit-mode', on);
+  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+  stickyTableHeader.refresh();
+}
+// US-19.25: đổi bề rộng panel (#content) → re-fit khi Fit-mode bật. Chỉ phản ứng
+// khi WIDTH đổi (không re-fit oan mỗi lần #content cao lên do gõ thêm dòng);
+// rAF-coalesce theo mẫu gutter.ts (Known Traps — throttle layout reads).
+let lastFitContentWidth = 0;
+let fitReflowRaf: number | undefined;
+const fitReflowObserver = new ResizeObserver((entries) => {
+  if (!tableFitModeOn) {
+    return;
+  }
+  const w = Math.round(entries[0]?.contentRect.width ?? content.clientWidth);
+  if (w === lastFitContentWidth) {
+    return;
+  }
+  lastFitContentWidth = w;
+  if (fitReflowRaf !== undefined) {
+    return;
+  }
+  fitReflowRaf = requestAnimationFrame(() => {
+    fitReflowRaf = undefined;
+    content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+    stickyTableHeader.refresh();
+  });
+});
+fitReflowObserver.observe(content);
+// US-19.25: gõ chữ trong ô bảng KHÔNG tự re-fit (input chỉ serialize, không render)
+// → cột đang bị ghim width ở fit-mode không nở theo chữ vừa gõ, wrap rất sớm (cột
+// mới thêm còn hẹp bằng đúng header). Re-fit ĐÚNG bảng đang gõ SAU KHI ngừng gõ
+// (debounce) để cột giãn theo nội dung. Chỉ khi Fit-mode BẬT (scroll-mode mặc định
+// tự giãn qua max-content nên không cần). Debounce (không mỗi phím) vì fitTableColumns
+// toggle class đo layout — tránh giật; đo gọn trong 1 tick nên không nháy.
+const FIT_TYPING_REFIT_MS = 200;
+let fitTypingTimer: ReturnType<typeof setTimeout> | undefined;
+let fitTypingTable: HTMLTableElement | null = null;
+function scheduleFitRefit(table: HTMLTableElement): void {
+  if (!tableFitModeOn) {
+    return;
+  }
+  fitTypingTable = table;
+  if (fitTypingTimer !== undefined) {
+    clearTimeout(fitTypingTimer);
+  }
+  fitTypingTimer = setTimeout(() => {
+    fitTypingTimer = undefined;
+    const t = fitTypingTable;
+    fitTypingTable = null;
+    if (!t || !t.isConnected) {
+      return; // bảng đã bị dựng lại/xoá giữa chừng
+    }
+    fitTableColumns(t);
+    stickyTableHeader.refresh();
+    // Cột nở → bảng có thể rộng thêm/đổi scroll ngang; kéo ô đang gõ về tầm nhìn.
+    const sel = window.getSelection();
+    const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
+    if (cell && content.contains(cell)) {
+      cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, FIT_TYPING_REFIT_MS);
+}
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
@@ -137,7 +215,10 @@ const readability = initReadability({
   onZenChange: (zen) => postToHost({ type: 'zenChanged', zen }),
   onReadingModeChange: (state) => postToHost({ type: 'readingModeChanged', ...state }),
   // bug_General #7: khi commit 1 bộ style, Mermaid dựng lại nếu nền sáng/tối lật.
-  onStyleApplied: () => mermaidView.refreshTheme(),
+  onStyleApplied: () => {
+    mermaidView.refreshTheme();
+    plantumlView.refreshTheme();
+  },
 });
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
@@ -332,7 +413,19 @@ window.addEventListener('message', (event) => {
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
+      caseInsensitiveFs = cfg.caseInsensitiveFs === true;
       crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
+      // US-2.8: engine PlantUML nạp lười lúc chạy — webview không tự dựng được
+      // URI webview lẫn nonce CSP, nên nhận sẵn từ host. Phải set TRƯỚC
+      // renderDocument bên dưới (lần render đầu có thể đã cần dựng biểu đồ).
+      // Gate on the URI only: a nonce can legitimately be empty (a host page
+      // without a CSP), and an empty string there is harmless on the <script>.
+      if (cfg.plantumlEngineUri) {
+        setPlantumlEngineConfig({
+          engineUri: cfg.plantumlEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
       if (cfg.readability) {
         readability.applyFromHost(cfg.readability);
       }
@@ -349,6 +442,21 @@ window.addEventListener('message', (event) => {
       quickCorrect.setDocUri(msg.docUri);
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
+      // US-19.25: seed Fit-mode TRƯỚC render đầu để bảng dựng thẳng ở fit-mode
+      // (fitTableColumns trong renderDocument đọc cờ này). Ghi lastFitContentWidth
+      // để ResizeObserver không re-fit oan ngay sau render.
+      tableFitModeOn = cfg.tableFitMode === true;
+      setTableFitMode(tableFitModeOn);
+      document.body.classList.toggle('table-fit-mode', tableFitModeOn);
+      // Seed bằng CONTENT-BOX width (trừ padding) để khớp `entries[0].contentRect
+      // .width` của ResizeObserver — nếu không, callback đầu tiên thấy width "đổi"
+      // (clientWidth gồm padding) và re-fit thừa ngay sau render.
+      {
+        const ics = getComputedStyle(content);
+        lastFitContentWidth = Math.round(
+          content.clientWidth - parseFloat(ics.paddingLeft || '0') - parseFloat(ics.paddingRight || '0')
+        );
+      }
       renderDocument(msg.text ?? '');
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
@@ -440,6 +548,13 @@ window.addEventListener('message', (event) => {
       brokenRef.notifyEntitiesResult(msg.requestId, msg.docVersion, msg.results);
       break;
     }
+    case 'entityIndexUpdated': {
+      // P1 follow-up: the host's entity index just absorbed a debounced reindex
+      // (or a delete drop). Re-run the broken-ref check so markers converge —
+      // our own edit echo is suppressed, so no re-render would trigger it.
+      brokenRef.refresh();
+      break;
+    }
     case 'scrollToPosition': {
       // C6b: file .md đã có panel mở sẵn — host gửi thẳng message này thay vì
       // qua 'init' vì resolveCustomTextEditor không chạy lại trong trường hợp này.
@@ -480,6 +595,12 @@ window.addEventListener('message', (event) => {
       readability.applyZenFromHost(msg.zen);
       break;
     }
+    case 'tableFitModeChanged': {
+      // US-19.25: Fit-mode vừa đổi ở TAB KHÁC, host broadcast lại — apply cục bộ,
+      // KHÔNG post ngược lại (tránh vòng lặp broadcast).
+      applyTableFitMode(msg.on);
+      break;
+    }
     case 'readingModeChanged': {
       // Bug 0716 #2: enabled/mode vừa đổi ở TAB KHÁC, host broadcast
       // lại — chỉ apply cục bộ (applyReadingModeFromHost không gọi lại
@@ -501,6 +622,11 @@ window.addEventListener('message', (event) => {
       } else if (msg.command === 'openToc') {
         toc.toggle();
         syncTocButton();
+      } else if (msg.command === 'toggleTableFitMode') {
+        // US-19.25: lật cờ, apply cục bộ + báo host để nhớ global + broadcast
+        // sang tab khác (cùng mô hình toggleZen → onZenChange).
+        applyTableFitMode(!tableFitModeOn);
+        postToHost({ type: 'tableFitModeChanged', on: tableFitModeOn });
       }
       break;
     }
@@ -557,6 +683,7 @@ function renderDocument(markdown: string): void {
   content.innerHTML = html;
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
+  postProcessPlantumlDom(content, document);
   postProcessCodeHeaders(content, document);
   postProcessRelativePathLinks(content, document);
   postProcessCaptions(content, document);
@@ -565,6 +692,7 @@ function renderDocument(markdown: string): void {
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
   mermaidView.renderAll();
+  plantumlView.renderAll();
   table.hideTableToolbar();
   // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
   // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
@@ -800,7 +928,7 @@ function restoreCaretAtSource(line: number, col: number): void {
  * sync/diff giả.
  */
 const TRAILING_TRAP_SELECTOR =
-  '.md-mermaid, .md-math-block, .md-front-matter, pre, table, hr, [contenteditable="false"]';
+  '.md-mermaid, .md-plantuml, .md-math-block, .md-front-matter, pre, table, hr, [contenteditable="false"]';
 
 function ensureTrailingParagraph(): void {
   const last = content.lastElementChild;
@@ -819,7 +947,7 @@ function ensureTrailingParagraph(): void {
  * cũng là một khối bẫy caret (hoặc không có phần tử kế tiếp — trường hợp con
  * cuối của blockquote/li, nơi ensureTrailingParagraph không với tới).
  */
-const ATOM_BLOCK_SELECTOR = '.md-mermaid, .md-math-block';
+const ATOM_BLOCK_SELECTOR = '.md-mermaid, .md-plantuml, .md-math-block';
 
 /**
  * Đảm bảo SAU MỖI khối Mermaid/math block đều có chỗ đặt caret: nếu phần tử
@@ -1065,8 +1193,14 @@ content.addEventListener('input', (e) => {
   // clone header dính (nếu đang hiện) cache bề rộng cột cũ, không tự nhận ra
   // thay đổi này (chỉ dựng lại khi ĐỔI bảng, xem table-sticky-header.ts), gây
   // lệch cột với header thật. Refresh để lần update() kế tiếp dựng lại clone.
-  if ((e.target as Element | null)?.closest?.('table')) {
+  // Caret đang trong ô bảng? (input event target ở contentEditable thường là
+  // #content chứ không phải ô — dò qua selection cho chắc.)
+  const sel = window.getSelection();
+  const editedTable = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('table') : null;
+  if (editedTable && content.contains(editedTable)) {
     stickyTableHeader.refresh();
+    // US-19.25: cột (fit-mode) không nở khi gõ vì bị ghim width → re-fit có debounce.
+    scheduleFitRefit(editedTable as HTMLTableElement);
   }
 });
 
@@ -1382,6 +1516,7 @@ function insertPastedMarkdown(text: string): void {
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
   mermaidView.renderAll();
+  plantumlView.renderAll();
 }
 
 /**
@@ -1410,6 +1545,7 @@ function insertMarkdownAtCaret(text: string): void {
     ensureCaretSpotAfterAtomBlocks();
   }
   mermaidView.renderAll();
+  plantumlView.renderAll();
 }
 
 /**
@@ -1433,6 +1569,7 @@ function renderPasteHtml(text: string): string {
   tmp.innerHTML = html;
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
+  postProcessPlantumlDom(tmp, document);
   postProcessCodeHeaders(tmp, document);
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;
@@ -1515,12 +1652,17 @@ function openLink(href: string): void {
 }
 
 function scrollToAnchor(fragment: string): void {
-  const decoded = decodeURIComponent(fragment).toLowerCase();
+  // X-4: slugify the fragment side (shared with broken-ref.ts) so a Vietnamese
+  // heading resolves regardless of NFC/NFD authoring form, not a raw decoded compare.
+  const target = fragmentToHeadingSlug(fragment);
+  if (!target) {
+    return; // a punctuation-only fragment slugs to '' — don't scroll to a random empty-slug heading.
+  }
   const headings = content.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (const h of Array.from(headings)) {
     // Same slugify rule broken-ref.ts uses to resolve a #heading link's
     // existence (Req 20 US-20.9) — shared so the two never drift apart.
-    if (slugifyHeadingText(h.textContent ?? '') === decoded) {
+    if (slugifyHeadingText(h.textContent ?? '') === target) {
       h.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       return;
     }
@@ -1568,10 +1710,10 @@ function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
     openLink(anchor.getAttribute('href') ?? '');
     return;
   }
-  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '');
+  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '', caseInsensitiveFs);
   const sectionAnchors = referencesSectionAnchors();
   const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
-    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '') === key
+    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '', caseInsensitiveFs) === key
   );
   if (!bodyAnchor) {
     return;
@@ -1683,12 +1825,17 @@ content.addEventListener('keydown', (e) => {
         return;
     }
   }
-  if (mod && e.shiftKey && e.key.toLowerCase() === 'x') {
+  // !e.altKey: trên Windows/Linux, AltGr đặt ctrlKey=true VÀ altKey=true, nên
+  // AltGr+Shift+X (ký tự thật trên layout VN/PL/DE/BR) sẽ vô tình chạy gạch
+  // ngang và nuốt ký tự. Cùng bảo vệ như nhánh mod-only ở trên và search.ts.
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'x') {
     applyInlineFormat(e, () => document.execCommand('strikeThrough'));
     return;
   }
   // Ctrl/Cmd+Shift+Z = redo (quy ước Mac, song song với Ctrl+Y ở trên).
-  if (mod && e.shiftKey && e.key.toLowerCase() === 'z') {
+  // !e.altKey: chặn AltGr+Shift+Z (ctrl+alt trên Windows/Linux) kích hoạt redo
+  // phá huỷ khi người dùng chỉ đang gõ một ký tự AltGr.
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     postToHost({ type: 'redo', pendingText: takePendingSync() });
     return;

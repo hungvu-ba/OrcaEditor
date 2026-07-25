@@ -155,6 +155,13 @@ const FMT_ICONS = {
       `<rect x="8.5" y="10" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
       `<path d="M4.5 6v2.5a1.5 1.5 0 0 0 1.5 1.5h5.5" ${FMT_STROKE}/>`
   ),
+  /** Icon PlantUML (US-4.30): sơ đồ hoạt động dọc (start ● → khối → stop ●), phân biệt với Mermaid. */
+  plantuml: svgIcon(
+    `<circle cx="8" cy="2.75" r="1.5" ${FMT_STROKE}/>` +
+      `<rect x="5" y="6.25" width="6" height="3.5" rx="1" ${FMT_STROKE}/>` +
+      `<circle cx="8" cy="13.25" r="1.5" ${FMT_STROKE}/>` +
+      `<path d="M8 4.25v2M8 9.75v2" ${FMT_STROKE}/>`
+  ),
   /** Icon eraser (US-4.13): khối tẩy nghiêng + gạch chân "mặt bàn". */
   eraser: svgIcon(
     `<path d="M10.6 2.9L13.1 5.4a1.5 1.5 0 0 1 0 2.1l-5.6 5.6H4.2L2.2 11.1a1.5 1.5 0 0 1 0-2.1l6.3-6.1a1.5 1.5 0 0 1 2.1 0z" ${FMT_STROKE}/>` +
@@ -502,6 +509,30 @@ const MERMAID_DROPDOWN: ToolbarDropdownEntry[] = [
 ];
 
 /**
+ * Split-button PlantUML (US-4.30) — song song 1-1 với Mermaid ở trên: mặt icon
+ * chèn template Activity mặc định, mũi tên mở dropdown 4 loại
+ * (Activity/Sequence/Class/State). Mỗi template là fence ```plantuml``` bọc
+ * `@startuml…@enduml`, chèn qua `ctx.insertMarkdown` như Mermaid —
+ * plantumlView.renderAll() (gọi trong insertMarkdownAtCaret, main.ts) tự dựng
+ * SVG cho khối vừa chèn, không cần đổi plantuml.ts.
+ */
+const PLANTUML_ACTIVITY_TEMPLATE =
+  '```plantuml\n@startuml\nstart\n:Do something;\nif (Decision?) then (yes)\n  :Handle A;\nelse (no)\n  :Handle B;\nendif\nstop\n@enduml\n```';
+const PLANTUML_SEQUENCE_TEMPLATE =
+  '```plantuml\n@startuml\nAlice -> Bob : Hello Bob, how are you?\nBob --> Alice : I am good, thanks!\n@enduml\n```';
+const PLANTUML_CLASS_TEMPLATE =
+  '```plantuml\n@startuml\nclass Animal {\n  +String name\n  +makeSound()\n}\nclass Dog\nAnimal <|-- Dog\n@enduml\n```';
+const PLANTUML_STATE_TEMPLATE =
+  '```plantuml\n@startuml\n[*] --> Idle\nIdle --> Running : start\nRunning --> Idle : stop\nRunning --> [*]\n@enduml\n```';
+const insertPlantumlDefault = () => ctx.insertMarkdown(PLANTUML_ACTIVITY_TEMPLATE);
+const PLANTUML_DROPDOWN: ToolbarDropdownEntry[] = [
+  { label: 'Activity diagram', badge: 'Common', action: insertPlantumlDefault },
+  { label: 'Sequence diagram', action: () => ctx.insertMarkdown(PLANTUML_SEQUENCE_TEMPLATE) },
+  { label: 'Class diagram', action: () => ctx.insertMarkdown(PLANTUML_CLASS_TEMPLATE) },
+  { label: 'State diagram', action: () => ctx.insertMarkdown(PLANTUML_STATE_TEMPLATE) },
+];
+
+/**
  * Dropdown của Reading Mode split-button — 3 mode phẳng (US-19.24): "Standard"
  * (tắt reading style, `disable()`) + "Sepia"/"Paper" (bật trực tiếp,
  * `setMode`). Hover 1 hàng live-preview lên file hiện tại (`previewMode`); rời
@@ -559,20 +590,20 @@ const toolbarItems: ToolbarItem[] = [
   // main.ts's Ctrl+Z/Y delegation) — the browser's native stack is blind to
   // raw-DOM ops (commitListOpDirect, replaceListItems...), so running
   // execCommand('undo') here would skip those changes and desync the stacks.
-  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
-  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
-  { label: 'B', title: 'Bold (⌘B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
-  { label: 'I', title: 'Italic (⌘I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
+  { label: '↶', icon: FMT_ICONS.undo, title: 'Undo (⌘Z / Ctrl+Z)', action: () => ctx.requestUndo(), id: 'fmt-undo', hostDelegated: true, collapsePriority: 19 },
+  { label: '↷', icon: FMT_ICONS.redo, title: 'Redo (⌘⇧Z / Ctrl+Shift+Z)', action: () => ctx.requestRedo(), id: 'fmt-redo', hostDelegated: true, collapsePriority: 18 },
+  { label: 'B', title: 'Bold (⌘B / Ctrl+B)', action: () => document.execCommand('bold'), id: 'fmt-bold', separatorBefore: true, collapsePriority: 12 },
+  { label: 'I', title: 'Italic (⌘I / Ctrl+I)', action: () => document.execCommand('italic'), id: 'fmt-italic', collapsePriority: 11 },
   {
     label: 'S',
-    title: 'Strikethrough (⌘⇧X)',
+    title: 'Strikethrough (⌘⇧X / Ctrl+Shift+X)',
     action: () => document.execCommand('strikeThrough'),
     id: 'fmt-strike',
     collapsePriority: 10,
   },
   {
     label: '</>',
-    title: 'Inline code (⌘E)',
+    title: 'Inline code (⌘E / Ctrl+E)',
     action: toggleInlineCode,
     id: 'fmt-inline-code',
     collapsePriority: 9,
@@ -678,6 +709,17 @@ const toolbarItems: ToolbarItem[] = [
     dropdown: MERMAID_DROPDOWN,
     dropdownTitle: 'Choose diagram type',
     id: 'fmt-mermaid',
+    separatorBefore: true,
+    collapsePriority: 1,
+  },
+  {
+    label: 'P',
+    icon: FMT_ICONS.plantuml,
+    title: 'PlantUML diagram (default: activity)',
+    action: insertPlantumlDefault,
+    dropdown: PLANTUML_DROPDOWN,
+    dropdownTitle: 'Choose diagram type',
+    id: 'fmt-plantuml',
     separatorBefore: true,
     collapsePriority: 1,
   },
@@ -1254,11 +1296,16 @@ function createMoreOptionsButton(): HTMLButtonElement {
   const popover = buildPopover('toolbar-more-options-menu');
   addPopoverRow(popover, FILE_MENTION_ICON, 'Copy "@file" reference', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }));
+    // viewOnly: neither action changes the document — skip invokeAction's
+    // post-action syncNow, or a doc whose DOM re-serializes with any byte
+    // drift (e.g. a UNC-link `\\` collapsed by CommonMark's backslash-escape
+    // parsing) posts a spurious 'edit' and dirties the file (see
+    // reading-mode-viewonly.spec.ts for the same class of bug).
+    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }), false, true);
   });
   addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }));
+    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }), false, true);
   });
 
   btn.addEventListener('click', () => {
@@ -2275,6 +2322,7 @@ export type TriggerDefineBlockId =
   | 'table'
   | 'code-block'
   | 'mermaid'
+  | 'plantuml'
   | 'math-block'
   | 'hr'
   | 'toc';
@@ -2341,6 +2389,9 @@ function runTriggerBlockAction(id: TriggerDefineBlockId): void {
       return;
     case 'mermaid':
       insertMermaidFlowchart();
+      return;
+    case 'plantuml':
+      insertPlantumlDefault();
       return;
     case 'math-block':
       ctx.insertMarkdown(`$$${MATH_FORMULA}$$`);
