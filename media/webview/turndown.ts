@@ -12,11 +12,13 @@ import {
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
   MERMAID_CLASS,
-  MERMAID_SOURCE_CLASS,
+  PLANTUML_CLASS,
   AUTOLINK_PATH_ATTR,
   EMPTY_LINK_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
+import { hasUrlScheme } from '../../src/shared/link-scheme';
+import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import {
   HEADING_STYLE_ATTR,
@@ -409,15 +411,101 @@ export function createTurndown(): TurndownService {
     replacement: (_content, node) => `[](${(node as HTMLElement).getAttribute(EMPTY_LINK_ATTR) ?? ''})`,
   });
 
+  // --- href/src containing a literal backslash (Windows UNC "\\server\share\x.md"
+  // or drive path "C:\dir\x.md", hand-typed in the .md) — X-7 round-trip fix.
+  // turndown's default escapeLinkDestination leaves `\` untouched; CommonMark
+  // then collapses every `\\` pair back to 1 char on re-parse, so the href
+  // "decays" a little more on every open (X-7 root cause B, independent of the
+  // %5C bug from normalizeLink above). escapeLinkDestinationBackslash re-escapes
+  // each maximal run of k backslashes to the minimal reproducing form (2k-1 raw
+  // chars) so re-parsing recovers exactly k backslashes; a run touching the very
+  // end of the string is padded by one extra `\` (even 2k) so its trailing
+  // single backslash can't combine with the `)`/`>` that follows and accidentally
+  // escape it. Applies to both <a href> and plain <img src> (markdown-it's
+  // normalizeLink, disabled above, covers both tags the same way) — other rules
+  // with their own attr-based filter (autolinkPath/emptyLink/htmlImgWithAttrs)
+  // are excluded explicitly so they don't collide.
+  function escapeLinkDestinationBackslash(destination: string): string {
+    let escaped = destination.replace(/\\+/g, (run) => '\\\\'.repeat(run.length - 1) + '\\');
+    const trailingRun = /\\+$/.exec(escaped);
+    if (trailingRun && trailingRun[0].length % 2 === 1) {
+      escaped += '\\';
+    }
+    const bracketEscaped = escaped.replace(/([<>()])/g, '\\$1');
+    return bracketEscaped.includes(' ') ? `<${bracketEscaped}>` : bracketEscaped;
+  }
+  td.addRule('linkHrefBackslashEscape', {
+    filter: (node) => {
+      if (node.nodeName !== 'A') {
+        return false;
+      }
+      const el = node as HTMLElement;
+      if (el.hasAttribute(AUTOLINK_PATH_ATTR) || el.hasAttribute(EMPTY_LINK_ATTR)) {
+        return false;
+      }
+      return (el.getAttribute('href') ?? '').includes('\\');
+    },
+    replacement: (content, node) => {
+      const el = node as HTMLElement;
+      const href = escapeLinkDestinationBackslash(el.getAttribute('href') ?? '');
+      const rawTitle = el.getAttribute('title') ?? '';
+      const titlePart = rawTitle ? ` "${rawTitle.replace(/"/g, '\\"')}"` : '';
+      return `[${content}](${href}${titlePart})`;
+    },
+  });
+  td.addRule('imgSrcBackslashEscape', {
+    filter: (node) => {
+      if (node.nodeName !== 'IMG') {
+        return false;
+      }
+      const el = node as HTMLElement;
+      if (!(el.getAttribute('src') ?? '').includes('\\')) {
+        return false;
+      }
+      const attrs = el.attributes;
+      for (let i = 0; i < attrs.length; i++) {
+        if (!['src', 'alt', 'title'].includes(attrs[i].name)) {
+          return false; // extra attrs (e.g. width) → htmlImgWithAttrs handles it instead
+        }
+      }
+      return true;
+    },
+    replacement: (_content, node) => {
+      const el = node as HTMLElement;
+      const alt = td.escape(el.getAttribute('alt') ?? '');
+      const src = escapeLinkDestinationBackslash(el.getAttribute('src') ?? '');
+      const rawTitle = el.getAttribute('title') ?? '';
+      const titlePart = rawTitle ? ` "${rawTitle.replace(/"/g, '\\"')}"` : '';
+      return src ? `![${alt}](${src}${titlePart})` : '';
+    },
+  });
+
   // --- linkify/autolink: <a> có text trùng href → giữ dạng URL trần ---
   td.addRule('bareUrl', {
     filter: (node) => {
       if (node.nodeName !== 'A') {
         return false;
       }
+      // An empty-text link `[](url)` carries display text that postProcessEmptyLinks
+      // INJECTED (the decoded file name) — it must serialize via the `emptyLink`
+      // rule, never as a bare URL. Before X-19's decodeURIComponent fix this was
+      // masked (decodeURI left `%26` etc. encoded, so the injected text rarely
+      // equalled the href); now it can match, so exclude stamped empty links.
+      if ((node as HTMLElement).hasAttribute?.(EMPTY_LINK_ATTR) ?? false) {
+        return false;
+      }
       const href = (node as HTMLElement).getAttribute('href') ?? '';
       const text = node.textContent ?? '';
       if (!href) {
+        return false;
+      }
+      // linkify (fuzzyLink:false) only ever auto-links scheme-based text (http(s)://,
+      // mailto:...) — never a bare relative/local-filesystem path. So an <a> whose
+      // href is NOT a real URL scheme (relative path, or a Windows drive path like
+      // `C:\…` — hasUrlScheme excludes those, see X-7) can only be an intentional
+      // link (typed `[x](x)` or an `@`-mention insert to a same-folder file) and
+      // must always keep its `[]()` syntax.
+      if (!hasUrlScheme(href)) {
         return false;
       }
       return href === text || href === `mailto:${text}` || decodeSafe(href) === text;
@@ -449,12 +537,13 @@ export function createTurndown(): TurndownService {
   //     trong .md-mermaid-source (giữ nguyên logic fence với fencedCodeWithLang) ---
   td.addRule('mermaidDiagram', {
     filter: (node) => (node as HTMLElement).classList?.contains(MERMAID_CLASS) ?? false,
-    replacement: (_content, node) => {
-      const code = (node as HTMLElement).querySelector(`.${MERMAID_SOURCE_CLASS} code`);
-      const text = (code?.textContent ?? '').replace(/\n$/, '');
-      const fence = pickFence(text);
-      return `\n\n${fence}mermaid\n${text}\n${fence}\n\n`;
-    },
+    replacement: (_content, node) => diagramFence(node as HTMLElement, MERMAID_FRAME),
+  });
+
+  // US-2.8: PlantUML frame → back to its ```plantuml fence, same contract.
+  td.addRule('plantumlDiagram', {
+    filter: (node) => (node as HTMLElement).classList?.contains(PLANTUML_CLASS) ?? false,
+    replacement: (_content, node) => diagramFence(node as HTMLElement, PLANTUML_FRAME),
   });
 
   // --- front matter ---
@@ -613,7 +702,43 @@ function safeOuterHtml(el: HTMLElement): string {
       child.removeAttribute(attr);
     }
   }
+  stripTablePresentation(copy);
   return collapseBlankLines(copy.outerHTML);
+}
+
+/**
+ * US-19.25: gỡ mọi tàn dư TRÌNH BÀY bề rộng cột (do fitTableColumns/fit-mode ghi
+ * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `md-table-fit`
+ * class + `width` trên <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML.
+ * Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp (vd lồng
+ * list trong ô) sẽ đi đường raw-HTML và rò các style/class này vào `.md`. Chỉ gỡ
+ * các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
+ */
+function stripTablePresentation(copy: HTMLElement): void {
+  const tables = copy.tagName === 'TABLE' ? [copy] : [];
+  for (const t of Array.from(copy.querySelectorAll('table'))) {
+    tables.push(t as HTMLElement);
+  }
+  for (const t of tables) {
+    t.classList.remove('md-table-fit');
+    if (t.getAttribute('class') === '') {
+      t.removeAttribute('class');
+    }
+    t.style.removeProperty('width');
+    if (t.getAttribute('style') === '') {
+      t.removeAttribute('style');
+    }
+  }
+  for (const cell of Array.from(copy.querySelectorAll('th, td'))) {
+    const c = cell as HTMLElement;
+    c.style.removeProperty('min-width');
+    c.style.removeProperty('width');
+    c.style.removeProperty('max-width');
+    c.style.removeProperty('box-sizing');
+    if (c.getAttribute('style') === '') {
+      c.removeAttribute('style');
+    }
+  }
 }
 
 /**
@@ -708,9 +833,17 @@ function blockLike(el: HTMLElement): boolean {
   );
 }
 
+// X-19: inverse of encodeLinkPath (dom-utils.ts), which encodes each `/`-segment
+// with encodeURIComponent. decodeURI (the old impl) leaves `; / ? : @ & = + $ , #`
+// encoded by spec, so `Tài liệu R&D.md` stays `…R%26D.md` and never equals the
+// bare-link text → serialized as `[](…)` instead of bare. Decode segment-wise
+// with decodeURIComponent to match the encode; try/catch keeps a lone `%` safe.
 function decodeSafe(s: string): string {
   try {
-    return decodeURI(s);
+    return s
+      .split('/')
+      .map((seg) => decodeURIComponent(seg))
+      .join('/');
   } catch {
     return s;
   }
@@ -724,6 +857,18 @@ function outerHtmlFallback(el: HTMLElement, content: string): string {
     return content;
   }
   return blockLike(el) ? `\n\n${safeOuterHtml(el)}\n\n` : safeOuterHtml(el);
+}
+
+/**
+ * Serialize one diagram frame (Mermaid / PlantUML) back to its fenced block.
+ * Reads the source `<pre>` only — the toolbar and the rendered SVG in the chart
+ * container are presentation, never part of the `.md`.
+ */
+function diagramFence(node: HTMLElement, spec: DiagramFrameSpec): string {
+  const code = node.querySelector(`.${spec.sourceClass} code`);
+  const text = (code?.textContent ?? '').replace(/\n$/, '');
+  const fence = pickFence(text);
+  return `\n\n${fence}${spec.language}\n${text}\n${fence}\n\n`;
 }
 
 // Pick a code fence long enough that `text` cannot close it early.

@@ -39,7 +39,7 @@ ${filler('A2')}
 ${filler('B')}
 `;
 
-// No H1 at all: default level-2 shows the H2s, but filtering to H1 hides
+// No H1 at all: the default level-3 shows the H2s/H3, but filtering to H1 hides
 // everything → the "no match" empty state.
 const DOC_NO_H1 = `## Only H2 A
 

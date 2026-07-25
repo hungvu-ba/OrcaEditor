@@ -448,6 +448,24 @@ table {
   overflow-x: auto;
 }
 
+/* A wide-but-short table (fully in the viewport) relies on THIS native
+ * scrollbar for discoverability — the floating proxy (US-19.24) only kicks in
+ * once the table's own bottom edge is off-screen. Chromium's default overlay
+ * scrollbar is invisible until hover/scroll, so without this override a short
+ * overflowing table gives no visual cue at all. Force the classic always-drawn
+ * look unconditionally (not just under reading-mode, editor.css:106), mirroring
+ * #sticky-table-scrollbar's thumb styling below. */
+table::-webkit-scrollbar {
+  height: 14px;
+}
+table::-webkit-scrollbar-thumb {
+  background: var(--rp-scrollbar-thumb);
+  border-radius: 7px;
+}
+table::-webkit-scrollbar-thumb:hover {
+  background: var(--rp-scrollbar-thumb-hover);
+}
+
 th {
   text-align: left;
   border-bottom: 1px solid;
@@ -458,16 +476,16 @@ td {
   padding: 5px 10px;
   /* US-19.3: sàn 14ch chặn cột co tới mức wrap thành "2 ký tự × 25 dòng" khi
    * panel hẹp — chạm ngưỡng này thì bảng scroll ngang trong "đảo riêng" thay vì
-   * bóp cột wrap từng từ (bug report 2026-07-15 mục 3; 8ch cũ vẫn quá nhỏ). Trần
-   * ~40ch để cột quá rộng thì wrap thay vì ăn hết không gian ngang; overflow-wrap
-   * normal để từ dài hơn sàn tự nới (min-content), KHÔNG cắt giữa từ.
+   * bóp cột wrap từng từ (bug report 2026-07-15 mục 3; 8ch cũ vẫn quá nhỏ).
+   * Không có trần: cột rộng bao nhiêu theo nội dung cũng được, bảng tự scroll
+   * ngang (table { max-width: 100%; overflow-x: auto } ở trên) thay vì ép wrap.
+   * overflow-wrap/word-break normal để không cắt giữa từ.
    * Sàn 14ch này chỉ là TRẦN cho cột có nội dung thật sự dài — fitTableColumns()
    * (table.ts) đo bề rộng tự nhiên từng cột sau mỗi lần render/sửa bảng rồi ghi
    * đè min-width (inline, min(14ch, tự nhiên)) để cột nội dung ngắn (vd "#") co
    * vừa nội dung thay vì bị ép rộng bằng cột dài nhất (bug report 2026-07-15
    * mục ảnh bảng nghiệp vụ). */
   min-width: 14ch;
-  max-width: 40ch;
   overflow-wrap: normal;
   word-break: normal;
 }
@@ -481,6 +499,50 @@ td {
   white-space: nowrap;
   min-width: 0;
   max-width: none;
+}
+
+/* US-19.25: dùng bởi fitTableColumns() khi đo MIN-CONTENT (từ dài nhất) từng
+ * cột — ép width:1px + cho wrap để cột co về sàn vật lý (không cắt giữa từ). */
+.md-table-col-min-measuring th,
+.md-table-col-min-measuring td {
+  white-space: normal;
+  width: 1px;
+  min-width: 0;
+  max-width: none;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+/* Khi đo min-content, KHÔNG cho ảnh/SVG co theo width:1px (max-width:100% mặc
+ * định của #content img sẽ bóp ảnh về ~0) — cột ảnh phải có sàn = bề rộng ảnh,
+ * không thì nhánh ② co cột ảnh xuống thành sợi chỉ, ảnh biến mất (US-19.25). */
+.md-table-col-min-measuring img,
+.md-table-col-min-measuring svg,
+.md-table-col-min-measuring video {
+  max-width: none;
+  width: auto;
+}
+
+/* US-19.25: bảng ở Fit-mode — layout cố định theo width cột đã tính
+ * (fitTableColumns ghi width/max-width inline mỗi ô + width bảng), cho phép wrap
+ * để cột hẹp không tràn. Chỉ gắn cho bảng ĐƠN GIẢN (serialize ra pipe) nên inline
+ * width + class này không rò vào .md. */
+#content table.md-table-fit {
+  /* display:table (đè base `table{display:block}` của scroll-island) để
+   * table-layout:fixed CÓ hiệu lực — trên display:block thì fixed bị bỏ qua, cột
+   * chạy auto-layout, width tính được chỉ còn là gợi ý. Ở fit-mode bảng đã vừa
+   * khung nên không cần scroll-container (display:block) nữa. */
+  display: table;
+  table-layout: fixed;
+}
+#content table.md-table-fit th,
+#content table.md-table-fit td {
+  min-width: 0;
+  white-space: normal;
+  /* US-19.25: KHÔNG cắt giữa từ. Sàn cột (fitTableColumns) đã đảm bảo bề rộng ≥
+   * từ rộng nhất nên không cần cắt khẩn cấp; nếu lệch sub-pixel thì từ tràn vô
+   * hình thay vì gãy kiểu "Cod|e". Ngắt dòng chỉ xảy ra ở khoảng trắng. */
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 table > tbody > tr + tr > td {
@@ -589,6 +651,46 @@ td[align='right'] {
    * padding(20px)+viền vào mỗi cột, dồn lệch dần sang phải. border-box để width
    * set vào khớp đúng phép đo, cột dính thẳng cột thân bảng. */
   box-sizing: border-box;
+}
+
+/* US-19.24: thanh cuộn ngang NỔI cho bảng rộng (table-sticky-header.ts). Ghim đáy
+ * viewport, khớp mép trái + bề rộng khung bảng đang xem. Là "scroll-proxy": khung
+ * overflow-x:auto + 1 spacer con rộng đúng scrollWidth của bảng → sinh scrollbar
+ * native (kéo được) mà khỏi tự vẽ thumb. pointer-events:auto (KHÁC header dính
+ * pointer-events:none) vì phải kéo được. Ngoài #content → roundtrip-safe. */
+#sticky-table-scrollbar {
+  position: fixed;
+  bottom: 0;
+  z-index: 90;
+  display: none;
+  height: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  pointer-events: auto;
+  background: var(--rp-bg, var(--vscode-editor-background, var(--vscode-sideBar-background)));
+  box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.12);
+}
+#sticky-table-scrollbar.visible {
+  display: block;
+}
+/* Spacer chỉ để bơm chiều rộng nội dung = scrollWidth của bảng (đặt inline từ JS);
+ * cao 1px, không hiện gì, chỉ để khung ngoài có thứ để cuộn ngang. */
+#sticky-table-scrollbar > div {
+  height: 1px;
+}
+/* Thumb theo TOKEN palette `--rp-scrollbar-thumb` (đã định nghĩa ở :root với
+ * fallback VS Code slider, và override mỗi reading palette — xem editor.css cho
+ * scrollbar chung). Không hardcode `--vscode-scrollbarSlider-*` vì rule ID này
+ * đè lên rule reading-mode chung → sẽ lệch tông thumb khi bật palette. */
+#sticky-table-scrollbar::-webkit-scrollbar {
+  height: 14px;
+}
+#sticky-table-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--rp-scrollbar-thumb);
+  border-radius: 7px;
+}
+#sticky-table-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--rp-scrollbar-thumb-hover);
 }
 
 /* US-17.7: breathing room between a block's own text and its edge, so the
@@ -1010,7 +1112,7 @@ body.reading-mode #content > :is(h1, h2, h3, h4, h5, h6) {
  * với prose. max-width:100% = px của #content (không dùng `ch` của block → không
  * dính font mono/serif). Bảng nhỏ vẫn co theo nội dung (width:max-content ở rule
  * `table`), chỉ chạm 100% mới scroll trong "đảo riêng" (US-19.3). */
-body.reading-mode #content > :is(table, pre, .md-math-block, .md-mermaid) {
+body.reading-mode #content > :is(table, pre, .md-math-block, .md-mermaid, .md-plantuml) {
   max-width: 100%;
   margin-left: 0;
   margin-right: 0;

@@ -22,16 +22,40 @@ import {
   classifyLink,
   computeMinimalEdit,
   imageNamePrefix,
+  driveMismatchHint,
+  isPathTooLongError,
+  normalizeAssetName,
+  normalizeCustomFolderPath,
+  normalizeEol,
   normalizeForSearch,
+  orphanAssetNames,
+  referencedAssetBasenames,
   relativePath,
+  sameDocumentUri,
   sanitizeDroppedFileName,
 } from './text-utils';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
+import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 
-/** Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi coi là no-op. */
-const UNDO_SETTLE_MS = 200;
+/**
+ * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
+ * coi là no-op. X-17: đây là TRẦN CỨNG chỉ bị chạm khi (a) undo-stack rỗng thật
+ * hoặc (b) I/O bị bóp (Defender + OneDrive quét) khiến edit lớn về chậm. 200ms
+ * quá sát cho case (b) → undo im lặng không làm gì; nâng lên 500ms để có headroom
+ * mà case (a) rỗng vẫn không giật thấy rõ (không phân biệt được (a) với (b) nên
+ * mọi giá trị đều bị cả hai case trả — 500ms là điểm cân bằng).
+ */
+const UNDO_SETTLE_MS = 500;
+
+/**
+ * Whether the host filesystem is case-insensitive (Windows, macOS/APFS). Used
+ * to case-fold asset-name comparison in orphan cleanup so `Report.png` and
+ * `report.png` are treated as the same file (X-1). Linux (ext4) is
+ * case-sensitive, so no fold there.
+ */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
 
 /**
  * Promise resolve khi `document` đổi lần kế tiếp, hoặc sau `timeoutMs` nếu không
@@ -80,6 +104,19 @@ function isMarkdownUri(uri: vscode.Uri): boolean {
 }
 
 /**
+ * One cached workspace file for the file-link search (P7). `baseNorm`/`dirNorm`
+ * are per-FILE data (independent of the typed query) — precomputed once when the
+ * URI list cache refreshes so `searchWorkspaceFiles` does not re-normalize every
+ * URI on each keystroke.
+ */
+interface WorkspaceFileEntry {
+  uri: vscode.Uri;
+  name: string;
+  baseNorm: string;
+  dirNorm: string;
+}
+
+/**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
  *
@@ -119,26 +156,37 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       vscode.commands.registerCommand('orcaEditor.openToc', () =>
         provider.postToActivePanel({ type: 'runCommand', command: 'openToc' })
       ),
+      vscode.commands.registerCommand('orcaEditor.toggleTableFitMode', () =>
+        provider.postToActivePanel({ type: 'runCommand', command: 'toggleTableFitMode' })
+      ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
     // declarations) live. Provider-level (not per-panel) so it covers every
     // markdown doc, open or not:
-    //  - onDidChangeTextDocument: open/unsaved buffers, re-parse on each edit.
+    //  - onDidChangeTextDocument: open/unsaved buffers, debounced reindex (P1:
+    //    routed through scheduleReindex so a keystroke burst parses once).
     //  - FileSystemWatcher: on-disk changes to files with no open editor
     //    (change/create -> re-read + re-parse; delete -> drop that file's rows).
     // The initial full scan is kicked off fire-and-forget so it never blocks
     // activation (isReady() stays false until it finishes — the "indexing" state).
     const docChangeSub = vscode.workspace.onDidChangeTextDocument((e) => {
       if (isMarkdownUri(e.document.uri)) {
-        provider.entityIndex.onFileChanged(e.document.uri.toString(), e.document.getText());
+        // P1: reuse the watcher's per-URI 300 ms debounce instead of a full
+        // O(doc) parse on every keystroke; reindexFile reads the open buffer
+        // at fire time so unsaved edits are still captured.
+        provider.scheduleReindex(e.document.uri);
       }
     });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
-    const reindex = (uri: vscode.Uri): void => void provider.reindexFile(uri);
+    // X-16: coalesce OneDrive/cloud sync bursts (many events for one file) and
+    // ignore synced build/deps dirs — reindexFile is cheap but a `node_modules`
+    // full of .md or a sync storm would otherwise reindex-storm. Delete stays
+    // immediate (drop the file's rows now; cancel any pending reindex for it).
+    const reindex = (uri: vscode.Uri): void => provider.scheduleReindex(uri);
     const watcherSubs = [
       watcher.onDidChange(reindex),
       watcher.onDidCreate(reindex),
-      watcher.onDidDelete((uri) => provider.entityIndex.onFileChanged(uri.toString(), '')),
+      watcher.onDidDelete((uri) => provider.forgetIndexedFile(uri)),
       watcher,
     ];
     // Req 21 US-21.3: session-only occurrence cache — every markdown file the
@@ -211,12 +259,75 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return new TextDecoder().decode(bytes);
   }
 
+  /**
+   * X-16: watcher debounce window per URI, and the build/deps dir names to skip
+   * (mirrors FILE_SEARCH_EXCLUDE's dir list — same folders the initial index
+   * build already excludes via findFiles).
+   */
+  private static readonly WATCHER_DEBOUNCE_MS = 300;
+  private static readonly WATCHER_EXCLUDE_DIRS = new Set([
+    'node_modules',
+    '.git',
+    'dist',
+    'out',
+    'build',
+    '.next',
+    'coverage',
+  ]);
+  private readonly reindexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** X-16: debounced, dir-scoped entry point for watcher change/create events. */
+  private scheduleReindex(uri: vscode.Uri): void {
+    if (uri.path.split('/').some((seg) => MarkdownWysiwygProvider.WATCHER_EXCLUDE_DIRS.has(seg))) {
+      return;
+    }
+    const key = uri.toString();
+    const existing = this.reindexTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.reindexTimers.set(
+      key,
+      setTimeout(() => {
+        this.reindexTimers.delete(key);
+        void this.reindexFile(uri);
+      }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
+    );
+  }
+
+  /** X-16: watcher delete — cancel any pending reindex, then drop the file's rows now. */
+  private forgetIndexedFile(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const existing = this.reindexTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      this.reindexTimers.delete(key);
+    }
+    this.entityIndex.onFileChanged(key, '');
+    this.notifyEntityIndexUpdated();
+  }
+
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
   private async reindexFile(uri: vscode.Uri): Promise<void> {
     try {
       this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+      this.notifyEntityIndexUpdated();
     } catch (err) {
       MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
+    }
+  }
+
+  /**
+   * P1 follow-up: tell every open panel (all URIs — a declaration in file A
+   * affects refs shown in file B) that the index changed, so broken-ref markers
+   * re-check instead of staying stale until the next mutation. Panel bursts are
+   * absorbed by the webview's own recompute debounce.
+   */
+  private notifyEntityIndexUpdated(): void {
+    for (const panels of this.panelsByUri.values()) {
+      for (const panel of panels) {
+        void panel.webview.postMessage({ type: 'entityIndexUpdated' } satisfies HostToWebview);
+      }
     }
   }
 
@@ -317,6 +428,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private globalReadingMode: { enabled: boolean; mode: ReadingMode } | undefined;
 
   /**
+   * US-19.25: table Fit-mode là trạng thái GLOBAL in-session giống hệt `globalZen`
+   * — bật/tắt ở 1 tab lan sang mọi tab .md, seed tab mới trong phiên. `undefined`
+   * = chưa tab nào đổi → seed theo setting `orcaEditor.table.fitMode`. KHÔNG persist
+   * Settings (mở lại VS Code về default).
+   */
+  private globalTableFitMode: boolean | undefined;
+
+  /**
    * C6a: vị trí "chờ áp dụng" cho 1 uri — set trước khi gọi vscode.openWith
    * (panel .md CHƯA tồn tại), đọc + xoá đúng 1 lần khi resolveCustomTextEditor
    * gửi message 'init' cho document đó. Dùng một lần: nếu không xoá ngay, mở
@@ -358,6 +477,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     exclude: vscode.WebviewPanel
   ): void {
     this.broadcastToOtherPanels(exclude, { type: 'readingModeChanged', ...state });
+  }
+
+  /** US-19.25: cùng cơ chế broadcastZen, cho Fit-mode bảng. */
+  private broadcastTableFitMode(on: boolean, exclude: vscode.WebviewPanel): void {
+    this.broadcastToOtherPanels(exclude, { type: 'tableFitModeChanged', on });
   }
 
   /** Post `message` to every open .md panel (all uris) except `exclude`. */
@@ -429,7 +553,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const initialReadability = this.resolveReadability(
       vscode.workspace.getConfiguration('orcaEditor', document.uri)
     );
-    webview.html = this.getHtml(webview, documentDir, initialReadability);
+    // US-2.8: nonce sinh ở đây thay vì trong getHtml, vì webview cũng cần nó —
+    // plantuml.ts tự chèn <script> nạp engine PlantUML lúc chạy (lazy-load), và
+    // script đó phải mang đúng nonce của trang mới qua được CSP. Gửi kèm trong
+    // 'init' (xem case 'ready').
+    const scriptNonce = getNonce();
+    const plantumlEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'plantuml-engine.js')
+      )
+      .toString();
+    webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
@@ -586,7 +720,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+              // X-12: same value drives host dedup + webview ref-nav so both fold identically.
+              caseInsensitiveFs: CASE_INSENSITIVE_FS,
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
+              // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
+              // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
+              tableFitMode: this.globalTableFitMode ?? wysiwygCfg.get<boolean>('table.fitMode', true),
+              // US-2.8: webview không tự gọi asWebviewUri/sinh nonce được, nên
+              // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
+              plantumlEngineUri,
+              scriptNonce,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
@@ -613,7 +756,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // ở trạng thái giữa (xem prevEditBeforeText).
             const isInverseOfPrev =
               prevEditBeforeText !== undefined && text === prevEditBeforeText && text !== beforeThis;
-            lastTextFromWebview = text;
+            // X-2 (caret half): the webview's serialize() is always LF, but
+            // applyMinimalEdit reconciles it to the document's EOL before writing.
+            // Store the echo key at the SAME EOL, else on a CRLF document
+            // getText() (CRLF) never equals this (LF) → echo-check below fails →
+            // a full 'update' re-render on every keystroke → lost caret.
+            lastTextFromWebview = normalizeEol(text, document.eol === vscode.EndOfLine.CRLF);
             let ok: boolean;
             if (isInverseOfPrev) {
               // Bug #3: chặn echo trong lúc HAI applyEdit của nhánh nghịch đảo bắn
@@ -647,7 +795,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // pendingText: commit lần gõ mới nhất (đang chờ debounce ở webview)
           // thành 1 undo-unit TRƯỚC khi undo — atomic trong handler này.
           if (msg.pendingText !== undefined) {
-            lastTextFromWebview = msg.pendingText;
+            // Same EOL reconciliation as case 'edit' — pendingText is LF too.
+            lastTextFromWebview = normalizeEol(msg.pendingText, document.eol === vscode.EndOfLine.CRLF);
             await this.applyMinimalEdit(document, msg.pendingText);
           }
           const before = document.getText();
@@ -734,6 +883,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           this.broadcastZen(msg.zen, webviewPanel);
           break;
         }
+        case 'tableFitModeChanged': {
+          // US-19.25: Fit-mode bảng global in-session (cùng mô hình zenChanged) —
+          // nhớ trong bộ nhớ process rồi phát cho mọi panel .md khác đang mở.
+          this.globalTableFitMode = msg.on;
+          this.broadcastTableFitMode(msg.on, webviewPanel);
+          break;
+        }
         case 'readingModeChanged': {
           // Bug 0716 #2: enabled/mode giờ global (đảo ngược per-tab cũ, cùng mô
           // hình zenChanged ở trên) — nhớ trong bộ nhớ process rồi phát cho mọi
@@ -816,7 +972,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // Let the trigger-text delete edit commit first, then read the text.
             await editChain;
             const text = document.getText();
-            const plan = planReferences(text);
+            const plan = planReferences(text, CASE_INSENSITIVE_FS);
             if (plan.candidates.length === 0) {
               void vscode.window.showInformationMessage('No new references to add.');
               break;
@@ -902,7 +1058,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /** Áp dụng newText bằng một edit nhỏ nhất (common prefix/suffix diff). */
   private async applyMinimalEdit(document: vscode.TextDocument, newText: string): Promise<boolean> {
-    const diff = computeMinimalEdit(document.getText(), newText);
+    const reconciled = normalizeEol(newText, document.eol === vscode.EndOfLine.CRLF);
+    const diff = computeMinimalEdit(document.getText(), reconciled);
     if (!diff) {
       return true;
     }
@@ -931,7 +1088,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * chính xác của edit liền trước (xem prevEditBeforeText).
    */
   private async applyEditBreakingCoalesce(document: vscode.TextDocument, newText: string): Promise<boolean> {
-    const diff = computeMinimalEdit(document.getText(), newText);
+    const reconciled = normalizeEol(newText, document.eol === vscode.EndOfLine.CRLF);
+    const diff = computeMinimalEdit(document.getText(), reconciled);
     if (!diff) {
       return true;
     }
@@ -1171,20 +1329,32 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
   private static readonly FILE_SEARCH_CACHE_TTL_MS = 4000;
-  private fileListCache: { uris: readonly vscode.Uri[]; expires: number } | undefined;
+  private fileListCache: { entries: readonly WorkspaceFileEntry[]; expires: number } | undefined;
 
-  private async getWorkspaceFileList(): Promise<readonly vscode.Uri[]> {
+  private async getWorkspaceFileEntries(): Promise<readonly WorkspaceFileEntry[]> {
     const now = Date.now();
     if (this.fileListCache && this.fileListCache.expires > now) {
-      return this.fileListCache.uris;
+      return this.fileListCache.entries;
     }
     const uris = await vscode.workspace.findFiles(
       '**/*',
       MarkdownWysiwygProvider.FILE_SEARCH_EXCLUDE,
       MarkdownWysiwygProvider.FILE_SEARCH_MAX_SCAN
     );
-    this.fileListCache = { uris, expires: now + MarkdownWysiwygProvider.FILE_SEARCH_CACHE_TTL_MS };
-    return uris;
+    // Normalization là dữ liệu theo-FILE, không theo-query → tính 1 lần khi cache
+    // refresh thay vì lặp lại cho mỗi phím gõ (P7).
+    const entries: WorkspaceFileEntry[] = uris.map((uri) => {
+      const segments = uri.path.split('/');
+      const name = segments[segments.length - 1];
+      return {
+        uri,
+        name,
+        baseNorm: normalizeForSearch(name.replace(/\.[^.]*$/, '')),
+        dirNorm: normalizeForSearch(segments.slice(0, -1).join(' ')),
+      };
+    });
+    this.fileListCache = { entries, expires: now + MarkdownWysiwygProvider.FILE_SEARCH_CACHE_TTL_MS };
+    return entries;
   }
 
   /**
@@ -1206,18 +1376,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return [];
     }
     const phrase = tokens.join('-');
-    const uris = await this.getWorkspaceFileList();
+    const entries = await this.getWorkspaceFileEntries();
 
     const documentDir = vscode.Uri.joinPath(document.uri, '..').path;
     const scored: Array<{ score: number; nameLength: number; uri: vscode.Uri; name: string }> = [];
-    for (const uri of uris) {
-      if (uri.toString() === document.uri.toString()) {
-        continue; // không gợi ý link tới chính file đang mở
+    for (const { uri, name, baseNorm, dirNorm } of entries) {
+      if (sameDocumentUri(uri.toString(), document.uri.toString(), CASE_INSENSITIVE_FS)) {
+        continue; // không gợi ý link tới chính file đang mở (case-fold trên FS không phân biệt hoa thường — X-8)
       }
-      const segments = uri.path.split('/');
-      const name = segments[segments.length - 1];
-      const baseNorm = normalizeForSearch(name.replace(/\.[^.]*$/, ''));
-      const dirNorm = normalizeForSearch(segments.slice(0, -1).join(' '));
       const inBase = tokens.filter((t) => baseNorm.includes(t)).length;
       const inDir = tokens.filter((t) => dirNorm.includes(t)).length;
       if (inBase === 0 && inDir < tokens.length) {
@@ -1237,7 +1403,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return scored.slice(0, MarkdownWysiwygProvider.FILE_SEARCH_MAX_RESULTS).map((item) => {
       const rel = vscode.workspace.asRelativePath(item.uri, false);
       return {
-        path: relativePath(documentDir, item.uri.path),
+        path: relativePath(documentDir, item.uri.path, CASE_INSENSITIVE_FS),
         name: item.name,
         dir: rel.slice(0, Math.max(0, rel.length - item.name.length - 1)) || '.',
       };
@@ -1285,6 +1451,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES
     );
 
+    // Cache text theo request (P8): whole-word miss ⇒ fallback gọi `scan` lần 2
+    // trên CÙNG danh sách file. Không có cache thì cả corpus bị đọc + decode lại
+    // từ đĩa lần nữa trong cùng round-trip. `null` = lần đọc trước lỗi (không thử
+    // lại trong request này). Cache chỉ sống trong 1 lần crossFileSearch — nội
+    // dung file có thể đổi giữa các request nên KHÔNG persist qua request.
+    const textCache = new Map<string, string | null>();
+
     // Một lượt quét theo `opts` — giữ NGUYÊN mọi cap/exclusion/đọc buffer/loại
     // trừ file hiện tại; chỉ thay primitive so khớp (indexOf phẳng → lõi chung
     // findTextMatches, để logic ranh giới từ Unicode-aware khớp hệt webview).
@@ -1298,28 +1471,38 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       let truncated = uris.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_FILES;
 
       for (const uri of uris) {
-        if (uri.toString() === document.uri.toString()) {
-          continue; // loại trừ hoàn toàn file đang mở, không tính vào cap
+        if (sameDocumentUri(uri.toString(), document.uri.toString(), CASE_INSENSITIVE_FS)) {
+          continue; // loại trừ hoàn toàn file đang mở, không tính vào cap (case-fold — X-8)
         }
         if (groups.length >= MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_GROUPS) {
           truncated = true;
           break;
         }
 
+        const uriKey = uri.toString();
         let text: string;
-        try {
-          const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
-          if (openDoc) {
-            text = openDoc.getText();
-          } else {
-            const bytes = await vscode.workspace.fs.readFile(uri);
-            text = new TextDecoder().decode(bytes);
+        const cachedText = textCache.get(uriKey);
+        if (cachedText === null) {
+          continue; // lần đọc trước đã lỗi — không thử lại trong cùng request (P8)
+        } else if (cachedText !== undefined) {
+          text = cachedText; // đã đọc/decode ở lượt scan trước → tái dùng (P8)
+        } else {
+          try {
+            const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uriKey);
+            if (openDoc) {
+              text = openDoc.getText();
+            } else {
+              const bytes = await vscode.workspace.fs.readFile(uri);
+              text = new TextDecoder().decode(bytes);
+            }
+          } catch (err) {
+            // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
+            // làm hỏng cả lượt tìm — bỏ qua file đó, log lại rồi tiếp tục.
+            MarkdownWysiwygProvider.log(`crossFileSearch: could not read ${uriKey}`, err);
+            textCache.set(uriKey, null);
+            continue;
           }
-        } catch (err) {
-          // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
-          // làm hỏng cả lượt tìm — bỏ qua file đó, log lại rồi tiếp tục.
-          MarkdownWysiwygProvider.log(`crossFileSearch: could not read ${uri.toString()}`, err);
-          continue;
+          textCache.set(uriKey, text);
         }
 
         const lines = text.split(/\r\n|\r|\n/);
@@ -1426,12 +1609,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
     const location = cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder');
-    const customFolderPath = cfg.get<string>('customFolderPath', '').trim();
+    const customFolderPath = normalizeCustomFolderPath(cfg.get<string>('customFolderPath', ''));
 
     if (location === 'customFolder' && customFolderPath) {
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
       const base = workspaceFolder?.uri ?? documentDir;
-      return path.isAbsolute(customFolderPath)
+      // Detect an absolute path cross-OS (X-8): a Windows drive path (`c:/…`) is
+      // NOT absolute per `path.isAbsolute` on macOS/Linux, so a Settings-Sync'd
+      // Windows setting would otherwise be joined and create a bogus `c:/…` dir.
+      const isAbsolute = isWindowsDrivePath(customFolderPath) || customFolderPath.startsWith('/');
+      return isAbsolute
         ? vscode.Uri.file(customFolderPath)
         : vscode.Uri.joinPath(base, customFolderPath);
     }
@@ -1450,13 +1637,33 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * A specific hint to append to the "outside the allowed workspace" error when
+   * a custom asset folder was refused because it is on a different drive than
+   * the workspace (X-8) — a relative link across drives is impossible, so the
+   * generic message is confusing. '' when the setting isn't an absolute
+   * customFolderPath or the drives match (caller keeps the plain message).
+   */
+  private customFolderRejectionHint(document: vscode.TextDocument): string {
+    const cfg = vscode.workspace.getConfiguration('orcaEditor.assetsPaste', document.uri);
+    if (cfg.get<'siblingAssetsFolder' | 'customFolder'>('location', 'siblingAssetsFolder') !== 'customFolder') {
+      return '';
+    }
+    const custom = normalizeCustomFolderPath(cfg.get<string>('customFolderPath', ''));
+    const workspaceUri = vscode.workspace.getWorkspaceFolder(document.uri)?.uri
+      ?? vscode.Uri.joinPath(document.uri, '..');
+    return driveMismatchHint(custom, workspaceUri.path);
+  }
+
+  /**
    * Prefix tên file ảnh suy ra từ basename document — gắn "quyền sở hữu" ảnh
    * vào 1 file .md mà không cần lưu index riêng (xem imageNamePrefix). Rỗng
    * khi basename không chuẩn hoá được (vd toàn CJK) — cleanupOrphanImages bỏ
    * qua document đó (không đủ cơ sở xác định ảnh nào thuộc về nó).
    */
   private imagePrefixFor(document: vscode.TextDocument): string {
-    return imageNamePrefix(path.basename(document.fileName, path.extname(document.fileName)));
+    // X-21: fold to the FS's case-sensitivity so `Report.md`/`report.md` don't
+    // share a prefix on Linux (each would treat the other's images as orphans).
+    return imageNamePrefix(path.basename(document.fileName, path.extname(document.fileName)), CASE_INSENSITIVE_FS);
   }
 
   /**
@@ -1474,6 +1681,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     mime: string,
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
+    // X-20: an untitled/virtual doc has no base dir to resolve `assets/` against;
+    // the lexical guard passes on `untitled:/assets` and writeFile throws a
+    // generic NoProvider → "Failed to save pasted image." Guard up front with a
+    // specific message (mirrors the addReference scheme guard).
+    if (document.uri.scheme !== 'file' || document.isUntitled) {
+      return { error: 'Save the file first to paste images into it.' };
+    }
     const ext = MarkdownWysiwygProvider.PASTE_IMAGE_EXTENSIONS[mime];
     if (!ext) {
       return { error: `Unsupported clipboard image type: ${mime}` };
@@ -1482,7 +1696,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const targetDir = await this.resolveAllowedAssetsDir(document);
     if (!targetDir) {
-      return { error: 'Configured paste-image folder is outside the allowed workspace.' };
+      return { error: `Configured paste-image folder is outside the allowed workspace.${this.customFolderRejectionHint(document)}` };
     }
 
     const prefix = this.imagePrefixFor(document);
@@ -1497,7 +1711,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return { error: 'Failed to save pasted image.' };
     }
 
-    return { relativePath: relativePath(documentDir.path, targetUri.path) };
+    return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
   }
 
   /**
@@ -1516,10 +1730,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     name: string,
     dataBase64: string
   ): Promise<{ relativePath?: string; error?: string }> {
+    // X-20: same untitled/virtual-doc guard as savePastedImage — no base dir to
+    // resolve `assets/` against, so fail with a specific message instead of a
+    // generic writeFile NoProvider throw.
+    if (document.uri.scheme !== 'file' || document.isUntitled) {
+      return { error: 'Save the file first to drop files into it.' };
+    }
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
     const targetDir = await this.resolveAllowedAssetsDir(document);
     if (!targetDir) {
-      return { error: 'Configured assets folder is outside the allowed workspace.' };
+      return { error: `Configured assets folder is outside the allowed workspace.${this.customFolderRejectionHint(document)}` };
     }
 
     try {
@@ -1527,24 +1747,48 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
       this.trackDroppedAsset(document, path.basename(targetUri.path));
-      return { relativePath: relativePath(documentDir.path, targetUri.path) };
+      return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
     } catch (err) {
       MarkdownWysiwygProvider.log(`Failed to save dropped file (${name})`, err);
+      if (isPathTooLongError(err)) {
+        return {
+          error:
+            'Failed to save dropped file: the resulting path is too long for this system. ' +
+            'Shorten the file name, or enable Windows long paths (LongPathsEnabled).',
+        };
+      }
       return { error: 'Failed to save dropped file.' };
     }
   }
 
   /** First non-colliding "name.ext" / "name (2).ext" / "name (3).ext"... under `dir`. */
+  /**
+   * X-18: names handed out by uniqueAssetUri but not yet written to disk. Two
+   * files dropped in one gesture (external-drop.ts fires each independently) both
+   * `stat` `report (2).pdf`, both miss, and one overwrites the other; OneDrive
+   * placeholder-stat latency widens the window. Reserving the chosen name
+   * synchronously before the await returns closes it — the second call skips the
+   * reserved candidate and takes `report (3).pdf`. Session-scoped; a name whose
+   * write later fails simply stays reserved (a skipped suffix, never an
+   * overwrite), which is the conservative failure mode.
+   */
+  private readonly reservedAssetUris = new Set<string>();
+
   private async uniqueAssetUri(dir: vscode.Uri, fileName: string): Promise<vscode.Uri> {
     const ext = path.extname(fileName);
     const stem = fileName.slice(0, fileName.length - ext.length);
     for (let n = 1; ; n++) {
       const candidate = n === 1 ? fileName : `${stem} (${n})${ext}`;
       const uri = vscode.Uri.joinPath(dir, candidate);
+      const key = uri.toString();
+      if (this.reservedAssetUris.has(key)) {
+        continue; // in-flight sibling drop already claimed this name
+      }
       try {
         await vscode.workspace.fs.stat(uri);
       } catch {
-        return uri; // stat threw → doesn't exist yet
+        this.reservedAssetUris.add(key); // reserve before returning → no concurrent double-win
+        return uri;
       }
     }
   }
@@ -1650,17 +1894,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
     }
 
-    // Còn xuất hiện trong nội dung vừa lưu ⇒ đang dùng, bỏ. Chỉ đọc sibling khi
-    // thật sự còn ứng viên mồ côi (tránh quét thư mục khi không cần).
-    const orphans = [...pool].filter((name) => !text.includes(name));
+    // Still referenced by a link/image/HTML target in the just-saved content ⇒
+    // in use, keep. Compare NORMALIZED names (href-decode + NFC + case-fold), not
+    // a raw substring: the .md href is percent-encoded and may differ in NFC/NFD
+    // from the on-disk name (X-1). Only read siblings when orphans actually remain.
+    const orphans = orphanAssetNames(pool, text, CASE_INSENSITIVE_FS);
     if (orphans.length === 0) {
       return;
     }
 
     const siblingTexts = await this.readSiblingMdTexts(document);
+    const siblingReferenced = new Set<string>();
+    for (const sibling of siblingTexts) {
+      for (const ref of referencedAssetBasenames(sibling, CASE_INSENSITIVE_FS)) {
+        siblingReferenced.add(ref);
+      }
+    }
     for (const name of orphans) {
       // Còn được 1 file .md khác nhắc tới ⇒ coi như đang dùng, không xoá/đổi tên.
-      if (siblingTexts.some((sibling) => sibling.includes(name))) {
+      if (siblingReferenced.has(normalizeAssetName(name, CASE_INSENSITIVE_FS))) {
         continue;
       }
       await this.deleteOrphanImage(imagesDir, name);
@@ -1715,9 +1967,20 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
-    const imagesDir = this.resolveAssetsDir(document);
+    // X-15: same allowed-roots guard as every other writer (savePastedImage /
+    // saveDroppedFile / cleanupOrphanImages) — a mis-configured customFolderPath
+    // must not let undo write a restored file outside the workspace. Skip when
+    // the dir is refused; the bytes stay cached for a later, in-bounds restore.
+    const imagesDir = await this.resolveAllowedAssetsDir(document);
+    if (!imagesDir) {
+      return;
+    }
+    // Same normalizer as cleanupOrphanImages: match the normalized name against
+    // the link/image/HTML targets so undo restores the right file even when its
+    // name has diacritics / spaces / parens (X-1).
+    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
-      if (!text.includes(fileName)) {
+      if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;
       }
       this.recentlyDeletedImages.delete(fileName);
@@ -1767,6 +2030,21 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     relPath: string
   ): Promise<vscode.Uri[]> {
     const decoded = decodeURIComponent(relPath);
+    if (isWindowsDrivePath(decoded) || isWindowsUncPath(decoded)) {
+      // X-7: an absolute drive path (`C:\…`) or UNC path (`\\server\share\…`) is
+      // NOT relative to the doc/workspace — resolve it directly as a file URI,
+      // still gated by allowed-roots, so click / inline marker / References all
+      // agree on one answer (a UNC target outside the workspace is refused, not
+      // mis-joined onto the workspace root as the relative branch would do).
+      // `path.win32.normalize` collapses `.`/`..` FIRST (and preserves the UNC
+      // `\\` prefix): unlike the relative branch below (built via `joinPath`,
+      // which normalizes at the Uri layer), `vscode.Uri.file` does NOT resolve
+      // `..`, and `isInsideAllowedRoots`' lexical guard assumes normalized input
+      // — so a raw `C:\root\..\..\outside` href would otherwise `startsWith` the
+      // root string and slip past.
+      const uri = vscode.Uri.file(path.win32.normalize(decoded));
+      return (await this.isInsideAllowedRoots(document, uri)) ? [uri] : [];
+    }
     const ordered: vscode.Uri[] = [];
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (folder) {
@@ -1873,17 +2151,27 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   ): Promise<Set<string>> {
     const missing = new Set<string>();
     for (const candidate of candidates) {
-      const uri = vscode.Uri.joinPath(document.uri, '..', decodeURIComponent(candidate.fileSegment));
-      if (!(await this.isInsideAllowedRoots(document, uri))) {
-        continue; // unknown / out of scope — do not mark.
-      }
-      try {
-        await vscode.workspace.fs.stat(uri);
-      } catch (err) {
-        if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
-          missing.add(candidate.key);
+      // X-10: resolve with the SAME candidate set as `openLink`/`checkTargetsExist`
+      // (workspace-root-relative first, then document-relative) instead of a
+      // second document-relative-only join — a root-relative link that opens
+      // fine must never get a false ⚠️. Outside allowed roots → no candidates →
+      // unknown → not marked (as before).
+      let exists = false;
+      let notFound = false;
+      for (const uri of await this.relativeTargetCandidates(document, candidate.fileSegment)) {
+        try {
+          await vscode.workspace.fs.stat(uri);
+          exists = true;
+          break;
+        } catch (err) {
+          if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
+            notFound = true;
+          }
+          // Any other error → unknown → does not by itself mark missing.
         }
-        // Any other error → unknown → no mark.
+      }
+      if (!exists && notFound) {
+        missing.add(candidate.key);
       }
     }
     return missing;
@@ -1895,28 +2183,52 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
 
-    // Chỉ phân giải symlink cho scheme file; scheme khác giữ path chuẩn hóa.
-    const canonical = async (uri: vscode.Uri): Promise<string> => {
-      const normalized = uri.path.replace(/\/+$/, '');
+    // Case khác nhau giữa các đoạn path (ổ đĩa "c:\" vs "C:\", hoặc case gốc
+    // trên đĩa do git checkout/rename) không nên khiến so sánh fail trên MỌI
+    // filesystem không phân biệt hoa thường — Windows VÀ macOS/APFS (X-8). Trước
+    // đây chỉ fold trên win32, nên một customFolderPath lệch case bị báo nhầm là
+    // "ngoài workspace" trên macOS.
+    const forCompare = (p: string): string => {
+      const withForwardSlashes = p.replace(/\\/g, '/');
+      return CASE_INSENSITIVE_FS ? withForwardSlashes.toLowerCase() : withForwardSlashes;
+    };
+
+    // Kiểm tra lexical (không đụng filesystem): candidate luôn được dựng qua
+    // vscode.Uri.joinPath (xem relativeTargetCandidates), nên các đoạn `..`
+    // đã được chuẩn hóa ở tầng Uri — đây là hàng rào chính chặn traversal ra
+    // ngoài workspace, và không bị ảnh hưởng bởi reparse point/junction
+    // (OneDrive Files On-Demand, Known Folder Move...) làm fs.realpath()
+    // trả về một path khác cấu trúc so với root dù file vẫn nằm trong cây
+    // workspace thật.
+    const lexicalPath = (uri: vscode.Uri): string => forCompare(uri.fsPath.replace(/[/\\]+$/, '') + '/');
+    const targetLexical = lexicalPath(target);
+    if (roots.some((root) => targetLexical.startsWith(lexicalPath(root)))) {
+      return true;
+    }
+
+    // Fallback: symlink thật sự có thể khiến path lexical rơi ra ngoài root
+    // dù sau khi resolve vẫn nằm trong workspace (hoặc ngược lại) — thử
+    // realpath() như một kiểm tra bổ sung, best-effort (không bắt buộc phải
+    // thành công, vì OneDrive/junction có thể khiến nó lệch hoặc lỗi).
+    const canonical = async (uri: vscode.Uri): Promise<string | null> => {
       if (uri.scheme !== 'file') {
-        return normalized;
+        return null;
       }
       try {
-        // Cố ý: chính hàm canonical() cần phân giải symlink của đường dẫn để
-        // so khớp allowlist openLink; fsPath đến từ vscode.Uri (không phải input
-        // thô của người dùng), không có chèn shell/lệnh nào ở đây.
         // eslint-disable-next-line security/detect-non-literal-fs-filename
-        return await fs.promises.realpath(uri.fsPath);
+        return forCompare((await fs.promises.realpath(uri.fsPath)) + '/');
       } catch {
-        // File chưa tồn tại — dùng path gốc đã chuẩn hóa làm fallback.
-        return uri.fsPath.replace(/[/\\]+$/, '');
+        return null;
       }
     };
 
-    const targetPath = (await canonical(target)) + '/';
+    const targetReal = await canonical(target);
+    if (targetReal === null) {
+      return false;
+    }
     for (const root of roots) {
-      const rootPath = (await canonical(root)) + '/';
-      if (targetPath.startsWith(rootPath)) {
+      const rootReal = await canonical(root);
+      if (rootReal !== null && targetReal.startsWith(rootReal)) {
         return true;
       }
     }
@@ -1926,12 +2238,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private getHtml(
     webview: vscode.Webview,
     documentDir: vscode.Uri,
-    readability: ReadabilityConfig
+    readability: ReadabilityConfig,
+    nonce: string
   ): string {
     const distUri = (...parts: string[]) =>
       webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', ...parts));
 
-    const nonce = getNonce();
     const baseHref = `${webview.asWebviewUri(documentDir)}/`;
 
     const csp = [
@@ -1945,7 +2257,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // và không chạy script được vì script-src chỉ nhận nonce.
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource} data:`,
-      `script-src 'nonce-${nonce}'`,
+      // US-2.8: 'wasm-unsafe-eval' cho phép biên dịch WebAssembly — bắt buộc để
+      // engine PlantUML client-side chạy (Viz.js 3.x = Graphviz qua Emscripten,
+      // .wasm nhúng sẵn dạng base64 data: URI nên KHÔNG cần quyền mạng nào).
+      // Nới lỏng có chủ đích, phạm vi hẹp: nó KHÔNG bật eval()/new Function()
+      // (đó là 'unsafe-eval', vẫn bị chặn) và không mở thêm cửa vào nào — muốn
+      // chạy bất kỳ script nào vẫn phải có nonce, script-src không có
+      // 'unsafe-inline'. Khoá lại bằng tripwire trong test/unit.ts.
+      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
       // chặn <base> tiêm từ nội dung markdown đổi gốc phân giải tài nguyên
       `base-uri ${webview.cspSource}`,
       // S1: chặn submit form (không có backend hợp lệ nào để gửi tới)

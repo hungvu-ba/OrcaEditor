@@ -22,6 +22,8 @@
 import { BROKEN_REF_RECOMPUTE_DEBOUNCE_MS, BROKEN_REF_TOOLTIP_HIDE_GRACE_MS } from './constants';
 import { el, positionNear, warningTriangleIcon } from './dom-utils';
 import { ENTITY_REF_CLASS } from './render';
+import { decodeEntityFragment } from '../../src/shared/entity-fragment';
+import { hasUrlScheme } from '../../src/shared/link-scheme';
 import type { VsCodeApi } from './vscode-api';
 import type { EntityExistResult, TargetExistsResult } from '../../src/shared/messages';
 
@@ -37,15 +39,34 @@ const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6';
  */
 export function slugifyHeadingText(text: string): string {
   return text
+    // X-4: NFC first so a decomposed Vietnamese letter (NFD `e`+U+0302)
+    // recomposes to its precomposed form (`ế`, a `\p{L}`) and survives the
+    // filter below — otherwise the combining mark (`\p{M}`) is stripped and the
+    // slug silently depends on the heading's authoring normalization form.
+    .normalize('NFC')
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '-')
     .replace(/[^\p{L}\p{N}-]/gu, '');
 }
 
-/** True for any href with a URL scheme (`http:`, `https:`, `mailto:`, ...) — never checked, per the Broken Reference plan. */
-function hasUrlScheme(href: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(href);
+/**
+ * The heading slug a `#fragment` link targets: percent-decode (guarded — a
+ * literal `%` throws, fall back to raw) then run the SAME `slugifyHeadingText`,
+ * so the fragment side and the heading side meet in one NFC-normalized, filtered
+ * spelling. X-4: consumers previously compared the slug against a raw
+ * `decodeURIComponent(...)` (neither slugified nor normalized), so an NFC↔NFD
+ * mismatch — or a hand-typed non-slug fragment — never matched. Shared by
+ * `headingExists` and `main.ts`'s `scrollToAnchor`.
+ */
+export function fragmentToHeadingSlug(fragment: string): string {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(fragment);
+  } catch {
+    decoded = fragment;
+  }
+  return slugifyHeadingText(decoded);
 }
 
 /**
@@ -247,9 +268,16 @@ export function initBrokenRef(deps: BrokenRefDeps): BrokenRefController {
     if (!fragment) {
       return false;
     }
-    const decoded = decodeURIComponent(fragment).toLowerCase();
+    // X-4: slugify the fragment side too (not a raw decoded compare) so both
+    // sides meet in one NFC-normalized, filtered spelling.
+    const target = fragmentToHeadingSlug(fragment);
+    if (!target) {
+      // A punctuation-only fragment (`#!!!`, `#%`) slugs to '' — don't let it
+      // false-match an empty-slug heading (e.g. `## 🎉`); it's genuinely broken.
+      return false;
+    }
     for (const heading of Array.from(content.querySelectorAll(HEADING_SELECTOR))) {
-      if (slugifyHeadingText(heading.textContent ?? '') === decoded) {
+      if (slugifyHeadingText(heading.textContent ?? '') === target) {
         return true;
       }
     }
@@ -301,15 +329,18 @@ export function initBrokenRef(deps: BrokenRefDeps): BrokenRefController {
       // full entity token — id-checked via the host, NEVER the heading/file
       // branches below (a same-doc `#UC01` would otherwise mis-flag as a heading).
       if (anchor.classList.contains(ENTITY_REF_CLASS)) {
-        if (!fragment) {
+        // X-5: the host resolves the id against decoded declarations, so key by
+        // the decoded+NFC fragment (a non-ASCII namespace arrives percent-encoded).
+        const entityId = decodeEntityFragment(fragment);
+        if (!entityId) {
           mark(anchor, false, 'entity', ''); // malformed — clear any stale marker.
           continue;
         }
-        const list = entityByFullId.get(fragment);
+        const list = entityByFullId.get(entityId);
         if (list) {
           list.push(anchor);
         } else {
-          entityByFullId.set(fragment, [anchor]);
+          entityByFullId.set(entityId, [anchor]);
         }
         continue;
       }

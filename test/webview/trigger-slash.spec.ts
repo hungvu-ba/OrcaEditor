@@ -111,6 +111,23 @@ test('selecting "Heading 1" on an empty line pre-fills selected sample text (Bug
   expect(edits.at(-1)?.text).not.toContain('/heading');
 });
 
+test('selecting "PlantUML diagram" inserts a ```plantuml block and keeps focus in the editor (US-4.30)', async ({ page }) => {
+  await openEditor(page, '');
+  await focusEmptyParagraph(page);
+  await page.keyboard.type('/plantuml');
+
+  await page.locator('.trigger-popup-item', { hasText: 'PlantUML diagram' }).first().click();
+
+  // The insert must land a real .md-plantuml atom block (structure created at
+  // DOM-postprocess time, independent of the WASM engine).
+  await expect(page.locator('#content .md-plantuml')).toHaveCount(1);
+  // Its source carries the default Activity template.
+  await expect(page.locator('#content .md-plantuml')).toContainText('@startuml');
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+  // Focus must stay in the editor (Bug: slash pick lost focus without inserting).
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe('content');
+});
+
 test('Bug #10 — `/` at the start of a heading that already has text shows the full Blocks group (same as a blank line)', async ({
   page,
 }) => {

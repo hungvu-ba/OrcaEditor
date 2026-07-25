@@ -62,6 +62,7 @@ const BLOCK_ITEMS: { id: TriggerDefineBlockId; label: string; detail?: string; a
   { id: 'table', label: 'Table' },
   { id: 'code-block', label: 'Code block', detail: '```' },
   { id: 'mermaid', label: 'Mermaid diagram' },
+  { id: 'plantuml', label: 'PlantUML diagram' },
   { id: 'math-block', label: 'Math block', detail: '$$' },
   { id: 'hr', label: 'Horizontal rule', detail: '---' },
   { id: 'toc', label: 'Table of Contents' },

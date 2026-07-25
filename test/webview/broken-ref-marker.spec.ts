@@ -97,6 +97,84 @@ test('same-document #heading links resolve locally against the TOC heading index
   expect(classes['#nonexistent-heading']).toBe(true);
 });
 
+test('X-4: a Vietnamese #heading link resolves across NFC/NFD forms — not marked broken', async ({ page }) => {
+  // Heading authored NFD (decomposed tone marks), fragment authored NFC. Before
+  // the fix the slug stripped the NFD combining marks (\p{M}) so it became
+  // `tieng-viet` and never matched the NFC fragment `tiếng-việt` → false broken.
+  const doc = `# ${'Tiếng Việt'.normalize('NFD')}\n\n[go](#${'tiếng-việt'.normalize('NFC')}) and [bad](#khong-co).\n`;
+  await openEditor(page, doc);
+  await page.waitForSelector('#content a[href]');
+  await page.waitForTimeout(500); // heading resolve is local + debounced, no host round trip
+
+  const brokenByText = await page.evaluate(() => {
+    const out: Record<string, boolean> = {};
+    for (const a of Array.from(document.querySelectorAll('#content a[href]'))) {
+      out[(a.textContent ?? '').trim()] = a.classList.contains('broken-ref');
+    }
+    return out;
+  });
+  expect(brokenByText['go']).toBeFalsy(); // resolves despite the NFC/NFD mismatch
+  expect(brokenByText['bad']).toBe(true); // a genuinely missing heading stays broken (no false positive)
+});
+
+test('X-4: clicking a Vietnamese #heading link resolves scrollToAnchor across NFC/NFD forms', async ({ page }) => {
+  // Reverse form: NFC heading, NFD link fragment. Spy on scrollIntoView (which
+  // element it targets) rather than scroll pixels — container-agnostic, and it
+  // asserts the fragment→heading MATCH directly. Before the fix the NFD fragment
+  // never matched the NFC heading slug, so scrollIntoView was never called.
+  const doc = `[jump](#${'tiếng-việt'.normalize('NFD')})\n\n# ${'Tiếng Việt'.normalize('NFC')}\n`;
+  await openEditor(page, doc);
+  await page.waitForSelector('#content a[href]');
+
+  await page.evaluate(() => {
+    (window as unknown as { __scrolledText: string | null }).__scrolledText = null;
+    const orig = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]): void {
+      (window as unknown as { __scrolledText: string | null }).__scrolledText = (this.textContent ?? '').trim();
+      return (orig as (...a: unknown[]) => void).apply(this, args);
+    };
+  });
+
+  // scrollToAnchor is reached via openLink, which fires on Cmd/Ctrl+Click.
+  await page.evaluate(() => {
+    const a = Array.from(document.querySelectorAll('#content a[href]')).find(
+      (el) => (el.textContent ?? '').trim() === 'jump'
+    ) as HTMLElement;
+    a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true }));
+  });
+  await page.waitForTimeout(200);
+
+  const scrolled = await page.evaluate(() => (window as unknown as { __scrolledText: string | null }).__scrolledText);
+  expect(scrolled?.normalize('NFC')).toContain('Tiếng Việt'.normalize('NFC'));
+});
+
+test('X-4: a hand-typed non-slug #fragment (space + capitals) resolves against the heading', async ({ page }) => {
+  // The fragment side is now slugified too, so `#Tiếng Việt` (space, capitals)
+  // resolves to the `## Tiếng Việt` heading instead of being falsely broken.
+  const doc = `# ${'Tiếng Việt'.normalize('NFC')}\n\n[go](#${encodeURIComponent('Tiếng Việt'.normalize('NFC'))}).\n`;
+  await openEditor(page, doc);
+  await page.waitForSelector('#content a[href]');
+  await page.waitForTimeout(500);
+
+  const broken = await page.evaluate(
+    () => (document.querySelector('#content a[href]') as HTMLElement).classList.contains('broken-ref')
+  );
+  expect(broken).toBeFalsy();
+});
+
+test('X-4: a punctuation-only #fragment does not false-match an empty-slug heading', async ({ page }) => {
+  // `## 🎉` slugs to '' and `#!!!` slugs to '' — the empty-target guard keeps the
+  // link broken instead of resolving it against the emoji heading.
+  await openEditor(page, '# 🎉\n\n[bad](#!!!).\n');
+  await page.waitForSelector('#content a[href]');
+  await page.waitForTimeout(500);
+
+  const broken = await page.evaluate(
+    () => (document.querySelector('#content a[href]') as HTMLElement).classList.contains('broken-ref')
+  );
+  expect(broken).toBe(true);
+});
+
 test('the reference the caret is currently inside is skipped for that recompute pass', async ({ page }) => {
   await openEditor(page, '[Old Setup Guide](./missing.md)\n');
   await page.waitForSelector('#content a[href]');

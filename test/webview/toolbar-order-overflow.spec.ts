@@ -15,7 +15,7 @@ const EXPECTED_ORDER = [
   'fmt-bullet', 'fmt-numbered', 'fmt-task', 'fmt-blockquote',
   'fmt-table', 'fmt-hr',
   'fmt-link', 'fmt-image',
-  'fmt-codeblock', 'fmt-math', 'fmt-mermaid',
+  'fmt-codeblock', 'fmt-math', 'fmt-mermaid', 'fmt-plantuml',
   'reading-toggle', 'zen-toggle', 'toc-toggle',
 ];
 
@@ -24,7 +24,7 @@ const EXPECTED_ORDER = [
 // LAST (Focus 20, Outline 21, Reading 22). Only "•••" (.toolbar-more) and the ⋮
 // kebab (.toolbar-more-options) never collapse — they have no id and are absent.
 const PRIORITY: Record<string, number> = {
-  'fmt-mermaid': 1, 'fmt-math': 2, 'fmt-codeblock': 3, 'fmt-hr': 4, 'fmt-table': 5,
+  'fmt-mermaid': 1, 'fmt-plantuml': 1, 'fmt-math': 2, 'fmt-codeblock': 3, 'fmt-hr': 4, 'fmt-table': 5,
   'fmt-blockquote': 6, 'fmt-task': 7, 'fmt-clear': 8, 'fmt-inline-code': 9,
   'fmt-strike': 10, 'fmt-italic': 11, 'fmt-bold': 12, 'fmt-numbered': 13,
   'fmt-bullet': 14, 'fmt-image': 15, 'fmt-link': 16, 'fmt-heading': 17,
@@ -39,7 +39,7 @@ test('controls appear in the wireframe order at rest', async ({ page }) => {
     const known = new Set([
       'fmt-undo', 'fmt-redo', 'fmt-bold', 'fmt-italic', 'fmt-strike', 'fmt-inline-code', 'fmt-clear',
       'fmt-heading', 'fmt-bullet', 'fmt-numbered', 'fmt-task', 'fmt-blockquote', 'fmt-table', 'fmt-hr',
-      'fmt-link', 'fmt-image', 'fmt-codeblock', 'fmt-math', 'fmt-mermaid', 'reading-toggle', 'zen-toggle', 'toc-toggle',
+      'fmt-link', 'fmt-image', 'fmt-codeblock', 'fmt-math', 'fmt-mermaid', 'fmt-plantuml', 'reading-toggle', 'zen-toggle', 'toc-toggle',
     ]);
     return [...document.querySelectorAll('#toolbar [id]')].map((el) => el.id).filter((id) => known.has(id));
   });

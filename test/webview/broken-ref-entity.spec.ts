@@ -256,6 +256,44 @@ test('a stale entitiesExistResult from a superseded scan is discarded', async ({
   expect(await anchorClasses(page, '#UC01')).toContain('broken-ref');
 });
 
+test('X-5: a non-ASCII (Vietnamese) namespace entity ref is recognized — pill when it exists', async ({ page }) => {
+  // markdown-it percent-encodes the non-ASCII fragment in the rendered href
+  // (`#Y%C3%Aau01`) while the display text stays `Yêu01`; before the fix the
+  // encoded/decoded mismatch meant md-entity-ref was never stamped and this
+  // waitForSelector timed out (the repro).
+  await openEditor(page, 'Xem [Yêu01](#Yêu01) ở đây.\n');
+  await page.waitForSelector('#content a.md-entity-ref');
+
+  const req = await waitForCheckEntitiesExist(page);
+  expect(req.ids).toHaveLength(1);
+  expect(req.ids[0]).not.toContain('%'); // decoded, not the %C3%AA form
+  expect(req.ids[0].normalize('NFC')).toBe('Yêu01'.normalize('NFC'));
+
+  await replyEntitiesExist(page, req.requestId, req.docVersion, [{ id: req.ids[0], exists: true, occurrences: 1 }]);
+  await page.waitForTimeout(150);
+
+  const classes = await page.evaluate(() => {
+    const a = document.querySelector('#content a.md-entity-ref');
+    return a ? Array.from(a.classList) : [];
+  });
+  expect(classes).toContain('md-entity-ref');
+  expect(classes).not.toContain('broken-ref');
+});
+
+test('X-5: a non-ASCII namespace entity ref marks broken as an ENTITY, not a heading', async ({ page }) => {
+  await openEditor(page, 'Xem [Yêu01](#Yêu01) ở đây.\n');
+  await page.waitForSelector('#content a.md-entity-ref');
+  const req = await waitForCheckEntitiesExist(page);
+
+  await replyEntitiesExist(page, req.requestId, req.docVersion, [{ id: req.ids[0], exists: false, occurrences: 1 }]);
+  await page.waitForSelector('#content a.broken-ref');
+
+  const kind = await page.evaluate(
+    () => (document.querySelector('#content a.broken-ref') as HTMLElement).dataset.brokenRefKind
+  );
+  expect(kind).toBe('entity'); // NOT the heading branch it fell into before the fix
+});
+
 test('toolbar broken-ref badge counts the entity broken ref', async ({ page }) => {
   await openEditor(page, 'See [UC01](#UC01) here.\n');
   const badge = page.locator('#toolbar .broken-ref-badge');

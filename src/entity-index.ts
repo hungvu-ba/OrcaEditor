@@ -7,6 +7,7 @@
  * feeds already-read text into the pure methods here.
  */
 import { entityFollowingLabel, entityFollowingPreview, normalizeForSearch } from './text-utils';
+import { decodeEntityFragment } from './shared/entity-fragment';
 
 /**
  * One indexed entity, flattened per declaration with its namespace carried on
@@ -214,7 +215,12 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       // surrounding prose/markdown (e.g. `caption::UC01`, → `` UC01`, ``;
       // `caption::UC01).` → `UC01).`). Strip that trailing non-alphanumeric run
       // so the parsed id stays a clean token; a punctuation-only token drops out.
-      const token = match[1].replace(/[^\p{L}\p{N}]+$/u, '');
+      // X-5 (deferred follow-up): NFC-normalize FIRST so an NFD-authored
+      // namespace (e.g. `Yêu01` with `ê` = e + U+0302) recomposes before
+      // NAMESPACE_RE (`/^\p{L}+/u`) — otherwise the split stops at the combining
+      // mark → namespace `Ye`, id `̂u01`. The mention/query side already NFCs
+      // (canonicalEntityId → decodeEntityFragment), so this makes both agree.
+      const token = match[1].normalize('NFC').replace(/[^\p{L}\p{N}]+$/u, '');
       if (token === '') {
         continue; // nothing left after trimming trailing punctuation.
       }
@@ -242,6 +248,18 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
 const QUERY_RESULT_CAP = 50;
 
 /**
+ * P2: internal per-row wrapper carrying search haystacks precomputed once at
+ * parse time, so `query` does zero `normalizeForSearch` calls per row (only the
+ * query string is normalized per call). Never exposed outside `EntityIndex`.
+ */
+interface IndexedRow {
+  row: IndexedEntity;
+  nsLower: string;
+  idHay: string;
+  titleHay: string;
+}
+
+/**
  * In-memory entity index keyed by file so an incremental per-file update just
  * replaces that file's rows (US-21.2). Pure — fed already-read text by
  * provider.ts. `isReady()` is false until the first full `build()` completes so
@@ -249,14 +267,33 @@ const QUERY_RESULT_CAP = 50;
  * false "nothing exists" (index freshness is NOT existence truth).
  */
 export class EntityIndex {
-  private byFile = new Map<string, IndexedEntity[]>();
+  private byFile = new Map<string, IndexedRow[]>();
   private ready = false;
+
+  /**
+   * P2: parse one file's text and wrap each row with its precomputed haystacks
+   * (shared by `build` and `onFileChanged`). `titleHay` bakes in the leading
+   * `-` so `query`'s word-start (segment-prefix) semantics stay byte-identical.
+   */
+  private parseToRows(uri: string, text: string): IndexedRow[] {
+    return parseEntities(uri, text).map((row) => ({
+      row,
+      nsLower: row.namespace.toLowerCase(),
+      // Full id is namespace + id (row.id holds only the post-namespace half),
+      // so a full-id query like `UC01` matches, as do partial-id tokens.
+      idHay: normalizeForSearch(row.namespace + row.id),
+      // Title match anchors to a word start: normalizeForSearch joins words with
+      // '-', so prefixing both sides with '-' turns includes() into a
+      // segment-prefix test (kills mid-word hits like `uc` in "strUCtured").
+      titleHay: `-${normalizeForSearch(row.title)}`,
+    }));
+  }
 
   /** Full (re)build from every workspace markdown file's text. */
   build(files: Iterable<{ uri: string; text: string }>): void {
     this.byFile.clear();
     for (const { uri, text } of files) {
-      const rows = parseEntities(uri, text);
+      const rows = this.parseToRows(uri, text);
       if (rows.length > 0) {
         this.byFile.set(uri, rows);
       }
@@ -270,7 +307,7 @@ export class EntityIndex {
    * that file's rows.
    */
   onFileChanged(uri: string, text: string): void {
-    const rows = parseEntities(uri, text);
+    const rows = this.parseToRows(uri, text);
     if (rows.length > 0) {
       this.byFile.set(uri, rows);
     } else {
@@ -294,19 +331,14 @@ export class EntityIndex {
       .filter((t) => t.length > 0);
     const out: IndexedEntity[] = [];
     for (const rows of this.byFile.values()) {
-      for (const row of rows) {
-        if (wantNs !== undefined && row.namespace.toLowerCase() !== wantNs) {
+      for (const wrapper of rows) {
+        if (wantNs !== undefined && wrapper.nsLower !== wantNs) {
           continue;
         }
-        // Full id is namespace + id (row.id holds only the post-namespace half),
-        // so a full-id query like `UC01` matches, as do partial-id tokens.
-        const idHay = normalizeForSearch(row.namespace + row.id);
-        // Title match anchors to a word start: normalizeForSearch joins words with
-        // '-', so prefixing both sides with '-' turns includes() into a
-        // segment-prefix test (kills mid-word hits like `uc` in "strUCtured").
-        const titleHay = `-${normalizeForSearch(row.title)}`;
-        if (tokens.every((t) => idHay.includes(t) || titleHay.includes(`-${t}`))) {
-          out.push(row);
+        // P2: haystacks (`idHay`, word-start-anchored `titleHay`) are
+        // precomputed once at parse time — see `parseToRows`.
+        if (tokens.every((t) => wrapper.idHay.includes(t) || wrapper.titleHay.includes(`-${t}`))) {
+          out.push(wrapper.row);
         }
       }
     }
@@ -323,20 +355,26 @@ export class EntityIndex {
    * case-insensitively (per US-21.2) and whose id matches exactly.
    */
   lookup(fullId: string): IndexedEntity[] {
-    const nsMatch = NAMESPACE_RE.exec(fullId);
+    // X-5: the mention fragment can arrive percent-encoded (`Y%C3%Aau01`) and in
+    // NFD — decode+NFC it so it meets an NFC-authored declaration in one spelling
+    // (a Vietnamese namespace no longer fails `NAMESPACE_RE` on `%`). An
+    // NFD-authored declaration is a separate concern (parseEntities mis-splits it
+    // at the combining mark) — deferred to the NFC normalizer work, see X-4.
+    const normalized = decodeEntityFragment(fullId);
+    const nsMatch = NAMESPACE_RE.exec(normalized);
     if (!nsMatch) {
       return [];
     }
     const ns = nsMatch[0].toLowerCase();
-    const id = fullId.slice(nsMatch[0].length);
+    const id = normalized.slice(nsMatch[0].length);
     if (id === '') {
       return [];
     }
     const out: IndexedEntity[] = [];
     for (const rows of this.byFile.values()) {
-      for (const row of rows) {
-        if (row.namespace.toLowerCase() === ns && row.id === id) {
-          out.push(row);
+      for (const wrapper of rows) {
+        if (wrapper.nsLower === ns && wrapper.row.id === id) {
+          out.push(wrapper.row);
         }
       }
     }
@@ -351,13 +389,13 @@ export class EntityIndex {
   namespaces(): { name: string; count: number }[] {
     const byKey = new Map<string, { name: string; count: number }>();
     for (const rows of this.byFile.values()) {
-      for (const row of rows) {
-        const key = row.namespace.toLowerCase();
+      for (const wrapper of rows) {
+        const key = wrapper.nsLower;
         const existing = byKey.get(key);
         if (existing) {
           existing.count++;
         } else {
-          byKey.set(key, { name: row.namespace, count: 1 });
+          byKey.set(key, { name: wrapper.row.namespace, count: 1 });
         }
       }
     }

@@ -334,4 +334,23 @@ runner.roundtrip('Mermaid sequence diagram template round-trip ổn định', ME
 runner.roundtrip('Mermaid class diagram template round-trip ổn định', MERMAID_CLASS_TEMPLATE);
 runner.roundtrip('Mermaid state diagram template round-trip ổn định', MERMAID_STATE_TEMPLATE);
 
+// ---------------------------------------------------------------------------
+// 10. PlantUML templates (toolbar.ts PLANTUML_*_TEMPLATE, US-4.30) — cùng cơ
+//     chế ctx.insertMarkdown(text) như Mermaid ở trên, literal markdown thật.
+//     4 hằng số copy nguyên văn từ toolbar.ts.
+// ---------------------------------------------------------------------------
+const PLANTUML_ACTIVITY_TEMPLATE =
+  '```plantuml\n@startuml\nstart\n:Do something;\nif (Decision?) then (yes)\n  :Handle A;\nelse (no)\n  :Handle B;\nendif\nstop\n@enduml\n```';
+const PLANTUML_SEQUENCE_TEMPLATE =
+  '```plantuml\n@startuml\nAlice -> Bob : Hello Bob, how are you?\nBob --> Alice : I am good, thanks!\n@enduml\n```';
+const PLANTUML_CLASS_TEMPLATE =
+  '```plantuml\n@startuml\nclass Animal {\n  +String name\n  +makeSound()\n}\nclass Dog\nAnimal <|-- Dog\n@enduml\n```';
+const PLANTUML_STATE_TEMPLATE =
+  '```plantuml\n@startuml\n[*] --> Idle\nIdle --> Running : start\nRunning --> Idle : stop\nRunning --> [*]\n@enduml\n```';
+
+runner.roundtrip('PlantUML activity template round-trip ổn định', PLANTUML_ACTIVITY_TEMPLATE);
+runner.roundtrip('PlantUML sequence diagram template round-trip ổn định', PLANTUML_SEQUENCE_TEMPLATE);
+runner.roundtrip('PlantUML class diagram template round-trip ổn định', PLANTUML_CLASS_TEMPLATE);
+runner.roundtrip('PlantUML state diagram template round-trip ổn định', PLANTUML_STATE_TEMPLATE);
+
 runner.finish('toolbar-insert');
