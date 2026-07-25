@@ -612,11 +612,15 @@ export function initTriggerPopup(deps: TriggerPopupDeps): TriggerPopupController
     const forToken = openToken;
     const result = dataSource.query(q);
     if (result instanceof Promise) {
-      result.then((groups) => {
-        if (!isResponseValid(rid, forToken)) return;
-        renderGroups(groups);
-        scheduleReposition();
-      });
+      result
+        .then((groups) => {
+          if (!isResponseValid(rid, forToken)) return;
+          renderGroups(groups);
+          scheduleReposition();
+        })
+        .catch(() => {
+          /* Stale/failed query — the staleness guard on the next query supersedes this one. */
+        });
     } else {
       if (!isResponseValid(rid, forToken)) return;
       renderGroups(result);

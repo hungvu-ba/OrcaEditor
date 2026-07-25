@@ -174,6 +174,7 @@ test('"+ Create new namespace" pinned row creates a brand-new namespace', async 
     (req) => window.postMessage({ type: 'namespaceListResult', requestId: req.requestId, ready: true, namespaces: [] }, '*'),
     nsReq
   );
+  await waitForItemCount(page, 1);
 
   await page.keyboard.type('ZZ');
   const createRow = page.locator('.trigger-popup-item-label', { hasText: 'Create new namespace' });
