@@ -411,6 +411,75 @@ export function createTurndown(): TurndownService {
     replacement: (_content, node) => `[](${(node as HTMLElement).getAttribute(EMPTY_LINK_ATTR) ?? ''})`,
   });
 
+  // --- href/src containing a literal backslash (Windows UNC "\\server\share\x.md"
+  // or drive path "C:\dir\x.md", hand-typed in the .md) — X-7 round-trip fix.
+  // turndown's default escapeLinkDestination leaves `\` untouched; CommonMark
+  // then collapses every `\\` pair back to 1 char on re-parse, so the href
+  // "decays" a little more on every open (X-7 root cause B, independent of the
+  // %5C bug from normalizeLink above). escapeLinkDestinationBackslash re-escapes
+  // each maximal run of k backslashes to the minimal reproducing form (2k-1 raw
+  // chars) so re-parsing recovers exactly k backslashes; a run touching the very
+  // end of the string is padded by one extra `\` (even 2k) so its trailing
+  // single backslash can't combine with the `)`/`>` that follows and accidentally
+  // escape it. Applies to both <a href> and plain <img src> (markdown-it's
+  // normalizeLink, disabled above, covers both tags the same way) — other rules
+  // with their own attr-based filter (autolinkPath/emptyLink/htmlImgWithAttrs)
+  // are excluded explicitly so they don't collide.
+  function escapeLinkDestinationBackslash(destination: string): string {
+    let escaped = destination.replace(/\\+/g, (run) => '\\\\'.repeat(run.length - 1) + '\\');
+    const trailingRun = /\\+$/.exec(escaped);
+    if (trailingRun && trailingRun[0].length % 2 === 1) {
+      escaped += '\\';
+    }
+    const bracketEscaped = escaped.replace(/([<>()])/g, '\\$1');
+    return bracketEscaped.includes(' ') ? `<${bracketEscaped}>` : bracketEscaped;
+  }
+  td.addRule('linkHrefBackslashEscape', {
+    filter: (node) => {
+      if (node.nodeName !== 'A') {
+        return false;
+      }
+      const el = node as HTMLElement;
+      if (el.hasAttribute(AUTOLINK_PATH_ATTR) || el.hasAttribute(EMPTY_LINK_ATTR)) {
+        return false;
+      }
+      return (el.getAttribute('href') ?? '').includes('\\');
+    },
+    replacement: (content, node) => {
+      const el = node as HTMLElement;
+      const href = escapeLinkDestinationBackslash(el.getAttribute('href') ?? '');
+      const rawTitle = el.getAttribute('title') ?? '';
+      const titlePart = rawTitle ? ` "${rawTitle.replace(/"/g, '\\"')}"` : '';
+      return `[${content}](${href}${titlePart})`;
+    },
+  });
+  td.addRule('imgSrcBackslashEscape', {
+    filter: (node) => {
+      if (node.nodeName !== 'IMG') {
+        return false;
+      }
+      const el = node as HTMLElement;
+      if (!(el.getAttribute('src') ?? '').includes('\\')) {
+        return false;
+      }
+      const attrs = el.attributes;
+      for (let i = 0; i < attrs.length; i++) {
+        if (!['src', 'alt', 'title'].includes(attrs[i].name)) {
+          return false; // extra attrs (e.g. width) → htmlImgWithAttrs handles it instead
+        }
+      }
+      return true;
+    },
+    replacement: (_content, node) => {
+      const el = node as HTMLElement;
+      const alt = td.escape(el.getAttribute('alt') ?? '');
+      const src = escapeLinkDestinationBackslash(el.getAttribute('src') ?? '');
+      const rawTitle = el.getAttribute('title') ?? '';
+      const titlePart = rawTitle ? ` "${rawTitle.replace(/"/g, '\\"')}"` : '';
+      return src ? `![${alt}](${src}${titlePart})` : '';
+    },
+  });
+
   // --- linkify/autolink: <a> có text trùng href → giữ dạng URL trần ---
   td.addRule('bareUrl', {
     filter: (node) => {

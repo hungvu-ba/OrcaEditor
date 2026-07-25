@@ -256,6 +256,7 @@
     "test:roundtrip:entity-ref": "node esbuild.js --test && node dist/test/roundtrip/entity-ref.js",
     "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
     "test:roundtrip:paste-text": "node esbuild.js --test && node dist/test/roundtrip/paste-text.js",
+    "test:roundtrip:links": "node esbuild.js --test && node dist/test/roundtrip/links.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",

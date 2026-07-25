@@ -533,10 +533,16 @@ eq('scheme: %5C-encoded drive path KHÔNG phải scheme (X-7)', hasUrlScheme('C:
 eq('scheme: đường dẫn tương đối KHÔNG phải scheme', hasUrlScheme('./a.md'), false);
 eq('scheme: anchor thuần KHÔNG phải scheme', hasUrlScheme('#heading'), false);
 
-// X-7 (deferred follow-up): UNC network path `\\server\share\…` is a local
-// absolute target, not a URL scheme and not workspace-relative.
-eq('unc: \\\\server\\share match', isWindowsUncPath('\\\\server\\share\\x.md'), true);
-eq('unc: single backslash không phải UNC', isWindowsUncPath('\\server\\x.md'), false);
+// X-7 (root cause B): UNC network path `\\server\share\…` is a local absolute
+// target, not a URL scheme and not workspace-relative. Both 1 AND 2 leading
+// backslashes must match — CommonMark's backslash-escape rule collapses a
+// hand-typed `\\server\...` (2 raw chars) down to 1 backslash in the parsed
+// href, so requiring exactly 2 here would never classify a naturally-authored
+// UNC link as UNC (see render.ts's normalizeLink override + turndown.ts's
+// linkHrefBackslashEscape rule, which together keep the doubled form stable
+// across round-trips when the DOM genuinely holds 2 backslashes).
+eq('unc: \\\\server\\share (2 backslash, doubled-in-DOM case) match', isWindowsUncPath('\\\\server\\share\\x.md'), true);
+eq('unc: \\server\\x.md (1 backslash, hand-typed-then-CommonMark-collapsed case) match', isWindowsUncPath('\\server\\x.md'), true);
 eq('unc: forward-slash //server KHÔNG phải UNC (protocol-relative URL)', isWindowsUncPath('//server/share/x.md'), false);
 eq('unc: drive path không phải UNC', isWindowsUncPath('C:\\x.md'), false);
 eq('unc: đường dẫn tương đối không phải UNC', isWindowsUncPath('./a.md'), false);

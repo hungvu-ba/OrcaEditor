@@ -165,6 +165,13 @@ export class MarkdownRenderer {
     // chỉ URL có scheme hoặc www. — tránh round-trip biến text thành link.
     this.md.linkify.set({ fuzzyLink: false });
 
+    // Same as VS Code (markdownEngine.ts): disable markdown-it's default
+    // normalizeLink — it percent-encodes characters "invalid in a URL" (including
+    // `\`, e.g. a UNC href "\\server\share" gets encoded to "%5Cserver%5Cshare"),
+    // which makes turndown re-serialize different bytes than the source → the
+    // file gets marked dirty even though nothing was edited (X-7 UNC round-trip).
+    this.md.normalizeLink = (link) => link;
+
     addAlignAttrToTables(this.md);
     fixRenderInlineAsText(this.md);
 

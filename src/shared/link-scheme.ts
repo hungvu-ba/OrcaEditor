@@ -12,10 +12,11 @@
  * filesystem target, NOT a URL scheme. The separator right after the colon is
  * what distinguishes it from a real scheme like `c:` (which is never followed
  * by a separator as its first char in practice). The separator is matched in
- * RAW (`\` `/`) AND percent-encoded (`%5C` `%2F`) form, because markdown-it's
- * normalizeLink encodes a backslash href — an authored `[x](C:\d\x.md)` renders
- * `href="C:%5Cd%5Cx.md"`, and that is the string the click / inline-marker paths
- * classify (X-7 follow-up: the raw-only regex misfired it into scheme `c:`).
+ * RAW (`\` `/`) AND percent-encoded (`%5C` `%2F`) form — kept defensive for any
+ * href reaching this function already percent-encoded from elsewhere, even
+ * though `render.ts` no longer produces that form itself (markdown-it's
+ * normalizeLink, which used to encode backslash into `%5C`, is disabled — X-7
+ * UNC round-trip fix; classification here works directly off the raw form).
  */
 export function isWindowsDrivePath(href: string): boolean {
   return /^[a-zA-Z]:([\\/]|%5c|%2f)/i.test(href);
@@ -23,13 +24,18 @@ export function isWindowsDrivePath(href: string): boolean {
 
 /**
  * A Windows UNC network path (`\\server\share\x.md`) — an absolute LOCAL/network
- * filesystem target, NOT a URL scheme and NOT workspace-relative. Two leading
- * backslashes followed by a server name (X-7 deferred follow-up). The single
- * forward-slash form `//server/share` is intentionally excluded: in an href it
- * reads as a protocol-relative URL, not a filesystem path.
+ * filesystem target, NOT a URL scheme and NOT workspace-relative. Matches 1 OR 2
+ * leading backslashes followed by a non-backslash char: CommonMark's own
+ * backslash-escape rule collapses a hand-typed `\\server\...` (2 backslashes) down
+ * to a SINGLE backslash by the time it reaches a parsed href (`\\` is an escaped
+ * literal `\`) — requiring exactly 2 here meant a naturally-authored UNC link was
+ * NEVER classified as UNC, silently falling into the relative/workspace-joined
+ * branch instead (X-7 follow-up, root cause B). The single forward-slash form
+ * `//server/share` is intentionally excluded: in an href it reads as a
+ * protocol-relative URL, not a filesystem path.
  */
 export function isWindowsUncPath(href: string): boolean {
-  return /^\\\\[^\\]/.test(href);
+  return /^\\{1,2}[^\\]/.test(href);
 }
 
 /**
