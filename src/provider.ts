@@ -1525,7 +1525,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           const remaining =
             MarkdownWysiwygProvider.CROSS_FILE_SEARCH_MAX_MATCHES_PER_FILE_SCAN - fileMatches.length;
           if (remaining <= 0) {
-            hitFileScanCap = true;
             break;
           }
           const offsets = findTextMatches(trimmedLine, query, opts, remaining);
