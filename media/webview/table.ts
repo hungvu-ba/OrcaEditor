@@ -148,7 +148,20 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
     true
   );
 
-  document.addEventListener('selectionchange', updateTableToolbar);
+  // rAF-coalesce selectionchange → updateTableToolbar: it reads getBoundingClientRect +
+  // offsetHeight and fires per keystroke while typing in a cell. Same frame-guard shape as the
+  // sibling handlers in toolbar.ts / select-highlight.ts; the show/hide/position logic is
+  // frequency-insensitive so deferring one frame changes nothing observable.
+  let toolbarSelRaf = 0;
+  document.addEventListener('selectionchange', () => {
+    if (toolbarSelRaf !== 0) {
+      return;
+    }
+    toolbarSelRaf = requestAnimationFrame(() => {
+      toolbarSelRaf = 0;
+      updateTableToolbar();
+    });
+  });
 
   // Click thẳng vào ô bảng luôn hiện toolbar (kể cả khi caret không đổi vị trí,
   // selectionchange có thể không bắn).
@@ -1468,18 +1481,31 @@ function initTableDragDrop(): void {
   // only on mousemove over #content — a scroll with the mouse stationary
   // otherwise leaves them stuck at the old position while the row/column
   // underneath moves (mirrors the block-level drag handle in drag-drop.ts).
+  // rAF-coalesce the reposition: positionRowHandle/positionColHandle each read rects, and scroll
+  // fires uncoalesced — same frame-guard shape as the hover path above.
+  let scrollHandleRaf = 0;
   window.addEventListener(
     'scroll',
     () => {
       if (tdState !== 'idle') {
         return;
       }
-      if (hoveredRow) {
-        positionRowHandle(hoveredRow);
+      if (scrollHandleRaf !== 0) {
+        return;
       }
-      if (hoveredCol) {
-        positionColHandle(hoveredCol);
-      }
+      scrollHandleRaf = requestAnimationFrame(() => {
+        scrollHandleRaf = 0;
+        // Re-check inside the frame: a drag can arm, or hover can clear, between event and frame.
+        if (tdState !== 'idle') {
+          return;
+        }
+        if (hoveredRow) {
+          positionRowHandle(hoveredRow);
+        }
+        if (hoveredCol) {
+          positionColHandle(hoveredCol);
+        }
+      });
     },
     { passive: true, capture: true }
   );
