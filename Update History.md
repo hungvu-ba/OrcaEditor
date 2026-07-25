@@ -448,3 +448,4 @@
 | 0.9.0 | 2026-07-25 | Fix: a wide-but-short table's own horizontal scrollbar is now always visible (Chromium's overlay scrollbar previously stayed invisible until hovered/scrolled) (US-19.24). |
 | 0.9.0 | 2026-07-25 | Fix: an `@`-mention link to a same-folder file no longer loses its `[]()` syntax on save — `bareUrl` now only collapses true absolute-URL/mailto autolinks. |
 | 0.9.0 | 2026-07-25 | Fix: Windows UNC/drive-path links (`\\server\...`, `C:\...`) no longer mark the file dirty on open (backslash was percent-encoded then decayed on re-save) and are now correctly detected as absolute, not workspace-relative. |
+| 0.9.0 | 2026-07-25 | Fix: "Copy `@file` reference" / "View raw Markdown source" no longer dirty the file on a doc with a pre-existing render/reserialize drift — both are now `viewOnly`, matching Reading Mode/Focus/TOC. |

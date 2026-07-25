@@ -2,12 +2,15 @@ import { test, expect } from '@playwright/test';
 import { openEditor, clearPosted } from './_harness';
 
 /**
- * Bug: picking a Reading Mode / Focus / TOC from the toolbar routed through
- * invokeAction(), which unconditionally called syncNow(). For a document whose
- * freshly-loaded DOM re-serializes with any byte drift (e.g. "* " bullets ->
- * "*   "), that sync posted a spurious 'edit' and marked the file dirty even
- * though only the VIEW changed. Fixed via ToolbarItem/Entry `viewOnly`, which
- * makes invokeAction skip the post-action syncNow.
+ * Bug: picking a Reading Mode / Focus / TOC (or, later, "Copy @file
+ * reference" / "View raw Markdown source" from the "More options" popover)
+ * from the toolbar routed through invokeAction(), which unconditionally
+ * called syncNow(). For a document whose freshly-loaded DOM re-serializes
+ * with any byte drift (e.g. "* " bullets -> "*   ", or a UNC-link `\\`
+ * collapsed by CommonMark's backslash-escape parsing), that sync posted a
+ * spurious 'edit' and marked the file dirty even though only the VIEW
+ * changed (or nothing at all, for the copy/view-source rows). Fixed via
+ * invokeAction's `viewOnly` param, which skips the post-action syncNow.
  *
  * `* one\n* two` is a known drift under this turndown ("* " -> "*   " + a
  * trailing space), so any spurious sync surfaces as an 'edit' here.
@@ -62,6 +65,32 @@ test('the TOC toggle does not post an edit (view-only)', async ({ page }) => {
   await page.waitForTimeout(500);
 
   expect(await postedEdits(page), 'TOC toggle must not dirty the file').toHaveLength(0);
+});
+
+test('Copy "@file" reference does not post an edit (view-only)', async ({ page }) => {
+  await openEditor(page, DRIFT_DOC);
+  await clearPosted(page);
+
+  await page.locator('.toolbar-more-options').click();
+  await page
+    .locator('.toolbar-popover.toolbar-more-options-menu .toolbar-popover-item', { hasText: 'Copy "@file" reference' })
+    .click();
+  await page.waitForTimeout(500);
+
+  expect(await postedEdits(page), 'Copy @file reference must not dirty the file').toHaveLength(0);
+});
+
+test('View raw Markdown source does not post an edit (view-only)', async ({ page }) => {
+  await openEditor(page, DRIFT_DOC);
+  await clearPosted(page);
+
+  await page.locator('.toolbar-more-options').click();
+  await page
+    .locator('.toolbar-popover.toolbar-more-options-menu .toolbar-popover-item', { hasText: 'View raw Markdown source' })
+    .click();
+  await page.waitForTimeout(500);
+
+  expect(await postedEdits(page), 'View raw Markdown source must not dirty the file').toHaveLength(0);
 });
 
 test('a real edit still syncs (fix does not gag genuine edits)', async ({ page }) => {

@@ -1296,11 +1296,16 @@ function createMoreOptionsButton(): HTMLButtonElement {
   const popover = buildPopover('toolbar-more-options-menu');
   addPopoverRow(popover, FILE_MENTION_ICON, 'Copy "@file" reference', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }));
+    // viewOnly: neither action changes the document — skip invokeAction's
+    // post-action syncNow, or a doc whose DOM re-serializes with any byte
+    // drift (e.g. a UNC-link `\\` collapsed by CommonMark's backslash-escape
+    // parsing) posts a spurious 'edit' and dirties the file (see
+    // reading-mode-viewonly.spec.ts for the same class of bug).
+    invokeAction(() => ctx.vscode.postMessage({ type: 'copyFileMention' }), false, true);
   });
   addPopoverRow(popover, RAW_SOURCE_ICON, 'View raw Markdown source', undefined, () => {
     closePopover();
-    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }));
+    invokeAction(() => ctx.vscode.postMessage({ type: 'viewSource' }), false, true);
   });
 
   btn.addEventListener('click', () => {
