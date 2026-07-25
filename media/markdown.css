@@ -448,6 +448,24 @@ table {
   overflow-x: auto;
 }
 
+/* A wide-but-short table (fully in the viewport) relies on THIS native
+ * scrollbar for discoverability — the floating proxy (US-19.24) only kicks in
+ * once the table's own bottom edge is off-screen. Chromium's default overlay
+ * scrollbar is invisible until hover/scroll, so without this override a short
+ * overflowing table gives no visual cue at all. Force the classic always-drawn
+ * look unconditionally (not just under reading-mode, editor.css:106), mirroring
+ * #sticky-table-scrollbar's thumb styling below. */
+table::-webkit-scrollbar {
+  height: 14px;
+}
+table::-webkit-scrollbar-thumb {
+  background: var(--rp-scrollbar-thumb);
+  border-radius: 7px;
+}
+table::-webkit-scrollbar-thumb:hover {
+  background: var(--rp-scrollbar-thumb-hover);
+}
+
 th {
   text-align: left;
   border-bottom: 1px solid;
@@ -520,7 +538,10 @@ td {
 #content table.md-table-fit td {
   min-width: 0;
   white-space: normal;
-  overflow-wrap: break-word;
+  /* US-19.25: KHÔNG cắt giữa từ. Sàn cột (fitTableColumns) đã đảm bảo bề rộng ≥
+   * từ rộng nhất nên không cần cắt khẩn cấp; nếu lệch sub-pixel thì từ tràn vô
+   * hình thay vì gãy kiểu "Cod|e". Ngắt dòng chỉ xảy ra ở khoảng trắng. */
+  overflow-wrap: normal;
   word-break: normal;
 }
 

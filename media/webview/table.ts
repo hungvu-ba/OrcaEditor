@@ -259,7 +259,7 @@ const FIT_CLASS = 'md-table-fit';
 // US-19.25 — hằng số thuật toán fit-mode (chốt PO 2026-07-24).
 const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
 const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
-const FIT_COMFORT_FLOOR_CH = 30; // không cắt cột lệch xuống dưới ngần này
+const FIT_COMFORT_FLOOR_CH = 30; // sàn dễ đọc: (a) không cắt cột lệch xuống dưới ngần này; (b) co cột cũng không xuống dưới ngần này (dưới nữa thì scroll)
 
 /** US-19.25: cờ Fit-mode global (đặt bởi main.ts từ InitConfig/broadcast). */
 let fitModeEnabled = false;
@@ -305,6 +305,33 @@ function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number)
 }
 
 /**
+ * US-19.25: bề rộng "từ" rộng nhất trong ô — từ = cụm KHÔNG khoảng trắng, GIỮ
+ * nguyên dấu '-' bên trong (vd "2026-07-20", "C-01" đều là 1 từ). Đo bằng Range
+ * trên từng text node trong ngữ cảnh nowrap (MEASURE_CLASS) nên hưởng đúng font
+ * của ô (đậm ở th...). Dùng làm SÀN cột để không cột nào hẹp hơn 1 từ → không cắt
+ * giữa từ và không ngắt ngày tháng ở '-'. CSS `width:1px` (Pass 2) ngắt cả ở '-'
+ * nên cho sàn quá thấp; hàm này bù lại. Trả 0 khi ô không có chữ (vd ô ảnh).
+ */
+function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
+  let widest = 0;
+  const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node.nodeValue ?? '';
+    const re = /\S+/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      range.setStart(node, m.index);
+      range.setEnd(node, m.index + m[0].length);
+      const w = range.getBoundingClientRect().width;
+      if (w > widest) {
+        widest = w;
+      }
+    }
+  }
+  return widest;
+}
+
+/**
  * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
  * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
  * `false` để caller rơi về hành vi mặc định (scroll) — khi hết đường co
@@ -343,10 +370,17 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   table.classList.add(MEASURE_CLASS);
   const range = document.createRange();
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
+  // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
+  // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
+  const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
       range.selectNodeContents(row.cells[i]);
       colWidths[i].push(range.getBoundingClientRect().width + padBorderX);
+      const wf = widestWordWidth(row.cells[i], range) + padBorderX;
+      if (wf > wordFloorByCol[i]) {
+        wordFloorByCol[i] = wf;
+      }
     }
   }
   table.classList.remove(MEASURE_CLASS);
@@ -361,6 +395,13 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   }
   table.classList.remove(MIN_MEASURE_CLASS);
 
+  // Nâng sàn mỗi cột lên ÍT NHẤT bằng từ rộng nhất → cột không bao giờ hẹp hơn 1
+  // từ: không cắt giữa từ (vd "Code") và không ngắt ngày tháng ở '-' (vd
+  // "2026-07-20"). Pass 2 vẫn giữ sàn cho ô ảnh/nội dung không-chữ (wordFloor=0).
+  for (let i = 0; i < colCount; i++) {
+    minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
+  }
+
   // comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max].
   const comf: number[] = new Array(colCount);
   for (let i = 0; i < colCount; i++) {
@@ -370,25 +411,77 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
   }
 
+  // Sàn dễ đọc mỗi cột khi CO: 30ch, nhưng KHÔNG dưới min-content (từ rộng nhất →
+  // chữ không vỡ) và KHÔNG trên comf (cột vốn hẹp hơn 30ch giữ nguyên comf, không
+  // thổi rộng ra). Co chỉ tới sàn này; qua đó thì scroll (xem nhánh ③).
+  const shrinkFloor = comf.map((c, i) => Math.min(c, Math.max(minByCol[i], comfortFloorPx)));
+
   const desired = comf.reduce((a, b) => a + b, 0);
+  const sumFloor = shrinkFloor.reduce((a, b) => a + b, 0);
+  const totalSlack = comf.reduce((a, c, i) => a + (c - shrinkFloor[i]), 0);
+
   let widths: number[];
+  let scroll = false;
   if (desired <= budgetW) {
-    widths = comf; // ① vừa khung → dùng comfortable (không kéo giãn full-width)
+    widths = comf; // ① vừa khung → comfortable (không kéo giãn full-width)
+  } else if (sumFloor >= budgetW || totalSlack <= 0) {
+    // ③ co tới sàn dễ đọc vẫn không vừa → SCROLL ngang, GIỮ độ rộng = sàn. Đây đúng
+    // là độ rộng mà nhánh ② tiến tới ở tới hạn (deficit→totalSlack) nên qua mốc
+    // scroll KHÔNG có cú nhảy — chỉ hiện thêm thanh cuộn (thanh nổi US-19.24).
+    widths = shrinkFloor;
+    scroll = true;
   } else {
-    const sumMin = minByCol.reduce((a, b) => a + b, 0);
-    const totalSlack = comf.reduce((a, c, i) => a + (c - minByCol[i]), 0);
-    if (sumMin >= budgetW || totalSlack <= 0) {
-      return false; // ② hết đường co → rơi về scroll (native + thanh nổi US-19.24)
-    }
+    // ② co tỉ lệ theo slack (comf → sàn dễ đọc), vừa khít budget.
     const deficit = desired - budgetW;
-    widths = comf.map((c, i) => c - (c - minByCol[i]) * (deficit / totalSlack));
+    widths = comf.map((c, i) => c - (c - shrinkFloor[i]) * (deficit / totalSlack));
   }
 
-  // Áp: table-layout:fixed (FIT_CLASS) + width/max-width inline mỗi ô. Chỉ chạy
-  // cho bảng đơn giản (caller đã lọc) → serialize ra pipe, không rò .md. Dùng
-  // FLOOR (không ceil) để tổng bề rộng KHÔNG vượt budgetW vài px → không sinh
-  // scrollbar dư ở nhánh ②.
-  const finalW = widths.map((w) => Math.max(1, Math.floor(w)));
+  // CEIL từng cột (không floor): ô 1-token (ngày/id, chỉ có 1 chỗ ngắt là chính dấu
+  // '-') mà mất <1px do làm tròn xuống sẽ NGẮT ở '-' (overflow-wrap:normal không
+  // chặn hyphen). Ceil đảm bảo bề rộng ≥ nội dung → không ngắt.
+  const finalW = widths.map((w) => Math.max(1, Math.ceil(w)));
+
+  if (scroll) {
+    // Scroll-island: KHÔNG gắn FIT_CLASS → giữ base `table{display:block;
+    // overflow-x:auto}`; ghim mỗi cột = sàn qua width+min+max (auto-layout tôn trọng
+    // width khi min-content ≤ width, mà sàn ≥ min-content nên chữ wrap vừa khít).
+    // Bảng rộng = Σsàn > budget → tự scroll ngang. Chỉ chạy cho bảng đơn giản (caller
+    // đã lọc) → không rò style vào .md.
+    for (const row of rows) {
+      for (let i = 0; i < row.cells.length; i++) {
+        const cell = row.cells[i];
+        cell.style.boxSizing = 'border-box';
+        const w = `${finalW[i]}px`;
+        cell.style.width = w;
+        cell.style.minWidth = w;
+        cell.style.maxWidth = w;
+      }
+    }
+    return true;
+  }
+
+  // Vừa khung (① / ②): table-layout:fixed (FIT_CLASS) + width/max-width mỗi ô. Tổng
+  // ceil có thể dôi vài px > budget → gỡ dần khỏi cột RỘNG DƯ nhất (còn slack trên
+  // sàn) để không sinh scrollbar dư.
+  const ceilFloor = shrinkFloor.map((m) => Math.ceil(m));
+  const cap = Math.floor(budgetW);
+  let overflow = finalW.reduce((a, b) => a + b, 0) - cap;
+  while (overflow > 0) {
+    let best = -1;
+    let bestSlack = 0;
+    for (let i = 0; i < colCount; i++) {
+      const slack = finalW[i] - ceilFloor[i];
+      if (slack > bestSlack) {
+        bestSlack = slack;
+        best = i;
+      }
+    }
+    if (best < 0) {
+      break; // không còn slack (mọi cột đã ở sàn) — chấp nhận dôi ≤ vài px
+    }
+    finalW[best] -= 1;
+    overflow -= 1;
+  }
   table.classList.add(FIT_CLASS);
   table.style.width = `${finalW.reduce((a, b) => a + b, 0)}px`;
   for (const row of rows) {
@@ -448,8 +541,10 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
 /**
  * Chỉnh bề rộng cột bảng sau mỗi render/sửa/resize. Fit-mode BẬT (US-19.25) và
  * bảng ĐƠN GIẢN (serialize ra pipe, không rò style/class vào .md) → co/wrap vừa
- * panel (`applyFitColumns`); còn lại (fit tắt, bảng phức tạp, hoặc hết đường co)
- * → hành vi mặc định scroll-mode (`applyDefaultColumnWidths`, US-19.3).
+ * panel, HOẶC khi co tới sàn dễ đọc vẫn không vừa thì tự scroll TẠI sàn (đều trong
+ * `applyFitColumns`, trả true). Chỉ khi fit tắt / bảng phức tạp / không đo được
+ * (applyFitColumns trả false) → hành vi mặc định scroll-mode natural
+ * (`applyDefaultColumnWidths`, US-19.3).
  */
 export function fitTableColumns(table: HTMLTableElement): void {
   const rows = Array.from(table.rows);

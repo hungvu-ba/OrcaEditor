@@ -56,9 +56,10 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(m.scrollWidth).toBeGreaterThan(m.clientWidth + 1); // overflows → scroll-island
   });
 
-  test('ON, narrow panel: table fits the panel (no horizontal scroll) + fit class', async ({ page }) => {
-    await page.setViewportSize({ width: 520, height: 600 });
-    await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
+  test('ON: shrinks/wraps to fit when it can (no horizontal scroll) + fit class', async ({ page }) => {
+    await page.setViewportSize({ width: 560, height: 600 });
+    // 2 wide columns still fit at the 30ch readability floor → shrink+wrap, no scroll.
+    await openEditor(page, makeTable(2, 4, WIDE), { tableFitMode: true });
     await page.locator('#content table').waitFor();
 
     await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
@@ -114,20 +115,20 @@ test.describe('US-19.25 table fit-mode', () => {
 
   test('ON: reflows when the panel is resized narrower', async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 600 });
-    await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
+    await openEditor(page, makeTable(2, 4, WIDE), { tableFitMode: true });
     await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
 
-    await page.setViewportSize({ width: 500, height: 600 });
+    await page.setViewportSize({ width: 560, height: 600 });
     // After the ResizeObserver reflow, the table still fits the new (narrower) panel.
     await expect
       .poll(async () => {
         const m = await tableInfo(page);
-        return m.fit && m.scrollWidth <= m.clientWidth + 2 && m.clientWidth < 560;
+        return m.fit && m.scrollWidth <= m.clientWidth + 2 && m.clientWidth < 620;
       }, { timeout: 3000 })
       .toBe(true);
   });
 
-  test('ON but Σ(min-content) > panel: falls back to horizontal scroll (no fit class)', async ({ page }) => {
+  test('ON but Σ(min-content) > panel: horizontal scroll (no fit class)', async ({ page }) => {
     await page.setViewportSize({ width: 260, height: 600 });
     // Long UNBREAKABLE tokens → large min-content per column; 6 of them can't fit 260px.
     const longWord = (_r: number, c: number): string => `AAAAAAAAAAAAAAAAAAAA${c}`;
@@ -136,13 +137,120 @@ test.describe('US-19.25 table fit-mode', () => {
     await page.waitForTimeout(300);
 
     const m = await tableInfo(page);
-    expect(m.fit).toBe(false); // fell back
+    expect(m.fit).toBe(false); // scroll-island, not fixed-fit
     expect(m.scrollWidth).toBeGreaterThan(m.clientWidth + 1); // scrolls
   });
 
-  test('command toggles fit-mode on then off (reports back to host)', async ({ page }) => {
+  test('ON: too many columns to fit readably → scrolls at the 30ch floor (not crushed)', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 600 });
+    // 6 wide columns: 6×~30ch floor > 900px → cannot fit readably → scroll AT the floor,
+    // instead of crushing every column down to its min-content word width.
+    await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+
+    const r = await page.evaluate(() => {
+      const t = document.querySelector('#content table') as HTMLTableElement;
+      const widths = Array.from(t.tBodies[0].rows[0].cells).map((c) => c.getBoundingClientRect().width);
+      return { fit: t.classList.contains('md-table-fit'), scrolls: t.scrollWidth - t.clientWidth > 1, minColW: Math.min(...widths) };
+    });
+    expect(r.scrolls).toBe(true); // scrolls rather than cramming
+    expect(r.fit).toBe(false); // scroll-island, not fixed-fit
+    expect(r.minColW).toBeGreaterThan(200); // ~30ch floor — NOT crushed to min-content
+  });
+
+  test('ON: no width jump crossing the fit⇄scroll boundary (continuity)', async ({ page }) => {
+    const descrWidth = (): Promise<number> =>
+      page.evaluate(() => Math.round((document.querySelector('#content table tbody td') as HTMLElement).getBoundingClientRect().width));
+    const scrolls = (): Promise<boolean> =>
+      page.evaluate(() => { const t = document.querySelector('#content table') as HTMLTableElement; return t.scrollWidth - t.clientWidth > 1; });
+
+    // Just below the boundary → scrolls, columns pinned at the floor.
+    await page.setViewportSize({ width: 1300, height: 600 });
+    await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+    const scrollW = await descrWidth();
+    const didScroll = await scrolls();
+
+    // Just above the boundary → fits (branch ②) at essentially the same width.
+    await page.setViewportSize({ width: 1500, height: 600 });
+    await page.waitForTimeout(300);
+    const fitW = await descrWidth();
+    const didFit = !(await scrolls());
+
+    expect(didScroll).toBe(true);
+    expect(didFit).toBe(true);
+    expect(Math.abs(fitW - scrollW)).toBeLessThan(12); // column width barely moves → no visible jump
+  });
+
+  test('ON: never breaks mid-word and keeps a hyphenated date on one line', async ({ page }) => {
     await page.setViewportSize({ width: 520, height: 600 });
-    await openEditor(page, makeTable(6, 4, WIDE)); // starts OFF
+    // Wide last column forces the table to shrink (branch ②). Without the per-word
+    // floor, the narrow columns would break "Identifier" mid-word and wrap the date
+    // at its '-'. With it, both stay whole.
+    const md =
+      '| Identifier | When | Description |\n' +
+      '| --- | --- | --- |\n' +
+      '| id-0001 | 2026-07-20 | a fairly long description that must wrap and take the slack so the other columns get squeezed |\n' +
+      '| id-0002 | 2026-06-18 | another long description sentence here to keep this column wide enough to force overall shrinking |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+
+    const r = await page.evaluate(() => {
+      const lineCount = (cell: HTMLTableCellElement): number => {
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        return range.getClientRects().length;
+      };
+      const table = document.querySelector('#content table') as HTMLTableElement;
+      const header = table.tHead!.rows[0];
+      const body = table.tBodies[0].rows;
+      return {
+        headerWordLines: lineCount(header.cells[0]), // "Identifier" — one word
+        dateLines: lineCount(body[0].cells[1]), // "2026-07-20"
+        dateText: body[0].cells[1].textContent,
+        descLines: lineCount(body[0].cells[2]), // sanity: this one DID wrap
+      };
+    });
+    expect(r.headerWordLines).toBe(1); // word not split across lines
+    expect(r.dateLines).toBe(1); // date not broken at '-'
+    expect(r.dateText).toBe('2026-07-20');
+    expect(r.descLines).toBeGreaterThan(1); // the wide column absorbed the shrink
+  });
+
+  test('ON: typing into a pinned narrow column re-fits it (debounced) so it grows with content', async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 600 });
+    // Col A starts tiny ("x") → pinned narrow by fit-mode; col B is long.
+    const md = '| A | B |\n| --- | --- |\n| x | ' + 'long filler content keeping column B wide '.repeat(2) + '|\n';
+    await openEditor(page, md, { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+
+    const colAWidth = (): Promise<number> =>
+      page.evaluate(() => Math.round((document.querySelector('#content table tbody td') as HTMLElement).getBoundingClientRect().width));
+    const before = await colAWidth();
+
+    // Put the caret at the end of col A's "x" cell and type a multi-word phrase.
+    await page.evaluate(() => {
+      const cell = document.querySelector('#content table tbody td') as HTMLElement;
+      const r = document.createRange();
+      r.selectNodeContents(cell);
+      r.collapse(false);
+      const s = window.getSelection()!;
+      s.removeAllRanges();
+      s.addRange(r);
+    });
+    await page.keyboard.type(' alpha beta gamma delta epsilon');
+
+    // The column is frozen (max-width pin) until the debounced re-fit fires; after it,
+    // the column has grown to accommodate the typed content.
+    await expect.poll(colAWidth, { timeout: 3000 }).toBeGreaterThan(before + 40);
+  });
+
+  test('command toggles fit-mode on then off (reports back to host)', async ({ page }) => {
+    await page.setViewportSize({ width: 560, height: 600 });
+    await openEditor(page, makeTable(2, 4, WIDE)); // starts OFF (2 cols fit at the floor once ON)
     await page.locator('#content table').waitFor();
     expect((await tableInfo(page)).fit).toBe(false);
 

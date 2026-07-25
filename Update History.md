@@ -442,3 +442,7 @@
 | 0.9.0 | 2026-07-25 | Change: Table Fit Width (fit-mode) now defaults ON — tables shrink/wrap columns to fit the panel out of the box instead of scrolling; still toggleable live per session (US-19.25). |
 | 0.9.0 | 2026-07-25 | Perf: cache normalized file-name entries so file-link search no longer re-normalizes 5000 URIs per keystroke, and request-scope cross-file text so whole-word fallback stops re-reading the corpus (P7/P8). |
 | 0.9.0 | 2026-07-25 | Perf: rAF-coalesce table scroll handle-repositioning and the selectionchange table-toolbar update so they no longer force layout per scroll tick / keystroke (P6; P5 sticky-header already coalesced). |
+| 0.9.0 | 2026-07-25 | Fix: Table Fit Width now uses the whole word (spaces only) as the wrap unit — never breaks a word mid-character and keeps hyphenated tokens like dates ("2026-07-20") on one line (US-19.25). |
+| 0.9.0 | 2026-07-25 | Feature: Table Fit Width adds a 30ch readability floor — many-column tables scroll horizontally at that floor instead of crushing columns; no width jump crossing the fit/scroll boundary (US-19.25). |
+| 0.9.0 | 2026-07-25 | Fix: in Table Fit Width, typing into a width-pinned column (e.g. a newly added one) now re-fits that table after a short debounce so the column grows with the content instead of wrapping after 1-2 words (US-19.25). |
+| 0.9.0 | 2026-07-25 | Fix: a wide-but-short table's own horizontal scrollbar is now always visible (Chromium's overlay scrollbar previously stayed invisible until hovered/scrolled) (US-19.24). |

@@ -169,6 +169,40 @@ const fitReflowObserver = new ResizeObserver((entries) => {
   });
 });
 fitReflowObserver.observe(content);
+// US-19.25: gõ chữ trong ô bảng KHÔNG tự re-fit (input chỉ serialize, không render)
+// → cột đang bị ghim width ở fit-mode không nở theo chữ vừa gõ, wrap rất sớm (cột
+// mới thêm còn hẹp bằng đúng header). Re-fit ĐÚNG bảng đang gõ SAU KHI ngừng gõ
+// (debounce) để cột giãn theo nội dung. Chỉ khi Fit-mode BẬT (scroll-mode mặc định
+// tự giãn qua max-content nên không cần). Debounce (không mỗi phím) vì fitTableColumns
+// toggle class đo layout — tránh giật; đo gọn trong 1 tick nên không nháy.
+const FIT_TYPING_REFIT_MS = 200;
+let fitTypingTimer: ReturnType<typeof setTimeout> | undefined;
+let fitTypingTable: HTMLTableElement | null = null;
+function scheduleFitRefit(table: HTMLTableElement): void {
+  if (!tableFitModeOn) {
+    return;
+  }
+  fitTypingTable = table;
+  if (fitTypingTimer !== undefined) {
+    clearTimeout(fitTypingTimer);
+  }
+  fitTypingTimer = setTimeout(() => {
+    fitTypingTimer = undefined;
+    const t = fitTypingTable;
+    fitTypingTable = null;
+    if (!t || !t.isConnected) {
+      return; // bảng đã bị dựng lại/xoá giữa chừng
+    }
+    fitTableColumns(t);
+    stickyTableHeader.refresh();
+    // Cột nở → bảng có thể rộng thêm/đổi scroll ngang; kéo ô đang gõ về tầm nhìn.
+    const sel = window.getSelection();
+    const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
+    if (cell && content.contains(cell)) {
+      cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, FIT_TYPING_REFIT_MS);
+}
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
@@ -1159,8 +1193,14 @@ content.addEventListener('input', (e) => {
   // clone header dính (nếu đang hiện) cache bề rộng cột cũ, không tự nhận ra
   // thay đổi này (chỉ dựng lại khi ĐỔI bảng, xem table-sticky-header.ts), gây
   // lệch cột với header thật. Refresh để lần update() kế tiếp dựng lại clone.
-  if ((e.target as Element | null)?.closest?.('table')) {
+  // Caret đang trong ô bảng? (input event target ở contentEditable thường là
+  // #content chứ không phải ô — dò qua selection cho chắc.)
+  const sel = window.getSelection();
+  const editedTable = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('table') : null;
+  if (editedTable && content.contains(editedTable)) {
     stickyTableHeader.refresh();
+    // US-19.25: cột (fit-mode) không nở khi gõ vì bị ghim width → re-fit có debounce.
+    scheduleFitRefit(editedTable as HTMLTableElement);
   }
 });
 
