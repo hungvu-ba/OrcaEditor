@@ -1,15 +1,23 @@
 /**
  * X-19: encodeLinkPath (dom-utils.ts) encodes each path segment with
  * encodeURIComponent, so `&`/`#`/`=`/`+` in a file name become `%26`/`%23`/…
- * The turndown `bareUrl` rule (turndown.ts) keeps an <a> whose text equals the
- * DECODED href as a bare link instead of `[text](href)`. It decoded with
- * decodeURI, which by spec leaves `; / ? : @ & = + $ , #` encoded — so a bare
- * link to `Tài liệu R&D.md` never matched its own text and was serialized as
- * `[Tài liệu R&D.md](Tài%20liệu%20R%26D.md)`. The fix decodes segment-wise with
- * decodeURIComponent (symmetric with the encode).
+ * The turndown `bareUrl` rule (turndown.ts) used to keep an <a> whose text
+ * equals the DECODED href as a bare link instead of `[text](href)` for ANY
+ * href, including relative workspace paths.
+ *
+ * That was over-broad: markdown-it linkify runs with `fuzzyLink:false`
+ * (render.ts), so it never auto-links a bare RELATIVE path from raw text — an
+ * `<a>` whose relative href equals its text can only be an intentional link
+ * (typed `[x](x)` or an `@`-mention insert to a same-folder file), and must
+ * always keep its `[]()` syntax. `bareUrl` now only collapses true absolute-
+ * URL/`mailto:` autolinks (guarded by `hasUrlScheme`, the shared X-7 predicate
+ * that also excludes Windows drive paths like `C:\…` from "URL scheme") —
+ * cases #1-4 below flip from "stays bare" to "becomes a link" accordingly;
+ * case #6 is the explicit regression guard that absolute-URL autolinks still
+ * collapse as before, and cases #7-8 guard the drive-path exclusion.
  *
  * DOM-outcome test: build the <a> the encoder+markdown-it produce and assert the
- * serialized .md keeps it bare (no `](`), plus a malformed-`%` safety case.
+ * serialized .md, plus a malformed-`%` safety case.
  *
  * Run standalone: npm run test:roundtrip:bare-url-decode
  */
@@ -24,22 +32,25 @@ function anchor(href: string, text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// 1. `&` in the name — the audit's example. Decoded href === text → stays bare.
+// 1. `&` in the name — the audit's example. Relative href → always a link now,
+//    even though the decoded href equals the text.
 // ---------------------------------------------------------------------------
 {
   const out = serializeHtml(anchor('T%C3%A0i%20li%E1%BB%87u%20R%26D.md', 'Tài liệu R&D.md'));
-  runner.check('and: not serialized as a []() link', !out.includes(']('), JSON.stringify(out));
-  runner.check('and: bare text with decoded &', out.includes('Tài liệu R&D.md'), JSON.stringify(out));
+  runner.check(
+    'and: serialized as a []() link with the raw (encoded) href',
+    out.includes('[Tài liệu R&D.md](T%C3%A0i%20li%E1%BB%87u%20R%26D.md)'),
+    JSON.stringify(out)
+  );
 }
 
 // ---------------------------------------------------------------------------
 // 2. `#` in the name — decodeURI would leave %23 encoded; decodeURIComponent
-//    decodes it so the anchor matches its text and stays bare.
+//    decodes it so the anchor's decoded href matches its text — still a link.
 // ---------------------------------------------------------------------------
 {
   const out = serializeHtml(anchor('a%23b.md', 'a#b.md'));
-  runner.check('hash: not a []() link', !out.includes(']('), JSON.stringify(out));
-  runner.check('hash: bare text with decoded #', out.includes('a#b.md'), JSON.stringify(out));
+  runner.check('hash: serialized as a []() link', out.includes('[a#b.md](a%23b.md)'), JSON.stringify(out));
 }
 
 // ---------------------------------------------------------------------------
@@ -47,15 +58,17 @@ function anchor(href: string, text: string): string {
 // ---------------------------------------------------------------------------
 {
   const out = serializeHtml(anchor('a%3Db%2Bc.md', 'a=b+c.md'));
-  runner.check('eq-plus: stays bare', !out.includes('](') && out.includes('a=b+c.md'), JSON.stringify(out));
+  runner.check('eq-plus: serialized as a []() link', out.includes('[a=b+c.md](a%3Db%2Bc.md)'), JSON.stringify(out));
 }
 
 // ---------------------------------------------------------------------------
-// 4. Already-plain href (no encoding) — unchanged, still bare (regression guard).
+// 4. Already-plain href (no encoding), relative path — `@`-mention to a
+//    same-folder file shapes exactly this (href === text, no scheme). Bug:
+//    used to collapse to bare "plain.md", losing the link syntax entirely.
 // ---------------------------------------------------------------------------
 {
   const out = serializeHtml(anchor('plain.md', 'plain.md'));
-  runner.check('plain: bare, no link syntax', !out.includes('](') && out.includes('plain.md'), JSON.stringify(out));
+  runner.check('plain: serialized as a []() link, not bare text', out.includes('[plain.md](plain.md)'), JSON.stringify(out));
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +87,49 @@ function anchor(href: string, text: string): string {
   }
   runner.check('malformed-%: no throw', !threw, `threw=${threw}`);
   runner.check('malformed-%: falls through to a normal link', out.includes('](x%2Gy.md)'), JSON.stringify(out));
+}
+
+// ---------------------------------------------------------------------------
+// 6. Absolute-URL autolink (scheme-based) — regression guard: this is the ONE
+//    shape linkify (fuzzyLink:false) actually produces from bare raw text, so
+//    it must still collapse to bare text on serialize, unchanged by the
+//    hasUrlScheme narrowing above.
+// ---------------------------------------------------------------------------
+{
+  const out = serializeHtml(anchor('https://example.com', 'https://example.com'));
+  runner.check('absolute url: not a []() link', !out.includes(']('), JSON.stringify(out));
+  runner.check('absolute url: stays bare', out.includes('https://example.com'), JSON.stringify(out));
+}
+
+// ---------------------------------------------------------------------------
+// 7. Windows drive-path link, raw backslashes — a hand-typed
+//    `[C:\Users\x.md](C:\Users\x.md)` has href === text, but `X:\…` is a LOCAL
+//    filesystem target, not a URL scheme (X-7, src/shared/link-scheme.ts). Must
+//    stay a real link, not collapse to bare text like a real `c:` scheme would.
+// ---------------------------------------------------------------------------
+{
+  // Text backslashes come out doubled: turndown's `escape()` escapes `\` in
+  // display text (markdown-significant), href is emitted raw/unescaped.
+  const out = serializeHtml(anchor('C:\\Users\\x.md', 'C:\\Users\\x.md'));
+  runner.check(
+    'drive-path raw: serialized as a []() link, not bare text',
+    out.includes('[C:\\\\Users\\\\x.md](C:\\Users\\x.md)'),
+    JSON.stringify(out)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Windows drive-path link, percent-encoded backslashes — markdown-it's
+//    normalizeLink encodes `\` to `%5C` in the href it renders, so this is the
+//    shape that actually reaches turndown from a real authored drive-path link.
+// ---------------------------------------------------------------------------
+{
+  const out = serializeHtml(anchor('C:%5CUsers%5Cx.md', 'C:\\Users\\x.md'));
+  runner.check(
+    'drive-path encoded: serialized as a []() link, not bare text',
+    out.includes('[C:\\\\Users\\\\x.md](C:%5CUsers%5Cx.md)'),
+    JSON.stringify(out)
+  );
 }
 
 runner.finish('bare-url-decode');

@@ -17,6 +17,7 @@ import {
   EMPTY_LINK_ATTR,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
+import { hasUrlScheme } from '../../src/shared/link-scheme';
 import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import {
@@ -427,6 +428,15 @@ export function createTurndown(): TurndownService {
       const href = (node as HTMLElement).getAttribute('href') ?? '';
       const text = node.textContent ?? '';
       if (!href) {
+        return false;
+      }
+      // linkify (fuzzyLink:false) only ever auto-links scheme-based text (http(s)://,
+      // mailto:...) — never a bare relative/local-filesystem path. So an <a> whose
+      // href is NOT a real URL scheme (relative path, or a Windows drive path like
+      // `C:\…` — hasUrlScheme excludes those, see X-7) can only be an intentional
+      // link (typed `[x](x)` or an `@`-mention insert to a same-folder file) and
+      // must always keep its `[]()` syntax.
+      if (!hasUrlScheme(href)) {
         return false;
       }
       return href === text || href === `mailto:${text}` || decodeSafe(href) === text;
