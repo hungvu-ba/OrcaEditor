@@ -817,27 +817,45 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
    * whenever one is under the cursor (any depth, including a depth-0 item) the block handle
    * is forced off — a `<ul>`/`<ol>` is itself a top-level block, so without this both handles
    * used to show at once inside a list. */
+  // rAF-coalesce the per-mousemove layout reads (findLiAt/findBlockAt/findTableBlockAt each
+  // force layout) — approved pattern, mirrors entity-scope.ts's onMouseMove. Only the latest
+  // coordinates survive the event→frame boundary; the hover body runs at most once per frame.
+  let hoverRaf = 0;
+  let hoverX = 0;
+  let hoverY = 0;
   function onContentHover(e: MouseEvent): void {
     if (state !== 'idle') {
       return;
     }
-    const li = findLiAt(e.clientX, e.clientY);
-    const block = li ? null : findBlockAt(e.clientY);
-    if (block !== hoveredBlock) {
-      setHighlightedBlock(block);
-      positionHandle(block);
+    hoverX = e.clientX;
+    hoverY = e.clientY;
+    if (hoverRaf !== 0) {
+      return;
     }
-    if (li !== hoveredLi) {
-      setHighlightedLi(li);
-      positionLiHandle(li);
-    }
-    // Independent of block/li above (bug 0716 round 2, #1) — must be able to show at the
-    // same time as a row/column handle, so it never reads or writes hoveredBlock/hoveredLi.
-    const tableBlock = findTableBlockAt(e.clientX, e.clientY);
-    if (tableBlock !== hoveredTableBlock) {
-      setHighlightedTableBlock(tableBlock);
-      positionTableHandle(tableBlock);
-    }
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = 0;
+      // Re-check inside the frame: a drag can arm between the event and this callback.
+      if (state !== 'idle') {
+        return;
+      }
+      const li = findLiAt(hoverX, hoverY);
+      const block = li ? null : findBlockAt(hoverY);
+      if (block !== hoveredBlock) {
+        setHighlightedBlock(block);
+        positionHandle(block);
+      }
+      if (li !== hoveredLi) {
+        setHighlightedLi(li);
+        positionLiHandle(li);
+      }
+      // Independent of block/li above (bug 0716 round 2, #1) — must be able to show at the
+      // same time as a row/column handle, so it never reads or writes hoveredBlock/hoveredLi.
+      const tableBlock = findTableBlockAt(hoverX, hoverY);
+      if (tableBlock !== hoveredTableBlock) {
+        setHighlightedTableBlock(tableBlock);
+        positionTableHandle(tableBlock);
+      }
+    });
   }
 
   /** True when `(x, y)` is still in the gutter band a hovered block/li's own handle lives
@@ -891,6 +909,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   content.addEventListener('mousemove', onContentHover);
   content.addEventListener('mouseleave', (e: MouseEvent) => {
+    // Cancel any hover frame armed by the last inside-mousemove: otherwise it fires after
+    // this leave with stale inside coords and re-shows the handle at its old spot (stuck-handle
+    // regression from rAF coalescing). On exit, mouseleave is the authority.
+    if (hoverRaf !== 0) {
+      cancelAnimationFrame(hoverRaf);
+      hoverRaf = 0;
+    }
     if (state !== 'idle') {
       return;
     }

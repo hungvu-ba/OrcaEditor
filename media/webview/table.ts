@@ -847,8 +847,8 @@ function tbodyRows(table: HTMLTableElement): HTMLTableRowElement[] {
  * gets a handle too, same as any other row — `armRowDrag` refuses to actually arm a drag for it
  * (GFM always needs exactly one header row at the top), but its handle still supports the
  * click-to-menu "Set as header row" path via `armedRow`. */
-function findRowAt(clientX: number, clientY: number): HTMLTableRowElement | null {
-  for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
+function findRowAt(tables: HTMLTableElement[], clientX: number, clientY: number): HTMLTableRowElement | null {
+  for (const table of tables) {
     const tRect = table.getBoundingClientRect();
     if (clientY < tRect.top || clientY > tRect.bottom || clientX < tRect.left - 24 || clientX > tRect.right) {
       continue;
@@ -865,8 +865,8 @@ function findRowAt(clientX: number, clientY: number): HTMLTableRowElement | null
 }
 
 /** Column under the cursor — x matched against header cell boundaries (columns align vertically down the table), y spans the whole table (plus `colHandleEl`'s height above the header) so the column handle tracks the hovered cell in ANY row, not just the header (bug 0715 #11: row and column must be able to show together). */
-function findHeaderCellAt(clientX: number, clientY: number): { table: HTMLTableElement; index: number } | null {
-  for (const table of Array.from(content.querySelectorAll('table')) as HTMLTableElement[]) {
+function findHeaderCellAt(tables: HTMLTableElement[], clientX: number, clientY: number): { table: HTMLTableElement; index: number } | null {
+  for (const table of tables) {
     const headerRow = table.tHead?.rows[0];
     if (!headerRow) {
       continue;
@@ -1385,23 +1385,49 @@ function initTableDragDrop(): void {
     }
   });
 
+  // rAF-coalesce the per-mousemove layout reads — findRowAt/findHeaderCellAt each query and
+  // measure tables — approved pattern, mirrors entity-scope.ts's onMouseMove. The table list is
+  // built once per frame and shared by both finders instead of queried twice per raw move.
+  let hoverRaf = 0;
+  let hoverX = 0;
+  let hoverY = 0;
   content.addEventListener('mousemove', (e) => {
     if (tdState !== 'idle') {
       return;
     }
-    const row = findRowAt(e.clientX, e.clientY);
-    if (row !== hoveredRow) {
-      setHighlightedRow(row);
-      positionRowHandle(row);
+    hoverX = e.clientX;
+    hoverY = e.clientY;
+    if (hoverRaf !== 0) {
+      return;
     }
-    const col = findHeaderCellAt(e.clientX, e.clientY);
-    if (!sameCol(col, hoveredCol)) {
-      setColumnHighlight(col);
-      positionColHandle(col);
-    }
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = 0;
+      // Re-check inside the frame: a drag can arm between the event and this callback.
+      if (tdState !== 'idle') {
+        return;
+      }
+      const tables = Array.from(content.querySelectorAll('table')) as HTMLTableElement[];
+      const row = findRowAt(tables, hoverX, hoverY);
+      if (row !== hoveredRow) {
+        setHighlightedRow(row);
+        positionRowHandle(row);
+      }
+      const col = findHeaderCellAt(tables, hoverX, hoverY);
+      if (!sameCol(col, hoveredCol)) {
+        setColumnHighlight(col);
+        positionColHandle(col);
+      }
+    });
   });
 
   content.addEventListener('mouseleave', (e: MouseEvent) => {
+    // Cancel any hover frame armed by the last inside-mousemove: otherwise it fires after
+    // this leave with stale inside coords and re-shows the row/column handle (stuck-handle
+    // regression from rAF coalescing). On exit, mouseleave is the authority.
+    if (hoverRaf !== 0) {
+      cancelAnimationFrame(hoverRaf);
+      hoverRaf = 0;
+    }
     if (tdState !== 'idle') {
       return;
     }
