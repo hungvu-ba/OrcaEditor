@@ -111,6 +111,81 @@ test('Zoom opens the diagram in the shared lightbox; Esc closes it', async ({ pa
   await expect(lightbox).toBeHidden();
 });
 
+// ---------------------------------------------------------------------------
+// US-4.30 — PlantUML insert entry points (toolbar split button + slash command),
+// mirroring Mermaid US-4.12/US-4.20. Needs the real engine: real toolbar/split-
+// caret clicks + execCommand insert + the `/` popup. We assert on the inserted
+// frame's raw source (`.md-plantuml-source`, present as soon as the block renders,
+// independent of the WASM chart), so these stay fast and don't wait on the engine.
+// ---------------------------------------------------------------------------
+
+/** Select the whole first paragraph so the toolbar insert has a caret/selection. */
+async function selectFirstParagraph(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(() => {
+    const p = document.querySelector('#content p')!;
+    const range = document.createRange();
+    range.selectNodeContents(p);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+}
+
+test('the PlantUML toolbar button (main face) inserts the default Activity template', async ({ page }) => {
+  await openEditor(page, 'Hello world\n');
+  await selectFirstParagraph(page);
+  await page.locator('#fmt-plantuml').click();
+
+  await expect(page.locator('.md-plantuml')).toHaveCount(1);
+  // Distinguishing lines from PLANTUML_ACTIVITY_TEMPLATE (toolbar.ts).
+  await expect(page.locator('.md-plantuml-source')).toContainText('Do something');
+  await expect(page.locator('.md-plantuml-source')).toContainText('Decision?');
+});
+
+test('the PlantUML toolbar dropdown inserts the picked diagram type (Sequence)', async ({ page }) => {
+  await openEditor(page, 'Hello world\n');
+  await selectFirstParagraph(page);
+  await page.locator('#fmt-plantuml ~ .split-caret').click();
+  const pop = page.locator('.toolbar-popover[data-for-id="fmt-plantuml"]');
+  await expect(pop).toBeVisible();
+  await pop.locator('.toolbar-popover-item', { hasText: 'Sequence diagram' }).first().click();
+
+  await expect(page.locator('.md-plantuml')).toHaveCount(1);
+  // PLANTUML_SEQUENCE_TEMPLATE — not the Activity default.
+  await expect(page.locator('.md-plantuml-source')).toContainText('Alice -> Bob');
+  await expect(page.locator('.md-plantuml-source')).not.toContainText('Do something');
+});
+
+test('the PlantUML dropdown lists the 4 diagram types (parity with Mermaid)', async ({ page }) => {
+  await openEditor(page, '# hi');
+  await page.locator('#fmt-plantuml ~ .split-caret').click();
+  const pop = page.locator('.toolbar-popover[data-for-id="fmt-plantuml"]');
+  await expect(pop).toBeVisible();
+  const labels = await pop.locator('.toolbar-popover-item').allTextContents();
+  expect(labels.some((l) => l.includes('Activity diagram'))).toBe(true);
+  expect(labels.some((l) => l.includes('Sequence diagram'))).toBe(true);
+  expect(labels.some((l) => l.includes('Class diagram'))).toBe(true);
+  expect(labels.some((l) => l.includes('State diagram'))).toBe(true);
+});
+
+test('the `/PlantUML diagram` slash command inserts the default Activity template', async ({ page }) => {
+  await openEditor(page, '');
+  await page.evaluate(() => {
+    const p = document.querySelector('#content p') ?? document.querySelector('#content')!;
+    const range = document.createRange();
+    range.selectNodeContents(p);
+    range.collapse(true);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+  await page.keyboard.type('/plantuml');
+  await page.locator('.trigger-popup-item', { hasText: 'PlantUML diagram' }).first().click();
+
+  await expect(page.locator('.md-plantuml')).toHaveCount(1);
+  await expect(page.locator('.md-plantuml-source')).toContainText('Do something');
+});
+
 test('an engine that fails to load shows an error and falls back to code view', async ({ page }) => {
   await openEditor(page, SIMPLE, { plantumlEngineUri: 'does-not-exist-plantuml-engine.js' });
 

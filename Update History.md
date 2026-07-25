@@ -436,3 +436,6 @@
 | 0.9.0 | 2026-07-24 | Feature: wide tables get a floating horizontal scrollbar pinned to the viewport bottom, column-aligned and two-way synced, so you no longer scroll to the table's bottom to reach it (US-19.24). |
 | 0.9.0 | 2026-07-25 | Feature: "Toggle Table Fit Width" command — a global mode that shrinks/wraps table columns to fit the panel (capping columns bloated by one long cell) instead of scrolling; falls back to scroll when content can't fit (US-19.25). |
 | 0.9.0 | 2026-07-25 | Fix: entity index now debounces open-buffer re-parse and precomputes search haystacks (perf P1/P2); host pushes broken-ref recheck after each reindex so markers converge. |
+| 0.9.0 | 2026-07-25 | Fix: TOC no longer highlights the heading above once scrolled to the document's true bottom — the last heading is force-selected instead of relying on it crossing the threshold line. |
+| 0.9.0 | 2026-07-25 | Fix: rAF-coalesce webview hover detection so drag-handle and table row/column hover no longer force layout on every mousemove (perf P3/P4). |
+| 0.9.0 | 2026-07-25 | Feature: PlantUML quick-insert — toolbar split button (default Activity + 4-type dropdown Activity/Sequence/Class/State) and a "PlantUML diagram" slash-command entry, mirroring Mermaid (US-4.30). |
