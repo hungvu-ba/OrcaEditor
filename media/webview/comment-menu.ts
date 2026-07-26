@@ -24,6 +24,7 @@ import {
   resolveCommentAnchorNode,
 } from './block-map';
 import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
+import { COMMENT_ANCHOR_ACTIVE_CLASS } from './constants';
 import { el, getOffsetWithin, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
@@ -50,9 +51,6 @@ interface PendingAnchor {
 
 /** Everything about a thread the webview knows BEFORE the host confirms it. */
 type PendingSeed = Omit<ThreadAnchorSeed, 'author' | 'createdAt'>;
-
-/** Marks the anchored node while the composer is open, so it is obvious what the comment attaches to. */
-const ANCHOR_ACTIVE_CLASS = 'comment-anchor-active';
 
 /**
  * Per-webview-load randomness in the thread handle (US-23.4). The document uri
@@ -250,7 +248,7 @@ export function initCommentMenu(
   document.body.appendChild(card);
 
   const composerDismiss = initPopoverDismiss(card, () => {
-    pending?.node.classList.remove(ANCHOR_ACTIVE_CLASS);
+    pending?.node.classList.remove(COMMENT_ANCHOR_ACTIVE_CLASS);
     pending = undefined;
     input.value = '';
   });
@@ -309,7 +307,7 @@ export function initCommentMenu(
     input.value = '';
     syncSubmitState();
 
-    node.classList.add(ANCHOR_ACTIVE_CLASS);
+    node.classList.add(COMMENT_ANCHOR_ACTIVE_CLASS);
     card.hidden = false;
     positionNear(card, range.getBoundingClientRect());
     composerDismiss.arm();

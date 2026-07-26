@@ -458,3 +458,4 @@
 | 0.10.0 | 2026-07-26 | Change: toolbar icon area now extends flush to both screen edges (was inset 26px each side); the "everything collapses to overflow" breakpoint moved accordingly. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.5): comments persist to an append-only `<file>.md.orca-comments.jsonl` sidecar, written before the thread exists and reloaded on reopen; the `.md` is never touched. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.5): renaming a `.md` moves its comment sidecar in the same VS Code operation (atomic, prompts on collision); a case/NFC-drifted sidecar is adopted on open. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.6): comment actions can no longer touch the `.md` — the session-only anchor marker class is stripped before serialize, and undo/redo inside a comment text field never reaches the document stack. |

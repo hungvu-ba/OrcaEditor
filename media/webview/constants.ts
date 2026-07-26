@@ -157,6 +157,15 @@ export const ANCHOR_SHORT_TEXT_THRESHOLD = 0.95;
  */
 export const COMMENT_ANCHOR_STATE_ATTR = 'data-comment-anchor-state';
 
+/**
+ * Marks the anchored node while the create composer is open, so it is obvious
+ * what the comment attaches to. Shared with turndown.ts rather than kept local
+ * to comment-menu.ts: a class written into `#content` survives the raw-HTML
+ * serialization path unless that path is told to strip it, and a comment action
+ * that reaches the `.md` is exactly the undo-stack slot US-23.6 forbids.
+ */
+export const COMMENT_ANCHOR_ACTIVE_CLASS = 'comment-anchor-active';
+
 // --- Req 23 US-23.4 AC4: "Unresolved location" panel ---
 
 /** Pointer travel before a mousedown on a card becomes a drag rather than a click. */

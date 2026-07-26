@@ -30,7 +30,7 @@ import {
   TABLE_SEP_STYLE_ATTR,
 } from './block-style';
 import { COMMENT_ANCHOR_ATTR } from './block-map';
-import { COMMENT_ANCHOR_STATE_ATTR } from './constants';
+import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_ANCHOR_STATE_ATTR } from './constants';
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -198,7 +198,11 @@ export function createTurndown(): TurndownService {
       }
       return false;
     },
-    replacement: (_content, node) => (node as HTMLElement).outerHTML ?? '',
+    // safeOuterHtml, not raw outerHTML: this is the third raw-HTML emitter, and
+    // an editor-session attribute/class landing on the <img> would otherwise be
+    // written into the `.md` here while the other two strip it (US-23.6).
+    replacement: (_content, node) =>
+      typeof (node as HTMLElement).outerHTML === 'string' ? safeOuterHtml(node as HTMLElement) : '',
   });
 
   // --- strikethrough: markdown-it chỉ parse ~~ (2 dấu) ---
@@ -699,6 +703,23 @@ const TRANSIENT_ATTRS = [
   TABLE_SEP_STYLE_ATTR,
 ];
 
+/**
+ * Same idea as TRANSIENT_ATTRS, for CLASSES — which the attribute loop cannot
+ * reach, since it can only delete `class` wholesale. Req 23 US-23.6: a comment
+ * action must never occupy a slot in the document's undo stack, so the marker
+ * comment-menu.ts puts on the anchored node while the composer is open must not
+ * survive into `.md` if a sync happens to serialize that node through a
+ * raw-HTML path. Every future comment class belongs here too (see the same
+ * warning at comment-panel.ts's drop-overlay).
+ *
+ * Scoped to comment classes on purpose: OTHER presentation classes stamped on
+ * live `#content` nodes (`md-entity-ref`, `dd-hover-outline`, `ref-nav-flash`,
+ * `md-code-wrapped`…) leak through this same path today. That is a pre-existing
+ * defect of those features, not this one — recorded in
+ * `_bmad-output/quick-dev/deferred-work.md`; this list is where its fix lands.
+ */
+const TRANSIENT_CLASSES = [COMMENT_ANCHOR_ACTIVE_CLASS];
+
 function safeOuterHtml(el: HTMLElement): string {
   const copy = el.cloneNode(true) as HTMLElement;
   for (const attr of TRANSIENT_ATTRS) {
@@ -707,8 +728,33 @@ function safeOuterHtml(el: HTMLElement): string {
       child.removeAttribute(attr);
     }
   }
+  stripTransientClasses(copy);
   stripTablePresentation(copy);
   return collapseBlankLines(copy.outerHTML);
+}
+
+/**
+ * Removes every TRANSIENT_CLASSES token from the clone, self and descendants.
+ * Walks `[class]` and tests `classList` rather than querying `.${token}`: a
+ * token interpolated into a selector must be a valid CSS identifier, and a
+ * future entry that isn't one would throw `SyntaxError` in the middle of
+ * serialize — silently stopping the document from syncing at all.
+ */
+function stripTransientClasses(copy: HTMLElement): void {
+  const carriers: HTMLElement[] = copy.hasAttribute('class') ? [copy] : [];
+  for (const found of Array.from(copy.querySelectorAll('[class]'))) {
+    carriers.push(found as HTMLElement);
+  }
+  for (const carrier of carriers) {
+    for (const token of TRANSIENT_CLASSES) {
+      carrier.classList.remove(token);
+    }
+    // A node whose ONLY class was the marker would otherwise serialize as
+    // `class=""` — still a change to the `.md`, which is the whole point.
+    if (carrier.getAttribute('class') === '') {
+      carrier.removeAttribute('class');
+    }
+  }
 }
 
 /**

@@ -585,4 +585,78 @@ runner.check(
   runner.check('golden: fully-canonical file (new convention) is byte-identical', out === md, `  out = ${JSON.stringify(out)}`);
 }
 
+// --- Req 23 US-23.6: session-only comment CLASSES must not leak into `.md` ---
+// TRANSIENT_ATTRS covers attributes; a class can only be dropped wholesale, so
+// the raw-HTML path (complex table / kept tag) needs its own strip. A marker
+// reaching the `.md` would be a real document edit — the undo-stack slot the US
+// forbids. A complex table (nested list in a cell) is the reliable way in.
+const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
+
+{
+  const out = serializeHtml(
+    `<table class="comment-anchor-active"><thead><tr><th>A</th></tr></thead>` +
+      `<tbody><tr>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.6: comment-anchor-active on the serialized element itself is stripped',
+    out.includes('<table') && !out.includes('comment-anchor-active') && !out.includes('class=""'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td class="comment-anchor-active">anchored</td>` +
+      `${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.6: comment-anchor-active on a descendant is stripped, no empty class left',
+    out.includes('anchored') && !out.includes('comment-anchor-active') && !out.includes('class=""'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // Only the marker goes: a class the document legitimately carries must survive.
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td class="comment-anchor-active md-keep-me">anchored</td>` +
+      `${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.6: a co-existing class survives the strip',
+    !out.includes('comment-anchor-active') && out.includes('md-keep-me'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // The OTHER entry into safeOuterHtml: an unknown tag kept as raw HTML
+  // (outerHtmlFallback). Exercised here because domino, not the browser, is the
+  // engine where this repo's DOM-API traps live.
+  const inline = serializeHtml('<p>Alpha <mark class="comment-anchor-active">marked</mark> text.</p>');
+  const block = serializeHtml('<div class="comment-anchor-active"><span>kept block</span></div>');
+  runner.check(
+    'US-23.6: kept-tag fallback path strips the marker too (inline + block)',
+    inline.includes('<mark>marked</mark>') &&
+      !inline.includes('comment-anchor-active') &&
+      block.includes('kept block') &&
+      !block.includes('comment-anchor-active') &&
+      !block.includes('class=""'),
+    `  inline = ${JSON.stringify(inline)}\n  block = ${JSON.stringify(block)}`
+  );
+}
+
+{
+  // The third raw-HTML emitter, htmlImgWithAttrs — a sized image is stored as
+  // raw <img> precisely so that rule fires, so it must strip the marker as well.
+  const out = serializeHtml('<p><img src="a.png" width="200" class="comment-anchor-active"></p>');
+  runner.check(
+    'US-23.6: raw <img> emitter strips the marker but keeps its real attributes',
+    out.includes('src="a.png"') && out.includes('width="200"') && !out.includes('comment-anchor-active'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
 runner.finish('style-preservation');

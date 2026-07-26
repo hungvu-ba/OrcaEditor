@@ -1816,6 +1816,50 @@ function jumpHeading(dir: 1 | -1): void {
   sel?.addRange(range);
 }
 
+/**
+ * Req 23 US-23.6 AC2: a text field has its own native undo history, so the
+ * platform undo/redo shortcut pressed inside one must stay there and never be
+ * delegated to the document's TextDocument stack — otherwise correcting a typo
+ * in a comment reply would silently roll back the Author's last document edit.
+ *
+ * Comment surfaces are mounted on `document.body` today, outside `#content`, so
+ * this handler never sees them; the guard is what keeps AC2 true when a later
+ * story (US-23.2's reply box) mounts one inside the editor instead — as a
+ * `<textarea>`, an `<input>`, or a nested `contenteditable`, all three of which
+ * carry their own undo history. A task-list checkbox (US-7.x) is an `<input>`
+ * with no text history of its own and must keep delegating, so only text-entry
+ * types count.
+ *
+ * Deliberately a stateless target test rather than input-ownership.ts's
+ * `setInputOwner()` flag: that flag stands the WHOLE handler down and has to be
+ * released on every exit path, which the trigger popups have got wrong before.
+ * A field that forgets to release it would disable the editor's shortcuts for
+ * the rest of the session; a target test cannot get stuck.
+ */
+const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
+
+function ownsNativeUndo(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+  if (target instanceof HTMLInputElement) {
+    return TEXT_ENTRY_INPUT_TYPES.has(target.type);
+  }
+  // A `contenteditable` nested inside `#content` never becomes
+  // `document.activeElement` — the OUTER editing host keeps focus, so `e.target`
+  // is `#content` and a target test cannot see the inner surface at all
+  // (measured, not assumed). The caret is the only thing that says which surface
+  // is being typed into. Such a field shares the outer host's native history, so
+  // the keystroke lands as AC2's permitted no-op rather than a true field undo —
+  // still the right outcome, since the alternative is rolling back the Author's
+  // last document edit. US-23.2 should prefer a real `<textarea>`/`<input>`,
+  // which does get its own undo.
+  const anchor = window.getSelection()?.anchorNode ?? null;
+  const el = anchor === null ? null : anchor.nodeType === Node.ELEMENT_NODE ? (anchor as Element) : anchor.parentElement;
+  const host = el?.closest('[contenteditable=""], [contenteditable="true"]') ?? null;
+  return host !== null && host !== content;
+}
+
 content.addEventListener('keydown', (e) => {
   // Req 20 US-20.2: while a trigger overlay owns the keyboard, the editor's
   // shortcut/undo/redo/arrow handling must not fire — the overlay handles the key.
@@ -1840,10 +1884,16 @@ content.addEventListener('keydown', (e) => {
       // native. Gắn kèm pendingText (nếu còn thay đổi chờ debounce) để host
       // commit lần gõ mới nhất thành undo-unit TRƯỚC khi undo.
       case 'z':
+        if (ownsNativeUndo(e.target)) {
+          return; // US-23.6 AC2 — the field's own undo, not the document's.
+        }
         e.preventDefault();
         postToHost({ type: 'undo', pendingText: takePendingSync() });
         return;
       case 'y':
+        if (ownsNativeUndo(e.target)) {
+          return;
+        }
         e.preventDefault();
         postToHost({ type: 'redo', pendingText: takePendingSync() });
         return;
@@ -1880,6 +1930,9 @@ content.addEventListener('keydown', (e) => {
   // !e.altKey: chặn AltGr+Shift+Z (ctrl+alt trên Windows/Linux) kích hoạt redo
   // phá huỷ khi người dùng chỉ đang gõ một ký tự AltGr.
   if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+    if (ownsNativeUndo(e.target)) {
+      return; // US-23.6 AC2, same as the mod-only z/y branch above.
+    }
     e.preventDefault();
     postToHost({ type: 'redo', pendingText: takePendingSync() });
     return;
