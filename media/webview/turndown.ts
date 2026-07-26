@@ -30,6 +30,7 @@ import {
   TABLE_SEP_STYLE_ATTR,
 } from './block-style';
 import { COMMENT_ANCHOR_ATTR } from './block-map';
+import { COMMENT_ANCHOR_STATE_ATTR } from './constants';
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -688,6 +689,7 @@ const TRANSIENT_ATTRS = [
   'data-line',
   'data-line-end',
   COMMENT_ANCHOR_ATTR,
+  COMMENT_ANCHOR_STATE_ATTR,
   HEADING_STYLE_ATTR,
   BULLET_STYLE_ATTR,
   CODE_STYLE_ATTR,

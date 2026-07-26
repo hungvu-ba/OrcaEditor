@@ -39,11 +39,21 @@ import { detectBlockStyle, type StyleOverride } from '../media/webview/block-sty
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import {
+  anchorUpdateRejection,
   commentThreadLine,
   createCommentRejection,
   resolveCommentAuthor,
+  type AnchorUpdateMessage,
   type CreateCommentMessage,
 } from '../src/comments/comment-utils';
+import {
+  anchorThresholdFor,
+  levenshtein,
+  normalizeAnchorText,
+  pickAnchorCandidate,
+  similarity,
+  type AnchorCandidate,
+} from '../media/webview/comment-anchor';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
 let pass = 0;
@@ -1298,11 +1308,14 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     type: 'createComment',
     requestId: 1,
     docUri: 'file:///a.md',
+    threadId: 'thread-1',
     anchorId: 'comment-anchor-1',
     offsetStart: 0,
     offsetEnd: 5,
     line: 3,
     body: 'Why this wording?',
+    recordedText: 'AC-2 — The held queue drains in enqueue order.',
+    nearestHeading: 'Acceptance criteria',
     ...over,
   });
 
@@ -1329,11 +1342,108 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     'createComment: a negative offset is refused',
     createCommentRejection(msg({ offsetStart: -1 }), 'file:///a.md') !== null
   );
+  check('createComment: a thread with no id is refused (it could never be addressed again)',
+    createCommentRejection(msg({ threadId: '' }), 'file:///a.md') !== null);
   check('createComment: a collapsed caret anchor is accepted', createCommentRejection(msg({ offsetStart: 4, offsetEnd: 4 }), 'file:///a.md') === null);
 
   // 1-based webview line -> 0-based vscode.Range line; 0 means "maps to no source line".
   check('comment thread line: 1-based source line becomes 0-based', commentThreadLine(3) === 2);
   check('comment thread line: an unmapped anchor lands on line 0', commentThreadLine(0) === 0);
+}
+
+// --- Req 23 US-23.4: tier-2 anchor matching + anchor-update validation -------
+{
+  const candidate = (text: string, line: number, heading = '', depth = 1): AnchorCandidate => ({
+    text,
+    line,
+    heading,
+    depth,
+  });
+
+  check('anchor text: whitespace runs collapse so a re-wrapped paragraph still matches',
+    normalizeAnchorText('The held  queue\n  drains') === 'The held queue drains');
+  check('anchor text: normalization is NFC', normalizeAnchorText('Nhật'.normalize('NFD')) === 'Nhật'.normalize('NFC'));
+  check('levenshtein: identical strings cost nothing', levenshtein('queue', 'queue') === 0);
+  check('levenshtein: one substitution costs one', levenshtein('Done', 'Dome') === 1);
+  check('similarity: a line-break reflow scores a perfect match',
+    similarity('The held queue drains', 'The held\nqueue   drains') === 1);
+  check('similarity: NFC and NFD forms of the same prose score a perfect match',
+    similarity('Nhật ký'.normalize('NFC'), 'Nhật ký'.normalize('NFD')) === 1);
+
+  check('threshold: ordinary text uses 0.8', anchorThresholdFor('AC-2 — the held queue drains') === 0.8);
+  check('threshold: text under 15 chars uses 0.95', anchorThresholdFor('Done') === 0.95);
+
+  const recorded = 'AC-2 — The held queue drains in enqueue order.';
+  const hit = pickAnchorCandidate(
+    recorded,
+    [candidate('AC-1 — Refund requests are held for replay.', 11), candidate('AC-2 — The held queue\ndrains in enqueue order.', 12)],
+    { lastKnownLine: 12, nearestHeading: '' }
+  );
+  check('tier 2: the reflowed original wins', hit?.index === 1 && hit.score === 1);
+
+  check('tier 2: a short recorded text does not settle for a near miss',
+    pickAnchorCandidate('Done', [candidate('Dome', 4)], { lastKnownLine: 4, nearestHeading: '' }) === null);
+  check('tier 2: a short recorded text still matches itself',
+    pickAnchorCandidate('Done', [candidate('Done', 9)], { lastKnownLine: 4, nearestHeading: '' })?.index === 0);
+  check('tier 2: nothing above the threshold is a miss, not a best guess',
+    pickAnchorCandidate('The held queue drains in enqueue order',
+      [candidate('Totally unrelated sentence about refunds', 3)], { lastKnownLine: 3, nearestHeading: '' }) === null);
+  check('tier 2: an empty recorded text never matches',
+    pickAnchorCandidate('   ', [candidate('anything', 1)], { lastKnownLine: 1, nearestHeading: '' }) === null);
+
+  // Two structurally identical bullets in different sections — the score alone
+  // cannot separate them, so the recorded context has to.
+  const twins = [candidate('Each entry records a reason code.', 8, 'Refunds'), candidate('Each entry records a reason code.', 40, 'Payouts')];
+  check('tier 2 tie-break: the recorded heading picks the right twin',
+    pickAnchorCandidate('Each entry records a reason code.', twins, { lastKnownLine: 41, nearestHeading: 'Refunds' })?.index === 0);
+  check('tier 2 tie-break: with no heading to go on, the nearest line wins',
+    pickAnchorCandidate('Each entry records a reason code.', twins, { lastKnownLine: 39, nearestHeading: '' })?.index === 1);
+  check('tier 2 tie-break: still ambiguous means fall through to tier 3, not a guess',
+    pickAnchorCandidate('Each entry records a reason code.',
+      [candidate('Each entry records a reason code.', 8), candidate('Each entry records a reason code.', 8)],
+      { lastKnownLine: 0, nearestHeading: '' }) === null);
+
+  // A blockquote and its only paragraph read identically and report the same
+  // line — depth is the only thing left that can separate them.
+  const nested = [candidate('Quoted claim.', 3, '', 1), candidate('Quoted claim.', 3, '', 2)];
+  check('tier 2 tie-break: the innermost of two identical nested nodes wins',
+    pickAnchorCandidate('Quoted claim.', nested, { lastKnownLine: 3, nearestHeading: '' })?.index === 1);
+  check('tier 2 tie-break: the heading comparison is normalized, not raw',
+    pickAnchorCandidate(
+      'Each entry records a reason code.',
+      [candidate('Each entry records a reason code.', 8, 'Nhật ký'.normalize('NFD')),
+       candidate('Each entry records a reason code.', 40, 'Payouts')],
+      { lastKnownLine: 41, nearestHeading: 'Nhật ký'.normalize('NFC') }
+    )?.index === 0);
+  // A candidate whose length alone puts it out of reach is rejected without
+  // running the O(n*m) distance at all.
+  check('tier 2: a candidate too different in length to reach the threshold is skipped',
+    pickAnchorCandidate('The held queue drains in enqueue order.',
+      [candidate('The held queue drains in enqueue order. ' + 'x'.repeat(60), 3)],
+      { lastKnownLine: 3, nearestHeading: '' }) === null);
+
+  const update = (over: Partial<AnchorUpdateMessage> = {}): AnchorUpdateMessage => ({
+    type: 'commentAnchorUpdate',
+    docUri: 'file:///a.md',
+    threadId: 'thread-1',
+    anchorId: 'comment-anchor-1',
+    line: 12,
+    state: 'approximate',
+    ...over,
+  });
+  check('anchorUpdate: a well-formed update is accepted', anchorUpdateRejection(update(), 'file:///a.md') === null);
+  check('anchorUpdate: an update for another document is refused',
+    anchorUpdateRejection(update(), 'file:///b.md') !== null);
+  check('anchorUpdate: an update naming no thread is refused',
+    anchorUpdateRejection(update({ threadId: '' }), 'file:///a.md') !== null);
+  // 0 is the "maps to no source line" value createComment already accepts, so
+  // refusing it here would leave whole-document anchors unable to relocate.
+  check('anchorUpdate: line 0 (an unmapped anchor) is accepted',
+    anchorUpdateRejection(update({ line: 0 }), 'file:///a.md') === null);
+  check('anchorUpdate: a negative line is refused',
+    anchorUpdateRejection(update({ line: -1 }), 'file:///a.md') !== null);
+  check('anchorUpdate: an unknown resolution state is refused',
+    anchorUpdateRejection(update({ state: 'resolved' as AnchorUpdateMessage['state'] }), 'file:///a.md') !== null);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

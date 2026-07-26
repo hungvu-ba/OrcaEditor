@@ -383,11 +383,37 @@ export type WebviewToHost =
       type: 'createComment';
       requestId: number;
       docUri: string;
+      /**
+       * Req 23 US-23.4: the webview's handle for this thread. Minted webview-side
+       * because that is the side which re-resolves the anchor across edits and so
+       * has to name the thread a later `commentAnchorUpdate` refers to.
+       */
+      threadId: string;
       anchorId: string;
       offsetStart: number;
       offsetEnd: number;
       line: number;
       body: string;
+      /** Req 23 US-23.4 tier 2: full text of the anchored node at creation time. */
+      recordedText: string;
+      /** Req 23 US-23.4 tier 2: heading the anchored node sat under — a tie-breaker, never a match key. */
+      nearestHeading: string;
+    }
+  /**
+   * Req 23 US-23.4: a tier relocated (or gave up on) a thread's anchor — move the
+   * native `CommentThread`'s best-effort Range to `line` and mark it with the new
+   * resolution `state`. Fire-and-forget: the structural anchor stays
+   * authoritative and the webview has already applied the move, so there is no
+   * requestId/reply pair. This path must never edit the `.md` — a comment action
+   * never occupies a slot in the document's undo stack (US-23.6).
+   */
+  | {
+      type: 'commentAnchorUpdate';
+      docUri: string;
+      threadId: string;
+      anchorId: string;
+      line: number;
+      state: 'exact' | 'approximate' | 'floating';
     };
 
 /** Message host → webview (discriminated theo `type`). */

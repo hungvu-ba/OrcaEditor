@@ -453,3 +453,4 @@
 | 0.9.0 | 2026-07-25 | Fix (security): pin `brace-expansion` to 5.0.8 via npm `overrides` and bump eslint/eslint-plugin-security, closing a DoS advisory (GHSA-mh99-v99m-4gvg) unreachable via a plain audit fix. |
 | 0.10.0 | 2026-07-25 | Feature: add `check:cross-platform` script (metaKey/ctrlKey symmetry, `⌘`/`Ctrl` labels, CRLF/NFD/Windows-path fixtures) run automatically by `build.sh release`. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.1): right-click "Add Comment" creates a `vscode.comments` thread anchored to the selected node — author, timestamp, no change to the `.md`. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): comment anchors survive edits via four tiers (structural id, fuzzy text, covering block, floating), re-evaluated whenever an edit settles; duplicated anchors are re-minted. |

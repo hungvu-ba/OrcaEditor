@@ -1030,6 +1030,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           });
           break;
         }
+        case 'commentAnchorUpdate': {
+          // Req 23 US-23.4: a tier relocated (or floated) a thread — follow it
+          // with the native Range. updateAnchor validates the whole payload
+          // (document identity, known thread, usable line, known state). No
+          // reply: the webview has already applied its own resolution, and a
+          // refused update only leaves the native Range stale, never wrong-way
+          // edited. Nothing here touches the document (US-23.6).
+          const error = this.comments?.updateAnchor(msg, document);
+          if (error) {
+            console.warn(`orca-editor: comment anchor update refused — ${error}`);
+          }
+          break;
+        }
         case 'entitySearch': {
           // Req 21 US-21.2: entity search, mirroring searchFiles ->
           // fileSearchResult's requestId echo. `ready` carries the indexing

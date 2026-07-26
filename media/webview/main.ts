@@ -72,6 +72,7 @@ import { initTriggerSlash } from './trigger-slash';
 import { initTriggerAt } from './trigger-at';
 import { initEntityScope } from './entity-scope';
 import { initCommentMenu } from './comment-menu';
+import { initCommentResolve } from './comment-resolve';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
@@ -291,9 +292,13 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
   scheduleSync();
   brokenRef.refresh();
 });
+// Req 23 US-23.4: four-tier anchor re-resolution. Created before the menu — a
+// thread created there registers with this resolver as soon as the host
+// confirms it.
+const commentResolve = initCommentResolve(content, vscode);
 // Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
 // only contextmenu handler.
-const commentMenu = initCommentMenu(content, vscode);
+const commentMenu = initCommentMenu(content, vscode, commentResolve);
 const brokenRef = initBrokenRef({
   content,
   vscode,
@@ -448,6 +453,7 @@ window.addEventListener('message', (event) => {
       // thread is never created against the wrong document, and shows the
       // author name the host will record.
       commentMenu.setDocUri(msg.docUri);
+      commentResolve.setDocUri(msg.docUri);
       commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
@@ -740,6 +746,10 @@ function renderDocument(markdown: string): void {
   stickyTableHeader.refresh();
   // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
   dragDrop.refresh();
+  // Req 23 US-23.4 AC5: the document just changed (edit, undo, redo or reload) —
+  // re-run every comment through the tiers once it settles, so a thread whose
+  // node or text reappeared is promoted back out of the floating list.
+  commentResolve.refresh();
 }
 
 /**
@@ -1173,6 +1183,12 @@ content.addEventListener('input', (e) => {
   if (!inputType || ORPHAN_LIST_INPUT_TYPES.has(inputType)) {
     fixOrphanNestedListItems();
   }
+  // Req 23 US-23.4 AC5: a locally typed edit is echo-suppressed host-side, so it
+  // never comes back as a render — without this the tiers would only ever re-run
+  // for host-driven updates and a paragraph deleted by typing would leave its
+  // comment claiming an exact anchor that is gone. Debounced, and a no-op while
+  // the document carries no comments.
+  commentResolve.refresh();
   scheduleSync();
   // Commit một undo-checkpoint ở ranh giới TỪ (space/Enter): mỗi từ thành 1 edit
   // = 1 bước undo (giống mọi editor), thay vì cả cụm gõ liên tục dồn thành một

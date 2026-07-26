@@ -116,3 +116,43 @@ export const BROKEN_REF_TOOLTIP_HIDE_GRACE_MS = 140;
 
 /** Trễ giữa các phím gõ vào ô tìm "Search again" trước khi hỏi host tìm file lại (quick-correct.ts). */
 export const QUICK_CORRECT_SEARCH_DEBOUNCE_MS = 200;
+
+// --- Req 23 US-23.4: comment anchor re-resolution ---
+
+/**
+ * Delay before re-running the four anchor-resolution tiers after the document
+ * re-renders (comment-resolve.ts). US-23.4 AC5 asks for "when the change
+ * settles", explicitly not once per keystroke.
+ */
+export const ANCHOR_REEVAL_DEBOUNCE_MS = 250;
+
+/**
+ * Similarity score (0-1) at which tier 2 accepts a candidate (US-23.4, PO
+ * decision 2026-07-26). A starting default, meant to be tuned from real usage.
+ */
+export const ANCHOR_SIMILARITY_THRESHOLD = 0.8;
+
+/** Below this many characters the recorded text counts as "short" and must match more strictly (US-23.4). */
+export const ANCHOR_SHORT_TEXT_LEN = 15;
+
+/**
+ * Upper bound on the strings tier 2's O(n·m) edit distance actually compares.
+ * A whole-document anchor records the entire file, and the scan runs per
+ * candidate per thread on every settled change; prose stops being any more
+ * discriminating long before this cut.
+ */
+export const ANCHOR_MAX_COMPARE_CHARS = 512;
+
+/**
+ * Threshold for short text: a few characters coincidentally resemble unrelated
+ * short strings elsewhere in the document, so a near-identical hit is required.
+ */
+export const ANCHOR_SHORT_TEXT_THRESHOLD = 0.95;
+
+/**
+ * Current anchor-resolution state of a node (`exact` | `approximate` |
+ * `floating`). US-23.2 reads it to draw the pin/highlight, and it is how AC3's
+ * "visibly marked as approximate" exists in the DOM. Session-only, stripped
+ * before serialize by turndown.ts's TRANSIENT_ATTRS.
+ */
+export const COMMENT_ANCHOR_STATE_ATTR = 'data-comment-anchor-state';

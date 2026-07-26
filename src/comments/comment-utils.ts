@@ -8,6 +8,12 @@ import type { WebviewToHost } from '../shared/messages';
 /** A `createComment` message, narrowed out of the WebviewToHost union. */
 export type CreateCommentMessage = Extract<WebviewToHost, { type: 'createComment' }>;
 
+/** A `commentAnchorUpdate` message (US-23.4), narrowed out of the WebviewToHost union. */
+export type AnchorUpdateMessage = Extract<WebviewToHost, { type: 'commentAnchorUpdate' }>;
+
+/** The anchor-resolution states US-23.4's tiers can produce. */
+const ANCHOR_STATES: readonly AnchorUpdateMessage['state'][] = ['exact', 'approximate', 'floating'];
+
 /**
  * Author recorded on a new comment: the `orcaEditor.comments.authorName`
  * setting when the user has set one, else the OS username. The setting is
@@ -44,6 +50,11 @@ export function createCommentRejection(msg: CreateCommentMessage, docUri: string
   if (msg.anchorId === '') {
     return 'This comment lost its anchor before it could be created.';
   }
+  if (msg.threadId === '') {
+    // US-23.4: the handle every later anchor update names. A thread stored under
+    // an empty key could never be addressed again.
+    return 'This comment lost its anchor before it could be created.';
+  }
   if (
     !Number.isInteger(msg.offsetStart) ||
     !Number.isInteger(msg.offsetEnd) ||
@@ -51,6 +62,36 @@ export function createCommentRejection(msg: CreateCommentMessage, docUri: string
     msg.offsetEnd < msg.offsetStart
   ) {
     return 'This comment lost its anchor before it could be created.';
+  }
+  return null;
+}
+
+/**
+ * Why a `commentAnchorUpdate` is refused, or null when it is valid (US-23.4).
+ * Same untrusted-input rule as `createCommentRejection`: a webview message is
+ * validated where the host consumes it, never assumed safe because a sibling
+ * path validated something similar.
+ *
+ * A refused update leaves the thread exactly where it was — the webview keeps
+ * its own resolution either way, so dropping a malformed update can only cost a
+ * stale native Range, never a corrupted one.
+ */
+export function anchorUpdateRejection(msg: AnchorUpdateMessage, docUri: string): string | null {
+  if (msg.docUri !== docUri) {
+    return 'This anchor update was written for a different document.';
+  }
+  if (msg.threadId === '' || msg.anchorId === '') {
+    return 'This anchor update names no thread.';
+  }
+  // 0 is legal, not a missing value: `commentAnchorLine` returns it for a node
+  // that maps to no source line (a whole-document anchor), `createComment`
+  // accepts it, and `commentThreadLine` already translates it. Refusing it here
+  // would leave exactly those threads unable to ever report a relocation.
+  if (!Number.isInteger(msg.line) || msg.line < 0) {
+    return 'This anchor update carries no usable line.';
+  }
+  if (!ANCHOR_STATES.includes(msg.state)) {
+    return 'This anchor update carries an unknown resolution state.';
   }
   return null;
 }

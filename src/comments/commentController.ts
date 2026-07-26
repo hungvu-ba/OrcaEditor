@@ -17,9 +17,11 @@
 import * as os from 'os';
 import * as vscode from 'vscode';
 import {
+  anchorUpdateRejection,
   commentThreadLine,
   createCommentRejection,
   resolveCommentAuthor,
+  type AnchorUpdateMessage,
   type CreateCommentMessage,
 } from './comment-utils';
 
@@ -28,6 +30,14 @@ export interface CommentAnchor {
   anchorId: string;
   offsetStart: number;
   offsetEnd: number;
+  /** US-23.4 tier 2: the anchored node's text at creation time. */
+  recordedText: string;
+  /** US-23.4: 1-based line the anchor was last resolved to. */
+  lastKnownLine: number;
+  /** US-23.4 tier 2 tie-breaker: heading the anchored node sat under. */
+  nearestHeading: string;
+  /** US-23.4: which tier placed it — orthogonal to the Open/Resolved/Closed axis (US-23.3). */
+  state: AnchorUpdateMessage['state'];
 }
 
 export interface CommentSupport extends vscode.Disposable {
@@ -37,9 +47,21 @@ export interface CommentSupport extends vscode.Disposable {
    * a refused request must never leave a thread against a stale/empty anchor.
    */
   createThread(msg: CreateCommentMessage, document: vscode.TextDocument): string | null;
+  /**
+   * US-23.4: a tier moved (or gave up on) a thread's anchor — follow it with the
+   * native Range and record the new state. Returns the rejection reason or null.
+   * Never edits the document (US-23.6).
+   */
+  updateAnchor(msg: AnchorUpdateMessage, document: vscode.TextDocument): string | null;
   /** The structural anchor a thread was created against — US-23.4 re-resolves from here. */
-  anchorOf(thread: vscode.CommentThread): CommentAnchor | undefined;
+  anchorOf(threadId: string): CommentAnchor | undefined;
 }
+
+/** What a non-exact anchor reads as on the native thread (US-23.4 AC3/AC4). */
+const ANCHOR_STATE_LABEL: Record<Exclude<AnchorUpdateMessage['state'], 'exact'>, string> = {
+  approximate: 'Approximate location',
+  floating: 'Unresolved location',
+};
 
 export function createCommentSupport(): CommentSupport {
   const controller = vscode.comments.createCommentController(
@@ -48,7 +70,11 @@ export function createCommentSupport(): CommentSupport {
   );
   // Threads are placed from the webview's structural anchor, never by dragging a
   // range in the text editor's gutter — so no commentingRangeProvider.
-  const anchors = new WeakMap<vscode.CommentThread, CommentAnchor>();
+  //
+  // Keyed by the webview's threadId (US-23.4): the webview owns re-resolution and
+  // addresses threads by that id, and a Map (unlike the previous WeakMap on the
+  // thread object) is what lets an update find the thread from the id alone.
+  const threads = new Map<string, { thread: vscode.CommentThread; anchor: CommentAnchor }>();
 
   return {
     createThread(msg, document): string | null {
@@ -70,19 +96,69 @@ export function createCommentSupport(): CommentSupport {
         author: { name: author },
         timestamp: new Date(),
       };
+      if (threads.has(msg.threadId)) {
+        // One controller serves every document, so a colliding handle would
+        // silently replace another thread's entry and misdirect its updates.
+        return 'A comment thread with this id already exists.';
+      }
       const thread = controller.createCommentThread(document.uri, range, [comment]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-      anchors.set(thread, {
-        anchorId: msg.anchorId,
-        offsetStart: msg.offsetStart,
-        offsetEnd: msg.offsetEnd,
+      threads.set(msg.threadId, {
+        thread,
+        anchor: {
+          anchorId: msg.anchorId,
+          offsetStart: msg.offsetStart,
+          offsetEnd: msg.offsetEnd,
+          recordedText: msg.recordedText,
+          lastKnownLine: msg.line,
+          nearestHeading: msg.nearestHeading,
+          state: 'exact',
+        },
       });
       return null;
     },
-    anchorOf(thread): CommentAnchor | undefined {
-      return anchors.get(thread);
+    updateAnchor(msg, document): string | null {
+      const rejection = anchorUpdateRejection(msg, document.uri.toString());
+      if (rejection !== null) {
+        return rejection;
+      }
+      const entry = threads.get(msg.threadId);
+      if (!entry) {
+        return 'This anchor update names a thread that no longer exists.';
+      }
+      if (entry.thread.uri.toString() !== msg.docUri) {
+        // Belt and braces behind the unique handle: never let one document's
+        // resolution move a thread that lives in another file.
+        return 'This anchor update names a thread in another document.';
+      }
+      // A floating thread keeps its last known line, which can sit past the end
+      // of a document that has since been cut down.
+      const line = Math.min(commentThreadLine(msg.line), Math.max(0, document.lineCount - 1));
+      try {
+        entry.thread.range = new vscode.Range(line, 0, line, 0);
+        // The native surface has no notion of anchor drift, so the state is
+        // carried as a contextValue (available to menu `when` clauses) plus a
+        // label — AC3's "never silently indistinguishable from an exact anchor"
+        // has to hold here too, not only in the webview.
+        entry.thread.contextValue = `anchor-${msg.state}`;
+        entry.thread.label = msg.state === 'exact' ? undefined : ANCHOR_STATE_LABEL[msg.state];
+      } catch {
+        // The thread was disposed (the user deleted it in the Comments panel, or
+        // the controller tore it down). Forget it rather than throwing out of the
+        // message handler on every later pass.
+        threads.delete(msg.threadId);
+        return 'This anchor update names a thread that no longer exists.';
+      }
+      entry.anchor.anchorId = msg.anchorId;
+      entry.anchor.lastKnownLine = msg.line;
+      entry.anchor.state = msg.state;
+      return null;
+    },
+    anchorOf(threadId): CommentAnchor | undefined {
+      return threads.get(threadId)?.anchor;
     },
     dispose(): void {
+      threads.clear();
       controller.dispose();
     },
   };

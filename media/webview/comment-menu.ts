@@ -9,11 +9,21 @@
  * session-only DOM attribute (block-map.ts's COMMENT_ANCHOR_ATTR, stripped by
  * turndown.ts) and the thread itself is created host-side.
  *
+ * US-23.4 added the anchor snapshot this module records at creation time
+ * (recorded text + nearest heading) and the hand-off to comment-resolve.ts,
+ * which owns re-resolution across later edits.
+ *
  * Out of scope here (later stories in Req 23): gutter pins/highlight overlay
- * (US-23.2), resolve flow (US-23.3), anchor re-resolution across edits
- * (US-23.4), sidecar persistence (US-23.5).
+ * (US-23.2), resolve flow (US-23.3), sidecar persistence (US-23.5).
  */
-import { commentAnchorLine, ensureCommentAnchorId, findCommentAnchor, resolveCommentAnchorNode } from './block-map';
+import {
+  commentAnchorLine,
+  ensureCommentAnchorId,
+  findCommentAnchor,
+  nearestHeadingBefore,
+  resolveCommentAnchorNode,
+} from './block-map';
+import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
 import { el, getOffsetWithin, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
@@ -28,10 +38,26 @@ interface PendingAnchor {
   line: number;
   /** Text the anchor covers — shown as the composer's quote; empty for a bare caret. */
   quote: string;
+  /**
+   * US-23.4 tier 2/3 snapshot, captured here because it must describe the node
+   * as it was when the comment was written: the anchored node's WHOLE text (so a
+   * paragraph reflowing its line breaks still matches) and the heading it sat
+   * under (a tie-breaker between structurally identical nodes in two sections).
+   */
+  recordedText: string;
+  nearestHeading: string;
 }
 
 /** Marks the anchored node while the composer is open, so it is obvious what the comment attaches to. */
 const ANCHOR_ACTIVE_CLASS = 'comment-anchor-active';
+
+/**
+ * Per-webview-load randomness in the thread handle (US-23.4). The document uri
+ * alone is not enough: closing and reopening the same file restarts the request
+ * counter while the host's thread registry survives, so the reopened webview
+ * would mint handles that collide with the still-registered ones.
+ */
+const sessionSalt = Math.random().toString(36).slice(2, 10);
 
 const BUBBLE_PATH = 'M21 12a8 8 0 0 1-8 8H7l-4 3v-6.5A8 8 0 0 1 11 4h2a8 8 0 0 1 8 8z';
 
@@ -69,7 +95,11 @@ export interface CommentMenuController {
   setAuthorName(name: string): void;
 }
 
-export function initCommentMenu(content: HTMLElement, vscode: VsCodeApi): CommentMenuController {
+export function initCommentMenu(
+  content: HTMLElement,
+  vscode: VsCodeApi,
+  resolve: CommentResolveController
+): CommentMenuController {
   let docUri = '';
   let authorName = '';
   let requestSeq = 0;
@@ -79,6 +109,8 @@ export function initCommentMenu(content: HTMLElement, vscode: VsCodeApi): Commen
    * requestId until the host replies (either outcome releases it).
    */
   let inFlightRequestId: number | undefined;
+  /** US-23.4: what to hand the resolver once the host confirms the thread exists. */
+  let inFlightSeed: ThreadAnchorSeed | undefined;
   let pending: PendingAnchor | undefined;
 
   // --- Context menu ------------------------------------------------------------------------
@@ -256,6 +288,8 @@ export function initCommentMenu(content: HTMLElement, vscode: VsCodeApi): Commen
       offsetEnd,
       line: commentAnchorLine(content, node),
       quote,
+      recordedText: node.textContent ?? '',
+      nearestHeading: nearestHeadingBefore(content, node),
     };
 
     const onSelection = quote !== '';
@@ -292,15 +326,34 @@ export function initCommentMenu(content: HTMLElement, vscode: VsCodeApi): Commen
     }
     const requestId = ++requestSeq;
     inFlightRequestId = requestId;
+    // US-23.4: the thread's handle for later anchor updates. Minted here because
+    // the webview is the side that re-resolves the anchor and therefore the side
+    // that has to name the thread it is talking about. It must be unique across
+    // the whole extension host, not just this webview: one CommentController
+    // serves every open document, so a bare per-webview counter would give the
+    // first thread of every file — and of every reopened file — the same handle,
+    // and an update for one document would move another document's thread.
+    inFlightSeed = {
+      threadId: `${docUri}#${sessionSalt}-${requestId}`,
+      anchorId: pending.anchorId,
+      offsetStart: pending.offsetStart,
+      offsetEnd: pending.offsetEnd,
+      recordedText: pending.recordedText,
+      lastKnownLine: pending.line,
+      nearestHeading: pending.nearestHeading,
+    };
     vscode.postMessage({
       type: 'createComment',
       requestId,
       docUri,
+      threadId: inFlightSeed.threadId,
       anchorId: pending.anchorId,
       offsetStart: pending.offsetStart,
       offsetEnd: pending.offsetEnd,
       line: pending.line,
       body,
+      recordedText: pending.recordedText,
+      nearestHeading: pending.nearestHeading,
     });
     composerDismiss.close();
   }
@@ -322,8 +375,16 @@ export function initCommentMenu(content: HTMLElement, vscode: VsCodeApi): Commen
         return;
       }
       inFlightRequestId = undefined;
+      const seed = inFlightSeed;
+      inFlightSeed = undefined;
       if (!ok) {
         showToast(error ?? 'The comment could not be created.');
+        return;
+      }
+      // US-23.4: only a thread the host actually created gets tracked — a
+      // refused request must leave nothing behind to re-resolve.
+      if (seed) {
+        resolve.register(seed);
       }
     },
     setDocUri(uri): void {

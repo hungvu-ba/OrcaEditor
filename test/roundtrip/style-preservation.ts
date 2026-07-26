@@ -465,6 +465,21 @@ runner.check(
   );
 }
 
+// Req 23 US-23.4: the resolution-state attribute is stamped on live nodes by the
+// same tiers that move the anchor id, so it needs the identical no-leak
+// guarantee — it is session-only UI state, never document content.
+{
+  const out = serializeHtml(
+    '<table data-comment-anchor-state="approximate"><tbody><tr>' +
+      '<td data-comment-anchor-state="floating"><ul><li>x</li><li>y</li></ul></td></tr></tbody></table>'
+  );
+  runner.check(
+    'complex table HTML output carries no comment-anchor state',
+    out.includes('<table') && !out.includes('data-comment-anchor-state'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
 // Same leak check for the table-separator axis specifically: a complex table
 // (nested list forces HTML fallback) stamped 'compact' must not leak
 // data-md-table-sep-style into the saved .md output.

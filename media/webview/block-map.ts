@@ -133,8 +133,201 @@ export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HT
  * multi-block selection anchored on `#content` itself).
  */
 export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number {
+  // US-23.4: the node's OWN line when it carries one — list items do, and a list
+  // is a single top-level block, so falling straight through to the block would
+  // report every item in a 6-line list as the list's first line and make
+  // US-23.4's line tie-breaker pick the wrong bullet.
+  if (el !== content) {
+    const own = readSrcRange(el)?.start;
+    if (own !== undefined) {
+      return own;
+    }
+  }
   const block = el === content ? content.firstElementChild : topLevelBlockOf(content, el);
   return (block && readSrcRange(block)?.start) ?? 0;
+}
+
+/**
+ * Req 23 US-23.4 AC6: after a render, make every comment-anchor id address ONE
+ * node again.
+ *
+ * A clone-producing edit (paste — including a paste from another file and any
+ * id-bearing node inside the pasted subtree — line duplication, multi-cursor
+ * duplication) copies the attribute along with the markup, so two locations
+ * would silently share one comment's anchor. The FIRST occurrence in document
+ * order keeps the id and every later one is re-minted: a node that was merely
+ * moved (cut+paste, drag-reorder) is still the only carrier of its id and so
+ * keeps it, which is exactly the move-vs-clone distinction AC6 asks for.
+ *
+ * Runs before resolution so tier 1 never matches a clone.
+ */
+export function dedupeCommentAnchors(content: HTMLElement, keep: ReadonlySet<HTMLElement> = new Set()): void {
+  const carriers = [content, ...Array.from(content.querySelectorAll<HTMLElement>(`[${COMMENT_ANCHOR_ATTR}]`))];
+  const byId = new Map<string, HTMLElement[]>();
+  for (const el of carriers) {
+    const id = el.getAttribute(COMMENT_ANCHOR_ATTR);
+    if (!id) {
+      continue;
+    }
+    const group = byId.get(id);
+    if (group) {
+      group.push(el);
+    } else {
+      byId.set(id, [el]);
+    }
+  }
+  for (const group of byId.values()) {
+    if (group.length === 1) {
+      continue;
+    }
+    // Document order alone would hand the id to a copy pasted ABOVE its source.
+    // `keep` carries the node each live thread actually resolved to last pass,
+    // which identifies the original whenever the clone appeared without a
+    // re-render (exactly the paste case); order is only the fallback.
+    const original = group.find((el) => keep.has(el)) ?? group[0];
+    for (const el of group) {
+      if (el !== original) {
+        el.setAttribute(COMMENT_ANCHOR_ATTR, `comment-anchor-${nextCommentAnchorId++}`);
+      }
+    }
+  }
+}
+
+/**
+ * Node kinds a floated comment can be matched to or re-attached to (US-23.4
+ * AC2/AC3/AC4). Table cells are included because US-23.1 anchors a selection
+ * inside one to the cell itself; an inline anchor (a `<strong>`, a link) has no
+ * candidate of its own and degrades to its enclosing block, marked approximate.
+ */
+const ANCHOR_CANDIDATE_SELECTOR = 'h1, h2, h3, h4, h5, h6, p, li, tr, td, th, blockquote, pre';
+
+const HEADING_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+
+/** A block whose inner DOM is generated/read-only rather than edited prose. */
+function isAtomBlock(el: HTMLElement): boolean {
+  return (
+    el.classList.contains(MERMAID_CLASS) ||
+    el.classList.contains(PLANTUML_CLASS) ||
+    el.classList.contains(MATH_BLOCK_CLASS) ||
+    el.classList.contains(FRONT_MATTER_CLASS)
+  );
+}
+
+/** How many elements deep below `#content` a node sits (`#content` itself is 0). */
+function depthWithin(content: HTMLElement, el: HTMLElement): number {
+  let depth = 0;
+  let node: HTMLElement | null = el;
+  while (node && node !== content) {
+    depth++;
+    node = node.parentElement;
+  }
+  return depth;
+}
+
+/** Req 23 US-23.4: one node tier 2/3 can consider, described by what the match needs. */
+export interface AnchorCandidateNode {
+  el: HTMLElement;
+  /** Whole text content of the node — the same shape `recordedText` was captured in. */
+  text: string;
+  /** 1-based source line: the node's own when it carries one (list items do), else its block's. */
+  line: number;
+  /** 1-based last source line the node covers — tier 3 asks which node still spans a lost location. */
+  lineEnd: number;
+  /** Text of the nearest heading above the node, '' when there is none. */
+  heading: string;
+  /**
+   * Nesting depth below `#content`. A container and a lone child (a blockquote
+   * and its only paragraph) have identical text AND identical source lines, so
+   * depth is the only thing that can separate them — the innermost is the more
+   * specific answer.
+   */
+  depth: number;
+}
+
+/**
+ * Req 23 US-23.4: every anchorable node in the current render, in document
+ * order, with the two tie-breakers (line, nearest heading) already resolved.
+ *
+ * Nodes whose top-level block has no source line are skipped — the self-inserted
+ * caret-trap `<p>` is not document content and must never win a match.
+ */
+export function anchorCandidates(content: HTMLElement): AnchorCandidateNode[] {
+  const candidates: AnchorCandidateNode[] = [];
+  let heading = '';
+  // `#content` itself is anchorable (US-23.1: a selection spanning several
+  // blocks resolves to it), so it has to be offered back as a candidate or such
+  // a comment could never re-match its own recorded text.
+  const first = readSrcRange(content.firstElementChild ?? content);
+  const last = readSrcRange(content.lastElementChild ?? content);
+  if (first) {
+    candidates.push({
+      el: content,
+      text: content.textContent ?? '',
+      line: first.start,
+      lineEnd: last?.end ?? first.end,
+      heading: '',
+      depth: 0,
+    });
+  }
+  for (const block of Array.from(content.children) as HTMLElement[]) {
+    const srcRange = readSrcRange(block);
+    if (!srcRange) {
+      continue;
+    }
+    if (HEADING_TAGS.has(block.tagName)) {
+      heading = (block.textContent ?? '').trim();
+    }
+    // An atom block (diagram, math, front matter) is offered as ONE candidate and
+    // never descended into: its inner DOM is regenerated asynchronously
+    // (mermaidView/plantumlView renderAll) or is read-only, so a thread parked on
+    // a node inside it would be silently destroyed on the next render.
+    const nodes = isAtomBlock(block)
+      ? [block]
+      : block.matches(ANCHOR_CANDIDATE_SELECTOR)
+        ? [block, ...Array.from(block.querySelectorAll<HTMLElement>(ANCHOR_CANDIDATE_SELECTOR))]
+        : Array.from(block.querySelectorAll<HTMLElement>(ANCHOR_CANDIDATE_SELECTOR));
+    for (const el of nodes) {
+      const ownRange = readSrcRange(el) ?? srcRange;
+      candidates.push({
+        el,
+        text: el.textContent ?? '',
+        line: ownRange.start,
+        lineEnd: ownRange.end,
+        heading,
+        depth: depthWithin(content, el),
+      });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Req 23 US-23.4: text of the nearest heading at or above `el`, recorded with a
+ * comment so tier 2 can tell two structurally identical nodes in different
+ * sections apart. '' when nothing precedes it.
+ */
+export function nearestHeadingBefore(content: HTMLElement, el: HTMLElement): string {
+  const block = el === content ? null : topLevelBlockOf(content, el);
+  if (!block) {
+    // A whole-document anchor (or a node outside any block) sits under no
+    // heading. Walking on would return the LAST heading in the file — a
+    // tie-breaker pointing at a section far below the comment.
+    return '';
+  }
+  let heading = '';
+  for (const child of Array.from(content.children) as HTMLElement[]) {
+    // A heading is its own nearest heading — the same rule anchorCandidates
+    // applies, so a recorded value and a candidate value stay comparable. The
+    // same "skip blocks with no source range" filter is applied for the same
+    // reason: a heading anchorCandidates cannot see must not be recorded here.
+    if (HEADING_TAGS.has(child.tagName) && readSrcRange(child)) {
+      heading = (child.textContent ?? '').trim();
+    }
+    if (child === block) {
+      break;
+    }
+  }
+  return heading;
 }
 
 function classifyBlockType(el: HTMLElement): string {
