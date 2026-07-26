@@ -32,6 +32,7 @@ import {
 } from './block-map';
 import { ANCHOR_REEVAL_DEBOUNCE_MS, COMMENT_ANCHOR_STATE_ATTR } from './constants';
 import type { VsCodeApi } from './vscode-api';
+import type { CommentStatus, CommentSyncReply } from '../../src/shared/messages';
 
 /**
  * Where a thread currently sits. Runtime-derived and orthogonal to the
@@ -56,6 +57,14 @@ export interface ThreadAnchor {
   author: string;
   /** ISO-8601 creation timestamp from the host; the panel orders newest-first by it. */
   createdAt: string;
+  /**
+   * US-23.3's Open/Resolved/Closed axis, kept up to date by `syncThread` —
+   * orthogonal to `state` (anchor resolution) below. Always 'Open' until
+   * US-23.3 ships (no code path writes a status-change line yet).
+   */
+  status: CommentStatus;
+  /** US-23.2: replies under this thread, in append order — what the popover renders. */
+  replies: CommentSyncReply[];
   state: AnchorState;
   /**
    * The node this thread resolved to last pass. Session-only and never
@@ -72,6 +81,30 @@ export type ThreadAnchorSeed = Omit<ThreadAnchor, 'state' | 'carrier'>;
 export interface CommentResolveController {
   /** Record a freshly created thread so later renders can re-resolve it (US-23.1 hands this over). */
   register(seed: ThreadAnchorSeed): void;
+  /**
+   * US-23.2: seed or refresh a thread from a `commentThreadsSync` push. A
+   * threadId not yet known is registered fresh (this session never created or
+   * saw it — e.g. persisted from a previous session, or reached from the
+   * native `vscode.comments` UI); an already-known thread only has its
+   * status/replies refreshed — anchor resolution (position/state/carrier) is
+   * this session's own business and is never overwritten by a sync.
+   */
+  syncThread(seed: ThreadAnchorSeed): void;
+  /**
+   * US-23.2: reconcile the whole registry to one host snapshot — apply every
+   * seed AND drop every thread absent from it, so a thread deleted host-side
+   * (from this popover, from a second panel, or from the native
+   * `vscode.comments` UI) stops keeping its gutter pin, its highlight and a
+   * re-openable popover for the rest of the session.
+   *
+   * Batched deliberately: one resolve + one change notification for the whole
+   * snapshot. Calling `syncThread` per thread re-resolves and fans out once PER
+   * THREAD, and the host pushes a fresh snapshot per anchor update — which made
+   * a single edit that moved M threads cost M×N pin/highlight rebuilds.
+   *
+   * Returns the pruned threadIds so the caller can drop dependent UI.
+   */
+  syncAll(seeds: ThreadAnchorSeed[]): string[];
   /** Re-run the tiers for every thread once the document has settled. */
   refresh(): void;
   /**
@@ -85,6 +118,12 @@ export interface CommentResolveController {
    * "Unresolved location" panel that renders these is its own story.
    */
   floatingThreads(): ThreadAnchor[];
+  /**
+   * US-23.2: every currently-registered thread (any anchor state) — the read
+   * model the gutter pins and the highlight overlay build from. Not sorted or
+   * filtered; callers pick what they need (e.g. excluding a Closed status).
+   */
+  allThreads(): ThreadAnchor[];
   /** Manual re-attachment of a floating thread onto `el` (the panel's drag/picker entry point). */
   reattach(threadId: string, el: HTMLElement): boolean;
   /** Current resolution of a thread — the read model for tests and later UI stories. */
@@ -306,17 +345,71 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     }
   }
 
+  /**
+   * Anchor resolution (position/state/carrier) stays this session's own — a sync
+   * only ever refreshes the mutable, host-owned metadata.
+   */
+  function refreshFromSeed(existing: ThreadAnchor, seed: ThreadAnchorSeed): void {
+    existing.status = seed.status;
+    existing.replies = seed.replies;
+    existing.body = seed.body;
+    existing.author = seed.author;
+    existing.createdAt = seed.createdAt;
+  }
+
+  /** Shared by `register` and `syncThread`'s "not seen before" branch. */
+  function registerSeed(seed: ThreadAnchorSeed): void {
+    threads.set(seed.threadId, { ...seed, state: 'exact' });
+    // Resolve now so the new thread is stamped immediately, and drop any
+    // pending pass — it would re-resolve the same DOM generation a second time
+    // and post duplicate updates for every other thread.
+    cancelPending();
+    resolveAll();
+    // A brand-new thread never changes state on its first pass, so resolveAll
+    // posts nothing — but the panel's count still has to account for it.
+    notifyChanged();
+  }
+
   return {
     register(seed): void {
-      threads.set(seed.threadId, { ...seed, state: 'exact' });
-      // Resolve now so the new thread is stamped immediately, and drop any
-      // pending pass — it would re-resolve the same DOM generation a second time
-      // and post duplicate updates for every other thread.
-      cancelPending();
-      resolveAll();
-      // A brand-new thread never changes state on its first pass, so resolveAll
-      // posts nothing — but the panel's count still has to account for it.
+      registerSeed(seed);
+    },
+    syncThread(seed): void {
+      const existing = threads.get(seed.threadId);
+      if (!existing) {
+        registerSeed(seed);
+        return;
+      }
+      refreshFromSeed(existing, seed);
       notifyChanged();
+    },
+    syncAll(seeds): string[] {
+      const keep = new Set(seeds.map((s) => s.threadId));
+      const pruned: string[] = [];
+      for (const threadId of Array.from(threads.keys())) {
+        if (!keep.has(threadId)) {
+          threads.delete(threadId);
+          pruned.push(threadId);
+        }
+      }
+      let seeded = false;
+      for (const seed of seeds) {
+        const existing = threads.get(seed.threadId);
+        if (existing) {
+          refreshFromSeed(existing, seed);
+        } else {
+          threads.set(seed.threadId, { ...seed, state: 'exact' });
+          seeded = true;
+        }
+      }
+      if (seeded) {
+        // Only a newly seeded thread needs the tiers run; a metadata-only
+        // refresh leaves every anchor exactly where the last pass put it.
+        cancelPending();
+        resolveAll();
+      }
+      notifyChanged();
+      return pruned;
     },
     refresh(): void {
       cancelPending();
@@ -331,6 +424,9 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       return Array.from(threads.values())
         .filter((anchor) => anchor.state === 'floating')
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    },
+    allThreads(): ThreadAnchor[] {
+      return Array.from(threads.values());
     },
     reattach(threadId, el): boolean {
       const anchor = threads.get(threadId);

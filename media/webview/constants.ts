@@ -176,3 +176,33 @@ export const COMMENT_PANEL_REATTACH_SUGGESTIONS = 3;
 
 /** Characters of recorded/candidate text a one-line snippet keeps before eliding. */
 export const COMMENT_PANEL_SNIPPET_CHARS = 60;
+
+// --- Req 23 US-23.2: gutter pins, thread popover, inline highlight overlay ---
+
+/**
+ * CSS Custom Highlight API registration name for the comment-anchor overlay —
+ * a 4th independent name alongside search.ts's 'search-match'/'search-current'
+ * and select-highlight.ts's 'select-match', so an active comment highlight and
+ * an active search-match highlight render as visually distinct, non-overriding
+ * layers (design handoff: "one overlay technique, two independent registrations").
+ */
+export const COMMENT_HIGHLIGHT_NAME = 'comment-anchor';
+
+/**
+ * Gutter pins on lines within this many BLANK lines of each other collapse
+ * into one "+N" cluster marker (design handoff: "Ln 7/9/11 sit inside the
+ * cluster window"). A blank-line gap of 1 (i.e. consecutive or one blank line
+ * apart) still clusters; two or more blank lines apart does not.
+ */
+export const COMMENT_GUTTER_CLUSTER_BLANK_GAP = 1;
+
+/** DOM class for one gutter pin (single thread or resolved-muted). */
+export const COMMENT_PIN_CLASS = 'comment-gutter-pin';
+/** DOM class for a collapsed "+N" cluster pin. */
+export const COMMENT_PIN_CLUSTER_CLASS = 'comment-gutter-pin-cluster';
+/** DOM class for the thread popover, mounted on `document.body` (comment-panel.ts convention). */
+export const COMMENT_POPOVER_CLASS = 'comment-popover';
+/** DOM class for the popover's reply `<textarea>` — native field undo, not the document's (US-23.6 AC2). */
+export const COMMENT_REPLY_INPUT_CLASS = 'comment-popover-reply-input';
+/** DOM class for a delete-confirmation dialog, mounted on `document.body`. */
+export const COMMENT_DELETE_CONFIRM_CLASS = 'comment-delete-confirm';

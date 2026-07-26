@@ -68,6 +68,16 @@
         "command": "orcaEditor.toggleTableFitMode",
         "title": "Toggle Table Fit Width",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.replyComment",
+        "title": "Reply to Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.deleteComment",
+        "title": "Delete Comment Thread",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
@@ -85,6 +95,14 @@
         {
           "command": "orcaEditor.openToSide",
           "when": "editorLangId == markdown"
+        },
+        {
+          "command": "orcaEditor.replyComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.deleteComment",
+          "when": "false"
         }
       ],
       "editor/title": [
@@ -113,6 +131,18 @@
           "command": "orcaEditor.open",
           "when": "resourceExtname =~ /\\.(md|markdown)$/",
           "group": "navigation@100"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "orcaEditor.replyComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.deleteComment",
+          "group": "inline@2",
+          "when": "commentController == orcaEditor.comments"
         }
       ]
     },

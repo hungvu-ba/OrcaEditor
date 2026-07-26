@@ -3934,3 +3934,497 @@ body[class*='reading-mode-'] .comment-composer-input {
   color: var(--rp-fg);
   border-color: var(--rp-border);
 }
+
+/* --- Req 23 US-23.2: comment highlight overlay ------------------------------
+ * CSS Custom Highlight API, same mechanism as search-match/select-match above
+ * — a 4th, independent registration so an active comment highlight and an
+ * active search-match highlight never mix or override one another. Fixed
+ * violet (not a --vscode-* var, matching the design handoff — no theme token
+ * maps to this hue), deliberately far from the amber find uses. */
+::highlight(comment-anchor) {
+  background-color: rgba(130, 110, 220, 0.22);
+}
+
+/* --- Req 23 US-23.2: gutter pins ---------------------------------------------
+ * A lane immediately left of #content, independent of gutter.ts's numbered
+ * line gutter (a separate lane, own reservation) and of the showLineNumbers
+ * setting — pins show regardless of it. Reserved only while the document has
+ * at least one Open/Resolved thread (body.comment-gutter-active). */
+body.comment-gutter-active {
+  padding-left: 60px; /* 26px base + 34px pin lane */
+}
+body.comment-gutter-active #toolbar {
+  margin-left: -60px;
+  padding-left: var(--toolbar-edge-pad);
+}
+body.comment-gutter-active.md-line-numbers {
+  padding-left: 132px; /* 26 + 34 (pins) + 56 (numbers) + 16 (gap) */
+}
+body.comment-gutter-active.md-line-numbers #toolbar {
+  margin-left: -132px;
+  padding-left: var(--toolbar-edge-pad);
+}
+body.comment-gutter-active.md-line-numbers #line-gutter {
+  left: 60px; /* shifted right past the pin lane */
+}
+
+#comment-gutter {
+  position: absolute;
+  top: 0;
+  left: 26px;
+  width: 34px;
+}
+
+.comment-gutter-pin {
+  position: absolute;
+  left: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 14%, transparent);
+  color: var(--vscode-textLink-foreground, #005fb8);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.comment-gutter-pin:hover,
+.comment-gutter-pin:focus-visible {
+  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 26%, transparent);
+  outline: none;
+}
+
+.comment-gutter-pin.resolved {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: var(--vscode-descriptionForeground, #9d9d9d);
+}
+
+.comment-gutter-pin-cluster {
+  height: 18px;
+  border-radius: 9px;
+  box-shadow: 0 0 0 3px var(--vscode-editor-background);
+}
+
+.comment-gutter-pin-icon {
+  width: 9px;
+  height: 9px;
+  flex: none;
+}
+
+.comment-gutter-pin-count {
+  white-space: nowrap;
+}
+
+.comment-gutter-cluster-list {
+  z-index: 498;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px;
+  padding: 4px;
+}
+
+.comment-gutter-cluster-list[hidden] {
+  display: none;
+}
+
+.comment-gutter-cluster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.comment-gutter-cluster-row:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-gutter-cluster-row-line {
+  flex: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+
+.comment-gutter-cluster-row-snippet {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comment-gutter-cluster-row-status {
+  flex: none;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+/* --- Req 23 US-23.2: thread popover ------------------------------------------
+ * Same shell convention as .comment-composer — body-mounted, fixed, high
+ * z-index. Original comment carries no edit control; delete (own-authored
+ * content only) is the one destructive action, always confirmation-gated. */
+.comment-popover {
+  position: fixed;
+  z-index: 498;
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-width: calc(100vw - 8px);
+  max-height: 70vh;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  font-size: 12.5px;
+}
+
+.comment-popover[hidden] {
+  display: none;
+}
+
+.comment-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  flex: none;
+}
+
+.comment-popover-title {
+  font-weight: 650;
+}
+
+.comment-popover-line {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.comment-popover-status {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.comment-popover-status.status-open {
+  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 13%, transparent);
+  color: var(--vscode-textLink-foreground, #005fb8);
+}
+
+.comment-popover-status.status-resolved {
+  background: rgba(44, 122, 75, 0.14);
+  color: #2c7a4b;
+}
+
+.comment-popover-status.status-closed {
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--vscode-descriptionForeground, #8a8a8a);
+}
+
+.comment-popover-quote {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  flex: none;
+}
+
+.comment-popover-quote[hidden] {
+  display: none;
+}
+
+.comment-popover-quote-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.comment-popover-list {
+  overflow-y: auto;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.comment-popover-reply {
+  padding-left: 12px;
+  border-left: 2px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+}
+
+.comment-popover-person-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.comment-popover-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  color: var(--vscode-editor-background);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.comment-popover-author {
+  font-weight: 650;
+}
+
+.comment-popover-time {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.comment-popover-delete {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.comment-popover-delete:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* AC5's soft nudge: visible but inert on content the current author didn't write. */
+.comment-popover-delete:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.comment-popover-body-text {
+  padding-left: 26px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  /* The card is `overflow: hidden`, so one long unbroken token (a URL, a path)
+     would be clipped unreadably instead of wrapping. */
+  overflow-wrap: anywhere;
+}
+
+.comment-popover-reply-box {
+  flex: none;
+  padding: 10px 12px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comment-popover-reply-box[hidden] {
+  display: none;
+}
+
+.comment-popover-reply-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.comment-popover-reply-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+
+.comment-popover-reply-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.comment-popover-reply-cancel,
+.comment-popover-reply-submit {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-popover-reply-cancel {
+  padding: 4px 12px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+/* Re-opens the composer after Cancel collapsed it (AC6). */
+.comment-popover-reply-open {
+  flex: none;
+  margin: 0 12px 10px;
+  padding: 5px 12px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  background: none;
+  color: var(--vscode-textLink-foreground, var(--vscode-button-background));
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-popover-reply-open:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-reply-open[hidden] {
+  display: none;
+}
+
+.comment-popover-reply-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-reply-submit {
+  padding: 5px 13px;
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.comment-popover-reply-submit:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.comment-popover-reply-submit[aria-disabled='true'] {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.7));
+  cursor: not-allowed;
+}
+
+.comment-popover-closed-notice {
+  flex: none;
+  padding: 12px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.comment-popover-closed-notice[hidden] {
+  display: none;
+}
+
+/* --- Req 23 US-23.2: delete confirmation — nested inside .comment-popover so
+ * its own outside-mousedown dismissal never reads as "outside the popover"
+ * (see comment-popover.ts). Positioned independently via position: fixed. */
+.comment-delete-confirm {
+  position: fixed;
+  z-index: 499;
+  width: 240px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.4);
+  font-size: 12.5px;
+}
+
+.comment-delete-confirm[hidden] {
+  display: none;
+}
+
+.comment-delete-confirm-message {
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.comment-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.comment-delete-confirm-cancel,
+.comment-delete-confirm-delete {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 12px;
+}
+
+.comment-delete-confirm-cancel {
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-delete-confirm-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-delete-confirm-delete {
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-errorForeground, #f14c4c);
+  color: #ffffff;
+}
+
+/* --- Req 23 US-23.2: "Show Comments" toolbar toggle -------------------------
+ * Same latching-button convention as #toc-toggle/#comment-panel-toggle
+ * (toolbar.ts): a plain `.active` class toggle read from `aria-pressed`. */
+#comment-highlight-toggle.active {
+  background: color-mix(in srgb, rgba(130, 110, 220, 1) 14%, transparent);
+  color: rgb(130, 110, 220);
+}
+
+/* US-19.11: floating comment chrome follows the reading palette like every
+ * other popup, rather than staying on the VS Code theme tokens. */
+body[class*='reading-mode-'] .comment-popover,
+body[class*='reading-mode-'] .comment-delete-confirm,
+body[class*='reading-mode-'] .comment-gutter-cluster-list {
+  background: var(--rp-widget-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+
+body[class*='reading-mode-'] .comment-popover-reply-input {
+  background: var(--rp-elev-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}

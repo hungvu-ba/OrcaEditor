@@ -383,3 +383,18 @@ export function driveMismatchHint(customPathNorm: string, workspacePathNorm: str
 export function sameDocumentUri(aStr: string, bStr: string, caseInsensitive: boolean): boolean {
   return caseInsensitive ? aStr.toLowerCase() === bStr.toLowerCase() : aStr === bStr;
 }
+
+/**
+ * Canonical form of a document `Uri.toString()` for use as a persisted STORAGE
+ * KEY (Req 23 US-23.2's per-file "Show Comments" flag in `workspaceState`).
+ *
+ * `sameDocumentUri` answers "are these the same document?" but a key needs one
+ * stable string, so the same folding is applied here up-front. NFC as well as
+ * case: a name typed on macOS (NFD) and the same name on Windows (NFC) are
+ * different strings, so keying on the raw uri silently wrote the flag under one
+ * key and read it back under another (CLAUDE.md's cross-platform trap).
+ */
+export function documentStateKey(uriStr: string, caseInsensitive: boolean): string {
+  const nfc = uriStr.normalize('NFC');
+  return caseInsensitive ? nfc.toLowerCase() : nfc;
+}

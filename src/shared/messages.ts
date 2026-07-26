@@ -117,6 +117,14 @@ export interface InitConfig {
    */
   commentAuthorName: string;
   /**
+   * Req 23 US-23.2: the "Show Comments" toolbar toggle's persisted state for
+   * THIS file, read from `context.workspaceState` (keyed by docUri) — the
+   * first user of `workspaceState` in this codebase. Defaults to off until the
+   * Author first turns it on for this file (gutter pins always show regardless
+   * of this flag; only the inline anchor-range highlight is gated by it).
+   */
+  commentHighlightOn: boolean;
+  /**
    * US-2.8: webview URI of the lazily-loaded PlantUML engine bundle
    * (`dist/webview/plantuml-engine.js`). Resolved host-side because the webview
    * cannot call `asWebviewUri` itself.
@@ -248,6 +256,55 @@ export interface EntitySuggestion {
 export interface NamespaceSummary {
   name: string;
   count: number;
+}
+
+/**
+ * Req 23 US-23.3's Open/Resolved/Closed axis, needed here (not just in
+ * `sidecar-format.ts`) because `CommentSyncThread` below crosses the wire.
+ * Structurally identical to `sidecar-format.ts`'s own `CommentStatus` — kept as
+ * a separate literal union deliberately, so this shared wire-format module has
+ * no import into a host-only file (per this file's own single-source-of-truth
+ * role). US-23.3 is unbuilt, so every thread reports 'Open' today; the type
+ * exists so US-23.2's gating logic (reply blocked while Closed) is written
+ * against the real shape rather than a hardcoded 'Open'.
+ */
+export type CommentStatus = 'Open' | 'Resolved' | 'Closed';
+
+/** Req 23 US-23.2: one reply, as carried in a `commentThreadsSync` snapshot. */
+export interface CommentSyncReply {
+  /** Durable sidecar id — what a later `deleteComment.targetReplyId` names to remove just this reply. */
+  id: string;
+  author: string;
+  timestamp: string;
+  body: string;
+}
+
+/**
+ * Req 23 US-23.2: one thread's full state, pushed on load and after every
+ * mutation — the bridge that lets the webview pin/highlight/reply to a thread
+ * it did not itself create this session (one that was persisted by a previous
+ * session, or created/replied-to from the native `vscode.comments` UI).
+ */
+export interface CommentSyncThread {
+  /**
+   * The key the webview must echo back in `replyToComment`/`deleteComment` —
+   * mirrors the host's own registry key: a webview-minted threadId for a
+   * thread created this session, the durable sidecar comment id for one
+   * loaded from disk.
+   */
+  threadId: string;
+  status: CommentStatus;
+  author: string;
+  timestamp: string;
+  body: string;
+  /** US-23.4 tier 2 snapshot — recorded at creation, only used to seed a thread the webview has not resolved itself yet. */
+  recordedText: string;
+  /** Character offsets WITHIN `recordedText` — the anchor's own quote, and what places it precisely inside whatever node tier 2 matches it to. */
+  offsetStart: number;
+  offsetEnd: number;
+  lastKnownLine: number;
+  nearestHeading: string;
+  replies: CommentSyncReply[];
 }
 
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
@@ -414,7 +471,33 @@ export type WebviewToHost =
       anchorId: string;
       line: number;
       state: 'exact' | 'approximate' | 'floating';
-    };
+    }
+  /**
+   * Req 23 US-23.2: append a reply under an existing thread. `threadId` is
+   * whatever key the host registered the thread under — the webview-minted
+   * handle for a thread created this session, or the durable sidecar id echoed
+   * back by `commentThreadsSync` for one loaded from disk. Rejected (empty/
+   * whitespace body, unknown thread, thread Closed) without appending a sidecar
+   * line — the host validates since it alone knows live thread status.
+   */
+  | { type: 'replyToComment'; requestId: number; docUri: string; threadId: string; body: string }
+  /**
+   * Req 23 US-23.2 PO decision: delete a thread or one reply under it — a
+   * confirmation-gated, cascading tombstone (US-23.5's `delete` line), never a
+   * file rewrite (US-23.6). `targetReplyId` absent deletes the WHOLE thread
+   * (cascading to every reply); present deletes only that one reply, leaving the
+   * thread and its other replies intact. Enforced host-side as a soft,
+   * non-authenticated author-match nudge (`orcaEditor.comments.authorName`),
+   * same convention as US-23.3's Close-gating.
+   */
+  | { type: 'deleteComment'; requestId: number; docUri: string; threadId: string; targetReplyId?: string }
+  /**
+   * Req 23 US-23.2: the "Show Comments" toolbar toggle changed for THIS file —
+   * persisted host-side via `context.workspaceState`, keyed by `docUri`. Purely
+   * a per-file UI preference; unlike `zenChanged`/`readingModeChanged` it is
+   * NOT broadcast to other panels (a per-file setting, not a global one).
+   */
+  | { type: 'commentHighlightToggled'; docUri: string; on: boolean };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -516,4 +599,22 @@ export type HostToWebview =
        */
       author?: string;
       timestamp?: string;
-    };
+    }
+  /**
+   * Req 23 US-23.2: full per-document thread snapshot, pushed once the webview
+   * has a document loaded (right after the sidecar load resolves) and again
+   * after every create/reply/delete/anchor-update. `docUri` guards a message
+   * that arrives after a tab switch, same convention as `init`.
+   */
+  | { type: 'commentThreadsSync'; docUri: string; threads: CommentSyncThread[] }
+  /**
+   * Req 23 US-23.2: reply to `replyToComment`. `ok: false` carries the reason in
+   * `error` (empty body, unknown thread, thread Closed); on success `replyId`/
+   * `author`/`timestamp` are what a later `deleteComment.targetReplyId` and the
+   * popover's own-authorship check need — the host mints the reply's durable id
+   * and re-resolves the author setting, so the webview's own guess must not be
+   * trusted for either.
+   */
+  | { type: 'replyResult'; requestId: number; ok: boolean; error?: string; replyId?: string; author?: string; timestamp?: string }
+  /** Req 23 US-23.2: reply to `deleteComment`. `ok: false` carries the refusal reason (unknown target, author mismatch). */
+  | { type: 'deleteCommentResult'; requestId: number; ok: boolean; error?: string };

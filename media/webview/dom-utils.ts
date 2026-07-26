@@ -283,6 +283,59 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
 }
 
 /**
+ * Inverse of `getOffsetWithin`: maps a `[start, end)` character range measured
+ * in `root`'s `Range.toString()` space back to a live DOM Range.
+ *
+ * Deliberately walks EVERY Text descendant in document order with no filtering
+ * and no separator insertion, because that is exactly what `Range.toString()`
+ * counts. `match-utils.ts`'s `collectHaystack`/`rangeAt` look interchangeable
+ * but are NOT: that pair inserts '\n' between block elements and rejects
+ * `.katex`/script/style text, so feeding it a `getOffsetWithin` offset washes
+ * the wrong characters — early by one per block boundary crossed, late by the
+ * length of KaTeX's hidden MathML/annotation text. Use that pair for search
+ * (which needs block boundaries) and this one for a stored character anchor.
+ *
+ * Offsets are clamped rather than throwing; returns null when no range can be
+ * built (no text nodes, or a collapsed result).
+ */
+export function rangeWithinOffsets(root: Element, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let consumed = 0;
+  let startNode: Text | undefined;
+  let startOffset = 0;
+  let endNode: Text | undefined;
+  let endOffset = 0;
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    const node = n as Text;
+    const len = node.data.length;
+    if (startNode === undefined && start <= consumed + len) {
+      startNode = node;
+      startOffset = Math.max(0, start - consumed);
+    }
+    if (end <= consumed + len) {
+      endNode = node;
+      endOffset = Math.max(0, end - consumed);
+      break;
+    }
+    consumed += len;
+    endNode = node;
+    endOffset = len;
+  }
+  if (!startNode || !endNode) {
+    return null;
+  }
+  const range = document.createRange();
+  try {
+    range.setStart(startNode, Math.min(startOffset, startNode.data.length));
+    range.setEnd(endNode, Math.min(endOffset, endNode.data.length));
+  } catch {
+    return null;
+  }
+  return range.collapsed ? null : range;
+}
+
+/**
  * Text from the start of `block` up to `range`'s start (i.e. everything left of
  * the caret within `block`). Shared reader for adjacency checks — e.g. the paste
  * smart-gap in main.ts needs the single char immediately before the caret

@@ -55,9 +55,11 @@ import { initImageZoom } from './image-zoom';
 import {
   initToolbar,
   syncCommentPanelButton,
+  syncCommentHighlightButton,
   syncTocButton,
   syncReadingButtons,
   toggleInlineCode,
+  toggleCommentHighlight,
   isPopoverOpen,
   openCodeLangSwitcher,
   initBrokenRefBadge,
@@ -75,6 +77,9 @@ import { initEntityScope } from './entity-scope';
 import { initCommentMenu } from './comment-menu';
 import { initCommentResolve } from './comment-resolve';
 import { initCommentPanel } from './comment-panel';
+import { initCommentHighlight } from './comment-highlight';
+import { initCommentPopover } from './comment-popover';
+import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
@@ -231,6 +236,17 @@ const commentResolve = initCommentResolve(content, vscode);
 // Req 23 US-23.4 AC4: where a thread lands once all four tiers have failed, and
 // the two equal routes (drag, Re-attach… picker / keyboard) back into the text.
 const commentPanel = initCommentPanel(content, commentResolve);
+// Req 23 US-23.2: the "Show Comments" inline highlight overlay — created
+// before the popover (which needs it to light up the open thread's range) and
+// before the toolbar (whose button toggles it).
+const commentHighlight = initCommentHighlight(commentResolve);
+// Req 23 US-23.2: the thread popover — opened from a gutter pin (or a cluster
+// row). Created before the gutter, which needs its `open` as a callback.
+const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlight);
+// Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
+const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
+  commentPopover.open(threadId, rect)
+);
 // The toolbar button carries the floating count, so it has to follow the
 // resolver even while the panel itself is closed.
 document.addEventListener('orca-comment-floating-changed', () => syncCommentPanelButton());
@@ -247,6 +263,8 @@ initToolbar(content, toolbarEl, {
   dom,
   toc,
   commentPanel,
+  commentHighlight,
+  onCommentHighlightToggle: (on) => postToHost({ type: 'commentHighlightToggled', docUri: currentDocUri, on }),
   readability,
   insertMarkdown: insertMarkdownAtCaret,
 });
@@ -355,6 +373,8 @@ syncToolbarHeightVar();
 
 /** Markdown hiện tại mà webview đã biết (đã render hoặc đã gửi lên). */
 let currentText = '';
+/** Req 23 US-23.2: `document.uri.toString()` echoed back on `commentHighlightToggled`/`replyToComment`/`deleteComment`. */
+let currentDocUri = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
 /** Block Map (HLR mục 18, US-18.1) — chỉ mục block cấp cao nhất, dựng lại ở cuối mỗi renderDocument(). */
 let blockMap: BlockEntry[] = [];
@@ -468,6 +488,14 @@ window.addEventListener('message', (event) => {
       commentMenu.setDocUri(msg.docUri);
       commentResolve.setDocUri(msg.docUri);
       commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
+      // Req 23 US-23.2: the popover echoes docUri back on reply/delete, and
+      // needs the author name for its own-authorship delete gating.
+      currentDocUri = msg.docUri;
+      commentPopover.setDocUri(msg.docUri);
+      commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
+      // Req 23 US-23.2: per-file persisted "Show Comments" state.
+      commentHighlight.setToggle(cfg.commentHighlightOn === true);
+      syncCommentHighlightButton();
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       // US-19.25: seed Fit-mode TRƯỚC render đầu để bảng dựng thẳng ở fit-mode
@@ -535,6 +563,48 @@ window.addEventListener('message', (event) => {
       // Req 23 US-23.1: releases the composer's in-flight guard; a refusal is
       // surfaced to the Reviewer rather than failing silently.
       commentMenu.notifyCreateResult(msg.requestId, msg.ok, msg.error, msg.author, msg.timestamp);
+      break;
+    }
+    case 'commentThreadsSync': {
+      // Req 23 US-23.2: full per-document thread snapshot — the bridge that
+      // lets a thread this session did not itself mint (persisted from a
+      // previous session, or reached from the native `vscode.comments` UI)
+      // still get a gutter pin/highlight/popover. A thread already known to
+      // the resolver only has its status/replies refreshed; a new one is
+      // registered with `anchorId: ''` so the very next pass starts at tier 2
+      // (US-23.4's own reload rule — a fresh parse has no live id to name).
+      if (msg.docUri !== currentDocUri) {
+        break;
+      }
+      // `syncAll`, not `syncThread` per thread: the snapshot is authoritative, so
+      // a thread missing from it was deleted host-side and must lose its pin,
+      // its highlight and its popover — and the whole batch costs one resolve.
+      const pruned = commentResolve.syncAll(
+        msg.threads.map((t) => ({
+          threadId: t.threadId,
+          anchorId: '',
+          offsetStart: t.offsetStart,
+          offsetEnd: t.offsetEnd,
+          recordedText: t.recordedText,
+          lastKnownLine: t.lastKnownLine,
+          nearestHeading: t.nearestHeading,
+          body: t.body,
+          author: t.author,
+          createdAt: t.timestamp,
+          status: t.status,
+          replies: t.replies,
+        }))
+      );
+      commentPopover.forgetThreads(pruned);
+      commentGutter.refresh();
+      break;
+    }
+    case 'replyResult': {
+      commentPopover.notifyReplyResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'deleteCommentResult': {
+      commentPopover.notifyDeleteResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'namespaceListResult': {
@@ -763,6 +833,14 @@ function renderDocument(markdown: string): void {
   // re-run every comment through the tiers once it settles, so a thread whose
   // node or text reappeared is promoted back out of the floating list.
   commentResolve.refresh();
+  // Req 23 US-23.2: #content was just rebuilt from scratch — every anchor's
+  // carrier element reference is stale until the debounced re-resolution above
+  // runs, but the pins/highlight need to reflect whatever the resolver knows
+  // RIGHT NOW too (same "refresh after rebuild" convention as search.refresh()/
+  // selectHighlight.refresh() above), so a resolve-driven refresh doesn't have
+  // to be the only path — `resolve.onChange` still covers the debounced pass.
+  commentGutter.refresh();
+  commentHighlight.refresh();
 }
 
 /**
@@ -1871,6 +1949,17 @@ content.addEventListener('keydown', (e) => {
   if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
     e.preventDefault();
     jumpHeading(e.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  // Req 23 US-23.2: Alt+Shift+C toggles "Show Comments" (design handoff).
+  // `e.code`, not `e.key`: Option is a composition modifier on macOS, so
+  // Option+Shift+C reports `e.key === 'Ç'` there. Matching on `e.key` left the
+  // branch dead on macOS AND let the composed character fall through into
+  // `#content` — a document edit from a view-only toggle. The Alt+Arrow
+  // precedent above is layout-immune, so this is the first Alt+letter shortcut.
+  if (e.altKey && e.shiftKey && !mod && e.code === 'KeyC') {
+    e.preventDefault();
+    toggleCommentHighlight();
     return;
   }
   if (mod && !e.shiftKey && !e.altKey) {

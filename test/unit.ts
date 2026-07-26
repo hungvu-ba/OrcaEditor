@@ -38,16 +38,24 @@ import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { buildGroups } from '../media/webview/comment-gutter';
+import type { ThreadAnchor } from '../media/webview/comment-resolve';
 import {
   anchorUpdateRejection,
   commentThreadLine,
   createCommentRejection,
+  deleteRejection,
+  replyRejection,
   resolveCommentAuthor,
   type AnchorUpdateMessage,
   type CreateCommentMessage,
+  type DeleteCommentMessage,
+  type ReplyMessage,
 } from '../src/comments/comment-utils';
 import {
   buildCommentLine,
+  buildDeleteLine,
+  buildReplyLine,
   foldSidecarRecords,
   isSidecarName,
   mdNameForSidecar,
@@ -613,14 +621,14 @@ const toWebview: HostToWebview[] = [
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
-    commentAuthorName: 'hungvu',
+    commentAuthorName: 'hungvu', commentHighlightOn: false,
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
-    commentAuthorName: 'hungvu',
+    commentAuthorName: 'hungvu', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
@@ -1461,6 +1469,113 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     anchorUpdateRejection(update({ line: -1 }), 'file:///a.md') !== null);
   check('anchorUpdate: an unknown resolution state is refused',
     anchorUpdateRejection(update({ state: 'resolved' as AnchorUpdateMessage['state'] }), 'file:///a.md') !== null);
+}
+
+// --- Req 23 US-23.2: reply/delete validation + sidecar line shapes ----------
+{
+  const reply = (over: Partial<ReplyMessage> = {}): ReplyMessage => ({
+    type: 'replyToComment',
+    requestId: 1,
+    docUri: 'file:///a.md',
+    threadId: 'thread-1',
+    body: 'Fixed, please re-check.',
+    ...over,
+  });
+  check('reply: a well-formed reply to an Open thread is accepted',
+    replyRejection(reply(), 'file:///a.md', 'Open') === null);
+  check('reply: a reply to a Resolved thread is still accepted',
+    replyRejection(reply(), 'file:///a.md', 'Resolved') === null);
+  // AC: "Replying is blocked while the thread is Closed".
+  check('reply: a reply to a Closed thread is refused',
+    replyRejection(reply(), 'file:///a.md', 'Closed') !== null);
+  check('reply: an empty body is refused',
+    replyRejection(reply({ body: '' }), 'file:///a.md', 'Open') !== null);
+  check('reply: a whitespace-only body is refused',
+    replyRejection(reply({ body: '   \n\t ' }), 'file:///a.md', 'Open') !== null);
+  check('reply: a reply for another document is refused',
+    replyRejection(reply(), 'file:///b.md', 'Open') !== null);
+  check('reply: a reply naming no thread is refused',
+    replyRejection(reply({ threadId: '' }), 'file:///a.md', 'Open') !== null);
+  check('reply: a reply to an unknown thread is refused',
+    replyRejection(reply(), 'file:///a.md', undefined) !== null);
+
+  const del = (over: Partial<DeleteCommentMessage> = {}): DeleteCommentMessage => ({
+    type: 'deleteComment',
+    requestId: 1,
+    docUri: 'file:///a.md',
+    threadId: 'thread-1',
+    ...over,
+  });
+  check('delete: the content author may delete their own content',
+    deleteRejection(del(), 'file:///a.md', { author: 'hungvu' }, 'hungvu') === null);
+  // The soft, non-authenticated nudge — not a security boundary (US-23.3 AC6).
+  check('delete: another author is refused',
+    deleteRejection(del(), 'file:///a.md', { author: 'someone-else' }, 'hungvu') !== null);
+  // The same name typed on macOS (NFD) and Windows (NFC) is one person — the
+  // two literals below are genuinely different strings before normalization.
+  check('delete: the NFD and NFC author names are genuinely different strings',
+    'Nguyễn'.normalize('NFD') !== 'Nguyễn'.normalize('NFC'));
+  check('delete: author matching is NFC-normalized',
+    deleteRejection(del(), 'file:///a.md', { author: 'Nguyễn'.normalize('NFD') }, 'Nguyễn'.normalize('NFC')) === null);
+  check('delete: a vanished target is refused',
+    deleteRejection(del(), 'file:///a.md', undefined, 'hungvu') !== null);
+  check('delete: a delete for another document is refused',
+    deleteRejection(del(), 'file:///b.md', { author: 'hungvu' }, 'hungvu') !== null);
+  check('delete: a delete naming no thread is refused',
+    deleteRejection(del({ threadId: '' }), 'file:///a.md', { author: 'hungvu' }, 'hungvu') !== null);
+
+  // The field sets are frozen by the requirement's "Sidecar Schema Decision"
+  // section — a drift here is a data-format break, not a cosmetic one.
+  const replyLine = buildReplyLine({
+    id: 'e8a2f4d1',
+    parentCommentId: 'b3f1c2a0',
+    author: 'otheruser',
+    timestamp: '2026-07-26T14:03:11.900Z',
+    body: 'Fixed, please re-check.',
+  });
+  check('reply line: carries exactly the declared field set',
+    JSON.stringify(Object.keys(replyLine).sort()) ===
+      JSON.stringify(['author', 'body', 'id', 'parent_comment_id', 'schema_version', 'timestamp', 'type'].sort()));
+  check('reply line: type is "reply" and it names its parent',
+    replyLine.type === 'reply' && replyLine.parent_comment_id === 'b3f1c2a0');
+
+  const deleteLine = buildDeleteLine({
+    id: '4a71e990',
+    targetId: 'e8a2f4d1',
+    author: 'otheruser',
+    timestamp: '2026-07-26T16:05:00.000Z',
+  });
+  check('delete line: carries exactly the declared field set',
+    JSON.stringify(Object.keys(deleteLine).sort()) ===
+      JSON.stringify(['author', 'id', 'schema_version', 'target_id', 'timestamp', 'type'].sort()));
+  check('delete line: type is "delete" and it names its target',
+    deleteLine.type === 'delete' && deleteLine.target_id === 'e8a2f4d1');
+}
+
+// --- Req 23 US-23.2 AC1: gutter-pin line clustering -------------------------
+{
+  const at = (line: number, threadId = `t${line}`): ThreadAnchor =>
+    ({ threadId, lastKnownLine: line, replies: [] }) as unknown as ThreadAnchor;
+  const lines = (groups: ThreadAnchor[][]): number[][] => groups.map((g) => g.map((a) => a.lastKnownLine));
+
+  check('pin cluster: one thread is its own group',
+    JSON.stringify(lines(buildGroups([at(3)]))) === JSON.stringify([[3]]));
+  // "within 1 blank line of each other" = a line gap of at most 2.
+  check('pin cluster: lines 2 apart (one blank line between) chain into one group',
+    JSON.stringify(lines(buildGroups([at(3), at(5), at(7)]))) === JSON.stringify([[3, 5, 7]]));
+  check('pin cluster: a 3-line gap starts a new group',
+    JSON.stringify(lines(buildGroups([at(3), at(6)]))) === JSON.stringify([[3], [6]]));
+  check('pin cluster: two threads on the SAME line are one group',
+    JSON.stringify(lines(buildGroups([at(4, 'a'), at(4, 'b')]))) === JSON.stringify([[4, 4]]));
+  check('pin cluster: input order does not matter',
+    JSON.stringify(lines(buildGroups([at(7), at(3), at(5)]))) === JSON.stringify([[3, 5, 7]]));
+  // Line 0 is `commentAnchorLine`'s "maps to no source line" fallback, NOT line
+  // zero: grouping those by value collapsed unrelated threads from opposite ends
+  // of the document onto one pin and left the others with no marker at all.
+  check('pin cluster: unknown-line (0) threads each keep their own group',
+    JSON.stringify(lines(buildGroups([at(0, 'a'), at(0, 'b')]))) === JSON.stringify([[0], [0]]));
+  check('pin cluster: an unknown-line thread never joins a real-line group',
+    JSON.stringify(lines(buildGroups([at(0, 'a'), at(1)]))) === JSON.stringify([[0], [1]]));
 }
 
 // --- Req 23 US-23.4 AC4: Re-attach... picker ranking ------------------------

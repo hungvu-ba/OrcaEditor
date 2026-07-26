@@ -17,6 +17,14 @@
 /** Priority tiers — higher wins. */
 export const ESCAPE_PRIORITY = {
   DRAG: 30,
+  /**
+   * A popover nested INSIDE another popover (Req 23 US-23.2's delete
+   * confirmation inside the comment thread card). Strictly above POPUP so
+   * Escape always resolves innermost-first: at equal priority the tie broke on
+   * registration order, so Escape closed the outer card — losing the reply
+   * draft — and which one won silently flipped as handlers were re-armed.
+   */
+  NESTED_POPUP: 25,
   POPUP: 20,
   CROSS_FILE: 15,
   ZEN: 10,
@@ -89,7 +97,11 @@ export interface PopoverDismiss {
  * via `onClose` — so the identical hide/guard/dispose boilerplate lives in ONE
  * place instead of being copied per popover.
  */
-export function initPopoverDismiss(popover: HTMLElement, onClose: () => void): PopoverDismiss {
+export function initPopoverDismiss(
+  popover: HTMLElement,
+  onClose: () => void,
+  priority: number = ESCAPE_PRIORITY.POPUP
+): PopoverDismiss {
   let escDisposable: Disposable | undefined;
   const api: PopoverDismiss = {
     get isOpen(): boolean {
@@ -97,7 +109,7 @@ export function initPopoverDismiss(popover: HTMLElement, onClose: () => void): P
     },
     arm(): void {
       escDisposable?.dispose();
-      escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.POPUP, () => {
+      escDisposable = registerEscapeHandler(priority, () => {
         if (popover.hidden) {
           return false;
         }

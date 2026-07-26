@@ -3,13 +3,20 @@
  * `vscode` import, so test/unit.ts can exercise them directly (commentController.ts
  * itself needs the VS Code runtime and cannot be imported there).
  */
-import type { WebviewToHost } from '../shared/messages';
+import type { CommentStatus, WebviewToHost } from '../shared/messages';
+import { sameAuthor } from './sidecar-format';
 
 /** A `createComment` message, narrowed out of the WebviewToHost union. */
 export type CreateCommentMessage = Extract<WebviewToHost, { type: 'createComment' }>;
 
 /** A `commentAnchorUpdate` message (US-23.4), narrowed out of the WebviewToHost union. */
 export type AnchorUpdateMessage = Extract<WebviewToHost, { type: 'commentAnchorUpdate' }>;
+
+/** A `replyToComment` message (US-23.2), narrowed out of the WebviewToHost union. */
+export type ReplyMessage = Extract<WebviewToHost, { type: 'replyToComment' }>;
+
+/** A `deleteComment` message (US-23.2), narrowed out of the WebviewToHost union. */
+export type DeleteCommentMessage = Extract<WebviewToHost, { type: 'deleteComment' }>;
 
 /** The anchor-resolution states US-23.4's tiers can produce. */
 const ANCHOR_STATES: readonly AnchorUpdateMessage['state'][] = ['exact', 'approximate', 'floating'];
@@ -104,6 +111,66 @@ export function anchorUpdateRejection(msg: AnchorUpdateMessage, docUri: string):
   }
   if (!ANCHOR_STATES.includes(msg.state)) {
     return 'This anchor update carries an unknown resolution state.';
+  }
+  return null;
+}
+
+/**
+ * Why a `replyToComment` request is refused, or null when valid (US-23.2). The
+ * thread's live status is passed in rather than read here — only
+ * `commentController.ts` has the live registry, so this stays the same
+ * pure-validator/thin-controller split `createCommentRejection` already
+ * establishes. `undefined` status means the named thread does not exist.
+ */
+export function replyRejection(msg: ReplyMessage, docUri: string, threadStatus: CommentStatus | undefined): string | null {
+  if (msg.docUri !== docUri) {
+    return 'This reply was written for a different document.';
+  }
+  if (msg.threadId === '') {
+    return 'This reply names no thread.';
+  }
+  if (msg.body.trim() === '') {
+    return 'A reply needs some text.';
+  }
+  if (threadStatus === undefined) {
+    return 'This comment thread no longer exists.';
+  }
+  // US-23.2 AC: replying is blocked while the thread is Closed (US-23.3) — the
+  // popover shows "this thread is closed" instead of a reply box. US-23.3 is
+  // unbuilt, so no code path writes a status-change line yet and every thread
+  // is 'Open' in practice; this branch exists so the gate is correct the
+  // moment that story starts producing 'Closed' threads, not retrofitted then.
+  if (threadStatus === 'Closed') {
+    return 'This thread is closed — reopen it before replying.';
+  }
+  return null;
+}
+
+/**
+ * Why a `deleteComment` request is refused, or null when valid (US-23.2 PO
+ * decision). `target` is the author string recorded on whatever this delete
+ * would remove (the thread's own comment, or one specific reply) — `undefined`
+ * means the named target no longer exists (already deleted, or never existed).
+ * The author-match check is a soft, non-authenticated UX nudge (same
+ * convention as US-23.3 AC6's Close-gating), never a security boundary.
+ */
+export function deleteRejection(
+  msg: DeleteCommentMessage,
+  docUri: string,
+  target: { author: string } | undefined,
+  currentAuthor: string
+): string | null {
+  if (msg.docUri !== docUri) {
+    return 'This delete was written for a different document.';
+  }
+  if (msg.threadId === '') {
+    return 'This delete names no thread.';
+  }
+  if (!target) {
+    return 'That comment or reply no longer exists.';
+  }
+  if (!sameAuthor(target.author, currentAuthor)) {
+    return 'Only the original author can delete this.';
   }
   return null;
 }

@@ -25,6 +25,7 @@ import {
 } from './list-ops';
 import { insertTable } from './table';
 import type { CommentPanelController } from './comment-panel';
+import type { CommentHighlightController } from './comment-highlight';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
 import { type ReadabilityController } from './readability';
@@ -48,6 +49,10 @@ export interface ToolbarContext {
   toc: TocController;
   /** Req 23 US-23.4 AC4: the "Unresolved location" panel this toolbar button opens. */
   commentPanel: CommentPanelController;
+  /** Req 23 US-23.2: the inline anchor-range highlight overlay this toolbar button toggles. */
+  commentHighlight: CommentHighlightController;
+  /** Req 23 US-23.2: persist the "Show Comments" toggle for this file (main.ts posts the host message). */
+  onCommentHighlightToggle: (on: boolean) => void;
   /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
   readability: ReadabilityController;
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
@@ -75,6 +80,11 @@ const TOC_ICON = svgIcon(
 const UNRESOLVED_COMMENT_ICON = svgIcon(
   `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>` +
     `<path d="M6.4 8.6l3.2-2.2M6.9 6.4L9.1 8.6" ${FMT_STROKE}/>`
+);
+
+/** Req 23 US-23.2: plain speech bubble — the "Show Comments" inline-highlight toggle. */
+const SHOW_COMMENTS_ICON = svgIcon(
+  `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>`
 );
 
 /** Icon Reading Mode (US-19.1): quyển sách mở — gợi chế độ đọc. */
@@ -333,6 +343,34 @@ function updateCommentPanelButton(): void {
 /** Called from main.ts whenever the floating set changes. */
 export function syncCommentPanelButton(): void {
   updateCommentPanelButton();
+}
+
+/**
+ * Req 23 US-23.2: "Show Comments" — latching toggle for the inline anchor-
+ * range highlight overlay. Gutter pins are unaffected by this toggle (always
+ * visible); only the CSS Custom Highlight wash is gated by it.
+ */
+function updateCommentHighlightButton(): void {
+  const button = document.getElementById('comment-highlight-toggle');
+  if (!button) {
+    return;
+  }
+  const on = ctx.commentHighlight.isOn();
+  button.setAttribute('aria-pressed', String(on));
+  button.classList.toggle('active', on);
+}
+
+/** Called from main.ts once the host's persisted per-file value has been applied. */
+export function syncCommentHighlightButton(): void {
+  updateCommentHighlightButton();
+}
+
+/** Shared by the toolbar button's click and the Alt+Shift+C shortcut (main.ts). */
+export function toggleCommentHighlight(): void {
+  const next = !ctx.commentHighlight.isOn();
+  ctx.commentHighlight.setToggle(next);
+  ctx.onCommentHighlightToggle(next);
+  updateCommentHighlightButton();
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -839,6 +877,16 @@ const toolbarItems: ToolbarItem[] = [
     // 23, not 22: 22 is reading-toggle's, the anchor for the whole right-aligned
     // group (see its comment) — sharing it would collapse the two together.
     collapsePriority: 23,
+  },
+  {
+    label: 'Show Comments',
+    icon: SHOW_COMMENTS_ICON,
+    title: 'Show Comments — Alt+Shift+C',
+    action: () => toggleCommentHighlight(),
+    id: 'comment-highlight-toggle',
+    // Display-only — must not sync/dirty the file (see ToolbarItem.viewOnly).
+    viewOnly: true,
+    collapsePriority: 24,
   },
 ];
 

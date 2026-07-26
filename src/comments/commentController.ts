@@ -22,13 +22,25 @@ import {
   anchorUpdateRejection,
   commentThreadLine,
   createCommentRejection,
+  deleteRejection,
+  replyRejection,
   resolveCommentAuthor,
   type AnchorUpdateMessage,
   type CreateCommentMessage,
+  type DeleteCommentMessage,
+  type ReplyMessage,
 } from './comment-utils';
 import { sameDocumentUri } from '../text-utils';
-import { buildCommentLine, sidecarBelongsToDocument, type SidecarThread } from './sidecar-format';
+import {
+  buildCommentLine,
+  buildDeleteLine,
+  buildReplyLine,
+  sidecarBelongsToDocument,
+  type CommentStatus,
+  type SidecarThread,
+} from './sidecar-format';
 import type { SidecarStore } from './sidecar-store';
+import type { CommentSyncThread } from '../shared/messages';
 
 /** The structural anchor a thread was created against (US-23.1; re-resolved by US-23.4). */
 export interface CommentAnchor {
@@ -85,6 +97,39 @@ export interface CommentSupport extends vscode.Disposable {
    * threads.
    */
   loadThreads(document: vscode.TextDocument): Promise<void>;
+  /**
+   * US-23.2: append a reply under `msg.threadId`. Validated against the
+   * thread's LIVE status (Closed blocks it) — `replyRejection` needs that,
+   * which only this registry has. Sidecar-append-then-native-update, same
+   * order as `createThread` (US-23.6: no `TextDocument` edit either way).
+   */
+  reply(
+    msg: ReplyMessage,
+    document: vscode.TextDocument
+  ): Promise<{ ok: true; replyId: string; author: string; timestamp: string } | { ok: false; error: string }>;
+  /**
+   * US-23.2 PO decision: delete a thread (cascading to every reply) or one
+   * reply within it, gated by a soft author-match nudge. A `delete` tombstone
+   * appended like every other action (US-23.6) — never a file rewrite.
+   */
+  deleteComment(
+    msg: DeleteCommentMessage,
+    document: vscode.TextDocument
+  ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * US-23.2: the full live snapshot `syncThreadsToWebview` pushes — the bridge
+   * that lets a thread the webview did not itself mint this session (loaded
+   * from the sidecar, or reached from the native `vscode.comments` UI) still
+   * get a gutter pin/highlight/popover.
+   */
+  listThreads(document: vscode.TextDocument): CommentSyncThread[];
+  /**
+   * US-23.2: reverse lookup from a native `vscode.CommentThread` (what a
+   * `comments/commentThread/context` command receives via its
+   * `vscode.CommentReply` argument) back to the registry key `reply()`/
+   * `deleteComment()` need — the native UI has no notion of this key at all.
+   */
+  threadIdFor(thread: vscode.CommentThread): string | undefined;
 }
 
 /** What a non-exact anchor reads as on the native thread (US-23.4 AC3/AC4). */
@@ -92,6 +137,23 @@ const ANCHOR_STATE_LABEL: Record<Exclude<AnchorUpdateMessage['state'], 'exact'>,
   approximate: 'Approximate location',
   floating: 'Unresolved location',
 };
+
+/**
+ * One `comment`/`reply` line turned into a native `vscode.Comment`. Hoisted out
+ * of `buildLoadedThread` (US-23.2) so `reply()`/`deleteComment()` build the
+ * exact same shape when they rebuild a thread's live `comments[]`, instead of
+ * a second copy of the timestamp-guard drifting from this one.
+ */
+function asNativeComment(source: { author: string; timestamp: string; body: string }): vscode.Comment {
+  return {
+    body: new vscode.MarkdownString(source.body),
+    mode: vscode.CommentMode.Preview,
+    author: { name: source.author },
+    // An unparseable timestamp would make `new Date` Invalid Date, which VS Code
+    // renders as garbage — drop it rather than show that.
+    timestamp: Number.isNaN(Date.parse(source.timestamp)) ? undefined : new Date(source.timestamp),
+  };
+}
 
 /**
  * US-23.5 AC4: one persisted thread rebuilt as a native `CommentThread` whose
@@ -110,14 +172,6 @@ function buildLoadedThread(
    */
   state: 'approximate' | 'floating'
 ): vscode.CommentThread {
-  const asComment = (source: { author: string; timestamp: string; body: string }): vscode.Comment => ({
-    body: new vscode.MarkdownString(source.body),
-    mode: vscode.CommentMode.Preview,
-    author: { name: source.author },
-    // An unparseable timestamp would make `new Date` Invalid Date, which VS Code
-    // renders as garbage — drop it rather than show that.
-    timestamp: Number.isNaN(Date.parse(source.timestamp)) ? undefined : new Date(source.timestamp),
-  });
   // last_known_line is 1-based and can sit past the end of a document that has
   // been cut down since the comment was written.
   const line = Math.min(
@@ -125,8 +179,8 @@ function buildLoadedThread(
     Math.max(0, document.lineCount - 1)
   );
   const thread = controller.createCommentThread(document.uri, new vscode.Range(line, 0, line, 0), [
-    asComment(persisted.comment),
-    ...persisted.replies.map(asComment),
+    asNativeComment(persisted.comment),
+    ...persisted.replies.map(asNativeComment),
   ]);
   thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
   // Placed from a recorded line, not a live structural id — marked on this surface
@@ -145,6 +199,14 @@ interface ThreadEntry {
   anchor: CommentAnchor;
   /** The durable sidecar `comment` id this thread was written as / loaded from. */
   commentId: string | null;
+  /** US-23.2: the original comment's own author/body/timestamp — read-only for the Author, own-authored-only for delete. */
+  commentAuthor: string;
+  commentBody: string;
+  commentTimestamp: string;
+  /** US-23.3's axis, folded from status-change lines (always 'Open' until that story ships). */
+  status: CommentStatus;
+  /** US-23.2: live reply list — each reply's own durable id is what a later single-reply delete names. */
+  replies: Array<{ id: string; author: string; timestamp: string; body: string }>;
 }
 
 export function createCommentSupport(
@@ -196,6 +258,18 @@ export function createCommentSupport(
     }
     return raw;
   };
+
+  /**
+   * Whether `entryKey` is registered under `document`. `threads` is one global
+   * map keyed by threadId, so a mutation path that only checks `msg.docUri`
+   * against its own document has verified nothing about the ENTRY: a threadId
+   * belonging to another file would append that file's line to this document's
+   * sidecar and dispose the other document's live thread. Routed through
+   * `docKeyFor` so the comparison folds case/NFC drift like the rest of the
+   * registry (CLAUDE.md's cross-platform trap), never a raw string compare.
+   */
+  const ownedBy = (document: vscode.TextDocument, entryKey: string): boolean =>
+    byDoc.get(docKeyFor(document.uri))?.has(entryKey) === true;
 
   const register = (docKey: string, entryKey: string, entry: ThreadEntry): void => {
     threads.set(entryKey, entry);
@@ -264,17 +338,18 @@ export function createCommentSupport(
       }
       const line = commentThreadLine(msg.line);
       const range = new vscode.Range(line, 0, line, 0);
-      const comment: vscode.Comment = {
-        body: new vscode.MarkdownString(msg.body),
-        mode: vscode.CommentMode.Preview,
-        author: { name: author },
-        timestamp: createdAt,
-      };
-      const thread = controller.createCommentThread(document.uri, range, [comment]);
+      const thread = controller.createCommentThread(document.uri, range, [
+        asNativeComment({ author, timestamp, body: msg.body }),
+      ]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
       register(docKeyFor(document.uri), msg.threadId, {
         thread,
         commentId,
+        commentAuthor: author,
+        commentBody: msg.body,
+        commentTimestamp: timestamp,
+        status: 'Open',
+        replies: [],
         anchor: {
           anchorId: msg.anchorId,
           offsetStart: msg.offsetStart,
@@ -360,6 +435,11 @@ export function createCommentSupport(
           register(docKey, persisted.id, {
             thread: buildLoadedThread(controller, document, persisted, loadedState),
             commentId: persisted.id,
+            commentAuthor: persisted.comment.author,
+            commentBody: persisted.comment.body,
+            commentTimestamp: persisted.comment.timestamp,
+            status: persisted.status,
+            replies: persisted.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
             anchor: {
               // A fresh parse mints fresh structural ids, so a reloaded thread has
               // no tier-1 anchor to name. An empty id marks it as "not tier-1".
@@ -438,8 +518,135 @@ export function createCommentSupport(
       entry.anchor.state = msg.state;
       return null;
     },
+
+    async reply(msg, document) {
+      const entry = threads.get(msg.threadId);
+      const rejection = replyRejection(msg, document.uri.toString(), entry?.status);
+      if (rejection !== null) {
+        return { ok: false, error: rejection };
+      }
+      if (entry !== undefined && !ownedBy(document, msg.threadId)) {
+        return { ok: false, error: 'This reply names a thread in another document.' };
+      }
+      if (!entry || entry.commentId === null) {
+        // A thread whose sidecar write is somehow still in flight (or was
+        // never durable) has no id a reply line could reference.
+        return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
+      }
+      const author = authorFor(document);
+      const createdAt = new Date();
+      const timestamp = createdAt.toISOString();
+      const replyId = crypto.randomUUID();
+      const writeError = await store.append(
+        document,
+        buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
+      );
+      if (writeError !== null) {
+        return { ok: false, error: writeError };
+      }
+      entry.replies.push({ id: replyId, author, timestamp, body: msg.body });
+      try {
+        entry.thread.comments = [
+          asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
+          ...entry.replies.map(asNativeComment),
+        ];
+      } catch {
+        // Thread disposed concurrently (deleted from the native UI mid-reply) —
+        // the sidecar line is already durable and reassembles correctly on the
+        // next reload; nothing more to reconcile on this live object.
+      }
+      return { ok: true, replyId, author, timestamp };
+    },
+
+    async deleteComment(msg, document) {
+      const entry = threads.get(msg.threadId);
+      const currentAuthor = authorFor(document);
+      const target =
+        entry === undefined
+          ? undefined
+          : msg.targetReplyId !== undefined
+            ? entry.replies.find((r) => r.id === msg.targetReplyId)
+            : entry.commentId !== null
+              ? { id: entry.commentId, author: entry.commentAuthor }
+              : undefined;
+      const rejection = deleteRejection(msg, document.uri.toString(), target, currentAuthor);
+      if (rejection !== null || !entry || !target) {
+        return { ok: false, error: rejection ?? 'That comment or reply no longer exists.' };
+      }
+      if (!ownedBy(document, msg.threadId)) {
+        return { ok: false, error: 'That delete names a thread in another document.' };
+      }
+      const timestamp = new Date().toISOString();
+      const writeError = await store.append(
+        document,
+        buildDeleteLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp })
+      );
+      if (writeError !== null) {
+        return { ok: false, error: writeError };
+      }
+      if (msg.targetReplyId !== undefined) {
+        // Cascades to this ONE reply only — the thread and its other replies
+        // are untouched (US-23.2 PO decision).
+        entry.replies = entry.replies.filter((r) => r.id !== msg.targetReplyId);
+        try {
+          entry.thread.comments = [
+            asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
+            ...entry.replies.map(asNativeComment),
+          ];
+        } catch {
+          // Disposed concurrently — nothing left to reconcile live.
+        }
+      } else {
+        // Deleting the thread cascades to every reply under it in one action.
+        try {
+          entry.thread.dispose();
+        } catch {
+          // Already disposed.
+        }
+        threads.delete(msg.threadId);
+        byDoc.get(docKeyFor(document.uri))?.delete(msg.threadId);
+      }
+      return { ok: true };
+    },
+
+    listThreads(document): CommentSyncThread[] {
+      const docKey = docKeyFor(document.uri);
+      const result: CommentSyncThread[] = [];
+      for (const entryKey of byDoc.get(docKey) ?? []) {
+        const entry = threads.get(entryKey);
+        if (!entry) {
+          continue;
+        }
+        result.push({
+          threadId: entryKey,
+          status: entry.status,
+          author: entry.commentAuthor,
+          timestamp: entry.commentTimestamp,
+          body: entry.commentBody,
+          recordedText: entry.anchor.recordedText,
+          offsetStart: entry.anchor.offsetStart,
+          offsetEnd: entry.anchor.offsetEnd,
+          lastKnownLine: entry.anchor.lastKnownLine,
+          nearestHeading: entry.anchor.nearestHeading,
+          replies: entry.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
+        });
+      }
+      // Oldest-created first — the same order `foldSidecarRecords` reassembles threads in.
+      result.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      return result;
+    },
+
     anchorOf(threadId): CommentAnchor | undefined {
       return threads.get(threadId)?.anchor;
+    },
+
+    threadIdFor(thread): string | undefined {
+      for (const [key, entry] of threads) {
+        if (entry.thread === thread) {
+          return key;
+        }
+      }
+      return undefined;
     },
     dispose(): void {
       threads.clear();

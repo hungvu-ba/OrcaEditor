@@ -250,6 +250,42 @@ export function buildCommentLine(input: {
   };
 }
 
+/** Assemble a reply line (US-23.2). Caller supplies id/timestamp so this stays pure. */
+export function buildReplyLine(input: {
+  id: string;
+  parentCommentId: string;
+  author: string;
+  timestamp: string;
+  body: string;
+}): ReplyLine {
+  return {
+    schema_version: SIDECAR_SCHEMA_VERSION,
+    type: 'reply',
+    id: input.id,
+    parent_comment_id: input.parentCommentId,
+    author: input.author,
+    timestamp: input.timestamp,
+    body: input.body,
+  };
+}
+
+/** Assemble a delete tombstone (US-23.2 PO decision). Caller supplies id/timestamp so this stays pure. */
+export function buildDeleteLine(input: {
+  id: string;
+  targetId: string;
+  author: string;
+  timestamp: string;
+}): DeleteLine {
+  return {
+    schema_version: SIDECAR_SCHEMA_VERSION,
+    type: 'delete',
+    id: input.id,
+    target_id: input.targetId,
+    author: input.author,
+    timestamp: input.timestamp,
+  };
+}
+
 function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
@@ -360,8 +396,12 @@ export function parseSidecarText(text: string): ParsedSidecar {
  * count as one person, per this repo's cross-platform rule. Not a security
  * boundary — `orcaEditor.comments.authorName` is free text (US-23.3's PO
  * decision), so this is the same soft nudge as the disabled Close control.
+ *
+ * Exported (not local to this fold) so US-23.2's own delete-gating in
+ * `comment-utils.ts`/`commentController.ts` uses this exact comparison rather
+ * than a second, potentially-diverging copy.
  */
-function sameAuthor(a: string, b: string): boolean {
+export function sameAuthor(a: string, b: string): boolean {
   return a.normalize('NFC') === b.normalize('NFC');
 }
 

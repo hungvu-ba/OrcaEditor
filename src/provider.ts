@@ -22,6 +22,7 @@ import { canonicalEntityId, scanEntityOccurrences } from './occurrence-scan';
 import {
   classifyLink,
   computeMinimalEdit,
+  documentStateKey,
   imageNamePrefix,
   driveMismatchHint,
   isPathTooLongError,
@@ -121,6 +122,51 @@ interface WorkspaceFileEntry {
 }
 
 /**
+ * Req 23 US-23.2: the shared body of the two native `vscode.comments` context
+ * commands (reply, delete). Both resolve the native thread back to its registry
+ * handle, run one `CommentSupport` mutation, surface its failure, then broadcast
+ * — only the mutation and the optional confirmation differ, so the surrounding
+ * steps live here once instead of being copied per command.
+ *
+ * The `reply?.thread` guard matters: the commands are context-menu-only
+ * (`package.json` hides them from the Command Palette with `when: false`), but a
+ * bare invocation — a keybinding, another extension, `executeCommand` — would
+ * otherwise throw on `undefined`.
+ */
+async function runNativeCommentCommand(
+  support: CommentSupport | undefined,
+  reply: vscode.CommentReply,
+  mutate: (
+    support: CommentSupport,
+    threadId: string,
+    document: vscode.TextDocument
+  ) => Promise<{ ok: boolean; error?: string }>,
+  sync: (document: vscode.TextDocument) => void,
+  confirm?: { message: string; confirmLabel: string }
+): Promise<void> {
+  if (!reply?.thread || !support) {
+    return;
+  }
+  const threadId = support.threadIdFor(reply.thread);
+  if (!threadId) {
+    return;
+  }
+  if (confirm) {
+    const answer = await vscode.window.showWarningMessage(confirm.message, { modal: true }, confirm.confirmLabel);
+    if (answer !== confirm.confirmLabel) {
+      return;
+    }
+  }
+  const document = await vscode.workspace.openTextDocument(reply.thread.uri);
+  const outcome = await mutate(support, threadId, document);
+  if (!outcome.ok) {
+    void vscode.window.showWarningMessage(outcome.error ?? 'That comment action failed.');
+    return;
+  }
+  sync(document);
+}
+
+/**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
  *
@@ -162,6 +208,38 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       ),
       vscode.commands.registerCommand('orcaEditor.toggleTableFitMode', () =>
         provider.postToActivePanel({ type: 'runCommand', command: 'toggleTableFitMode' })
+      ),
+      // Req 23 US-23.2: reply/delete reachable from the NATIVE `vscode.comments`
+      // UI in a plain text editor too, not just the webview — both surfaces call
+      // the exact same `CommentSupport.reply`/`deleteComment`, so they can never
+      // disagree. Contributed to `comments/commentThread/context` (package.json),
+      // invoked with a `vscode.CommentReply` ({ thread, text }); `threadIdFor`
+      // reverses the native thread object back to the registry key these
+      // functions need, since the native UI has no notion of it at all.
+      vscode.commands.registerCommand('orcaEditor.replyComment', (reply: vscode.CommentReply) =>
+        runNativeCommentCommand(
+          provider.comments,
+          reply,
+          (support, threadId, document) =>
+            support.reply(
+              { type: 'replyToComment', requestId: 0, docUri: document.uri.toString(), threadId, body: reply.text },
+              document
+            ),
+          (document) => provider.syncCommentThreads(document)
+        )
+      ),
+      // US-23.2 PO decision: confirmation-gated, cascading (removes every reply
+      // under the thread in one action) — enforced here since the native UI has
+      // no dialog of its own for this, unlike the webview's popover.
+      vscode.commands.registerCommand('orcaEditor.deleteComment', (reply: vscode.CommentReply) =>
+        runNativeCommentCommand(
+          provider.comments,
+          reply,
+          (support, threadId, document) =>
+            support.deleteComment({ type: 'deleteComment', requestId: 0, docUri: document.uri.toString(), threadId }, document),
+          (document) => provider.syncCommentThreads(document),
+          { message: 'Delete this comment thread and all its replies?', confirmLabel: 'Delete' }
+        )
       ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
@@ -466,6 +544,37 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     void this.activePanel?.webview.postMessage(message);
   }
 
+  /**
+   * Req 23 US-23.2: the `context.workspaceState` key for this document's "Show
+   * Comments" toggle — first use of `workspaceState` anywhere in this codebase.
+   * Keyed by docUri (not global) since the AC asks for per-file persistence.
+   */
+  private commentHighlightStateKey(docUri: string): string {
+    return `orcaEditor.comments.showComments:${documentStateKey(docUri, CASE_INSENSITIVE_FS)}`;
+  }
+
+  /**
+   * Req 23 US-23.2: push the full live thread snapshot to every panel this
+   * document has open — the host-side half of the reload/live-sync bridge.
+   * Called after the initial sidecar load settles and after every
+   * create/reply/delete/anchor-update mutation. A no-op if no panel of this
+   * document is registered yet (nothing to push to) or comments are unavailable.
+   */
+  private syncCommentThreads(document: vscode.TextDocument): void {
+    if (!this.comments) {
+      return;
+    }
+    const docUriStr = document.uri.toString();
+    const panels = this.panelsByUri.get(docUriStr);
+    if (!panels || panels.size === 0) {
+      return;
+    }
+    const threads = this.comments.listThreads(document);
+    for (const panel of panels) {
+      void panel.webview.postMessage({ type: 'commentThreadsSync', docUri: docUriStr, threads } satisfies HostToWebview);
+    }
+  }
+
   /** Req 20 US-20.3 membership list: ids from `contributes.orcaEditorExecuteCommands`. */
   private triggerExecuteCommandIds(): string[] {
     return (this.context.extension.packageJSON.contributes?.orcaEditorExecuteCommands as string[] | undefined) ?? [];
@@ -617,7 +726,15 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // nothing below waits on disk I/O, and loadThreads is idempotent for a second
     // panel on the same file. A read failure is logged inside the store, never
     // surfaced as a broken open.
-    void this.comments?.loadThreads(document);
+    // Req 23 US-23.2: once the load settles, push the full thread snapshot to
+    // whichever panels of this document are registered by then — the bridge that
+    // seeds the webview's gutter pins/highlight for a thread it didn't mint this
+    // session. Chained onto THIS SAME call (not a second `loadThreads` call) so
+    // the existing single-flight `loaded` guard is never asked to make a second
+    // caller wait for an in-flight first one, which it isn't built to do. The
+    // 'ready' handler below also syncs once the webview registers, covering the
+    // case where this load finishes before that registration happens.
+    void this.comments?.loadThreads(document).then(() => this.syncCommentThreads(document));
 
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
@@ -842,8 +959,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 wysiwygCfg.get<string>('comments.authorName'),
                 os.userInfo().username
               ),
+              // Req 23 US-23.2: per-file persisted "Show Comments" toggle —
+              // defaults off until the Author first turns it on for this file.
+              commentHighlightOn: this.context.workspaceState.get<boolean>(
+                this.commentHighlightStateKey(docUriStr),
+                false
+              ),
             },
           });
+          // Req 23 US-23.2: best-effort immediate sync for this now-registered
+          // panel (covers the case where the sidecar load already settled before
+          // 'ready' arrived); the load's own `.then()` continuation delivers the
+          // full list here regardless, so this is never the only delivery.
+          this.syncCommentThreads(document);
           break;
         }
         case 'edit': {
@@ -1115,6 +1243,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // webview can render this thread's card if its anchor ever floats.
             ...(outcome.ok ? { author: outcome.author, timestamp: outcome.timestamp } : { error: outcome.error }),
           });
+          if (outcome.ok) {
+            // Req 23 US-23.2: push the fresh snapshot so every open panel of
+            // this document (including this one) can pin/highlight it.
+            this.syncCommentThreads(document);
+          }
           break;
         }
         case 'commentAnchorUpdate': {
@@ -1127,6 +1260,59 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           const error = this.comments?.updateAnchor(msg, document);
           if (error) {
             console.warn(`orca-editor: comment anchor update refused — ${error}`);
+            // Nothing changed, so nothing to broadcast. Syncing here anyway made
+            // every refused update push a full N-thread snapshot back, which the
+            // webview then re-applied — pure amplification of a no-op.
+            break;
+          }
+          this.syncCommentThreads(document);
+          break;
+        }
+        case 'replyToComment': {
+          // Req 23 US-23.2: append a reply — reply() validates the whole
+          // payload (document identity, non-empty body, thread not Closed).
+          // Nothing here edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.reply(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'replyResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok
+              ? { replyId: outcome.replyId, author: outcome.author, timestamp: outcome.timestamp }
+              : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'deleteComment': {
+          // Req 23 US-23.2 PO decision: confirmation is enforced webview-side
+          // (the popover's own dialog) — this only re-validates ownership
+          // host-side, since a webview message is untrusted input like any other.
+          const outcome = this.comments
+            ? await this.comments.deleteComment(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'deleteCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'commentHighlightToggled': {
+          // Req 23 US-23.2: per-file persistence — first use of
+          // `context.workspaceState` in this codebase. Not broadcast to other
+          // panels of the same document: this is a per-file UI preference, not
+          // a global one (unlike zenChanged/readingModeChanged).
+          if (msg.docUri === docUriStr) {
+            void this.context.workspaceState.update(this.commentHighlightStateKey(docUriStr), msg.on);
           }
           break;
         }

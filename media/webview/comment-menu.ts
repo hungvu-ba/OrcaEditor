@@ -49,8 +49,13 @@ interface PendingAnchor {
   nearestHeading: string;
 }
 
-/** Everything about a thread the webview knows BEFORE the host confirms it. */
-type PendingSeed = Omit<ThreadAnchorSeed, 'author' | 'createdAt'>;
+/**
+ * Everything about a thread the webview knows BEFORE the host confirms it.
+ * `status`/`replies` are also omitted here (US-23.2) — a brand-new thread is
+ * always Open with no replies, filled in at the final `resolve.register()`
+ * call alongside author/createdAt, not carried through the in-flight guard.
+ */
+type PendingSeed = Omit<ThreadAnchorSeed, 'author' | 'createdAt' | 'status' | 'replies'>;
 
 /**
  * Per-webview-load randomness in the thread handle (US-23.4). The document uri
@@ -394,7 +399,8 @@ export function initCommentMenu(
       // the host re-reads the author setting at create time and that is what the
       // thread was actually filed under.
       if (seed) {
-        resolve.register({ ...seed, author: author ?? authorName, createdAt: timestamp ?? '' });
+        // A freshly created thread is always Open with no replies yet (US-23.2/23.3).
+        resolve.register({ ...seed, author: author ?? authorName, createdAt: timestamp ?? '', status: 'Open', replies: [] });
       }
     },
     setDocUri(uri): void {
