@@ -16,17 +16,29 @@
  * since this card lives outside `#content`, the editor's own undo/redo keydown
  * handler — bound to `#content` — never even sees a keystroke typed here).
  *
- * Out of scope (US-23.3, unbuilt): Resolve/Close/Reopen controls. Status is
- * shown (Open/Resolved/Closed) since `foldSidecarRecords` can in principle
- * report any of the three, but nothing in this story ever transitions one.
+ * US-23.3 added the action bar (Mark as Resolved / Close / Reopen) and the
+ * passive drift strip. Both are rendered from the live thread only — the action
+ * bar's gating mirrors `statusChangeRejection` host-side so a control the host
+ * would refuse is visibly disabled with its reason in place, and the strip is
+ * derived from `anchor.contentDrifted` on every render, never a stored flag.
  */
 import type { CommentHighlightController } from './comment-highlight';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
-import { COMMENT_DELETE_CONFIRM_CLASS, COMMENT_POPOVER_CLASS, COMMENT_REPLY_INPUT_CLASS } from './constants';
+import {
+  COMMENT_ACTION_BAR_CLASS,
+  COMMENT_DELETE_CONFIRM_CLASS,
+  COMMENT_DRIFT_STRIP_CLASS,
+  COMMENT_POPOVER_CLASS,
+  COMMENT_REPLY_INPUT_CLASS,
+} from './constants';
 import { el, positionNear, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 import { sameAuthor } from '../../src/comments/sidecar-format';
+import type { CommentStatusAction } from '../../src/shared/messages';
+
+/** What a surface outside this module learns about the transition it asked for. */
+export type StatusOutcome = (ok: boolean, error?: string) => void;
 
 export interface CommentPopoverController {
   /** Open (or re-focus) the popover for `threadId`, anchored beside `anchorRect`. */
@@ -37,6 +49,77 @@ export interface CommentPopoverController {
   setAuthorName(name: string): void;
   notifyReplyResult(requestId: number, ok: boolean, error?: string): void;
   notifyDeleteResult(requestId: number, ok: boolean, error?: string): void;
+  /** US-23.3: outcome of a Resolve/Close/Reopen request this popover sent. */
+  notifyStatusResult(requestId: number, ok: boolean, error?: string): void;
+  /**
+   * US-23.3: post a transition through the SINGLE owner of the
+   * `changeCommentStatus`/`changeCommentStatusResult` pair.
+   *
+   * The anchor-lost dialog (US-23.3 AC3) also needs to resolve a thread, and a
+   * second module minting its own request ids against one shared result type
+   * cannot work: both counters start at 0, so each would answer — and swallow —
+   * the other's replies. Routing through here keeps one counter, one in-flight
+   * guard, and one place that knows who is owed the answer.
+   *
+   * Returns false when another transition is still in flight, in which case
+   * NOTHING was posted and `onOutcome` will never be called.
+   */
+  requestStatusChange(threadId: string, action: CommentStatusAction, onOutcome?: StatusOutcome): boolean;
+}
+
+/** One button in the popover's action bar, already decided for the thread being rendered. */
+interface StatusAction {
+  action: CommentStatusAction;
+  label: string;
+  /** The one live action reads as primary; a gated one is rendered disabled, never omitted (AC6). */
+  primary: boolean;
+  /** Why it is unavailable, shown as the button's tooltip — absent means enabled. */
+  disabledReason?: string;
+}
+
+/**
+ * AC1/AC5/AC6: which transitions the viewer may invoke on this thread, and why
+ * not when they may not.
+ *
+ * Deliberately mirrors `statusChangeRejection` host-side rather than replacing
+ * it — the host is the authority (every webview message is untrusted input).
+ * This half exists so a control the host would refuse is visibly disabled with
+ * its reason in place, which is what AC6 means by a soft nudge: informational,
+ * bypassable by editing the free-text author setting, never a security boundary.
+ *
+ * `isThreadAuthor` false covers "the author name is not known yet" as well as
+ * "someone else" — the safe reading, since it never offers the Author-only
+ * Resolve to a viewer whose identity has not arrived.
+ */
+function statusActionsFor(status: ThreadAnchor['status'], isThreadAuthor: boolean): StatusAction[] {
+  const notYours = (verb: string): string => `You can’t ${verb} your own comment`;
+  if (status === 'Open') {
+    return isThreadAuthor
+      ? [{ action: 'resolve', label: 'Mark as Resolved', primary: true }]
+      : [
+          // The Author's move, not the Reviewer's — Close stays visible but dead
+          // until it exists, which is the two-step flow made legible.
+          { action: 'close', label: 'Close', primary: false, disabledReason: 'Resolve the thread before closing' },
+        ];
+  }
+  const reopen: StatusAction = {
+    action: 'reopen',
+    label: 'Reopen',
+    primary: status === 'Closed',
+    ...(isThreadAuthor ? { disabledReason: notYours('reopen') } : {}),
+  };
+  if (status === 'Closed') {
+    return [reopen];
+  }
+  return [
+    {
+      action: 'close',
+      label: 'Close',
+      primary: true,
+      ...(isThreadAuthor ? { disabledReason: notYours('close') } : {}),
+    },
+    reopen,
+  ];
 }
 
 function formatTimestamp(iso: string): string {
@@ -74,6 +157,10 @@ export function initCommentPopover(
   // its popover. Recorded here and re-checked before any UI mutation.
   let inFlightReplyThread: string | undefined;
   let inFlightDeleteThread: string | undefined;
+  /** US-23.3: the one in-flight Resolve/Close/Reopen, so a double-click can't append two lines. */
+  let inFlightStatusRequest: number | undefined;
+  /** Who is owed that request's answer — set only when another surface asked for it. */
+  let inFlightStatusOutcome: StatusOutcome | undefined;
   /** Whether Cancel has collapsed the reply composer for the open thread. */
   let replyCollapsed = false;
 
@@ -116,6 +203,18 @@ export function initCommentPopover(
 
   const closedNotice = el('div', 'comment-popover-closed-notice', 'This thread is closed');
 
+  // AC2: a passive strip, directly under the header as in the design. No button
+  // and no dismiss — it is recomputed from the anchor on every render, so it
+  // leaves on its own once the text matches again and returns if it drifts later.
+  const driftStrip = el('div', COMMENT_DRIFT_STRIP_CLASS);
+  driftStrip.hidden = true;
+  driftStrip.setAttribute('role', 'status');
+
+  // AC1/AC4/AC5: Mark as Resolved / Close / Reopen, plus who made the last
+  // transition and when.
+  const actionBar = el('div', COMMENT_ACTION_BAR_CLASS);
+  const actionNote = el('span', 'comment-popover-action-note');
+
   // --- Delete confirmation (its own small popover, nested lifecycle) ---------
   //
   // Appended as a CHILD of `card`, not a body-level sibling: `initPopoverDismiss`'s
@@ -136,7 +235,7 @@ export function initCommentPopover(
     ESCAPE_PRIORITY.NESTED_POPUP
   );
 
-  card.append(header, quoteRow, list, replyBox, replyOpen, closedNotice, confirmDialog);
+  card.append(header, driftStrip, quoteRow, list, replyBox, replyOpen, closedNotice, actionBar, confirmDialog);
   document.body.appendChild(card);
 
   function openConfirm(message: string, anchorRect: DOMRect, onConfirm: () => void): void {
@@ -232,6 +331,71 @@ export function initCommentPopover(
     });
   }
 
+  /**
+   * US-23.3: ask the host for a transition. The status the popover shows is never
+   * changed here — it comes back through `commentThreadsSync` once the sidecar
+   * line is durable, so a refused or failed transition can never leave the UI
+   * claiming a state the file does not hold.
+   */
+  function requestChangeStatus(
+    threadId: string,
+    action: CommentStatusAction,
+    onOutcome?: StatusOutcome
+  ): boolean {
+    if (inFlightStatusRequest !== undefined) {
+      return false;
+    }
+    const requestId = ++requestSeq;
+    inFlightStatusRequest = requestId;
+    inFlightStatusOutcome = onOutcome;
+    vscode.postMessage({ type: 'changeCommentStatus', requestId, docUri, threadId, action });
+    return true;
+  }
+
+  /** AC1/AC4/AC5/AC6: the action bar for the thread being rendered. */
+  function renderActionBar(anchor: ThreadAnchor, isThreadAuthor: boolean): void {
+    actionBar.textContent = '';
+    for (const item of statusActionsFor(anchor.status, isThreadAuthor)) {
+      const button = el(
+        'button',
+        `comment-popover-action comment-popover-action-${item.action}${item.primary ? ' is-primary' : ''}`,
+        item.label
+      );
+      button.type = 'button';
+      if (item.disabledReason !== undefined) {
+        // Rendered disabled WITH its reason rather than omitted, so the nudge is
+        // visible (the same shape US-23.2's gated delete button uses).
+        button.setAttribute('aria-disabled', 'true');
+        button.title = item.disabledReason;
+      } else {
+        button.addEventListener('click', () => requestChangeStatus(anchor.threadId, item.action));
+      }
+      actionBar.appendChild(button);
+    }
+    // AC4: the acting user and timestamp, shown alongside the thread whenever a
+    // transition has happened. Checked BEFORE the Open branch on purpose — a
+    // Reopen leaves the thread Open while still being a transition AC4 requires
+    // reporting, so short-circuiting on the status threw that away and the Author
+    // saw no sign the thread had ever been reopened.
+    if (anchor.lastTransitionAuthor !== undefined) {
+      const when = formatTimestamp(anchor.lastTransitionTimestamp ?? '');
+      // The status alone cannot name the action that produced it: "Open by X"
+      // reads as authorship, not as a reopen.
+      const what = anchor.status === 'Open' ? 'Reopened' : anchor.status;
+      actionNote.textContent = `${what} by ${anchor.lastTransitionAuthor}${when ? ` · ${when}` : ''}`;
+    } else if (anchor.status === 'Open') {
+      // Never transitioned: the design's hint instead. The disabled Close also
+      // carries this reason in its tooltip, so nothing is lost when a transition
+      // note replaces it above.
+      actionNote.textContent = isThreadAuthor
+        ? 'Moves the thread to Resolved'
+        : 'Resolve the thread before closing';
+    } else {
+      actionNote.textContent = anchor.status;
+    }
+    actionBar.appendChild(actionNote);
+  }
+
   function render(anchor: ThreadAnchor): void {
     headerLine.textContent = anchor.lastKnownLine > 0 ? `Ln ${anchor.lastKnownLine}` : '';
     statusPill.textContent = anchor.status;
@@ -272,6 +436,23 @@ export function initCommentPopover(
     const closed = anchor.status === 'Closed';
     closedNotice.hidden = !closed;
     applyReplyVisibility(closed);
+
+    // AC2: live and derived. Suppressed once the thread reaches Resolved/Closed —
+    // the suggestion has either been acted on or the thread is a record now.
+    const suggestResolve = anchor.contentDrifted && anchor.status === 'Open';
+    driftStrip.hidden = !suggestResolve;
+    const driftText = suggestResolve
+      ? ownsComment
+        ? 'The commented text may have changed — mark as resolved?'
+        : 'The commented text may have changed'
+      : '';
+    if (driftStrip.textContent !== driftText) {
+      // Assigned only on a real change: `render` runs on every settled pass, and
+      // this is an `aria-live` region — reassigning the same string re-announces
+      // it to a screen reader on every keystroke burst.
+      driftStrip.textContent = driftText;
+    }
+    renderActionBar(anchor, ownsComment);
   }
 
   /**
@@ -422,6 +603,30 @@ export function initCommentPopover(
         cardDismiss.close();
       }
       // A single reply delete is picked up by the next `commentThreadsSync` re-render.
+    },
+    notifyStatusResult(requestId, ok, error): void {
+      if (requestId !== inFlightStatusRequest) {
+        return;
+      }
+      inFlightStatusRequest = undefined;
+      const outcome = inFlightStatusOutcome;
+      inFlightStatusOutcome = undefined;
+      if (outcome) {
+        // Another surface asked for this one — it owns both the message and what
+        // to do about a refusal, so it must not also get this module's toast.
+        outcome(ok, error);
+        return;
+      }
+      if (!ok) {
+        showToast(error ?? 'That comment could not be updated.');
+      }
+      // On success there is nothing to patch: the host's `commentThreadsSync`
+      // push carries the new status/actor/timestamp, and `resolve.onChange`
+      // re-renders whichever thread is open — including the case where the user
+      // moved to a different thread while this was in flight.
+    },
+    requestStatusChange(threadId, action, onOutcome): boolean {
+      return requestChangeStatus(threadId, action, onOutcome);
     },
   };
 }

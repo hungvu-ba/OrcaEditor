@@ -122,6 +122,34 @@ export function anchorThresholdFor(recordedText: string): number {
     : ANCHOR_SIMILARITY_THRESHOLD;
 }
 
+/**
+ * Req 23 US-23.3 AC2: does the text a thread is anchored to RIGHT NOW still
+ * match what was recorded when the comment was written?
+ *
+ * Separate from `pickAnchorCandidate` on purpose. Tier 2 answers "which node is
+ * this comment's?", and it only runs when tier 1 has already failed — so an
+ * Author editing the anchored paragraph in place keeps the structural id, gets
+ * resolved by tier 1, and tier 2 never runs at all. That is the very case AC2
+ * exists for ("the anchored text changes substantially after creation"), so the
+ * indicator has to ask this question directly against the resolved node instead
+ * of reading which tier fired.
+ *
+ * Uses the same normalization and the same per-length threshold as tier 2, so
+ * "no longer matches" means exactly what it means there — and the threshold is
+ * passed into the score so a candidate whose length alone rules it out costs no
+ * Levenshtein pass (this runs once per thread on every settled change).
+ *
+ * An empty recorded text has nothing to drift from and always reads as matching.
+ */
+export function anchorTextMatches(recordedText: string, currentText: string): boolean {
+  const recorded = normalizeAnchorText(recordedText);
+  if (recorded === '') {
+    return true;
+  }
+  const threshold = anchorThresholdFor(recorded);
+  return scoreNormalized(recorded, normalizeAnchorText(currentText), threshold) >= threshold;
+}
+
 /** One row of the "Re-attach…" picker: a candidate, its index, and how close it reads. */
 export interface ReattachTarget {
   index: number;

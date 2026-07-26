@@ -20,21 +20,26 @@ import * as os from 'os';
 import * as vscode from 'vscode';
 import {
   anchorUpdateRejection,
+  commentThreadContextValue,
   commentThreadLine,
   createCommentRejection,
   deleteRejection,
   replyRejection,
   resolveCommentAuthor,
+  statusChangeRejection,
+  STATUS_CHANGE_TARGET,
   type AnchorUpdateMessage,
   type CreateCommentMessage,
   type DeleteCommentMessage,
   type ReplyMessage,
+  type StatusChangeMessage,
 } from './comment-utils';
 import { sameDocumentUri } from '../text-utils';
 import {
   buildCommentLine,
   buildDeleteLine,
   buildReplyLine,
+  buildStatusChangeLine,
   sidecarBelongsToDocument,
   type CommentStatus,
   type SidecarThread,
@@ -117,6 +122,20 @@ export interface CommentSupport extends vscode.Disposable {
     document: vscode.TextDocument
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
+   * US-23.3: move a thread along Open → Resolved → Closed, or Reopen it back to
+   * Open in one step. Validated against the thread's LIVE status and recorded
+   * author (which action is legal, and the Author/Reviewer nudge) — both of
+   * which only this registry knows. Appends a `status-change` line and never
+   * rewrites a prior one (US-23.5), never edits the `.md` (US-23.6).
+   */
+  changeStatus(
+    msg: StatusChangeMessage,
+    document: vscode.TextDocument
+  ): Promise<
+    | { ok: true; status: CommentStatus; author: string; timestamp: string }
+    | { ok: false; error: string }
+  >;
+  /**
    * US-23.2: the full live snapshot `syncThreadsToWebview` pushes — the bridge
    * that lets a thread the webview did not itself mint this session (loaded
    * from the sidecar, or reached from the native `vscode.comments` UI) still
@@ -137,6 +156,34 @@ const ANCHOR_STATE_LABEL: Record<Exclude<AnchorUpdateMessage['state'], 'exact'>,
   approximate: 'Approximate location',
   floating: 'Unresolved location',
 };
+
+/**
+ * The three derived facets of a native thread, set in ONE place so the four
+ * paths that can change either axis (create, load, anchor update, status change)
+ * cannot drift apart:
+ *
+ * - `contextValue` carries BOTH axes, built by the pure
+ *   `commentThreadContextValue` (which `test/unit.ts` pins against the `when`
+ *   clauses in `package.json`). A `comments/commentThread/context` menu `when`
+ *   clause is the only per-thread gate the native UI offers, and US-23.3 needs
+ *   the status half (which of Resolve/Close/Reopen is even applicable) while
+ *   US-23.4 needs the anchor half. `createThread` used to set no `contextValue`
+ *   at all, which showed none of the three actions on a thread created this
+ *   session.
+ * - `label` marks a drifted anchor on this surface too (US-23.4 AC3).
+ * - `state` is VS Code's own two-value axis; it has no third value, so anything
+ *   past Open reads as resolved there.
+ */
+function applyThreadFacets(
+  thread: vscode.CommentThread,
+  anchorState: AnchorUpdateMessage['state'],
+  status: CommentStatus
+): void {
+  thread.contextValue = commentThreadContextValue(anchorState, status);
+  thread.label = anchorState === 'exact' ? undefined : ANCHOR_STATE_LABEL[anchorState];
+  thread.state =
+    status === 'Open' ? vscode.CommentThreadState.Unresolved : vscode.CommentThreadState.Resolved;
+}
 
 /**
  * One `comment`/`reply` line turned into a native `vscode.Comment`. Hoisted out
@@ -184,13 +231,8 @@ function buildLoadedThread(
   ]);
   thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
   // Placed from a recorded line, not a live structural id — marked on this surface
-  // too (US-23.4 AC3), exactly as `updateAnchor` does.
-  thread.contextValue = `anchor-${state}`;
-  thread.label = ANCHOR_STATE_LABEL[state];
-  // The folded Open/Resolved/Closed status (US-23.3) mapped onto the native
-  // two-state axis: anything past Open reads as resolved here.
-  thread.state =
-    persisted.status === 'Open' ? vscode.CommentThreadState.Unresolved : vscode.CommentThreadState.Resolved;
+  // too (US-23.4 AC3), alongside the folded Open/Resolved/Closed status (US-23.3).
+  applyThreadFacets(thread, state, persisted.status);
   return thread;
 }
 
@@ -203,8 +245,11 @@ interface ThreadEntry {
   commentAuthor: string;
   commentBody: string;
   commentTimestamp: string;
-  /** US-23.3's axis, folded from status-change lines (always 'Open' until that story ships). */
+  /** US-23.3's axis, folded from status-change lines. */
   status: CommentStatus;
+  /** US-23.3 AC4: actor + time of the most recent transition; both absent while never left Open. */
+  lastTransitionAuthor?: string;
+  lastTransitionTimestamp?: string;
   /** US-23.2: live reply list — each reply's own durable id is what a later single-reply delete names. */
   replies: Array<{ id: string; author: string; timestamp: string; body: string }>;
 }
@@ -342,6 +387,10 @@ export function createCommentSupport(
         asNativeComment({ author, timestamp, body: msg.body }),
       ]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+      // A thread with no contextValue matches no `status-*` menu clause, so the
+      // native UI would offer none of US-23.3's three actions on a thread created
+      // this session — set both axes from the start, like every other path.
+      applyThreadFacets(thread, 'exact', 'Open');
       register(docKeyFor(document.uri), msg.threadId, {
         thread,
         commentId,
@@ -431,6 +480,10 @@ export function createCommentSupport(
         if (known.has(persisted.id)) {
           continue;
         }
+        // US-23.3 AC4: the transition's actor/time have to survive the reload, so
+        // they come off the last (timestamp-sorted) status-change line rather than
+        // being remembered only by the session that performed it.
+        const lastTransition = persisted.statusChanges[persisted.statusChanges.length - 1];
         try {
           register(docKey, persisted.id, {
             thread: buildLoadedThread(controller, document, persisted, loadedState),
@@ -439,6 +492,8 @@ export function createCommentSupport(
             commentBody: persisted.comment.body,
             commentTimestamp: persisted.comment.timestamp,
             status: persisted.status,
+            lastTransitionAuthor: lastTransition?.author,
+            lastTransitionTimestamp: lastTransition?.timestamp,
             replies: persisted.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
             anchor: {
               // A fresh parse mints fresh structural ids, so a reloaded thread has
@@ -503,9 +558,9 @@ export function createCommentSupport(
         // The native surface has no notion of anchor drift, so the state is
         // carried as a contextValue (available to menu `when` clauses) plus a
         // label — AC3's "never silently indistinguishable from an exact anchor"
-        // has to hold here too, not only in the webview.
-        entry.thread.contextValue = `anchor-${msg.state}`;
-        entry.thread.label = msg.state === 'exact' ? undefined : ANCHOR_STATE_LABEL[msg.state];
+        // has to hold here too, not only in the webview. The status half is
+        // re-stamped with it so an anchor move never erases US-23.3's own gate.
+        applyThreadFacets(entry.thread, msg.state, entry.status);
       } catch {
         // The thread was disposed (the user deleted it in the Comments panel, or
         // the controller tore it down). Forget it rather than throwing out of the
@@ -609,6 +664,62 @@ export function createCommentSupport(
       return { ok: true };
     },
 
+    async changeStatus(msg, document) {
+      const entry = threads.get(msg.threadId);
+      const currentAuthor = authorFor(document);
+      const rejection = statusChangeRejection(
+        msg,
+        document.uri.toString(),
+        entry?.status,
+        currentAuthor,
+        entry?.commentAuthor
+      );
+      if (rejection !== null || !entry) {
+        return { ok: false, error: rejection ?? 'This comment thread no longer exists.' };
+      }
+      if (!ownedBy(document, msg.threadId)) {
+        // Same guard `reply`/`deleteComment` carry: `threads` is one global map,
+        // so a threadId from another file would append this transition to the
+        // wrong sidecar and move the wrong document's thread.
+        return { ok: false, error: 'This status change names a thread in another document.' };
+      }
+      if (entry.commentId === null) {
+        // A thread whose sidecar write is still in flight has no durable id a
+        // `status-change` line could name as its parent.
+        return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
+      }
+      const fromStatus = entry.status;
+      const toStatus = STATUS_CHANGE_TARGET[msg.action];
+      const timestamp = new Date().toISOString();
+      const writeError = await store.append(
+        document,
+        buildStatusChangeLine({
+          id: crypto.randomUUID(),
+          parentCommentId: entry.commentId,
+          author: currentAuthor,
+          timestamp,
+          fromStatus,
+          toStatus,
+        })
+      );
+      if (writeError !== null) {
+        // Persist-then-apply, like every other action: a transition the sidecar
+        // never accepted must not be shown as taken, since it would vanish on
+        // the next reopen.
+        return { ok: false, error: writeError };
+      }
+      entry.status = toStatus;
+      entry.lastTransitionAuthor = currentAuthor;
+      entry.lastTransitionTimestamp = timestamp;
+      try {
+        applyThreadFacets(entry.thread, entry.anchor.state, toStatus);
+      } catch {
+        // Disposed concurrently (deleted from the native UI mid-transition) — the
+        // sidecar line is already durable and folds correctly on the next reload.
+      }
+      return { ok: true, status: toStatus, author: currentAuthor, timestamp };
+    },
+
     listThreads(document): CommentSyncThread[] {
       const docKey = docKeyFor(document.uri);
       const result: CommentSyncThread[] = [];
@@ -629,6 +740,8 @@ export function createCommentSupport(
           lastKnownLine: entry.anchor.lastKnownLine,
           nearestHeading: entry.anchor.nearestHeading,
           replies: entry.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
+          lastTransitionAuthor: entry.lastTransitionAuthor,
+          lastTransitionTimestamp: entry.lastTransitionTimestamp,
         });
       }
       // Oldest-created first — the same order `foldSidecarRecords` reassembles threads in.

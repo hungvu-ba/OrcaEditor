@@ -16,6 +16,14 @@
 
 /** Priority tiers — higher wins. */
 export const ESCAPE_PRIORITY = {
+  /**
+   * A full-viewport modal with its own scrim (Req 23 US-23.3's anchor-lost
+   * dialog). Above everything else because it is visually on top of everything
+   * else: at NESTED_POPUP it tied with the comment popover's delete confirmation,
+   * and the stable sort broke that tie by registration order — so Escape closed
+   * whichever had been armed first, leaving the topmost dialog and its scrim up.
+   */
+  MODAL: 40,
   DRAG: 30,
   /**
    * A popover nested INSIDE another popover (Req 23 US-23.2's delete
@@ -44,8 +52,9 @@ let listenerInstalled = false;
 
 function onKeyDown(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
-  // Priority-descending snapshot (registration order breaks ties; same-priority
-  // handlers here are mutually exclusive so tie order is irrelevant).
+  // Priority-descending snapshot. Registration order breaks ties, so any two
+  // handlers that can be armed AT THE SAME TIME must not share a priority — see
+  // MODAL above for the case that proved it.
   const ordered = entries.slice().sort((a, b) => b.priority - a.priority);
   for (const entry of ordered) {
     if (entry.handler()) {

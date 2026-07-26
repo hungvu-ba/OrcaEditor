@@ -47,15 +47,20 @@ import {
   deleteRejection,
   replyRejection,
   resolveCommentAuthor,
+  commentThreadContextValue,
+  statusChangeRejection,
+  STATUS_CHANGE_TARGET,
   type AnchorUpdateMessage,
   type CreateCommentMessage,
   type DeleteCommentMessage,
   type ReplyMessage,
+  type StatusChangeMessage,
 } from '../src/comments/comment-utils';
 import {
   buildCommentLine,
   buildDeleteLine,
   buildReplyLine,
+  buildStatusChangeLine,
   foldSidecarRecords,
   isSidecarName,
   mdNameForSidecar,
@@ -71,6 +76,7 @@ import {
   type StatusChangeLine,
 } from '../src/comments/sidecar-format';
 import {
+  anchorTextMatches,
   anchorThresholdFor,
   levenshtein,
   normalizeAnchorText,
@@ -632,7 +638,7 @@ const toWebview: HostToWebview[] = [
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
-  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced' },
+  { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced', commentAuthorName: 'hungvu' },
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
   { type: 'scrollToPosition', line: 0, character: 0, length: 1 },
   { type: 'pasteImageResult', requestId: 1, relativePath: 'images/a.png' },
@@ -1550,6 +1556,221 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       JSON.stringify(['author', 'id', 'schema_version', 'target_id', 'timestamp', 'type'].sort()));
   check('delete line: type is "delete" and it names its target',
     deleteLine.type === 'delete' && deleteLine.target_id === 'e8a2f4d1');
+}
+
+// --- Req 23 US-23.3: two-step resolve (Open -> Resolved -> Closed) ----------
+{
+  const statusLine = buildStatusChangeLine({
+    id: '9c40aa77',
+    parentCommentId: 'b3f1c2a0',
+    author: 'hungvu',
+    timestamp: '2026-07-26T15:10:00.000Z',
+    fromStatus: 'Open',
+    toStatus: 'Resolved',
+  });
+  check('status-change line: carries exactly the declared field set',
+    JSON.stringify(Object.keys(statusLine).sort()) ===
+      JSON.stringify(
+        ['author', 'from_status', 'id', 'parent_comment_id', 'schema_version', 'timestamp', 'to_status', 'type'].sort()
+      ));
+  check('status-change line: type is "status-change" and it names its parent and both ends of the move',
+    statusLine.type === 'status-change' &&
+      statusLine.parent_comment_id === 'b3f1c2a0' &&
+      statusLine.from_status === 'Open' &&
+      statusLine.to_status === 'Resolved');
+  // A Reopen has to say which of Resolved/Closed it undid (AC5) — the fold only
+  // reads to_status, so from_status exists purely to keep the history readable.
+  check('status-change line: a Reopen records which status it undid',
+    buildStatusChangeLine({
+      id: 's9',
+      parentCommentId: 'c1',
+      author: 'mai',
+      timestamp: '2026-07-26T16:00:00.000Z',
+      fromStatus: 'Closed',
+      toStatus: 'Open',
+    }).from_status === 'Closed');
+
+  const move = (over: Partial<StatusChangeMessage> = {}): StatusChangeMessage => ({
+    type: 'changeCommentStatus',
+    requestId: 1,
+    docUri: 'file:///a.md',
+    threadId: 't1',
+    action: 'resolve',
+    ...over,
+  });
+  const AUTHOR = 'hungvu';
+  const REVIEWER = 'mai.tran';
+
+  // AC1: Open -> Resolved is the AUTHOR's move.
+  check('resolve: the thread author may resolve an Open thread',
+    statusChangeRejection(move(), 'file:///a.md', 'Open', AUTHOR, AUTHOR) === null);
+  check('resolve: a reviewer may not resolve',
+    statusChangeRejection(move(), 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
+  check('resolve: an already-Resolved thread cannot be resolved again',
+    statusChangeRejection(move(), 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
+  check('resolve: a Closed thread cannot be resolved',
+    statusChangeRejection(move(), 'file:///a.md', 'Closed', AUTHOR, AUTHOR) !== null);
+
+  // AC1: only the REVIEWER closes, and only from Resolved — the Author cannot
+  // close directly, and Close is a no-op while the thread is still Open.
+  const close = move({ action: 'close' });
+  check('close: a reviewer may close a Resolved thread',
+    statusChangeRejection(close, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null);
+  check('close: an Open thread cannot be closed — resolve it first',
+    statusChangeRejection(close, 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
+  // AC6: the soft self-close nudge. Name-matched, not authenticated.
+  check('close: the thread author is nudged away from closing their own thread',
+    statusChangeRejection(close, 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
+  // The status reason must win over the role reason: a reviewer looking at an
+  // Open thread is waiting on the Author, not lacking permission.
+  check('close: an Open thread reports the status reason, not a permission one',
+    statusChangeRejection(close, 'file:///a.md', 'Open', REVIEWER, AUTHOR) ===
+      'Resolve the thread before closing it.');
+
+  // AC5: Reopen is one Reviewer-only action available from EITHER Resolved or
+  // Closed, and it goes straight back to Open.
+  const reopen = move({ action: 'reopen' });
+  check('reopen: a reviewer may reopen a Resolved thread',
+    statusChangeRejection(reopen, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null);
+  check('reopen: a reviewer may reopen a Closed thread',
+    statusChangeRejection(reopen, 'file:///a.md', 'Closed', REVIEWER, AUTHOR) === null);
+  check('reopen: an Open thread cannot be reopened',
+    statusChangeRejection(reopen, 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
+  check('reopen: the thread author is nudged away from reopening their own thread',
+    statusChangeRejection(reopen, 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
+  // The state machine as an invariant rather than a restatement: no action may be
+  // invoked from the status it produces, or a thread could be resolved twice /
+  // reopened into Open, appending a no-op transition line each time.
+  check('status change: no action is legal from the status it produces',
+    (['resolve', 'close', 'reopen'] as const).every(
+      (act) =>
+        statusChangeRejection(
+          move({ action: act }),
+          'file:///a.md',
+          STATUS_CHANGE_TARGET[act],
+          act === 'resolve' ? AUTHOR : REVIEWER,
+          AUTHOR
+        ) !== null
+    ));
+  // Reopen must land on Open in ONE step (AC5) — not Closed -> Resolved -> Open.
+  check('status change: reopen from either Resolved or Closed lands on Open in one step',
+    STATUS_CHANGE_TARGET.reopen === 'Open' &&
+      statusChangeRejection(reopen, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null &&
+      statusChangeRejection(reopen, 'file:///a.md', 'Closed', REVIEWER, AUTHOR) === null);
+
+  // Same untrusted-input rules every other comment validator carries.
+  check('status change: a request for another document is refused',
+    statusChangeRejection(move(), 'file:///b.md', 'Open', AUTHOR, AUTHOR) !== null);
+  check('status change: a request naming no thread is refused',
+    statusChangeRejection(move({ threadId: '' }), 'file:///a.md', 'Open', AUTHOR, AUTHOR) !== null);
+  check('status change: a vanished thread is refused',
+    statusChangeRejection(move(), 'file:///a.md', undefined, AUTHOR, undefined) !== null);
+  // An unknown action must be refused outright: falling through would look up
+  // `undefined` as the target status and append a malformed sidecar line.
+  check('status change: an unknown action is refused',
+    statusChangeRejection(
+      move({ action: 'archive' as StatusChangeMessage['action'] }),
+      'file:///a.md',
+      'Open',
+      AUTHOR,
+      AUTHOR
+    ) !== null);
+  // The Author/Reviewer split is one NFC-normalized name comparison, exactly as
+  // the delete gating already is — the same person on macOS and Windows is one.
+  check('status change: the author match is NFC-normalized',
+    statusChangeRejection(
+      move(),
+      'file:///a.md',
+      'Open',
+      'Nguyễn'.normalize('NFC'),
+      'Nguyễn'.normalize('NFD')
+    ) === null);
+
+  // --- contextValue <-> package.json `when` clauses ------------------------
+  //
+  // The native Resolve/Close/Reopen actions are visible only when the thread's
+  // contextValue matches its command's `when` regex. A typo on EITHER side removes
+  // all three from the Comments UI with nothing failing anywhere, so the two are
+  // pinned against each other here rather than trusted to stay in sync.
+  // `process.cwd()`, matching the `src/provider.ts` read above: this suite is
+  // compiled into `dist/test/`, so `__dirname` would resolve to `dist/`.
+  const pkg = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')
+  ) as { contributes: { menus: Record<string, Array<{ command: string; when: string }>> } };
+  const threadMenu = pkg.contributes.menus['comments/commentThread/context'];
+  const whenFor = (command: string): string =>
+    threadMenu.find((entry) => entry.command === `orcaEditor.${command}Comment`)?.when ?? '';
+  /** The `commentThread =~ /…/` half of a `when` clause, as a live RegExp. */
+  const clauseRegex = (command: string): RegExp => {
+    const source = /commentThread\s*=~\s*\/(.+?)\//.exec(whenFor(command))?.[1];
+    return new RegExp(source ?? '(?!)');
+  };
+
+  check('contextValue: every status/anchor pair carries both axes',
+    (['exact', 'approximate', 'floating'] as const).every((anchorState) =>
+      (['Open', 'Resolved', 'Closed'] as const).every((status) => {
+        const value = commentThreadContextValue(anchorState, status);
+        return value.includes(`anchor-${anchorState}`) && value.includes(`status-${status.toLowerCase()}`);
+      })
+    ));
+  // The matrix the two-step flow depends on: exactly which of the three actions
+  // the native menu offers per status (anchor state must never affect it).
+  const offered = (status: 'Open' | 'Resolved' | 'Closed'): string[] =>
+    (['resolve', 'close', 'reopen'] as const).filter((command) =>
+      clauseRegex(command).test(commentThreadContextValue('exact', status))
+    );
+  check('contextValue: an Open thread offers Resolve only',
+    JSON.stringify(offered('Open')) === JSON.stringify(['resolve']));
+  check('contextValue: a Resolved thread offers Close and Reopen',
+    JSON.stringify(offered('Resolved')) === JSON.stringify(['close', 'reopen']));
+  check('contextValue: a Closed thread offers Reopen only',
+    JSON.stringify(offered('Closed')) === JSON.stringify(['reopen']));
+  // The anchor half must not leak into the status clauses — a drifted or floating
+  // thread still needs its transitions.
+  check('contextValue: the anchor state never changes which actions are offered',
+    (['approximate', 'floating'] as const).every((anchorState) =>
+      (['Open', 'Resolved', 'Closed'] as const).every((status) => {
+        const drifted = (['resolve', 'close', 'reopen'] as const).filter((command) =>
+          clauseRegex(command).test(commentThreadContextValue(anchorState, status))
+        );
+        return JSON.stringify(drifted) === JSON.stringify(offered(status));
+      })
+    ));
+  // Every one of the three must be palette-hidden: they take a `CommentReply`
+  // argument and throw on a bare invocation.
+  check('contextValue: all three commands are hidden from the Command Palette',
+    (['resolve', 'close', 'reopen'] as const).every((command) =>
+      pkg.contributes.menus.commandPalette.some(
+        (entry) => entry.command === `orcaEditor.${command}Comment` && entry.when === 'false'
+      )
+    ));
+}
+
+// --- Req 23 US-23.3 AC2: the content-drift check behind the popover strip ----
+{
+  const RECORDED = 'The refund drains the queued session before the retry window closes.';
+  check('drift: identical text matches',
+    anchorTextMatches(RECORDED, RECORDED));
+  // Re-wrapping a paragraph changes no words, so it must not read as drift.
+  check('drift: re-wrapped whitespace still matches',
+    anchorTextMatches(RECORDED, RECORDED.replace(/ /g, '\n  ')));
+  check('drift: a one-word tweak still matches (above the 0.8 tier-2 threshold)',
+    anchorTextMatches(RECORDED, RECORDED.replace('drains', 'clears')));
+  check('drift: a rewritten sentence no longer matches',
+    !anchorTextMatches(RECORDED, 'Totally different prose about something else entirely here.'));
+  check('drift: deleted-to-nothing no longer matches',
+    !anchorTextMatches(RECORDED, ''));
+  // Short recorded text uses the stricter 0.95 threshold (US-23.4 PO decision),
+  // so a single-character change to a short heading IS drift.
+  check('drift: short text is held to the stricter threshold',
+    !anchorTextMatches('Done', 'Dane'));
+  // An empty recorded text has nothing to drift from — never report drift on it,
+  // or every bare-caret anchor would show the strip forever.
+  check('drift: an empty recorded text always matches',
+    anchorTextMatches('', 'anything at all'));
+  // The same prose typed on macOS vs Windows differs only by Unicode form.
+  check('drift: NFD vs NFC of the same prose is not drift',
+    anchorTextMatches('Nguyễn Văn A'.normalize('NFD'), 'Nguyễn Văn A'.normalize('NFC')));
 }
 
 // --- Req 23 US-23.2 AC1: gutter-pin line clustering -------------------------

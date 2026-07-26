@@ -206,3 +206,15 @@ export const COMMENT_POPOVER_CLASS = 'comment-popover';
 export const COMMENT_REPLY_INPUT_CLASS = 'comment-popover-reply-input';
 /** DOM class for a delete-confirmation dialog, mounted on `document.body`. */
 export const COMMENT_DELETE_CONFIRM_CLASS = 'comment-delete-confirm';
+
+// --- Req 23 US-23.3: two-step resolve (Open -> Resolved -> Closed) ---
+
+/** DOM class for the popover's Resolve/Close/Reopen action bar. */
+export const COMMENT_ACTION_BAR_CLASS = 'comment-popover-actions';
+/**
+ * DOM class for AC2's passive drift strip. Purely derived from the live anchor —
+ * no dismiss control, so it must never carry any persisted/one-shot state.
+ */
+export const COMMENT_DRIFT_STRIP_CLASS = 'comment-popover-drift';
+/** DOM class for AC3's anchor-lost dialog, mounted on `document.body` behind its own scrim. */
+export const COMMENT_ANCHOR_LOST_CLASS = 'comment-anchor-lost';

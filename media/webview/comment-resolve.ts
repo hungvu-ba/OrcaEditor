@@ -20,7 +20,7 @@
  * names match the frozen `.orca-comments.jsonl` anchor schema so that story can
  * persist it verbatim.
  */
-import { pickAnchorCandidate } from './comment-anchor';
+import { anchorTextMatches, pickAnchorCandidate } from './comment-anchor';
 import {
   anchorCandidates,
   commentAnchorLine,
@@ -59,13 +59,31 @@ export interface ThreadAnchor {
   createdAt: string;
   /**
    * US-23.3's Open/Resolved/Closed axis, kept up to date by `syncThread` —
-   * orthogonal to `state` (anchor resolution) below. Always 'Open' until
-   * US-23.3 ships (no code path writes a status-change line yet).
+   * orthogonal to `state` (anchor resolution) below. The two must never be
+   * conflated: a thread can be floating AND Resolved, or exact AND Closed.
    */
   status: CommentStatus;
+  /** US-23.3 AC4: who made the last Resolved/Closed/Reopen transition, and when. Absent while never left Open. */
+  lastTransitionAuthor?: string;
+  lastTransitionTimestamp?: string;
   /** US-23.2: replies under this thread, in append order — what the popover renders. */
   replies: CommentSyncReply[];
   state: AnchorState;
+  /**
+   * US-23.3 AC2: whether the text this thread currently sits on has drifted out
+   * of match with `recordedText`. Recomputed every settled pass — a live derived
+   * indicator, never a stored/dismissible flag, so it disappears on its own once
+   * the text matches again (e.g. an undo) and comes back if it drifts later.
+   */
+  contentDrifted: boolean;
+  /**
+   * US-23.3 AC3: this thread just lost its anchor entirely (all four tiers
+   * failed) while still Open, so its Author owes an explicit answer —
+   * "this was resolved" vs "this comment lost its anchor". Set on the transition
+   * INTO floating, not on every pass, so the dialog is raised once per episode
+   * rather than re-raised on every keystroke that settles.
+   */
+  awaitingAnchorDecision: boolean;
   /**
    * The node this thread resolved to last pass. Session-only and never
    * persisted — it is what tells a pasted COPY from its original when the copy
@@ -75,8 +93,11 @@ export interface ThreadAnchor {
   carrier?: HTMLElement;
 }
 
-/** The anchor facts a thread is registered with (state and carrier are derived, never supplied). */
-export type ThreadAnchorSeed = Omit<ThreadAnchor, 'state' | 'carrier'>;
+/** The anchor facts a thread is registered with (everything else is derived, never supplied). */
+export type ThreadAnchorSeed = Omit<
+  ThreadAnchor,
+  'state' | 'carrier' | 'contentDrifted' | 'awaitingAnchorDecision'
+>;
 
 export interface CommentResolveController {
   /** Record a freshly created thread so later renders can re-resolve it (US-23.1 hands this over). */
@@ -126,6 +147,14 @@ export interface CommentResolveController {
   allThreads(): ThreadAnchor[];
   /** Manual re-attachment of a floating thread onto `el` (the panel's drag/picker entry point). */
   reattach(threadId: string, el: HTMLElement): boolean;
+  /**
+   * US-23.3 AC3: the Author has answered the anchor-lost dialog for this thread,
+   * or left without deciding. Either way it stops being asked for THIS episode;
+   * a later floating transition arms it again (nothing about the answer is
+   * persisted — the frozen sidecar schema has no line type for an anchor
+   * decision, only for a real status change).
+   */
+  clearAnchorDecision(threadId: string): void;
   /** Current resolution of a thread — the read model for tests and later UI stories. */
   anchorOf(threadId: string): ThreadAnchor | undefined;
   /** Seed from `InitConfig.docUri` — echoed on every update so the host can verify the document. */
@@ -279,6 +308,33 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     anchor.state = 'floating';
   }
 
+  /**
+   * US-23.3 AC2/AC3: the two derived status indicators, recomputed from the
+   * resolution that just ran. They live here rather than in the popover so every
+   * surface reads one answer, and so the dialog is armed by the TRANSITION into
+   * floating — a plain "is it floating?" check would re-raise it on every settled
+   * change for the rest of the session.
+   *
+   * Neither is posted to the host: both are webview-derived (only the DOM can
+   * answer them) and neither moves the native thread's Range.
+   */
+  function applyStatusIndicators(anchor: ThreadAnchor, previousState: AnchorState): void {
+    // A floating thread has nothing holding it, so the recorded text certainly
+    // does not match — AC2's condition is "the content-match check currently
+    // fails", which that satisfies.
+    anchor.contentDrifted =
+      anchor.carrier === undefined ||
+      !anchorTextMatches(anchor.recordedText, anchor.carrier.textContent ?? '');
+    if (anchor.state !== 'floating' || anchor.status !== 'Open') {
+      // Promoted back out (an undo restored the text) or already past Open —
+      // nothing left to decide. Clearing here is also what re-arms the dialog
+      // for a genuine later episode.
+      anchor.awaitingAnchorDecision = false;
+    } else if (previousState !== 'floating') {
+      anchor.awaitingAnchorDecision = true;
+    }
+  }
+
   function postUpdate(anchor: ThreadAnchor): void {
     vscode.postMessage({
       type: 'commentAnchorUpdate',
@@ -323,13 +379,21 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       const previousLine = anchor.lastKnownLine;
       const previousState = anchor.state;
       const previousAnchorId = anchor.anchorId;
+      const previousDrift = anchor.contentDrifted;
+      const previousAwaiting = anchor.awaitingAnchorDecision;
       resolveOne(anchor, candidates);
+      applyStatusIndicators(anchor, previousState);
       if (
         anchor.lastKnownLine !== previousLine ||
         anchor.state !== previousState ||
         anchor.anchorId !== previousAnchorId
       ) {
         postUpdate(anchor);
+        changed = true;
+      }
+      if (anchor.contentDrifted !== previousDrift || anchor.awaitingAnchorDecision !== previousAwaiting) {
+        // Webview-only indicators: they must re-render the popover/dialog, but
+        // there is nothing for the host to follow, so no postUpdate.
         changed = true;
       }
     }
@@ -355,11 +419,32 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     existing.body = seed.body;
     existing.author = seed.author;
     existing.createdAt = seed.createdAt;
+    existing.lastTransitionAuthor = seed.lastTransitionAuthor;
+    existing.lastTransitionTimestamp = seed.lastTransitionTimestamp;
+    if (seed.status !== 'Open') {
+      // US-23.3 AC3: a thread that left Open (from this popover, from a second
+      // panel, or from the native UI) has nothing left to decide about its lost
+      // anchor. Cleared on the sync rather than waiting for the next resolution
+      // pass, which a metadata-only sync does not run.
+      existing.awaitingAnchorDecision = false;
+    } else if (existing.state === 'floating') {
+      // ...and a Reopen can put a thread back into Open while it is ALREADY
+      // anchorless, which is exactly AC3's condition. `applyStatusIndicators`
+      // arms only on the transition INTO floating, and this thread is past that,
+      // so without arming here the question would never be asked again for the
+      // rest of the session.
+      existing.awaitingAnchorDecision = true;
+    }
+  }
+
+  /** A thread's initial derived state, before the first resolution pass reads the DOM. */
+  function seedToAnchor(seed: ThreadAnchorSeed): ThreadAnchor {
+    return { ...seed, state: 'exact', contentDrifted: false, awaitingAnchorDecision: false };
   }
 
   /** Shared by `register` and `syncThread`'s "not seen before" branch. */
   function registerSeed(seed: ThreadAnchorSeed): void {
-    threads.set(seed.threadId, { ...seed, state: 'exact' });
+    threads.set(seed.threadId, seedToAnchor(seed));
     // Resolve now so the new thread is stamped immediately, and drop any
     // pending pass — it would re-resolve the same DOM generation a second time
     // and post duplicate updates for every other thread.
@@ -398,7 +483,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
         if (existing) {
           refreshFromSeed(existing, seed);
         } else {
-          threads.set(seed.threadId, { ...seed, state: 'exact' });
+          threads.set(seed.threadId, seedToAnchor(seed));
           seeded = true;
         }
       }
@@ -440,6 +525,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       postUpdate(anchor);
       notifyChanged();
       return true;
+    },
+    clearAnchorDecision(threadId): void {
+      const anchor = threads.get(threadId);
+      if (!anchor || !anchor.awaitingAnchorDecision) {
+        return;
+      }
+      anchor.awaitingAnchorDecision = false;
+      notifyChanged();
     },
     anchorOf(threadId): ThreadAnchor | undefined {
       return threads.get(threadId);

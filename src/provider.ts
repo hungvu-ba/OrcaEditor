@@ -241,6 +241,29 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           { message: 'Delete this comment thread and all its replies?', confirmLabel: 'Delete' }
         )
       ),
+      // Req 23 US-23.3: the same two-step resolve state machine from the NATIVE
+      // `vscode.comments` UI. No confirmation dialog on any of the three — every
+      // transition is reversible by the Reviewer's Reopen (the PO decision's own
+      // correction path), unlike a delete. Which of the three is even offered is
+      // gated per thread by the `status-*` half of `contextValue` in package.json;
+      // the Author/Reviewer rule stays host-side in `statusChangeRejection`, so a
+      // disallowed invocation surfaces its reason as a warning here.
+      ...(['resolve', 'close', 'reopen'] as const).map((action) =>
+        vscode.commands.registerCommand(
+          `orcaEditor.${action}Comment`,
+          (reply: vscode.CommentReply) =>
+            runNativeCommentCommand(
+              provider.comments,
+              reply,
+              (support, threadId, document) =>
+                support.changeStatus(
+                  { type: 'changeCommentStatus', requestId: 0, docUri: document.uri.toString(), threadId, action },
+                  document
+                ),
+              (document) => provider.syncCommentThreads(document)
+            )
+        )
+      ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
     // declarations) live. Provider-level (not per-panel) so it covers every
@@ -892,6 +915,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         // need live propagation (visibility gate, not just a seed) — dateFormat/
         // executeCommands stay init-only, unchanged behavior.
         triggerMode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
+        // Req 23 US-23.3 AC6: also live, for the same reason — the host resolves
+        // this name again on every comment action, so the webview's copy must not
+        // go stale or its Resolve/Close/Reopen gating disagrees with the host's.
+        commentAuthorName: resolveCommentAuthor(
+          wysiwygCfg.get<string>('comments.authorName'),
+          os.userInfo().username
+        ),
       });
     });
 
@@ -1297,6 +1327,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             : ({ ok: false, error: 'Comments are not available in this window.' } as const);
           void postToWebview({
             type: 'deleteCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'changeCommentStatus': {
+          // Req 23 US-23.3: changeStatus() validates the whole payload (document
+          // identity, known action, legality from the thread's live status, and
+          // the Author/Reviewer nudge). Appends a `status-change` sidecar line;
+          // nothing here edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.changeStatus(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'changeCommentStatusResult',
             requestId: msg.requestId,
             ok: outcome.ok,
             ...(outcome.ok ? {} : { error: outcome.error }),

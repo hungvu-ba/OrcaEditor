@@ -79,6 +79,7 @@ import { initCommentResolve } from './comment-resolve';
 import { initCommentPanel } from './comment-panel';
 import { initCommentHighlight } from './comment-highlight';
 import { initCommentPopover } from './comment-popover';
+import { initCommentAnchorDialog } from './comment-anchor-dialog';
 import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
@@ -243,6 +244,10 @@ const commentHighlight = initCommentHighlight(commentResolve);
 // Req 23 US-23.2: the thread popover — opened from a gutter pin (or a cluster
 // row). Created before the gutter, which needs its `open` as a callback.
 const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlight);
+// Req 23 US-23.3 AC3: asks the Author "was this resolved, or did it lose its
+// anchor?" once per floating episode. Self-driven off commentResolve's change
+// notifications — no other module opens it.
+const commentAnchorDialog = initCommentAnchorDialog(commentResolve, commentPopover);
 // Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
@@ -493,6 +498,7 @@ window.addEventListener('message', (event) => {
       currentDocUri = msg.docUri;
       commentPopover.setDocUri(msg.docUri);
       commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
+      commentAnchorDialog.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 23 US-23.2: per-file persisted "Show Comments" state.
       commentHighlight.setToggle(cfg.commentHighlightOn === true);
       syncCommentHighlightButton();
@@ -593,6 +599,8 @@ window.addEventListener('message', (event) => {
           createdAt: t.timestamp,
           status: t.status,
           replies: t.replies,
+          lastTransitionAuthor: t.lastTransitionAuthor,
+          lastTransitionTimestamp: t.lastTransitionTimestamp,
         }))
       );
       commentPopover.forgetThreads(pruned);
@@ -605,6 +613,13 @@ window.addEventListener('message', (event) => {
     }
     case 'deleteCommentResult': {
       commentPopover.notifyDeleteResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'changeCommentStatusResult': {
+      // Req 23 US-23.3: only the failure needs surfacing here — a successful
+      // transition arrives as its own `commentThreadsSync` push, which is what
+      // re-renders every surface (pin, popover, panel).
+      commentPopover.notifyStatusResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'namespaceListResult': {
@@ -675,6 +690,12 @@ window.addEventListener('message', (event) => {
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
+      // Req 23 US-23.3 AC6: the identity the Resolve/Close/Reopen gating (and the
+      // anchor-lost dialog) reads must track the setting live — the host re-reads
+      // it per action, so a stale copy here disagrees with what the host allows.
+      commentPopover.setAuthorName(msg.commentAuthorName ?? '');
+      commentAnchorDialog.setAuthorName(msg.commentAuthorName ?? '');
+      commentMenu.setAuthorName(msg.commentAuthorName ?? '');
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       if (lineNumbersEnabled) {

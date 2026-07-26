@@ -78,6 +78,21 @@
         "command": "orcaEditor.deleteComment",
         "title": "Delete Comment Thread",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.resolveComment",
+        "title": "Mark Comment as Resolved",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.closeComment",
+        "title": "Close Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.reopenComment",
+        "title": "Reopen Comment Thread",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
@@ -102,6 +117,18 @@
         },
         {
           "command": "orcaEditor.deleteComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.resolveComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.closeComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.reopenComment",
           "when": "false"
         }
       ],
@@ -143,6 +170,21 @@
           "command": "orcaEditor.deleteComment",
           "group": "inline@2",
           "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.resolveComment",
+          "group": "inline@3",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-open/"
+        },
+        {
+          "command": "orcaEditor.closeComment",
+          "group": "inline@4",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-resolved/"
+        },
+        {
+          "command": "orcaEditor.reopenComment",
+          "group": "inline@5",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-(resolved|closed)/"
         }
       ]
     },

@@ -3,7 +3,7 @@
  * `vscode` import, so test/unit.ts can exercise them directly (commentController.ts
  * itself needs the VS Code runtime and cannot be imported there).
  */
-import type { CommentStatus, WebviewToHost } from '../shared/messages';
+import type { CommentStatus, CommentStatusAction, WebviewToHost } from '../shared/messages';
 import { sameAuthor } from './sidecar-format';
 
 /** A `createComment` message, narrowed out of the WebviewToHost union. */
@@ -17,6 +17,9 @@ export type ReplyMessage = Extract<WebviewToHost, { type: 'replyToComment' }>;
 
 /** A `deleteComment` message (US-23.2), narrowed out of the WebviewToHost union. */
 export type DeleteCommentMessage = Extract<WebviewToHost, { type: 'deleteComment' }>;
+
+/** A `changeCommentStatus` message (US-23.3), narrowed out of the WebviewToHost union. */
+export type StatusChangeMessage = Extract<WebviewToHost, { type: 'changeCommentStatus' }>;
 
 /** The anchor-resolution states US-23.4's tiers can produce. */
 const ANCHOR_STATES: readonly AnchorUpdateMessage['state'][] = ['exact', 'approximate', 'floating'];
@@ -136,10 +139,9 @@ export function replyRejection(msg: ReplyMessage, docUri: string, threadStatus: 
     return 'This comment thread no longer exists.';
   }
   // US-23.2 AC: replying is blocked while the thread is Closed (US-23.3) — the
-  // popover shows "this thread is closed" instead of a reply box. US-23.3 is
-  // unbuilt, so no code path writes a status-change line yet and every thread
-  // is 'Open' in practice; this branch exists so the gate is correct the
-  // moment that story starts producing 'Closed' threads, not retrofitted then.
+  // popover shows "this thread is closed" instead of a reply box. Reachable
+  // since US-23.3 shipped `statusChangeRejection`/`changeStatus` below; only the
+  // Reviewer's Reopen lifts it.
   if (threadStatus === 'Closed') {
     return 'This thread is closed — reopen it before replying.';
   }
@@ -171,6 +173,107 @@ export function deleteRejection(
   }
   if (!sameAuthor(target.author, currentAuthor)) {
     return 'Only the original author can delete this.';
+  }
+  return null;
+}
+
+/** The status each action moves a thread to (US-23.3 AC1/AC5). */
+export const STATUS_CHANGE_TARGET: Record<CommentStatusAction, CommentStatus> = {
+  resolve: 'Resolved',
+  close: 'Closed',
+  reopen: 'Open',
+};
+
+/**
+ * The statuses each action may be invoked FROM (US-23.3 AC1/AC5). Reopen accepts
+ * both Resolved and Closed because the PO decision made it one action covering
+ * "the Reviewer disagrees this is fixed" and "that Close was a mistake" alike.
+ */
+const STATUS_CHANGE_SOURCE: Record<CommentStatusAction, readonly CommentStatus[]> = {
+  resolve: ['Open'],
+  close: ['Resolved'],
+  reopen: ['Resolved', 'Closed'],
+};
+
+/**
+ * Whether each action is the Author's or the Reviewer's (US-23.3 AC1/AC5/AC6).
+ *
+ * This extension has no authentication and no role model: `author` is
+ * `orcaEditor.comments.authorName`, free text the user can change at any time.
+ * So "Author" can only mean "the configured name matches the one recorded on
+ * this thread" and "Reviewer" its negation — the same non-authenticated
+ * name-string match US-23.2's delete-gating uses. AC6 states the consequence
+ * explicitly: this is a soft UX nudge, not a security boundary, and a user who
+ * edits the setting can still act on their own thread.
+ */
+const STATUS_CHANGE_ACTOR: Record<CommentStatusAction, 'author' | 'reviewer'> = {
+  resolve: 'author',
+  close: 'reviewer',
+  reopen: 'reviewer',
+};
+
+/**
+ * The native `CommentThread.contextValue` for a thread, carrying BOTH axes
+ * (US-23.4's anchor resolution and US-23.3's status).
+ *
+ * Pure and here rather than inline in `commentController.ts` so `test/unit.ts` can
+ * assert it against the `when` clauses in `package.json` — a typo on either side
+ * silently removes all three native Resolve/Close/Reopen actions, with nothing
+ * failing anywhere. Both halves must always be present: a thread carrying only
+ * `anchor-…` matches no `status-…` clause and offers none of the three.
+ */
+export function commentThreadContextValue(
+  anchorState: AnchorUpdateMessage['state'],
+  status: CommentStatus
+): string {
+  return `anchor-${anchorState} status-${status.toLowerCase()}`;
+}
+
+/**
+ * Why a `changeCommentStatus` request is refused, or null when valid (US-23.3).
+ * The thread's live status and its recorded author are passed in for the same
+ * reason `replyRejection` takes the status: only `commentController.ts` holds the
+ * live registry, so this stays a pure validator. `threadStatus`/`threadAuthor`
+ * `undefined` means the named thread does not exist.
+ *
+ * Checks run status-before-role deliberately: a Reviewer looking at an Open
+ * thread should be told to wait for the Author's Resolve (the design's "Resolve
+ * the thread before closing"), not that they lack permission.
+ */
+export function statusChangeRejection(
+  msg: StatusChangeMessage,
+  docUri: string,
+  threadStatus: CommentStatus | undefined,
+  currentAuthor: string,
+  threadAuthor: string | undefined
+): string | null {
+  if (msg.docUri !== docUri) {
+    return 'This status change was written for a different document.';
+  }
+  if (msg.threadId === '') {
+    return 'This status change names no thread.';
+  }
+  // Untrusted input: an unknown action must be refused, never fall through to a
+  // lookup that would yield `undefined` and append a malformed sidecar line.
+  if (!Object.prototype.hasOwnProperty.call(STATUS_CHANGE_TARGET, msg.action)) {
+    return 'This status change carries an unknown action.';
+  }
+  if (threadStatus === undefined || threadAuthor === undefined) {
+    return 'This comment thread no longer exists.';
+  }
+  if (!STATUS_CHANGE_SOURCE[msg.action].includes(threadStatus)) {
+    return msg.action === 'close'
+      ? 'Resolve the thread before closing it.'
+      : `A ${threadStatus} thread cannot be ${msg.action === 'resolve' ? 'resolved' : 'reopened'}.`;
+  }
+  const isThreadAuthor = sameAuthor(currentAuthor, threadAuthor);
+  if (STATUS_CHANGE_ACTOR[msg.action] === 'author' && !isThreadAuthor) {
+    return 'Only the comment’s author can mark it resolved.';
+  }
+  if (STATUS_CHANGE_ACTOR[msg.action] === 'reviewer' && isThreadAuthor) {
+    return msg.action === 'close'
+      ? 'You can’t close your own comment.'
+      : 'You can’t reopen your own comment.';
   }
   return null;
 }

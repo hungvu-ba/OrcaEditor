@@ -269,6 +269,35 @@ export function buildReplyLine(input: {
   };
 }
 
+/**
+ * Assemble an Open/Resolved/Closed transition line (US-23.3). Caller supplies
+ * id/timestamp so this stays pure.
+ *
+ * `from_status` is recorded as well as `to_status` even though the fold only
+ * reads the latter: a Reopen has to say which of Resolved/Closed it undid
+ * (US-23.3 AC5), and the pair is what makes a merged sidecar's history
+ * readable after two authors' lines interleave.
+ */
+export function buildStatusChangeLine(input: {
+  id: string;
+  parentCommentId: string;
+  author: string;
+  timestamp: string;
+  fromStatus: CommentStatus;
+  toStatus: CommentStatus;
+}): StatusChangeLine {
+  return {
+    schema_version: SIDECAR_SCHEMA_VERSION,
+    type: 'status-change',
+    id: input.id,
+    parent_comment_id: input.parentCommentId,
+    author: input.author,
+    timestamp: input.timestamp,
+    from_status: input.fromStatus,
+    to_status: input.toStatus,
+  };
+}
+
 /** Assemble a delete tombstone (US-23.2 PO decision). Caller supplies id/timestamp so this stays pure. */
 export function buildDeleteLine(input: {
   id: string;
@@ -530,14 +559,27 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
       .filter((reply) => !deletedReplies.has(reply.id))
       .sort(byTimestamp);
     const statusChanges = (statusByParent.get(id) ?? []).slice().sort(byTimestamp);
+    // Last-write-wins on `to_status`, defaulting to Open when nothing has been
+    // recorded: the current status is always this fold, never a stored field on
+    // the comment line. `from_status` decides nothing — a disagreeing chain still
+    // folds — but a disagreement means one writer acted on a status another had
+    // already moved past (two windows on one file, or a git merge interleaving two
+    // branches), so it is surfaced rather than silently overwritten.
+    let status: CommentStatus = 'Open';
+    for (const change of statusChanges) {
+      if (change.from_status !== status) {
+        warnings.push(
+          `status-change ${change.id}: recorded a move from ${change.from_status}, but the thread was ${status} — a concurrent transition was overwritten`
+        );
+      }
+      status = change.to_status;
+    }
     threads.push({
       id,
       comment,
       replies,
       statusChanges,
-      // Default Open when no transition has been recorded yet; the current
-      // status is always this fold, never a stored field on the comment line.
-      status: statusChanges.reduce<CommentStatus>((_, change) => change.to_status, 'Open'),
+      status,
     });
   }
   threads.sort((a, b) => byTimestamp(a.comment, b.comment));

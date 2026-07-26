@@ -264,11 +264,19 @@ export interface NamespaceSummary {
  * Structurally identical to `sidecar-format.ts`'s own `CommentStatus` — kept as
  * a separate literal union deliberately, so this shared wire-format module has
  * no import into a host-only file (per this file's own single-source-of-truth
- * role). US-23.3 is unbuilt, so every thread reports 'Open' today; the type
- * exists so US-23.2's gating logic (reply blocked while Closed) is written
- * against the real shape rather than a hardcoded 'Open'.
+ * role).
  */
 export type CommentStatus = 'Open' | 'Resolved' | 'Closed';
+
+/**
+ * Req 23 US-23.3: which transition a `changeCommentStatus` asks for. Named by
+ * the ACTION rather than by the target status because the two are not
+ * interchangeable — the legal source status and the acting role differ per
+ * action (Resolve: Open, Author; Close: Resolved, Reviewer; Reopen:
+ * Resolved-or-Closed, Reviewer), so a bare `toStatus: 'Open'` could not tell a
+ * Reopen from a fresh thread.
+ */
+export type CommentStatusAction = 'resolve' | 'close' | 'reopen';
 
 /** Req 23 US-23.2: one reply, as carried in a `commentThreadsSync` snapshot. */
 export interface CommentSyncReply {
@@ -305,6 +313,15 @@ export interface CommentSyncThread {
   lastKnownLine: number;
   nearestHeading: string;
   replies: CommentSyncReply[];
+  /**
+   * US-23.3 AC4: who made the most recent Resolved/Closed/Reopen transition and
+   * when. Carried on the snapshot rather than derived webview-side because the
+   * webview never sees the `status-change` lines — and it has to survive a
+   * reload, not just the session that performed the transition. Both absent
+   * while the thread has never left Open.
+   */
+  lastTransitionAuthor?: string;
+  lastTransitionTimestamp?: string;
 }
 
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
@@ -492,6 +509,21 @@ export type WebviewToHost =
    */
   | { type: 'deleteComment'; requestId: number; docUri: string; threadId: string; targetReplyId?: string }
   /**
+   * Req 23 US-23.3: move a thread along the Open → Resolved → Closed axis, or
+   * Reopen it back to Open in one step. Appends a `status-change` sidecar line
+   * (US-23.5) — never rewrites a prior line, and never edits the `.md`
+   * (US-23.6). The host validates the whole request: only it knows the thread's
+   * live status (which action is legal from it) and the configured author name
+   * (the non-authenticated Author/Reviewer nudge).
+   */
+  | {
+      type: 'changeCommentStatus';
+      requestId: number;
+      docUri: string;
+      threadId: string;
+      action: CommentStatusAction;
+    }
+  /**
    * Req 23 US-23.2: the "Show Comments" toolbar toggle changed for THIS file —
    * persisted host-side via `context.workspaceState`, keyed by `docUri`. Purely
    * a per-file UI preference; unlike `zenChanged`/`readingModeChanged` it is
@@ -527,7 +559,20 @@ export type HostToWebview =
    */
   | { type: 'update'; text: string; caretLine?: number; caretCol?: number }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
-  | { type: 'configUpdate'; autoOpenToc: boolean; showLineNumbers: boolean; triggerMode: TriggerMode }
+  /**
+   * `orcaEditor.*` changed in Settings. `commentAuthorName` rides along (Req 23
+   * US-23.3 AC6): the host re-reads that setting per action, so a webview holding
+   * the value it got at `init` would keep gating Resolve/Close/Reopen — and the
+   * anchor-lost dialog — on a stale identity, leaving AC6's own documented
+   * "edit the setting to get past the nudge" needing a panel reload.
+   */
+  | {
+      type: 'configUpdate';
+      autoOpenToc: boolean;
+      showLineNumbers: boolean;
+      triggerMode: TriggerMode;
+      commentAuthorName: string;
+    }
   /**
    * C4: `usedFallback` = true khi host đã âm thầm hạ một truy vấn Whole Word 0
    * kết quả xuống substring cho chính response này — webview hiện thông báo +
@@ -617,4 +662,13 @@ export type HostToWebview =
    */
   | { type: 'replyResult'; requestId: number; ok: boolean; error?: string; replyId?: string; author?: string; timestamp?: string }
   /** Req 23 US-23.2: reply to `deleteComment`. `ok: false` carries the refusal reason (unknown target, author mismatch). */
-  | { type: 'deleteCommentResult'; requestId: number; ok: boolean; error?: string };
+  | { type: 'deleteCommentResult'; requestId: number; ok: boolean; error?: string }
+  /**
+   * Req 23 US-23.3: reply to `changeCommentStatus`. `ok: false` carries the
+   * refusal reason (illegal transition from the thread's live status, or the
+   * Author/Reviewer nudge); `ok: true` carries nothing else on purpose — the new
+   * status, actor and timestamp all reach every surface through the
+   * `commentThreadsSync` push that follows, so echoing them here would be a
+   * second source of truth for the same three values.
+   */
+  | { type: 'changeCommentStatusResult'; requestId: number; ok: boolean; error?: string };
