@@ -24,6 +24,7 @@ import {
   computeUnwrapListRange,
 } from './list-ops';
 import { insertTable } from './table';
+import type { CommentPanelController } from './comment-panel';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
 import { type ReadabilityController } from './readability';
@@ -45,6 +46,8 @@ export interface ToolbarContext {
   requestRedo: () => void;
   dom: DomHelpers;
   toc: TocController;
+  /** Req 23 US-23.4 AC4: the "Unresolved location" panel this toolbar button opens. */
+  commentPanel: CommentPanelController;
   /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
   readability: ReadabilityController;
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
@@ -63,6 +66,15 @@ const TOC_ICON = svgIcon(
   `<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.75" ${FMT_STROKE}/>` +
     `<path d="M9.75 2.75v10.5" ${FMT_STROKE}/>` +
     '<path d="M3.75 6.25h3.5M3.75 8.75h3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.55"/>'
+);
+
+/**
+ * Req 23 US-23.4 AC4: a speech bubble with a broken link through it — a comment
+ * that has lost the place it pointed at.
+ */
+const UNRESOLVED_COMMENT_ICON = svgIcon(
+  `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>` +
+    `<path d="M6.4 8.6l3.2-2.2M6.9 6.4L9.1 8.6" ${FMT_STROKE}/>`
 );
 
 /** Icon Reading Mode (US-19.1): quyển sách mở — gợi chế độ đọc. */
@@ -287,6 +299,40 @@ interface ToolbarItem {
   dropdown?: ToolbarDropdownEntry[];
   /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
   dropdownTitle?: string;
+}
+
+/**
+ * Req 23 US-23.4 AC4: the unresolved-location button reflects the panel's open
+ * state and carries the floating count; it disappears entirely at zero, since a
+ * document with no lost anchor has nothing to route the user to.
+ */
+function updateCommentPanelButton(): void {
+  const button = document.getElementById('comment-panel-toggle');
+  if (!button) {
+    return;
+  }
+  const floating = ctx.commentPanel.floatingCount();
+  const open = ctx.commentPanel.isOpen();
+  button.classList.toggle('active', open);
+  // Zero floating threads hides the button — EXCEPT while the panel itself is
+  // still open: the panel emptying (drag/keyboard re-attach, or the last thread
+  // resolving elsewhere) must not remove the only way to close it.
+  button.hidden = floating === 0 && !open;
+  button.setAttribute('data-count', String(floating));
+  button.title =
+    floating === 0
+      ? 'Unresolved comment locations'
+      : `${floating} comment${floating === 1 ? '' : 's'} lost their anchor — open the Unresolved location panel`;
+  // Appearing/disappearing changes how much room the toolbar needs, and the
+  // overflow split is width-based (US-4.7) — without this, showing the button
+  // pushes another one off the edge instead of collapsing one into "•••", and
+  // hiding it leaves a gap that a collapsed button could have used.
+  recalcOverflow();
+}
+
+/** Called from main.ts whenever the floating set changes. */
+export function syncCommentPanelButton(): void {
+  updateCommentPanelButton();
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -760,6 +806,13 @@ const toolbarItems: ToolbarItem[] = [
     icon: TOC_ICON,
     title: 'Show/hide Table of Contents',
     action: () => {
+      // Both dock on the right at the same width — mutually exclusive rather
+      // than stacked, so one panel's offset math never has to account for
+      // the other also being open.
+      if (!ctx.toc.isOpen() && ctx.commentPanel.isOpen()) {
+        ctx.commentPanel.toggle();
+        updateCommentPanelButton();
+      }
       ctx.toc.toggle();
       updateTocButton();
     },
@@ -767,6 +820,25 @@ const toolbarItems: ToolbarItem[] = [
     // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
     viewOnly: true,
     collapsePriority: 21,
+  },
+  {
+    label: '⚑',
+    icon: UNRESOLVED_COMMENT_ICON,
+    title: 'Unresolved comment locations',
+    action: () => {
+      if (!ctx.commentPanel.isOpen() && ctx.toc.isOpen()) {
+        ctx.toc.toggle();
+        updateTocButton();
+      }
+      ctx.commentPanel.toggle();
+      updateCommentPanelButton();
+    },
+    id: 'comment-panel-toggle',
+    // Display-only — must not sync/dirty the file (see ToolbarItem.viewOnly).
+    viewOnly: true,
+    // 23, not 22: 22 is reading-toggle's, the anchor for the whole right-aligned
+    // group (see its comment) — sharing it would collapse the two together.
+    collapsePriority: 23,
   },
 ];
 

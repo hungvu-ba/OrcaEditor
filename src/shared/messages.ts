@@ -501,4 +501,19 @@ export type HostToWebview =
    * clears its in-flight guard on either outcome so a rejected attempt can be
    * retried.
    */
-  | { type: 'createCommentResult'; requestId: number; ok: boolean; error?: string };
+  | {
+      type: 'createCommentResult';
+      requestId: number;
+      ok: boolean;
+      error?: string;
+      /**
+       * Req 23 US-23.4: the author actually recorded on the thread and when.
+       * Present only on success. The host re-reads `orcaEditor.comments.authorName`
+       * (falling back to the OS username) at create time, so this is the only
+       * accurate source — `InitConfig.commentAuthorName` is a display hint the
+       * user may have changed since. The webview needs both to render a floating
+       * thread's card in the "Unresolved location" panel.
+       */
+      author?: string;
+      timestamp?: string;
+    };

@@ -51,6 +51,7 @@ import {
   levenshtein,
   normalizeAnchorText,
   pickAnchorCandidate,
+  rankReattachTargets,
   similarity,
   type AnchorCandidate,
 } from '../media/webview/comment-anchor';
@@ -1444,6 +1445,42 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     anchorUpdateRejection(update({ line: -1 }), 'file:///a.md') !== null);
   check('anchorUpdate: an unknown resolution state is refused',
     anchorUpdateRejection(update({ state: 'resolved' as AnchorUpdateMessage['state'] }), 'file:///a.md') !== null);
+}
+
+// --- Req 23 US-23.4 AC4: Re-attach... picker ranking ------------------------
+{
+  const candidate = (text: string, line: number, heading = '', depth = 1): AnchorCandidate => ({
+    text,
+    line,
+    heading,
+    depth,
+  });
+  const nodes = [
+    candidate('REQ-118 — Session Expiry', 1, '', 1),
+    candidate('AC-1 — Refund requests raised against an expired session are held.', 11, 'Acceptance criteria'),
+    candidate('AC-2 — The held queue drains in enqueue order.', 12, 'Acceptance criteria'),
+    candidate('AC-3 — Each entry records a reason code.', 13, 'Acceptance criteria'),
+  ];
+  const recorded = 'AC-2 — The held queue drains in enqueue order.';
+
+  const ranked = rankReattachTargets(recorded, nodes, '');
+  check('re-attach: every node is offered when the filter is empty', ranked.all.length === 4);
+  check('re-attach: the closest node is suggested first', ranked.suggested[0]?.index === 2);
+  check('re-attach: the exact node scores 100%', Math.round((ranked.suggested[0]?.score ?? 0) * 100) === 100);
+  check('re-attach: suggestions are capped', rankReattachTargets(recorded, nodes, '', 2).suggested.length === 2);
+  // Suggestions are ranked, never applied — the picker always leaves the choice
+  // to the author, which is why every candidate stays listed under Suggested.
+  check('re-attach: a runner-up is still offered, not discarded', (ranked.suggested[1]?.index ?? -1) !== -1);
+
+  const filtered = rankReattachTargets(recorded, nodes, 'QUEUE');
+  check('re-attach: the filter is case-insensitive', filtered.all.length === 1 && filtered.all[0].index === 2);
+  check('re-attach: a filter matching nothing yields no rows',
+    rankReattachTargets(recorded, nodes, 'zzz').all.length === 0);
+  check('re-attach: the filter is normalized like every other text comparison',
+    rankReattachTargets('x', [candidate('Nhật ký phiên'.normalize('NFD'), 3)], 'Nhật'.normalize('NFC')).all.length === 1);
+  check('re-attach: no candidates means no rows', rankReattachTargets(recorded, [], '').all.length === 0);
+  check('re-attach: an empty recorded text still lists every node, just unranked',
+    rankReattachTargets('', nodes, '').all.length === 4 && rankReattachTargets('', nodes, '').suggested.length === 0);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

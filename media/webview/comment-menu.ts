@@ -48,6 +48,9 @@ interface PendingAnchor {
   nearestHeading: string;
 }
 
+/** Everything about a thread the webview knows BEFORE the host confirms it. */
+type PendingSeed = Omit<ThreadAnchorSeed, 'author' | 'createdAt'>;
+
 /** Marks the anchored node while the composer is open, so it is obvious what the comment attaches to. */
 const ANCHOR_ACTIVE_CLASS = 'comment-anchor-active';
 
@@ -88,7 +91,7 @@ function primaryModifierLabel(): string {
 
 export interface CommentMenuController {
   /** Host reply hook — clears the in-flight guard and reports a refusal to the Reviewer. */
-  notifyCreateResult(requestId: number, ok: boolean, error?: string): void;
+  notifyCreateResult(requestId: number, ok: boolean, error?: string, author?: string, timestamp?: string): void;
   /** Seed from `InitConfig.docUri` — echoed back so the host never creates a thread on the wrong document. */
   setDocUri(uri: string): void;
   /** Seed from `InitConfig.commentAuthorName` — display only (the host resolves the real author at create time). */
@@ -109,8 +112,12 @@ export function initCommentMenu(
    * requestId until the host replies (either outcome releases it).
    */
   let inFlightRequestId: number | undefined;
-  /** US-23.4: what to hand the resolver once the host confirms the thread exists. */
-  let inFlightSeed: ThreadAnchorSeed | undefined;
+  /**
+   * US-23.4: what to hand the resolver once the host confirms the thread exists.
+   * The author and creation timestamp are missing on purpose — they come back
+   * with the host's reply, since only the host resolves the real author.
+   */
+  let inFlightSeed: PendingSeed | undefined;
   let pending: PendingAnchor | undefined;
 
   // --- Context menu ------------------------------------------------------------------------
@@ -333,8 +340,9 @@ export function initCommentMenu(
     // serves every open document, so a bare per-webview counter would give the
     // first thread of every file — and of every reopened file — the same handle,
     // and an update for one document would move another document's thread.
-    inFlightSeed = {
+    const seed: PendingSeed = {
       threadId: `${docUri}#${sessionSalt}-${requestId}`,
+      body,
       anchorId: pending.anchorId,
       offsetStart: pending.offsetStart,
       offsetEnd: pending.offsetEnd,
@@ -342,11 +350,12 @@ export function initCommentMenu(
       lastKnownLine: pending.line,
       nearestHeading: pending.nearestHeading,
     };
+    inFlightSeed = seed;
     vscode.postMessage({
       type: 'createComment',
       requestId,
       docUri,
-      threadId: inFlightSeed.threadId,
+      threadId: seed.threadId,
       anchorId: pending.anchorId,
       offsetStart: pending.offsetStart,
       offsetEnd: pending.offsetEnd,
@@ -370,7 +379,7 @@ export function initCommentMenu(
   submitBtn.addEventListener('click', submit);
 
   return {
-    notifyCreateResult(requestId, ok, error): void {
+    notifyCreateResult(requestId, ok, error, author, timestamp): void {
       if (requestId !== inFlightRequestId) {
         return;
       }
@@ -382,9 +391,12 @@ export function initCommentMenu(
         return;
       }
       // US-23.4: only a thread the host actually created gets tracked — a
-      // refused request must leave nothing behind to re-resolve.
+      // refused request must leave nothing behind to re-resolve. The author and
+      // timestamp come from the reply, not from the composer's display hint:
+      // the host re-reads the author setting at create time and that is what the
+      // thread was actually filed under.
       if (seed) {
-        resolve.register(seed);
+        resolve.register({ ...seed, author: author ?? authorName, createdAt: timestamp ?? '' });
       }
     },
     setDocUri(uri): void {

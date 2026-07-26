@@ -39,7 +39,7 @@ body {
 
 #toolbar {
   margin-left: -26px;
-  padding-left: 26px;
+  padding-left: var(--toolbar-edge-pad);
 }
 
 /* --- Vùng soạn thảo --- */
@@ -64,7 +64,7 @@ body.md-line-numbers {
 
 body.md-line-numbers #toolbar {
   margin-left: -98px;
-  padding-left: 98px;
+  padding-left: var(--toolbar-edge-pad);
 }
 
 /* Gutter sits after the 26px container padding: 26px offset + 56px width, then a
@@ -412,6 +412,13 @@ body.dd-dragging .dd-handle {
    * --toolbar-height mà main.ts đo runtime cho layout offset. Đổi đúng 1 giá trị
    * này cho một density toggle (compact/comfortable) về sau. */
   --toolbar-base-height: 40px;
+  /* Inner inset of the toolbar's own row of controls. The toolbar is full-bleed
+   * (negative margins cancel the body's left inset and the docked panels'
+   * reserve), so this — not the body's 26px — is what decides how close the
+   * first and last icon sit to the window edges. Kept small on purpose: every
+   * pixel here is width the width-based overflow split (US-4.7) can no longer
+   * give to a real button. */
+  --toolbar-edge-pad: 6px;
   --toolbar-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #f3f3f3));
   --toolbar-fg: var(--vscode-foreground, #3b3b3b);
   --toolbar-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
@@ -445,8 +452,8 @@ body.dd-dragging .dd-handle {
   gap: 3px;
   padding: calc(var(--toolbar-base-height) * 0.125) 0;
   margin: 0 -26px 8px;
-  padding-left: 26px;
-  padding-right: 26px;
+  padding-left: var(--toolbar-edge-pad);
+  padding-right: var(--toolbar-edge-pad);
   background: var(--toolbar-bg);
   border-bottom: 1px solid var(--toolbar-border);
 }
@@ -468,6 +475,14 @@ body:not(.reading-zen) {
  * and gets its own top inset, so scope this to non-zen. */
 body.reading-mode:not(.reading-zen) #content {
   padding-top: 24px;
+}
+
+/* `display: inline-flex` below would otherwise beat the UA sheet's
+ * `[hidden] { display: none }`, so a button that hides itself (Req 23 US-23.4's
+ * unresolved-location toggle, which only exists while something is floating)
+ * would stay on screen. */
+#toolbar button[hidden] {
+  display: none;
 }
 
 #toolbar button {
@@ -1489,6 +1504,55 @@ body.toc-open #select-viewport-band {
   right: var(--toc-width);
 }
 
+/* The comment panel docks in the same place as TOC (mutually exclusive, see
+ * toolbar.ts) — same offset so the search box and overview rulers clear it too. */
+body.comment-panel-open #search-viewport-band {
+  right: var(--comment-panel-width);
+}
+
+body.comment-panel-open #select-viewport-band {
+  right: var(--comment-panel-width);
+}
+
+body.comment-panel-open #search-box {
+  right: calc(20px + var(--comment-panel-width));
+}
+
+body.comment-panel-open #search-overview {
+  right: var(--comment-panel-width);
+}
+
+body.comment-panel-open #select-overview {
+  right: var(--comment-panel-width);
+}
+
+/* toolbar.ts writes the live count into data-count; [data-count="0"] happens
+ * while the panel is open with nothing left floating (the BLOCKER fix keeps
+ * the button visible then) — the badge itself should still disappear. */
+#comment-panel-toggle {
+  position: relative;
+}
+
+#comment-panel-toggle::after {
+  content: attr(data-count);
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--comment-warn-fg);
+  border-radius: 7px;
+}
+
+#comment-panel-toggle[data-count='0']::after {
+  display: none;
+}
+
 /*---------------------------------------------------------------------------
  * Mục lục (Table of Contents) — panel cố định bên phải
  *--------------------------------------------------------------------------*/
@@ -1538,7 +1602,7 @@ body.toc-open {
 
 body.toc-open #toolbar {
   margin-right: calc(-26px - var(--toc-width));
-  padding-right: calc(26px + var(--toc-width));
+  padding-right: calc(var(--toolbar-edge-pad) + var(--toc-width));
 }
 
 /* Đẩy hộp tìm + thước overview sang trái để không bị panel che. */
@@ -2339,6 +2403,17 @@ body.reading-zen.md-line-numbers #toolbar {
   margin-left: 0;
   padding-left: 26px;
 }
+/* Zen's toolbar is already `position: fixed; right: 0`, spanning the full
+ * viewport width on its own — the negative-margin "stretch to overlap the
+ * dock's top strip" trick (body.comment-panel-open #toolbar above) is for the
+ * in-flow toolbar only. Left uncountered, its margin/padding-right would shift
+ * the fixed toolbar away from the true right edge, opening a gap while Zen and
+ * the comment panel are both active. Same specificity (one class + #toolbar)
+ * as the rule it must beat, so it has to repeat the extra class to win. */
+body.reading-zen.comment-panel-open #toolbar {
+  margin-right: 0;
+  padding-right: var(--toolbar-edge-pad);
+}
 
 /* --- US-19.6/US-19.24: chrome (TOC + pop-up) phóng cỡ chữ trong Reading Mode ---
  * Mỗi selector đọc bucket --reading-ui-fs-N khớp với cỡ NATIVE của chính nó
@@ -2736,6 +2811,336 @@ body[class*='reading-mode-'] ::highlight(search-current) {
 .toc-item:focus-visible {
   outline: 2px solid var(--vscode-focusBorder, #007acc);
   outline-offset: -2px;
+}
+
+/*--------------------------------------------------------------------------*
+ * Req 23 US-23.4 AC4 — "Unresolved location" panel
+ *
+ * Same dock geometry and token discipline as the TOC panel above: every rule
+ * reads through the --comment-panel-* layer, never a raw --vscode-* var, so a
+ * reading mode can restyle the whole panel in one override block.
+ *--------------------------------------------------------------------------*/
+
+:root {
+  --comment-panel-width: 300px;
+  --comment-panel-bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --comment-panel-fg: var(--vscode-foreground);
+  --comment-panel-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.7));
+  --comment-panel-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  --comment-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --comment-card-border: var(--vscode-widget-border, rgba(128, 128, 128, 0.28));
+  --comment-card-hover-border: var(--vscode-focusBorder, #007acc);
+  --comment-accent: var(--vscode-textLink-foreground, #3794ff);
+  --comment-accent-soft: color-mix(in srgb, var(--comment-accent) 14%, transparent);
+  --comment-warn-fg: var(--vscode-editorWarning-foreground, #cca700);
+  --comment-panel-field-bg: var(--vscode-input-background, transparent);
+  --comment-panel-field-fg: var(--vscode-input-foreground, inherit);
+  --comment-panel-field-border: var(--vscode-input-border, var(--comment-card-border));
+}
+
+body.comment-panel-open {
+  padding-right: calc(26px + var(--comment-panel-width));
+}
+
+body.comment-panel-open #toolbar {
+  margin-right: calc(-26px - var(--comment-panel-width));
+  padding-right: calc(var(--toolbar-edge-pad) + var(--comment-panel-width));
+}
+
+#comment-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  width: 0;
+  overflow: hidden;
+  color: var(--comment-panel-fg);
+  background: var(--comment-panel-bg);
+  border-left: 1px solid var(--comment-panel-border);
+  opacity: 0;
+  visibility: hidden;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
+}
+
+body.comment-panel-open #comment-panel {
+  width: var(--comment-panel-width);
+  opacity: 1;
+  visibility: visible;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
+}
+
+.comment-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--comment-panel-border);
+}
+
+.comment-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.comment-panel-count {
+  margin-left: auto;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--comment-warn-fg);
+  border: 1px solid var(--comment-warn-fg);
+  border-radius: 9px;
+}
+
+.comment-panel-hint {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--comment-panel-muted);
+}
+
+.comment-panel-list {
+  flex: 1 1 auto;
+  /* Uncapped by design: seven cards or seventy, the list is the whole list. */
+  overflow-y: auto;
+  padding: 0 10px 12px;
+}
+
+.comment-panel-card {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 8px;
+  padding: 8px 9px 9px;
+  background: var(--comment-card-bg);
+  border: 1px solid var(--comment-card-border);
+  border-radius: 6px;
+  cursor: grab;
+}
+
+.comment-panel-card:hover {
+  border-color: var(--comment-card-hover-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.comment-panel-card:focus-visible {
+  outline: 1px solid var(--comment-accent);
+  outline-offset: 2px;
+}
+
+/* Always drawn, never hover-revealed: a card that can be dragged should say so
+ * at rest (design handoff). */
+.comment-panel-handle {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--comment-panel-muted);
+}
+
+.comment-panel-card-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.comment-panel-card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.comment-panel-meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.comment-panel-author {
+  font-weight: 600;
+}
+
+.comment-panel-time {
+  color: var(--comment-panel-muted);
+}
+
+.comment-panel-more {
+  margin-left: auto;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--comment-panel-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.comment-panel-more:hover {
+  color: var(--comment-panel-fg);
+}
+
+.comment-panel-quote {
+  margin: 4px 0 3px;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--comment-panel-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.comment-panel-text {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.comment-panel-empty {
+  padding: 24px 6px;
+  text-align: center;
+}
+
+.comment-panel-empty-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.comment-panel-empty-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--comment-panel-muted);
+}
+
+/* Drop aim — one visual language for the pointer route and the keyboard route. */
+.comment-drop-target {
+  background: var(--comment-accent-soft);
+  outline: 1px solid var(--comment-accent);
+  outline-offset: 2px;
+}
+
+.comment-drop-chip {
+  position: fixed;
+  z-index: 260;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--comment-accent);
+  background: var(--comment-panel-bg);
+  border: 1px solid var(--comment-accent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+body.comment-card-dragging {
+  cursor: grabbing;
+}
+
+body.comment-card-dragging * {
+  user-select: none;
+}
+
+/* --- Re-attach... picker --- */
+
+.comment-reattach-picker {
+  position: fixed;
+  z-index: 270;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 320px;
+  max-height: min(70vh, 460px);
+  padding: 10px;
+  color: var(--comment-panel-fg);
+  background: var(--comment-card-bg);
+  border: 1px solid var(--comment-card-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+}
+
+.comment-reattach-picker[hidden] {
+  display: none;
+}
+
+.comment-reattach-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.comment-reattach-filter {
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--comment-panel-field-fg);
+  background: var(--comment-panel-field-bg);
+  border: 1px solid var(--comment-panel-field-border);
+  border-radius: 4px;
+}
+
+.comment-reattach-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.comment-reattach-group {
+  padding: 6px 4px 3px;
+  font-size: 10px;
+  color: var(--comment-panel-muted);
+  text-transform: uppercase;
+}
+
+.comment-reattach-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.comment-reattach-row:hover,
+.comment-reattach-row.active {
+  background: var(--comment-accent-soft);
+}
+
+.comment-reattach-line {
+  flex: 0 0 auto;
+  color: var(--comment-panel-muted);
+}
+
+.comment-reattach-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Ranked, not chosen: the percentage is similarity to the recorded context, and
+ * even a 92% match still sits behind a click. */
+.comment-reattach-score {
+  flex: 0 0 auto;
+  color: var(--comment-accent);
+}
+
+.comment-reattach-empty,
+.comment-reattach-hint {
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--comment-panel-muted);
 }
 
 /* --- US-19.4 Image click-to-zoom ---

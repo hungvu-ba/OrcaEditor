@@ -48,9 +48,12 @@ test('controls appear in the wireframe order at rest', async ({ page }) => {
 });
 
 test('an extremely narrow toolbar collapses EVERY control into "•••", leaving only "•••" and the ⋮ kebab', async ({ page }) => {
-  // 200px: even the right utility cluster (Reading/Focus/Outline) has collapsed.
+  // 150px: even the right utility cluster (Reading/Focus/Outline) has collapsed.
   // The only always-visible controls are "•••" (overflow menu) and the ⋮ kebab.
-  await page.setViewportSize({ width: 200, height: 800 });
+  // (Was 200px until the toolbar's inner inset shrank to --toolbar-edge-pad,
+  // which handed ~40px back to the controls — the collapse ORDER is unchanged,
+  // only the width at which the last one gives up.)
+  await page.setViewportSize({ width: 150, height: 800 });
   await openEditor(page, '# hi');
 
   await expect(page.locator('.toolbar-more')).toBeVisible();

@@ -54,6 +54,7 @@ import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
 import {
   initToolbar,
+  syncCommentPanelButton,
   syncTocButton,
   syncReadingButtons,
   toggleInlineCode,
@@ -73,6 +74,7 @@ import { initTriggerAt } from './trigger-at';
 import { initEntityScope } from './entity-scope';
 import { initCommentMenu } from './comment-menu';
 import { initCommentResolve } from './comment-resolve';
+import { initCommentPanel } from './comment-panel';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
@@ -222,6 +224,16 @@ const readability = initReadability({
     plantumlView.refreshTheme();
   },
 });
+// Req 23 US-23.4: four-tier anchor re-resolution. Created before the menu — a
+// thread created there registers with this resolver as soon as the host
+// confirms it.
+const commentResolve = initCommentResolve(content, vscode);
+// Req 23 US-23.4 AC4: where a thread lands once all four tiers have failed, and
+// the two equal routes (drag, Re-attach… picker / keyboard) back into the text.
+const commentPanel = initCommentPanel(content, commentResolve);
+// The toolbar button carries the floating count, so it has to follow the
+// resolver even while the panel itself is closed.
+document.addEventListener('orca-comment-floating-changed', () => syncCommentPanelButton());
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
@@ -234,9 +246,14 @@ initToolbar(content, toolbarEl, {
   requestRedo: () => postToHost({ type: 'redo', pendingText: takePendingSync() }),
   dom,
   toc,
+  commentPanel,
   readability,
   insertMarkdown: insertMarkdownAtCaret,
 });
+// Req 23 US-23.4 AC4: the unresolved-location button starts hidden (nothing is
+// floating yet) — sync it now so the toolbar's width-based overflow split is
+// computed without it, rather than with a button that is about to vanish.
+syncCommentPanelButton();
 initInputRules(content, { scheduleSync, dom });
 
 // Req 20 US-20.1/20.2/20.3: ONE shared trigger-popup shell — created LAZILY on
@@ -292,10 +309,6 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
   scheduleSync();
   brokenRef.refresh();
 });
-// Req 23 US-23.4: four-tier anchor re-resolution. Created before the menu — a
-// thread created there registers with this resolver as soon as the host
-// confirms it.
-const commentResolve = initCommentResolve(content, vscode);
 // Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
 // only contextmenu handler.
 const commentMenu = initCommentMenu(content, vscode, commentResolve);
@@ -521,7 +534,7 @@ window.addEventListener('message', (event) => {
     case 'createCommentResult': {
       // Req 23 US-23.1: releases the composer's in-flight guard; a refusal is
       // surfaced to the Reviewer rather than failing silently.
-      commentMenu.notifyCreateResult(msg.requestId, msg.ok, msg.error);
+      commentMenu.notifyCreateResult(msg.requestId, msg.ok, msg.error, msg.author, msg.timestamp);
       break;
     }
     case 'namespaceListResult': {

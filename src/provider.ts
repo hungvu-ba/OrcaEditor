@@ -1019,14 +1019,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // (document identity, non-empty body, well-formed anchor) and returns
           // the refusal reason — a rejected request must surface to the
           // Reviewer, never fail silently. Nothing here edits the document.
-          const error = this.comments
+          const outcome = this.comments
             ? this.comments.createThread(msg, document)
-            : 'Comments are not available in this window.';
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
           void postToWebview({
             type: 'createCommentResult',
             requestId: msg.requestId,
-            ok: error === null,
-            ...(error === null ? {} : { error }),
+            ok: outcome.ok,
+            // Req 23 US-23.4: the recorded author/timestamp travel back so the
+            // webview can render this thread's card if its anchor ever floats.
+            ...(outcome.ok ? { author: outcome.author, timestamp: outcome.timestamp } : { error: outcome.error }),
           });
           break;
         }

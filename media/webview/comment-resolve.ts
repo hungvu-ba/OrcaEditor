@@ -50,6 +50,12 @@ export interface ThreadAnchor {
   /** 1-based line the anchor was last seen on; updated as tiers relocate it. */
   lastKnownLine: number;
   nearestHeading: string;
+  /** The comment's own text — what a card in the "Unresolved location" panel shows (US-23.4 AC4). */
+  body: string;
+  /** Author actually recorded on the thread, echoed by the host at create time. */
+  author: string;
+  /** ISO-8601 creation timestamp from the host; the panel orders newest-first by it. */
+  createdAt: string;
   state: AnchorState;
   /**
    * The node this thread resolved to last pass. Session-only and never
@@ -69,6 +75,11 @@ export interface CommentResolveController {
   /** Re-run the tiers for every thread once the document has settled. */
   refresh(): void;
   /**
+   * Called after every pass whose outcome differs from the last one, so the
+   * panel and its toolbar badge re-render without polling.
+   */
+  onChange(listener: () => void): void;
+  /**
    * Threads no tier could place. Uncapped and never pruned — US-23.4 AC4 forbids
    * a cap and a silent drop, even when one large edit floats many at once. The
    * "Unresolved location" panel that renders these is its own story.
@@ -85,6 +96,7 @@ export interface CommentResolveController {
 export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): CommentResolveController {
   let docUri = '';
   const threads = new Map<string, ThreadAnchor>();
+  const listeners: Array<() => void> = [];
   let timer: number | undefined;
 
   /**
@@ -248,10 +260,17 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
    * never resolve a thread onto a copy. Doing it here also keeps the scan off
    * the per-keystroke path — this whole function only runs behind the debounce.
    */
+  function notifyChanged(): void {
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+
   function resolveAll(): void {
     if (threads.size === 0) {
       return;
     }
+    let changed = false;
     const keep = new Set<HTMLElement>();
     for (const anchor of threads.values()) {
       if (anchor.carrier?.isConnected) {
@@ -272,7 +291,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
         anchor.anchorId !== previousAnchorId
       ) {
         postUpdate(anchor);
+        changed = true;
       }
+    }
+    if (changed) {
+      notifyChanged();
     }
   }
 
@@ -291,6 +314,9 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // and post duplicate updates for every other thread.
       cancelPending();
       resolveAll();
+      // A brand-new thread never changes state on its first pass, so resolveAll
+      // posts nothing — but the panel's count still has to account for it.
+      notifyChanged();
     },
     refresh(): void {
       cancelPending();
@@ -300,7 +326,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       }, ANCHOR_REEVAL_DEBOUNCE_MS);
     },
     floatingThreads(): ThreadAnchor[] {
-      return Array.from(threads.values()).filter((anchor) => anchor.state === 'floating');
+      // Newest created first (design handoff): the author is looking for a
+      // comment they remember writing, not for whichever anchor broke last.
+      return Array.from(threads.values())
+        .filter((anchor) => anchor.state === 'floating')
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     },
     reattach(threadId, el): boolean {
       const anchor = threads.get(threadId);
@@ -312,10 +342,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // makes tier 1 keep it there on every later pass.
       place(anchor, el, 'exact');
       postUpdate(anchor);
+      notifyChanged();
       return true;
     },
     anchorOf(threadId): ThreadAnchor | undefined {
       return threads.get(threadId);
+    },
+    onChange(listener): void {
+      listeners.push(listener);
     },
     setDocUri(uri): void {
       docUri = uri;

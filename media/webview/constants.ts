@@ -156,3 +156,14 @@ export const ANCHOR_SHORT_TEXT_THRESHOLD = 0.95;
  * before serialize by turndown.ts's TRANSIENT_ATTRS.
  */
 export const COMMENT_ANCHOR_STATE_ATTR = 'data-comment-anchor-state';
+
+// --- Req 23 US-23.4 AC4: "Unresolved location" panel ---
+
+/** Pointer travel before a mousedown on a card becomes a drag rather than a click. */
+export const COMMENT_PANEL_DRAG_THRESHOLD_PX = 4;
+
+/** How many ranked candidates the Re-attach… picker offers under "Suggested". */
+export const COMMENT_PANEL_REATTACH_SUGGESTIONS = 3;
+
+/** Characters of recorded/candidate text a one-line snippet keeps before eliding. */
+export const COMMENT_PANEL_SNIPPET_CHARS = 60;

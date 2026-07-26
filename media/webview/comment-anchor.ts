@@ -122,6 +122,52 @@ export function anchorThresholdFor(recordedText: string): number {
     : ANCHOR_SIMILARITY_THRESHOLD;
 }
 
+/** One row of the "Re-attach…" picker: a candidate, its index, and how close it reads. */
+export interface ReattachTarget {
+  index: number;
+  /** Similarity to the recorded text in 0–1 — shown as a percentage, never applied automatically. */
+  score: number;
+}
+
+export interface ReattachTargets {
+  /** Closest matches first, capped — the picker's `Suggested` group. */
+  suggested: ReattachTarget[];
+  /** Everything that passed the filter, in document order. */
+  all: ReattachTarget[];
+}
+
+/**
+ * Req 23 US-23.4 AC4: what the "Re-attach…" picker lists for a floating thread.
+ *
+ * Suggestions are RANKED, never chosen — even a 92% match sits behind a click,
+ * because the whole reason a thread is floating is that automatic matching
+ * already failed. `filter` is matched on the normalized text, so a query typed
+ * in a different Unicode form or with different spacing still matches.
+ */
+export function rankReattachTargets(
+  recordedText: string,
+  candidates: readonly AnchorCandidate[],
+  filter: string,
+  suggestedLimit = 3
+): ReattachTargets {
+  const needle = normalizeAnchorText(filter).toLowerCase();
+  const recorded = normalizeAnchorText(recordedText);
+  const all: ReattachTarget[] = [];
+  for (let index = 0; index < candidates.length; index++) {
+    const text = normalizeAnchorText(candidates[index].text);
+    if (needle !== '' && !text.toLowerCase().includes(needle)) {
+      continue;
+    }
+    all.push({ index, score: recorded === '' ? 0 : scoreNormalized(recorded, text, 0) });
+  }
+  const suggested = all
+    .filter((target) => target.score > 0)
+    .slice()
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, suggestedLimit);
+  return { suggested, all };
+}
+
 /**
  * Tier 2's answer: which candidate the recorded text belongs to, or null when
  * the tier fails and resolution must fall through to tier 3.

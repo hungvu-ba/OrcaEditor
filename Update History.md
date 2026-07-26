@@ -454,3 +454,5 @@
 | 0.10.0 | 2026-07-25 | Feature: add `check:cross-platform` script (metaKey/ctrlKey symmetry, `⌘`/`Ctrl` labels, CRLF/NFD/Windows-path fixtures) run automatically by `build.sh release`. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.1): right-click "Add Comment" creates a `vscode.comments` thread anchored to the selected node — author, timestamp, no change to the `.md`. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.4): comment anchors survive edits via four tiers (structural id, fuzzy text, covering block, floating), re-evaluated whenever an edit settles; duplicated anchors are re-minted. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): "Unresolved location" panel lists every floated comment (no cap), with drag-to-reattach, a ranked Re-attach… picker, and a keyboard-equivalent path; toolbar button badges the count. |
+| 0.10.0 | 2026-07-26 | Change: toolbar icon area now extends flush to both screen edges (was inset 26px each side); the "everything collapses to overflow" breakpoint moved accordingly. |

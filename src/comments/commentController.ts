@@ -40,13 +40,22 @@ export interface CommentAnchor {
   state: AnchorUpdateMessage['state'];
 }
 
+/**
+ * What creating a thread produced: the refusal reason, or the identity actually
+ * recorded on it. US-23.4's panel renders a floating thread's card from these,
+ * and only the host knows them (the author setting is re-read at create time).
+ */
+export type CreateThreadOutcome =
+  | { ok: false; error: string }
+  | { ok: true; author: string; timestamp: string };
+
 export interface CommentSupport extends vscode.Disposable {
   /**
-   * Create one thread for a validated `createComment` request. Returns the
-   * rejection reason (to be surfaced to the Reviewer) or null on success —
-   * a refused request must never leave a thread against a stale/empty anchor.
+   * Create one thread for a validated `createComment` request. A refused request
+   * must never leave a thread against a stale/empty anchor, and its reason is
+   * surfaced to the Reviewer.
    */
-  createThread(msg: CreateCommentMessage, document: vscode.TextDocument): string | null;
+  createThread(msg: CreateCommentMessage, document: vscode.TextDocument): CreateThreadOutcome;
   /**
    * US-23.4: a tier moved (or gave up on) a thread's anchor — follow it with the
    * native Range and record the new state. Returns the rejection reason or null.
@@ -77,10 +86,15 @@ export function createCommentSupport(): CommentSupport {
   const threads = new Map<string, { thread: vscode.CommentThread; anchor: CommentAnchor }>();
 
   return {
-    createThread(msg, document): string | null {
+    createThread(msg, document): CreateThreadOutcome {
       const rejection = createCommentRejection(msg, document.uri.toString());
       if (rejection !== null) {
-        return rejection;
+        return { ok: false, error: rejection };
+      }
+      if (threads.has(msg.threadId)) {
+        // One controller serves every document, so a colliding handle would
+        // silently replace another thread's entry and misdirect its updates.
+        return { ok: false, error: 'A comment thread with this id already exists.' };
       }
       const line = commentThreadLine(msg.line);
       const range = new vscode.Range(line, 0, line, 0);
@@ -90,17 +104,13 @@ export function createCommentSupport(): CommentSupport {
           .get<string>('authorName'),
         os.userInfo().username
       );
+      const createdAt = new Date();
       const comment: vscode.Comment = {
         body: new vscode.MarkdownString(msg.body),
         mode: vscode.CommentMode.Preview,
         author: { name: author },
-        timestamp: new Date(),
+        timestamp: createdAt,
       };
-      if (threads.has(msg.threadId)) {
-        // One controller serves every document, so a colliding handle would
-        // silently replace another thread's entry and misdirect its updates.
-        return 'A comment thread with this id already exists.';
-      }
       const thread = controller.createCommentThread(document.uri, range, [comment]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
       threads.set(msg.threadId, {
@@ -115,7 +125,7 @@ export function createCommentSupport(): CommentSupport {
           state: 'exact',
         },
       });
-      return null;
+      return { ok: true, author, timestamp: createdAt.toISOString() };
     },
     updateAnchor(msg, document): string | null {
       const rejection = anchorUpdateRejection(msg, document.uri.toString());
