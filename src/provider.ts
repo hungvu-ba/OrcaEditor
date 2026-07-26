@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import type {
   CrossFileMatch,
   CrossFileMatchGroup,
@@ -38,6 +39,8 @@ import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
+import { createCommentSupport, type CommentSupport } from './comments/commentController';
+import { resolveCommentAuthor } from './comments/comment-utils';
 
 /**
  * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
@@ -195,11 +198,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // proactive crawl, never persisted).
     const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => provider.scheduleOccurrenceScan(doc));
     void provider.buildEntityIndex();
-    return vscode.Disposable.from(providerDisposable, ...commandDisposables, docChangeSub, docOpenSub, ...watcherSubs);
+    // Req 23 US-23.1: one CommentController for the whole extension (threads are
+    // per-document, the controller is not) — created here so it is disposed with
+    // the provider registration.
+    provider.comments = createCommentSupport();
+    return vscode.Disposable.from(
+      providerDisposable,
+      ...commandDisposables,
+      docChangeSub,
+      docOpenSub,
+      ...watcherSubs,
+      provider.comments
+    );
   }
 
   /** Req 21 US-21.2: the live workspace entity index (`caption::` declarations). */
   public readonly entityIndex = new EntityIndex();
+
+  /** Req 23 US-23.1: the shared `vscode.comments` CommentController — assigned in register(). */
+  public comments: CommentSupport | undefined;
 
   /**
    * Req 21 US-21.3: session-only entity-reference occurrence cache, keyed by
@@ -736,6 +753,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 executeCommands: this.triggerExecuteCommands(),
                 mode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
               },
+              // Req 23 US-23.1: shown in the comment composer so the Reviewer
+              // sees which identity is about to be recorded. Display only — the
+              // host resolves the author again when the thread is created.
+              commentAuthorName: resolveCommentAuthor(
+                wysiwygCfg.get<string>('comments.authorName'),
+                os.userInfo().username
+              ),
             },
           });
           break;
@@ -987,6 +1011,23 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           } finally {
             addReferenceInFlight = false;
           }
+          break;
+        }
+        case 'createComment': {
+          // Req 23 US-23.1: create the native CommentThread for the webview's
+          // structural anchor. createThread validates the whole payload
+          // (document identity, non-empty body, well-formed anchor) and returns
+          // the refusal reason — a rejected request must surface to the
+          // Reviewer, never fail silently. Nothing here edits the document.
+          const error = this.comments
+            ? this.comments.createThread(msg, document)
+            : 'Comments are not available in this window.';
+          void postToWebview({
+            type: 'createCommentResult',
+            requestId: msg.requestId,
+            ok: error === null,
+            ...(error === null ? {} : { error }),
+          });
           break;
         }
         case 'entitySearch': {

@@ -178,6 +178,11 @@
           "default": true,
           "description": "On save, permanently delete pasted/dropped images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically. Does not apply to non-image files dropped into the editor — those are never auto-deleted."
         },
+        "orcaEditor.comments.authorName": {
+          "type": "string",
+          "default": "",
+          "description": "Name recorded as the author on review comments you create. Leave empty to use your OS username. This is a display name only — it is free text with no authentication behind it."
+        },
         "orcaEditor.readability.enabled": {
           "type": "boolean",
           "default": false,

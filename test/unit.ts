@@ -38,6 +38,12 @@ import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
+import {
+  commentThreadLine,
+  createCommentRejection,
+  resolveCommentAuthor,
+  type CreateCommentMessage,
+} from '../src/comments/comment-utils';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 
 let pass = 0;
@@ -580,12 +586,14 @@ const toWebview: HostToWebview[] = [
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
+    commentAuthorName: 'hungvu',
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
+    commentAuthorName: 'hungvu',
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
@@ -1282,6 +1290,50 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   const ext = makeHost(true);
   ext.external('bar'); // thay đổi không do webview
   check('bug3: edit ngoài thật vẫn post update (không over-suppress)', ext.updates === 1);
+}
+
+// --- Req 23 US-23.1: comment author + createComment payload validation --------
+{
+  const msg = (over: Partial<CreateCommentMessage> = {}): CreateCommentMessage => ({
+    type: 'createComment',
+    requestId: 1,
+    docUri: 'file:///a.md',
+    anchorId: 'comment-anchor-1',
+    offsetStart: 0,
+    offsetEnd: 5,
+    line: 3,
+    body: 'Why this wording?',
+    ...over,
+  });
+
+  check('comment author: setting wins over the OS username', resolveCommentAuthor('reviewer', 'osuser') === 'reviewer');
+  check('comment author: unset setting falls back to the OS username', resolveCommentAuthor(undefined, 'osuser') === 'osuser');
+  check('comment author: whitespace-only setting is treated as unset', resolveCommentAuthor('   ', 'osuser') === 'osuser');
+
+  check('createComment: a well-formed request is accepted', createCommentRejection(msg(), 'file:///a.md') === null);
+  check(
+    'createComment: a message for another document is refused (tab switch)',
+    createCommentRejection(msg(), 'file:///b.md') !== null
+  );
+  check('createComment: an empty body never creates a thread', createCommentRejection(msg({ body: '' }), 'file:///a.md') !== null);
+  check(
+    'createComment: a whitespace-only body never creates a thread',
+    createCommentRejection(msg({ body: ' \n\t ' }), 'file:///a.md') !== null
+  );
+  check('createComment: a missing anchor id is refused', createCommentRejection(msg({ anchorId: '' }), 'file:///a.md') !== null);
+  check(
+    'createComment: a reversed offset pair is refused',
+    createCommentRejection(msg({ offsetStart: 9, offsetEnd: 2 }), 'file:///a.md') !== null
+  );
+  check(
+    'createComment: a negative offset is refused',
+    createCommentRejection(msg({ offsetStart: -1 }), 'file:///a.md') !== null
+  );
+  check('createComment: a collapsed caret anchor is accepted', createCommentRejection(msg({ offsetStart: 4, offsetEnd: 4 }), 'file:///a.md') === null);
+
+  // 1-based webview line -> 0-based vscode.Range line; 0 means "maps to no source line".
+  check('comment thread line: 1-based source line becomes 0-based', commentThreadLine(3) === 2);
+  check('comment thread line: an unmapped anchor lands on line 0', commentThreadLine(0) === 0);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

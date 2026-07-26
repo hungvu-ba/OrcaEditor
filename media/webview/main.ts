@@ -71,6 +71,7 @@ import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
 import { initTriggerSlash } from './trigger-slash';
 import { initTriggerAt } from './trigger-at';
 import { initEntityScope } from './entity-scope';
+import { initCommentMenu } from './comment-menu';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
@@ -290,6 +291,9 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
   scheduleSync();
   brokenRef.refresh();
 });
+// Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
+// only contextmenu handler.
+const commentMenu = initCommentMenu(content, vscode);
 const brokenRef = initBrokenRef({
   content,
   vscode,
@@ -440,6 +444,11 @@ window.addEventListener('message', (event) => {
       // Req 21 bug fix: the quick-correct popover needs docUri to relativize a
       // corrected entity's declaring-file href (else it keeps the old file).
       quickCorrect.setDocUri(msg.docUri);
+      // Req 23 US-23.1: the composer echoes docUri back on 'createComment' so a
+      // thread is never created against the wrong document, and shows the
+      // author name the host will record.
+      commentMenu.setDocUri(msg.docUri);
+      commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       // US-19.25: seed Fit-mode TRƯỚC render đầu để bảng dựng thẳng ở fit-mode
@@ -501,6 +510,12 @@ window.addEventListener('message', (event) => {
       // waiting for), so no new host message shape.
       quickCorrect.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
       triggerAt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      break;
+    }
+    case 'createCommentResult': {
+      // Req 23 US-23.1: releases the composer's in-flight guard; a refusal is
+      // surfaced to the Reviewer rather than failing silently.
+      commentMenu.notifyCreateResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'namespaceListResult': {

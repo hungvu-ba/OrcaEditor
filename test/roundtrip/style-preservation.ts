@@ -449,6 +449,22 @@ runner.check(
   );
 }
 
+// Req 23 US-23.1: same leak check for the comment anchor id — a comment must
+// leave NO footprint in the `.md`, and the raw-HTML path is where a stamped
+// attribute would otherwise survive. Covers the id on the table itself and on a
+// descendant cell (a selection can anchor to either).
+{
+  const out = serializeHtml(
+    '<table data-comment-anchor-id="comment-anchor-1"><tbody><tr>' +
+      '<td data-comment-anchor-id="comment-anchor-2"><ul><li>x</li><li>y</li></ul></td></tr></tbody></table>'
+  );
+  runner.check(
+    'complex table HTML output carries no comment-anchor id',
+    out.includes('<table') && !out.includes('data-comment-anchor-id'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
 // Same leak check for the table-separator axis specifically: a complex table
 // (nested list forces HTML fallback) stamped 'compact' must not leak
 // data-md-table-sep-style into the saved .md output.

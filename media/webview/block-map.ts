@@ -37,6 +37,106 @@ function freshBlockId(): string {
   return `block-${nextBlockId++}`;
 }
 
+/**
+ * Req 23 US-23.1: structural id of the node a comment is anchored to. Same
+ * session-only, never-written-to-.md contract as BLOCK_ID_ATTR (it is stripped
+ * by turndown.ts's TRANSIENT_ATTRS), but stamped on ANY element a selection can
+ * reach — an inline `<strong>`, a `<td>`, a whole `<p>` — not just the
+ * top-level blocks BlockEntry tracks.
+ */
+export const COMMENT_ANCHOR_ATTR = 'data-comment-anchor-id';
+
+let nextCommentAnchorId = 1;
+
+/**
+ * Req 23 US-23.1: the id of the element a comment anchors to — reused when the
+ * element already carries one (two comments on the same paragraph must resolve
+ * to the SAME node), minted fresh otherwise.
+ *
+ * A clone (paste, line duplication) carries its source's attribute along, which
+ * would silently make two locations share one comment's anchor; when the id is
+ * not unique in `content` the clone is re-stamped instead of inheriting. Full
+ * clone-vs-move discrimination on every edit is US-23.4's job — this is only the
+ * mint-time guarantee that the id handed to the host addresses one node.
+ */
+export function ensureCommentAnchorId(content: HTMLElement, el: HTMLElement): string {
+  const existing = el.getAttribute(COMMENT_ANCHOR_ATTR);
+  if (existing && commentAnchorsFor(content, existing).length === 1) {
+    return existing;
+  }
+  const id = `comment-anchor-${nextCommentAnchorId++}`;
+  el.setAttribute(COMMENT_ANCHOR_ATTR, id);
+  return id;
+}
+
+/**
+ * Every element carrying `anchorId`. `content` ITSELF can be the anchored node
+ * (a selection spanning several top-level blocks resolves to it), and
+ * querySelectorAll only walks descendants — so it is matched separately or a
+ * whole-document anchor would read as "gone".
+ */
+function commentAnchorsFor(content: HTMLElement, anchorId: string): HTMLElement[] {
+  const selector = `[${COMMENT_ANCHOR_ATTR}="${CSS.escape(anchorId)}"]`;
+  const found = Array.from(content.querySelectorAll<HTMLElement>(selector));
+  return content.matches(selector) ? [content, ...found] : found;
+}
+
+/** Req 23 US-23.1: the element carrying `anchorId`, or null once it is gone from the current render. */
+export function findCommentAnchor(content: HTMLElement, anchorId: string): HTMLElement | null {
+  return commentAnchorsFor(content, anchorId)[0] ?? null;
+}
+
+/** The top-level block (direct child of `#content`) containing `el`, or null when `el` is outside `content`. */
+function topLevelBlockOf(content: HTMLElement, el: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = el;
+  while (node && node.parentElement !== content) {
+    node = node.parentElement;
+  }
+  return node;
+}
+
+/**
+ * Req 23 US-23.1: the element a comment on `range` anchors to — the smallest
+ * node containing the WHOLE selection (its common ancestor), so a selection
+ * crossing a paragraph break or reaching into a table cell/list item anchors to
+ * one enclosing node instead of being split or refused. A collapsed range (bare
+ * caret) resolves through the same path, landing on its containing node.
+ *
+ * Null means "no addressable node" — an empty document, a selection outside
+ * `#content`, or a block block-map excludes from its structural index (the
+ * self-inserted caret-trap `<p>`, which has no `data-line`; see readSrcRange).
+ * Callers surface that as a disabled "Add Comment", never as a silent no-op.
+ */
+export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HTMLElement | null {
+  if (!content.firstElementChild) {
+    return null;
+  }
+  const start = range.commonAncestorContainer;
+  const el = start.nodeType === Node.ELEMENT_NODE ? (start as HTMLElement) : start.parentElement;
+  if (!el || (el !== content && !content.contains(el))) {
+    return null;
+  }
+  if (el !== content) {
+    const block = topLevelBlockOf(content, el);
+    if (!block || !readSrcRange(block)) {
+      return null;
+    }
+  }
+  return el;
+}
+
+/**
+ * Req 23 US-23.1: 1-based source line the anchored node starts on — the
+ * best-effort document coordinate the host needs to give the native
+ * `CommentThread` a `vscode.Range`. The STRUCTURAL anchor stays authoritative;
+ * this is API compliance only. 0 when the node maps to no source line (a
+ * multi-block selection anchored on `#content` itself).
+ */
+export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number {
+  const block = el === content ? content.firstElementChild : topLevelBlockOf(content, el);
+  return (block && readSrcRange(block)?.start) ?? 0;
+}
+
 function classifyBlockType(el: HTMLElement): string {
   if (el.classList.contains(MERMAID_CLASS)) {
     return 'mermaid';

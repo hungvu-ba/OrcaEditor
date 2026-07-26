@@ -3281,3 +3281,251 @@ body[class*='reading-mode-'] #md-lightbox-stage[data-canvas='light'] {
   opacity: 0.5;
   cursor: default;
 }
+
+/* --- Req 23 US-23.1: "Add Comment" context menu + composer -----------------
+ * The menu reuses the handle-menu shell (.dd-menu-popup / .dd-menu-item /
+ * .dd-menu-sep) so a right-click menu and a handle menu read as the same
+ * VS Code menu; only the per-item icon + accelerator layout is new here.
+ * Commenting never rewrites document text, so nothing below changes metrics of
+ * the anchored content — the active-anchor mark is a background wash only. */
+
+.comment-context-menu[hidden] {
+  display: none;
+}
+
+.comment-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.comment-menu-item-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.comment-menu-item-label {
+  flex: 1;
+}
+
+.comment-menu-item-accel {
+  opacity: 0.7;
+  font-size: 11.5px;
+}
+
+.comment-menu-item[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.comment-menu-item[aria-disabled='true']:hover {
+  background: none;
+}
+
+/* Icon-less items keep the label column aligned with the "Add Comment" row. */
+.comment-menu-item:not(:has(.comment-menu-item-icon)) .comment-menu-item-label {
+  padding-left: 23px;
+}
+
+.comment-composer {
+  position: fixed;
+  z-index: 497;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 390px;
+  max-width: calc(100vw - 8px);
+  padding: 12px 13px;
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+
+.comment-composer[hidden] {
+  display: none;
+}
+
+.comment-composer-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-composer-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.comment-composer-title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.comment-composer-target {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.comment-composer-quote {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.comment-composer-quote[hidden] {
+  display: none;
+}
+
+.comment-composer-quote-rule {
+  flex: none;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  opacity: 0.4;
+}
+
+.comment-composer-quote-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.55;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.comment-composer-author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-composer-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  color: var(--vscode-editor-background);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.comment-composer-author-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.comment-composer-author-note {
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+
+.comment-composer-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.comment-composer-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-focusBorder) 30%, transparent);
+}
+
+.comment-composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.comment-composer-hint {
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+
+.comment-composer-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.comment-composer-btn {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.comment-composer-cancel {
+  padding: 5px 13px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-composer-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-composer-submit {
+  padding: 6px 14px;
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.comment-composer-submit:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.comment-composer-submit[aria-disabled='true'] {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.7));
+  cursor: not-allowed;
+}
+
+/* The anchor stays lit while the composer is open, so it is obvious what the
+ * comment will attach to. Background only — no weight, size or spacing change,
+ * so the document never reflows while composing. */
+.comment-anchor-active {
+  background: color-mix(in srgb, var(--vscode-focusBorder) 9%, transparent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--vscode-focusBorder) 9%, transparent);
+  border-radius: 2px;
+}
+
+/* US-19.11: the composer is floating chrome, so it follows the reading palette
+ * like every other popup rather than staying on the VS Code theme tokens. */
+body[class*='reading-mode-'] .comment-composer {
+  background: var(--rp-widget-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+  box-shadow: 0 16px 36px var(--rp-widget-shadow, rgba(0, 0, 0, 0.3));
+}
+
+body[class*='reading-mode-'] .comment-composer-input {
+  background: var(--rp-elev-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}

@@ -109,6 +109,14 @@ export interface InitConfig {
   /** Req 20 US-20.2/20.3: seed for the `/` Define+Execute trigger popup. */
   trigger: TriggerConfig;
   /**
+   * Req 23 US-23.1: the name that will be recorded as the author on a comment
+   * created from this panel (`orcaEditor.comments.authorName`, or the OS
+   * username when unset). Shown in the composer so the Reviewer sees which
+   * identity is about to be attached; the host resolves it again at create time
+   * — this copy is display only, never the value written to the thread.
+   */
+  commentAuthorName: string;
+  /**
    * US-2.8: webview URI of the lazily-loaded PlantUML engine bundle
    * (`dist/webview/plantuml-engine.js`). Resolved host-side because the webview
    * cannot call `asWebviewUri` itself.
@@ -358,7 +366,29 @@ export type WebviewToHost =
    */
   | { type: 'entitySearch'; requestId: number; query: string; namespace?: string }
   /** Req 21 US-21.2: the popup asks for the namespace browse list (with counts). */
-  | { type: 'namespaceList'; requestId: number };
+  | { type: 'namespaceList'; requestId: number }
+  /**
+   * Req 23 US-23.1: the "Add Comment" composer was submitted — create a native
+   * `vscode.comments` CommentThread for the anchored selection/caret. The
+   * STRUCTURAL anchor (`anchorId` + the character offsets WITHIN that node) is
+   * authoritative; `line` (1-based source line of the anchored node's block, 0
+   * when it maps to none) is a best-effort coordinate only, there so the host
+   * can hand the native API the `vscode.Range` it requires. Nothing here edits
+   * the `.md` — comments never enter the document's text or undo stack
+   * (US-23.6). `docUri` (echoes `InitConfig.docUri`) is verified host-side like
+   * `executeCommand`/`addReference` so a message arriving after a tab switch
+   * never creates a thread against the wrong document.
+   */
+  | {
+      type: 'createComment';
+      requestId: number;
+      docUri: string;
+      anchorId: string;
+      offsetStart: number;
+      offsetEnd: number;
+      line: number;
+      body: string;
+    };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -437,4 +467,12 @@ export type HostToWebview =
    */
   | { type: 'entityResult'; requestId: number; ready: boolean; entities: EntitySuggestion[] }
   /** Req 21 US-21.2: reply to `namespaceList`; `ready` as in `entityResult`. */
-  | { type: 'namespaceListResult'; requestId: number; ready: boolean; namespaces: NamespaceSummary[] };
+  | { type: 'namespaceListResult'; requestId: number; ready: boolean; namespaces: NamespaceSummary[] }
+  /**
+   * Req 23 US-23.1: reply to `createComment`. `ok: false` carries the reason in
+   * `error` (a stale/rejected request must surface to the Reviewer, never fail
+   * silently and never leave a thread against an empty anchor); the webview
+   * clears its in-flight guard on either outcome so a rejected attempt can be
+   * retried.
+   */
+  | { type: 'createCommentResult'; requestId: number; ok: boolean; error?: string };

@@ -29,6 +29,7 @@ import {
   HR_STYLE_ATTR,
   TABLE_SEP_STYLE_ATTR,
 } from './block-style';
+import { COMMENT_ANCHOR_ATTR } from './block-map';
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -678,13 +679,15 @@ function collapseBlankLines(html: string): string {
 /**
  * Editor-session metadata that must never leak into `.md` through raw-HTML
  * serialization paths (complex tables, kept/unknown tags): Block Map ids,
- * gutter line numbers, and the US-18.4 per-block style attributes — all
- * stamped on live DOM or the serialize clone, none of them document content.
+ * gutter line numbers, Req 23 comment-anchor ids, and the US-18.4 per-block
+ * style attributes — all stamped on live DOM or the serialize clone, none of
+ * them document content.
  */
 const TRANSIENT_ATTRS = [
   'data-block-id',
   'data-line',
   'data-line-end',
+  COMMENT_ANCHOR_ATTR,
   HEADING_STYLE_ATTR,
   BULLET_STYLE_ATTR,
   CODE_STYLE_ATTR,
