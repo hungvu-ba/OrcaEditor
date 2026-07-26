@@ -63,6 +63,18 @@ export function createCommentRejection(msg: CreateCommentMessage, docUri: string
   ) {
     return 'This comment lost its anchor before it could be created.';
   }
+  // US-23.5: these three are written straight into the sidecar's `anchor` block,
+  // and its loader rejects the whole line if any is off-shape — so an unvalidated
+  // value here would report success and then vanish on the next reopen. `line` is
+  // 0-or-positive by the same rule `commentThreadLine`/`anchorUpdateRejection`
+  // use (0 = "maps to no source line"); the two texts may be empty (an empty
+  // node, or a node under no heading) but must be strings, not absent.
+  if (!Number.isInteger(msg.line) || msg.line < 0) {
+    return 'This comment lost its anchor before it could be created.';
+  }
+  if (typeof msg.recordedText !== 'string' || typeof msg.nearestHeading !== 'string') {
+    return 'This comment lost its anchor before it could be created.';
+  }
   return null;
 }
 

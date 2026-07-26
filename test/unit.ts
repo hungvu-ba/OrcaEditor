@@ -47,6 +47,22 @@ import {
   type CreateCommentMessage,
 } from '../src/comments/comment-utils';
 import {
+  buildCommentLine,
+  foldSidecarRecords,
+  isSidecarName,
+  mdNameForSidecar,
+  sidecarBelongsToDocument,
+  parseSidecarText,
+  serializeSidecarLine,
+  sidecarNameFor,
+  sidecarNameMatches,
+  type CommentLine,
+  type DeleteLine,
+  type SidecarThread,
+  type ReplyLine,
+  type StatusChangeLine,
+} from '../src/comments/sidecar-format';
+import {
   anchorThresholdFor,
   levenshtein,
   normalizeAnchorText,
@@ -1481,6 +1497,255 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('re-attach: no candidates means no rows', rankReattachTargets(recorded, [], '').all.length === 0);
   check('re-attach: an empty recorded text still lists every node, just unranked',
     rankReattachTargets('', nodes, '').all.length === 4 && rankReattachTargets('', nodes, '').suggested.length === 0);
+}
+
+// --- Req 23 US-23.5: .orca-comments.jsonl sidecar format --------------------
+{
+  const anchor = {
+    offset_start: 0,
+    offset_end: 5,
+    recorded_text: 'AC-1 — held',
+    last_known_line: 88,
+    nearest_heading: 'Acceptance criteria',
+  };
+  const comment = (over: Partial<CommentLine> = {}): CommentLine => ({
+    ...buildCommentLine({
+      id: 'c1',
+      author: 'reviewer',
+      timestamp: '2026-07-26T10:00:00.000Z',
+      body: 'why?',
+      anchor,
+    }),
+    ...over,
+  });
+  const reply = (over: Partial<ReplyLine> = {}): ReplyLine => ({
+    schema_version: 1,
+    type: 'reply',
+    id: 'r1',
+    parent_comment_id: 'c1',
+    author: 'author',
+    timestamp: '2026-07-26T11:00:00.000Z',
+    body: 'fixed',
+    ...over,
+  });
+  const statusChange = (over: Partial<StatusChangeLine> = {}): StatusChangeLine => ({
+    schema_version: 1,
+    type: 'status-change',
+    id: 's1',
+    parent_comment_id: 'c1',
+    author: 'author',
+    timestamp: '2026-07-26T12:00:00.000Z',
+    from_status: 'Open',
+    to_status: 'Resolved',
+    ...over,
+  });
+  const tombstone = (over: Partial<DeleteLine> = {}): DeleteLine => ({
+    schema_version: 1,
+    type: 'delete',
+    id: 'd1',
+    target_id: 'r1',
+    author: 'author',
+    timestamp: '2026-07-26T13:00:00.000Z',
+    ...over,
+  });
+
+  // AC1/AC3: 1:1 sibling name, and every append ends the line so two concurrent
+  // appends land as separate diff hunks instead of colliding on one line region.
+  check('sidecar: the file is a 1:1 sibling of the .md', sidecarNameFor('foo.md') === 'foo.md.orca-comments.jsonl');
+  const serialized = serializeSidecarLine(comment());
+  check('sidecar: a serialized line ends with a newline', serialized.endsWith('\n'));
+  check('sidecar: a serialized record is exactly one physical line',
+    serialized.slice(0, -1).includes('\n') === false);
+  // A multi-line body must not break the line-oriented format.
+  check('sidecar: a body containing newlines still serializes to one line',
+    serializeSidecarLine(comment({ body: 'line one\nline two' })).slice(0, -1).includes('\n') === false);
+  check('sidecar: a serialized line round-trips',
+    parseSidecarText(serialized).lines.length === 1 &&
+      (parseSidecarText(serialized).lines[0] as CommentLine).body === 'why?');
+  check('sidecar: no status is stored on the comment line',
+    Object.prototype.hasOwnProperty.call(comment(), 'status') === false);
+  check('sidecar: the session-scoped structural id is never persisted',
+    Object.prototype.hasOwnProperty.call(comment().anchor, 'anchorId') === false &&
+      Object.prototype.hasOwnProperty.call(comment().anchor, 'structuralId') === false);
+
+  // AC4: an unparseable line is skipped with a warning, never aborting the load —
+  // a crashed append leaves at most one truncated final line.
+  const withGarbage = `${serializeSidecarLine(comment())}{"schema_version":1,"type":"comm\n${serializeSidecarLine(comment({ id: 'c2' }))}`;
+  const parsedGarbage = parseSidecarText(withGarbage);
+  check('sidecar: a corrupt line is skipped, the rest still load', parsedGarbage.lines.length === 2);
+  check('sidecar: a skipped line is reported', parsedGarbage.warnings.length === 1);
+  check('sidecar: a blank line is not a warning', parseSidecarText('\n\n').warnings.length === 0);
+  // JSON that parses but is not a record must not reach the fold.
+  check('sidecar: valid JSON of the wrong shape is skipped',
+    parseSidecarText('{"type":"comment","id":"x"}\n').lines.length === 0);
+  check('sidecar: a record with no id is skipped',
+    parseSidecarText(serializeSidecarLine(comment({ id: '' }))).lines.length === 0);
+  check('sidecar: an unknown line type is skipped',
+    parseSidecarText('{"schema_version":1,"type":"reaction","id":"x","author":"a","timestamp":"2026-01-01T00:00:00Z"}\n')
+      .lines.length === 0);
+
+  // AC4: timestamp order, not on-disk order — a git merge can interleave lines.
+  const shuffled = foldSidecarRecords([
+    comment(),
+    reply({ id: 'r2', timestamp: '2026-07-26T11:30:00.000Z', body: 'second' }),
+    reply({ id: 'r1', timestamp: '2026-07-26T11:00:00.000Z', body: 'first' }),
+  ]);
+  check('sidecar: replies are ordered by timestamp, not disk order',
+    shuffled.threads[0].replies.map((r) => r.body).join(',') === 'first,second');
+
+  // AC4: first-seen wins on a duplicate id, and the rest are flagged.
+  const duplicated = foldSidecarRecords([comment({ body: 'first' }), comment({ body: 'second' })]);
+  check('sidecar: a duplicate comment id keeps the first-seen line',
+    duplicated.threads.length === 1 && duplicated.threads[0].comment.body === 'first');
+  check('sidecar: a duplicate comment id is flagged', duplicated.warnings.length === 1);
+
+  // AC4: an unmatched parent routes to orphans instead of being dropped.
+  const orphaned = foldSidecarRecords([comment(), reply({ parent_comment_id: 'missing' })]);
+  check('sidecar: a reply with no parent routes to orphans',
+    orphaned.orphans.length === 1 && orphaned.threads[0].replies.length === 0);
+  check('sidecar: a status change with no parent routes to orphans',
+    foldSidecarRecords([statusChange({ parent_comment_id: 'missing' })]).orphans.length === 1);
+
+  // Status is derived by folding status-change lines, never stored.
+  check('sidecar: a thread with no status change defaults to Open',
+    foldSidecarRecords([comment()]).threads[0].status === 'Open');
+  check('sidecar: status folds to the last change by timestamp',
+    foldSidecarRecords([
+      comment(),
+      statusChange({ id: 's2', timestamp: '2026-07-26T14:00:00.000Z', from_status: 'Resolved', to_status: 'Closed' }),
+      statusChange(),
+    ]).threads[0].status === 'Closed');
+  check('sidecar: a reopen folds back to Open',
+    foldSidecarRecords([
+      comment(),
+      statusChange(),
+      statusChange({ id: 's3', timestamp: '2026-07-26T15:00:00.000Z', from_status: 'Resolved', to_status: 'Open' }),
+    ]).threads[0].status === 'Open');
+
+  // Tombstones: applied last, cascade for a comment, single for a reply.
+  const replyDeleted = foldSidecarRecords([comment(), reply(), reply({ id: 'r2' }), tombstone()]);
+  check('sidecar: deleting a reply leaves the thread and its siblings',
+    replyDeleted.threads.length === 1 && replyDeleted.threads[0].replies.length === 1 &&
+      replyDeleted.threads[0].replies[0].id === 'r2');
+  const threadDeleted = foldSidecarRecords([
+    comment(),
+    reply(),
+    statusChange(),
+    tombstone({ target_id: 'c1', author: 'reviewer' }),
+  ]);
+  check('sidecar: deleting a comment cascades to its replies and status changes',
+    threadDeleted.threads.length === 0 && threadDeleted.orphans.length === 0);
+  // Soft ownership nudge, not a security boundary: only the author of a line may
+  // tombstone it, and a mismatch is logged rather than applied.
+  check('sidecar: a delete whose author does not match the target is ignored',
+    foldSidecarRecords([comment(), reply(), tombstone({ author: 'someone-else' })]).threads[0].replies.length === 1);
+  check('sidecar: an author-mismatched delete is flagged',
+    foldSidecarRecords([comment(), reply(), tombstone({ author: 'someone-else' })]).warnings.length === 1);
+  // The same name typed on macOS (NFD) and Windows (NFC) is one person.
+  check('sidecar: author matching is NFC-normalized',
+    foldSidecarRecords([
+      comment(),
+      reply({ author: 'Nguyễn'.normalize('NFC') }),
+      tombstone({ author: 'Nguyễn'.normalize('NFD') }),
+    ]).threads[0].replies.length === 0);
+  // A stray delete from a race between two sessions must not error the load.
+  const strayDelete = foldSidecarRecords([comment(), tombstone({ target_id: 'nope' }), tombstone(), tombstone()]);
+  check('sidecar: a delete naming an unknown target is a silent no-op',
+    strayDelete.threads.length === 1 && strayDelete.warnings.length === 0);
+
+  // Regression (review 2026-07-26): duplicate ids were deduped for `comment` only.
+  // A merge that lands one reply twice displayed it twice — and since
+  // `deletedReplies` is keyed by id, ONE tombstone removed BOTH copies even when
+  // their authors differed.
+  const dupReply = foldSidecarRecords([comment(), reply({ body: 'one' }), reply({ body: 'two' })]);
+  check('sidecar: a duplicate reply id keeps the first-seen line',
+    dupReply.threads[0].replies.length === 1 && dupReply.threads[0].replies[0].body === 'one');
+  check('sidecar: a duplicate reply id is flagged', dupReply.warnings.length === 1);
+  check('sidecar: a duplicate status-change id keeps the first-seen line',
+    foldSidecarRecords([comment(), statusChange(), statusChange({ to_status: 'Closed' })]).threads[0].status === 'Resolved');
+  // A tombstone must never reach a different author's line via a shared id.
+  check('sidecar: a duplicate reply id cannot be cross-deleted by the other author',
+    foldSidecarRecords([
+      comment(),
+      reply({ author: 'A', body: "A's" }),
+      reply({ author: 'B', body: "B's" }),
+      tombstone({ author: 'B' }),
+    ]).threads[0].replies.length === 1);
+
+  // AC7 clause 2: does this sidecar even describe the document it sits next to?
+  // Decided by CONTENT, never by the file's creation date — `git clone`/`git
+  // checkout` recreate the file so its birth time becomes "now" while its comments
+  // stay older, which would discard every comment after any fresh clone.
+  {
+    const withText = (text: string, id: string): SidecarThread =>
+      foldSidecarRecords([comment({ id, anchor: { ...anchor, recorded_text: text } })]).threads[0];
+    const realDoc = '# Requirement 23\n\nThis is **bold** text in a paragraph.\n\nSee [the spec](a.md).\n';
+    const foreignDoc = '# Sprint retro notes\n\nWhat went well this iteration.\n';
+    const threads = [withText('This is bold text in a paragraph.', 'c1')];
+    check('belonging: the file that was commented on is recognised',
+      sidecarBelongsToDocument(threads, realDoc) === 'belongs');
+    check('belonging: a different file at the same path is foreign',
+      sidecarBelongsToDocument(threads, foreignDoc) === 'foreign');
+    // The stripped comparison is what closes the DOM-text vs raw-markdown gap:
+    // `## Title` scores only 0.625 against a recorded `Title` under US-23.4's
+    // similarity, i.e. below its 0.8 threshold, but both reduce to `title` here.
+    check('belonging: markdown syntax does not hide a match (heading)',
+      sidecarBelongsToDocument([withText('Requirement 23', 'c2')], realDoc) === 'belongs');
+    check('belonging: markdown syntax does not hide a match (inline bold)',
+      sidecarBelongsToDocument([withText('This is bold text', 'c3')], realDoc) === 'belongs');
+    // Never claim `foreign` without evidence — that would hide real comments.
+    check('belonging: a too-short recorded text is not discriminating',
+      sidecarBelongsToDocument([withText('Done', 'c4')], foreignDoc) === 'unknown');
+    check('belonging: no threads at all yields no claim',
+      sidecarBelongsToDocument([], foreignDoc) === 'unknown');
+    check('belonging: one match among many is enough to prove belonging',
+      sidecarBelongsToDocument([withText('nothing like this here at all', 'c5'), withText('This is bold text in a paragraph.', 'c6')], realDoc) === 'belongs');
+    check('belonging: NFD-authored recorded text still matches an NFC document',
+      sidecarBelongsToDocument([withText('Yêu cầu nghiệp vụ'.normalize('NFD'), 'c7')],
+        '## Yêu cầu nghiệp vụ'.normalize('NFC')) === 'belongs');
+  }
+
+  // Regression (review 2026-07-26): an unparseable timestamp sorted LAST, so one
+  // malformed field outranked every valid one and froze a thread's status.
+  check('sidecar: a garbage timestamp cannot outrank a real later transition',
+    foldSidecarRecords([
+      comment(),
+      statusChange({ id: 's1', timestamp: 'soon', to_status: 'Closed' }),
+      statusChange({ id: 's2', timestamp: '2026-07-26T12:00:00.000Z', from_status: 'Closed', to_status: 'Open' }),
+    ]).threads[0].status === 'Open');
+
+  // AC5: name drift a rename event never reports. Never a raw `===` — decode →
+  // NFC → separator → optional case-fold (CLAUDE.md's cross-platform trap).
+  const nfcName = sidecarNameFor('Yêu cầu.md'.normalize('NFC'));
+  const nfdName = sidecarNameFor('Yêu cầu.md'.normalize('NFD'));
+  check('sidecar drift: the NFD and NFC names are genuinely different strings', nfcName !== nfdName);
+  check('sidecar drift: NFD and NFC names match', sidecarNameMatches(nfdName, nfcName, false));
+  check('sidecar drift: case drift matches on a case-insensitive FS',
+    sidecarNameMatches(sidecarNameFor('Foo.md'), sidecarNameFor('foo.md'), true));
+  check('sidecar drift: case drift does NOT match on a case-sensitive FS',
+    sidecarNameMatches(sidecarNameFor('Foo.md'), sidecarNameFor('foo.md'), false) === false);
+  // Regression (review 2026-07-26, 3/3 reviewers): the comparison must NOT
+  // percent-decode. `a%20b.md` is a legal on-disk name, and an adopt is a
+  // destructive rename — so conflating it with `a b.md` would let opening one file
+  // steal the other's whole comment history. Mirrors normalizeAssetName's own rule.
+  check('sidecar drift: a percent-encoded name is NOT the same file as its decoded form',
+    sidecarNameMatches('a%20b.md.orca-comments.jsonl', 'a b.md.orca-comments.jsonl', false) === false);
+  check('sidecar drift: a literal % that is not an escape still compares',
+    sidecarNameMatches('100%.md.orca-comments.jsonl', '100%.md.orca-comments.jsonl', false));
+  check('sidecar drift: the shared on-disk normalizer backs the comparison',
+    sidecarNameMatches('Yêu.md.orca-comments.jsonl'.normalize('NFD'), 'Yêu.md.orca-comments.jsonl'.normalize('NFC'), false)
+      && normalizeAssetName('Yêu.md'.normalize('NFD')) === normalizeAssetName('Yêu.md'.normalize('NFC')));
+  // The paired-.md name is what lets adoptDrifted require an ORPHANED candidate.
+  check('sidecar drift: the paired .md name is recoverable',
+    mdNameForSidecar('foo.md.orca-comments.jsonl') === 'foo.md');
+  check('sidecar drift: a non-sidecar has no paired .md name',
+    mdNameForSidecar('foo.md') === null);
+  check('sidecar drift: two unrelated names never match',
+    sidecarNameMatches(sidecarNameFor('a.md'), sidecarNameFor('b.md'), true) === false);
+  // The directory scan must only ever consider real sidecars.
+  check('sidecar drift: a sidecar is recognised', isSidecarName('foo.md.orca-comments.jsonl'));
+  check('sidecar drift: the paired .md is not a sidecar', isSidecarName('foo.md') === false);
+  check('sidecar drift: an unrelated jsonl is not a sidecar', isSidecarName('data.jsonl') === false);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

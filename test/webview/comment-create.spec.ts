@@ -86,6 +86,24 @@ test('right-click over a selection anchors the comment to that node with within-
   expect(stamped).toBe(msg.anchorId);
 });
 
+test('the create carries the anchor snapshot the sidecar persists (US-23.5)', async ({ page }) => {
+  await openEditor(page, DOC);
+  await selectIn(page, 0, 6, 15); // "paragraph" inside "Alpha paragraph text."
+  await clearPosted(page);
+  await openComposer(page);
+  await page.locator('.comment-composer-input').fill('Snapshot me.');
+  await page.locator('.comment-composer-submit').click();
+
+  const [msg] = await postedCreates(page);
+  // recordedText/nearestHeading are written straight into the sidecar's
+  // `anchor` block, and tier 2 (US-23.4) is the ONLY way a reopened file finds
+  // this comment again — the session-scoped anchorId is never persisted. A
+  // create that posted them empty would be unrecoverable after a reopen, so the
+  // capture is asserted at the point it leaves the webview.
+  expect(msg.recordedText).toBe('Alpha paragraph text.');
+  expect(msg.nearestHeading).toBe('Heading one');
+});
+
 test('a bare caret is a valid anchor — collapsed offsets, same path as a range', async ({ page }) => {
   await openEditor(page, DOC);
   await selectIn(page, 1, 5, 5); // collapsed caret inside "Beta paragraph text."

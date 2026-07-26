@@ -41,6 +41,7 @@ import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 import { createCommentSupport, type CommentSupport } from './comments/commentController';
 import { resolveCommentAuthor } from './comments/comment-utils';
+import { createSidecarStore } from './comments/sidecar-store';
 
 /**
  * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
@@ -201,12 +202,86 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Req 23 US-23.1: one CommentController for the whole extension (threads are
     // per-document, the controller is not) — created here so it is disposed with
     // the provider registration.
-    provider.comments = createCommentSupport();
+    // Req 23 US-23.5: it persists through the sidecar store. Every write is routed
+    // through the same isInsideAllowedRoots check the other writers use — a
+    // defence-in-depth invariant, not a filter on attacker-controlled input: the
+    // sidecar path is derived from the document uri alone, so no field of the
+    // `createComment` payload can steer it. The gate is what keeps that true if the
+    // derivation ever grows a payload-dependent part.
+    const sidecarStore = createSidecarStore(
+      (docUri, target) => provider.isUriInsideAllowedRoots(docUri, target),
+      (message, err) => MarkdownWysiwygProvider.log(message, err),
+      CASE_INSENSITIVE_FS
+    );
+    provider.comments = createCommentSupport(
+      sidecarStore,
+      (message, err) => MarkdownWysiwygProvider.log(message, err),
+      CASE_INSENSITIVE_FS
+    );
+    // Req 23 US-23.5 AC5: carry a `.md`'s comment sidecar along when the file is
+    // renamed or moved. onWillRenameFiles (not onDidRenameFiles) is what pairs
+    // them — contributing the sidecar's rename to the SAME WorkspaceEdit means VS
+    // Code applies the two together. A file rename is not a text edit, so this adds
+    // nothing to any undo stack (US-23.6).
+    //
+    // A folder rename fires ONE event for the folder, with no child entries, so
+    // the `.md` files inside are absent here — correctly so: the sidecar is a
+    // sibling INSIDE that folder and moves with it for free.
+    const renameSub = vscode.workspace.onWillRenameFiles((event) => {
+      const markdownRenames = event.files.filter((file) => isMarkdownUri(file.oldUri));
+      if (markdownRenames.length === 0) {
+        return;
+      }
+      event.waitUntil(
+        (async (): Promise<vscode.WorkspaceEdit> => {
+          const edit = new vscode.WorkspaceEdit();
+          for (const file of markdownRenames) {
+            if (event.token.isCancellationRequested) {
+              // VS Code bounds rename participants (`files.participants.timeout`)
+              // and abandons a slow one, discarding this edit. Stop planning and
+              // tell the user which sidecars did NOT move, so the one path that
+              // strands comments is not also the silent one.
+              MarkdownWysiwygProvider.log(
+                'Comment sidecar: rename participant cancelled; remaining sidecars were not moved'
+              );
+              void vscode.window.showWarningMessage(
+                'The rename finished before its comment sidecars could be moved. Their comments stayed under the old file names.'
+              );
+              break;
+            }
+            try {
+              await sidecarStore.planRename(edit, file.oldUri, file.newUri);
+            } catch (err) {
+              // Per file: one failure must not discard the renames already planned
+              // for its siblings, which is what throwing out of this loop would do.
+              MarkdownWysiwygProvider.log(
+                `Comment sidecar: could not plan the move for ${file.oldUri.toString()}`,
+                err
+              );
+            }
+          }
+          return edit;
+        })()
+      );
+    });
+    // Req 23 US-23.5 AC5: once the rename has happened, the old uri's threads are
+    // bound to a path that no longer resolves. Dropping them lets the reopened
+    // document rebuild from the moved sidecar instead of showing each comment
+    // twice — once against the dead uri.
+    const renamedSub = vscode.workspace.onDidRenameFiles((event) => {
+      for (const file of event.files) {
+        if (isMarkdownUri(file.oldUri)) {
+          provider.comments?.forgetDocument(file.oldUri);
+        }
+      }
+    });
     return vscode.Disposable.from(
       providerDisposable,
       ...commandDisposables,
       docChangeSub,
       docOpenSub,
+      renameSub,
+      renamedSub,
       ...watcherSubs,
       provider.comments
     );
@@ -536,6 +611,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // Req 21 US-21.3: seed the occurrence cache for this document — a custom
     // editor open does not always surface as onDidOpenTextDocument.
     this.scheduleOccurrenceScan(document);
+
+    // Req 23 US-23.5 AC4: rebuild this document's persisted comment threads from
+    // its sidecar. Fire-and-forget: it only populates the native comments UI, so
+    // nothing below waits on disk I/O, and loadThreads is idempotent for a second
+    // panel on the same file. A read failure is logged inside the store, never
+    // surfaced as a broken open.
+    void this.comments?.loadThreads(document);
 
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
@@ -1019,8 +1101,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // (document identity, non-empty body, well-formed anchor) and returns
           // the refusal reason — a rejected request must surface to the
           // Reviewer, never fail silently. Nothing here edits the document.
+          // Req 23 US-23.5: it now awaits the sidecar append, so a failed write
+          // reaches the Reviewer as this request's error instead of creating a
+          // thread that would not survive the next reopen.
           const outcome = this.comments
-            ? this.comments.createThread(msg, document)
+            ? await this.comments.createThread(msg, document)
             : ({ ok: false, error: 'Comments are not available in this window.' } as const);
           void postToWebview({
             type: 'createCommentResult',
@@ -1355,9 +1440,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
   }
 
-  /** Thư mục không bao giờ chứa file đáng để link tới từ tài liệu markdown. */
+  /**
+   * Thư mục không bao giờ chứa file đáng để link tới từ tài liệu markdown.
+   * Req 23 US-23.5: cũng loại `*.orca-comments.jsonl` — sidecar là dữ liệu máy đi
+   * kèm 1 file .md, không phải file người dùng muốn link tới, và nó nằm ngay cạnh
+   * mọi file .md nên sẽ làm nhiễu picker `@` và ăn quota FILE_SEARCH_MAX_SCAN.
+   */
   private static readonly FILE_SEARCH_EXCLUDE =
-    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}';
+    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,**/*.orca-comments.jsonl}';
 
   private static readonly FILE_SEARCH_MAX_SCAN = 5000;
   private static readonly FILE_SEARCH_MAX_RESULTS = 20;
@@ -1380,7 +1470,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     '**/*.pdf,**/*.zip,**/*.gz,**/*.tar,**/*.7z,**/*.rar,' +
     '**/*.woff,**/*.woff2,**/*.ttf,**/*.eot,**/*.otf,' +
     '**/*.mp4,**/*.mp3,**/*.mov,**/*.avi,**/*.wav,' +
-    '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar}';
+    '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar,' +
+    // Req 23 US-23.5: comment sidecars are machine JSONL — searching them would
+    // return raw `{"schema_version":1,...}` lines instead of document text.
+    '**/*.orca-comments.jsonl}';
 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
@@ -2233,8 +2326,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
+    return this.isUriInsideAllowedRoots(document.uri, target);
+  }
+
+  /**
+   * Same guard keyed on a document's uri alone — Req 23 US-23.5's rename path
+   * runs while the `.md` is only about to move, so there is no TextDocument for
+   * the destination to hand in.
+   */
+  private async isUriInsideAllowedRoots(docUri: vscode.Uri, target: vscode.Uri): Promise<boolean> {
     const roots = [
-      vscode.Uri.joinPath(document.uri, '..'),
+      vscode.Uri.joinPath(docUri, '..'),
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
 
