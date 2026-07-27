@@ -440,6 +440,27 @@ export function createCommentSupport(
     return resolved !== '' ? resolved : promptForAuthorName(document);
   };
 
+  /**
+   * US-23.19: never let a comment's `recorded_text` outlive the buffer it was
+   * read from. Runs `store.refusalFor` first — the existing US-23.5 untitled/
+   * virtual-scheme/outside-root refusals, unchanged and checked before this
+   * gate ever reads `isDirty` (AC5) — then saves the document only when it is
+   * actually dirty (AC3), with the append call itself the only thing a caller
+   * runs after this resolves (AC1). `document.save()` writes only the user's
+   * own already-pending edits, so it contributes no `TextEdit` of its own and
+   * costs no extra undo step (AC4).
+   */
+  const saveBeforeAppend = async (document: vscode.TextDocument): Promise<string | null> => {
+    const refusal = await store.refusalFor(document);
+    if (refusal !== null) {
+      return refusal;
+    }
+    if (document.isDirty && !(await document.save())) {
+      return 'Could not save the file before recording the comment.';
+    }
+    return null;
+  };
+
   return {
     async createThread(msg, document): Promise<CreateThreadOutcome> {
       const rejection = createCommentRejection(msg, document.uri.toString());
@@ -470,22 +491,25 @@ export function createCommentSupport(
       const commentId = crypto.randomUUID();
       let writeError: string | null;
       try {
-        writeError = await store.append(
-          document,
-          buildCommentLine({
-            id: commentId,
-            author,
-            timestamp,
-            body: msg.body,
-            anchor: {
-              offset_start: msg.offsetStart,
-              offset_end: msg.offsetEnd,
-              recorded_text: msg.recordedText,
-              last_known_line: msg.line,
-              nearest_heading: msg.nearestHeading,
-            },
-          })
-        );
+        writeError = await saveBeforeAppend(document);
+        if (writeError === null) {
+          writeError = await store.append(
+            document,
+            buildCommentLine({
+              id: commentId,
+              author,
+              timestamp,
+              body: msg.body,
+              anchor: {
+                offset_start: msg.offsetStart,
+                offset_end: msg.offsetEnd,
+                recorded_text: msg.recordedText,
+                last_known_line: msg.line,
+                nearest_heading: msg.nearestHeading,
+              },
+            })
+          );
+        }
       } finally {
         creating.delete(msg.threadId);
       }
@@ -763,10 +787,13 @@ export function createCommentSupport(
         const createdAt = new Date();
         const timestamp = createdAt.toISOString();
         const replyId = crypto.randomUUID();
-        const writeError = await store.append(
-          document,
-          buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
-        );
+        const saveError = await saveBeforeAppend(document);
+        const writeError =
+          saveError ??
+          (await store.append(
+            document,
+            buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
+          ));
         if (writeError !== null) {
           return { ok: false, error: writeError };
         }
@@ -810,10 +837,13 @@ export function createCommentSupport(
         return { ok: false, error: 'That delete names a thread in another document.' };
       }
       const timestamp = new Date().toISOString();
-      const writeError = await store.append(
-        document,
-        buildDeleteLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp })
-      );
+      const saveError = await saveBeforeAppend(document);
+      const writeError =
+        saveError ??
+        (await store.append(
+          document,
+          buildDeleteLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp })
+        ));
       if (writeError !== null) {
         return { ok: false, error: writeError };
       }
@@ -882,17 +912,20 @@ export function createCommentSupport(
       // request could read a stale `entry.status` in is closed at both ends.
       changingStatus.add(msg.threadId);
       try {
-        const writeError = await store.append(
-          document,
-          buildStatusChangeLine({
-            id: crypto.randomUUID(),
-            parentCommentId: entry.commentId,
-            author: currentAuthor,
-            timestamp,
-            fromStatus,
-            toStatus,
-          })
-        );
+        const saveError = await saveBeforeAppend(document);
+        const writeError =
+          saveError ??
+          (await store.append(
+            document,
+            buildStatusChangeLine({
+              id: crypto.randomUUID(),
+              parentCommentId: entry.commentId,
+              author: currentAuthor,
+              timestamp,
+              fromStatus,
+              toStatus,
+            })
+          ));
         if (writeError !== null) {
           // Persist-then-apply, like every other action: a transition the sidecar
           // never accepted must not be shown as taken, since it would vanish on

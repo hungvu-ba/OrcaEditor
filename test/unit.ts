@@ -1479,6 +1479,66 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     sidecarBackupNameFor('foo.md.orca-comments.jsonl', 'stamp').endsWith('.bak'));
 }
 
+// --- Req 24 US-23.19: save-first gate — refusalFor -> isDirty -> save() -----
+// commentController.ts's real `saveBeforeAppend` imports 'vscode' so it isn't
+// reachable here — MODELED as a synchronous shadow of its control flow, same
+// convention as `modelRefusalFor` above (nothing here depends on genuine
+// asynchrony; `saveSucceeds`/`insideAllowedRoots` stand in for already-resolved
+// answers). `log` records which steps actually ran, so a test can assert what
+// did NOT happen (no save on a clean document, no save on a refused document).
+{
+  interface FakeDirtyDoc {
+    isUntitled: boolean;
+    scheme: string;
+    isDirty: boolean;
+  }
+
+  function modelSaveBeforeAppend(
+    doc: FakeDirtyDoc,
+    insideAllowedRoots: boolean,
+    saveSucceeds: boolean,
+    log: string[]
+  ): string | null {
+    log.push('refusalFor');
+    if (doc.isUntitled) {
+      return 'Save the file first to comment on it.';
+    }
+    if (doc.scheme !== 'file') {
+      return 'Comments need a file on disk; this document is on a virtual filesystem.';
+    }
+    if (!insideAllowedRoots) {
+      return 'The comment sidecar would be written outside the allowed workspace.';
+    }
+    if (doc.isDirty) {
+      log.push('save');
+      if (!saveSucceeds) {
+        return 'Could not save the file before recording the comment.';
+      }
+    }
+    return null;
+  }
+
+  const clean = { isUntitled: false, scheme: 'file', isDirty: false };
+  const dirty = { isUntitled: false, scheme: 'file', isDirty: true };
+
+  const cleanLog: string[] = [];
+  check('save-first gate (AC3): a clean document never calls save',
+    modelSaveBeforeAppend(clean, true, true, cleanLog) === null && !cleanLog.includes('save'));
+
+  const dirtySavedLog: string[] = [];
+  check('save-first gate (AC1): a dirty document is saved, in order, before the append would run',
+    modelSaveBeforeAppend(dirty, true, true, dirtySavedLog) === null && dirtySavedLog.join(',') === 'refusalFor,save');
+
+  const dirtyFailedLog: string[] = [];
+  check('save-first gate (AC2): a failed save is reported and the caller never reaches append',
+    modelSaveBeforeAppend(dirty, true, false, dirtyFailedLog) === 'Could not save the file before recording the comment.');
+
+  const untitledLog: string[] = [];
+  check('save-first gate (AC5): untitled is refused by the existing refusalFor check before isDirty/save ever run',
+    modelSaveBeforeAppend({ isUntitled: true, scheme: 'file', isDirty: true }, true, true, untitledLog)
+      === 'Save the file first to comment on it.' && !untitledLog.includes('save'));
+}
+
 // --- Req 23 US-23.10 AC9: body neutralization + EOL reconciliation ----------
 {
   check('neutralizeBodyText: plain text is unchanged', neutralizeBodyText('Why this wording?') === 'Why this wording?');
