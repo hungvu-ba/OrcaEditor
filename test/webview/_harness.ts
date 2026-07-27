@@ -80,7 +80,10 @@ function harnessHtml(readability: InitConfig['readability']): string {
 <title>webview test harness</title>
 <script>
   window.__posted = [];
-  let __state = {};
+  // Seeded by presetWebviewState() through addInitScript, which runs before this
+  // stub — the only way a spec can reach code that reads persisted webview state
+  // (rightDockTab, tocWidth, tocMaxLevel) on the very first boot.
+  let __state = window.__presetState ?? {};
   window.acquireVsCodeApi = () => ({
     postMessage: (msg) => { window.__posted.push(msg); },
     getState: () => __state,
@@ -116,6 +119,23 @@ function ensureHarnessFile(readability: InitConfig['readability']): void {
     throw new Error('dist/webview/main.js not found — run `node esbuild.js` before webview tests.');
   }
   fs.writeFileSync(HARNESS_FILE, harnessHtml(readability), 'utf8');
+}
+
+/**
+ * Seed the fake `vscode.getState()` record BEFORE the page boots. Must be called
+ * before `openEditor`; anything the webview persists (`rightDockTab`, `tocWidth`,
+ * `tocMaxLevel`) can be restored this way, which is the only route to the
+ * "reopened with a remembered choice" branch — the stub's state is per-page.
+ */
+export async function presetWebviewState(page: Page, state: Record<string, unknown>): Promise<void> {
+  await page.addInitScript((seed) => {
+    (window as unknown as { __presetState: unknown }).__presetState = seed;
+  }, state);
+}
+
+/** Read the fake `vscode.setState()` record — what the webview persisted so far. */
+export async function readWebviewState(page: Page): Promise<Record<string, unknown>> {
+  return page.evaluate(() => (window as unknown as { acquireVsCodeApi: () => { getState(): Record<string, unknown> } }).acquireVsCodeApi().getState());
 }
 
 /** Open the harness page and bootstrap it with the given markdown, like the host's 'init' message. */
@@ -162,6 +182,81 @@ export async function waitForEdit(page: Page, timeoutMs = 2000): Promise<string>
   );
   const msg = (await handle.jsonValue()) as { text: string };
   return msg.text;
+}
+
+/**
+ * Req 23 US-23.9: one thread as the host would push it, with everything but the
+ * interesting fields defaulted. Specs that only care about status/anchor state
+ * should not have to restate the whole `CommentSyncThread` envelope.
+ */
+export interface SeedThread {
+  threadId: string;
+  status?: 'Open' | 'Resolved' | 'Closed';
+  author?: string;
+  timestamp?: string;
+  body?: string;
+  recordedText?: string;
+  lastKnownLine?: number;
+  lastTransitionAuthor?: string;
+  lastTransitionTimestamp?: string;
+}
+
+/** What the host reports about the sidecar behind a snapshot (US-23.9 AC12/AC13). */
+export interface SeedSidecar {
+  foreign?: boolean;
+  problem?: string;
+  orphans?: Array<{ id: string; kind: 'reply' | 'status-change'; author: string; timestamp: string; detail: string }>;
+}
+
+/**
+ * Push a `commentThreadsSync` snapshot, exactly as `provider.syncCommentThreads`
+ * does. This is the ONLY way to reach a Closed thread or a foreign sidecar from
+ * a spec: neither can be produced by driving the webview's own UI.
+ */
+export async function seedCommentThreads(page: Page, threads: SeedThread[], sidecar?: SeedSidecar): Promise<void> {
+  await page.evaluate(
+    ({ list, docUri, side }) =>
+      window.postMessage(
+        {
+          type: 'commentThreadsSync',
+          docUri,
+          sidecar: side,
+          threads: list.map((t) => ({
+            threadId: t.threadId,
+            status: t.status ?? 'Open',
+            author: t.author ?? 'reviewer',
+            timestamp: t.timestamp ?? '2026-07-20T09:00:00.000Z',
+            body: t.body ?? 'Body.',
+            recordedText: t.recordedText ?? '',
+            offsetStart: 0,
+            offsetEnd: 0,
+            lastKnownLine: t.lastKnownLine ?? 1,
+            nearestHeading: '',
+            replies: [],
+            lastTransitionAuthor: t.lastTransitionAuthor,
+            lastTransitionTimestamp: t.lastTransitionTimestamp,
+          })),
+        },
+        '*'
+      ),
+    { list: threads, docUri: DEFAULT_DOC_URI, side: sidecar }
+  );
+}
+
+/**
+ * Open the right dock on the Comment tab and wait for the panel to finish
+ * widening. Goes through the tab header rather than the `⚑` toolbar button: the
+ * button is hidden while the file has no threads, which is exactly the state the
+ * empty-state specs need to reach.
+ */
+export async function openCommentTab(page: Page): Promise<void> {
+  // force: toolbar overflow math can transiently report #toc-toggle as offscreen.
+  await page.locator('#toc-toggle').click({ force: true });
+  // The dock animates its width open; measuring a row mid-transition would give
+  // a box that has moved by the time the pointer gets there.
+  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
+  await expect(page.locator('#comment-tabpanel')).toBeVisible();
 }
 
 /**

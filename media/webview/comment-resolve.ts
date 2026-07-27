@@ -26,6 +26,7 @@ import {
   commentAnchorLine,
   COMMENT_ANCHOR_ATTR,
   dedupeCommentAnchors,
+  ensureCommentAnchorId,
   findCommentAnchor,
   nearestHeadingBefore,
   type AnchorCandidateNode,
@@ -219,6 +220,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     const occupant = el.getAttribute(COMMENT_ANCHOR_ATTR);
     if (occupant && occupant !== anchor.anchorId && idUsedByAnother(occupant, anchor)) {
       anchor.anchorId = occupant;
+    } else if (anchor.anchorId === '') {
+      // A thread seeded from a host snapshot has no live id — `syncAll` seeds ''
+      // deliberately, so the very next pass starts at tier 2. Stamping that empty
+      // string onto the node would leave `[data-comment-anchor-id=""]` on it, and
+      // every later thread's tier-1 lookup would then "find" this node: one
+      // reload would collapse the whole file's threads onto whichever resolved
+      // first. Mint a real id instead (block-map.ts also refuses to match '').
+      anchor.anchorId = ensureCommentAnchorId(content, el);
     } else {
       for (const previous of carriersOf(COMMENT_ANCHOR_ATTR, anchor.anchorId)) {
         if (previous !== el) {

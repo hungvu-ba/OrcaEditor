@@ -128,8 +128,11 @@ registerEscapeHandler(ESCAPE_PRIORITY.DOCK, () => {
   // Focus lives inside a panel that is about to collapse and then go
   // visibility:hidden — hand it back before it is orphaned there.
   content.focus();
-  toc.toggle();
+  // close(), not toggle(): Escape must dismiss the dock whichever tab is
+  // showing, and toggle() with no id would switch to TOC from the Comment tab.
+  toc.close();
   syncTocButton();
+  syncCommentPanelButton();
   return true;
 });
 const mermaidView = initMermaid(content);
@@ -257,9 +260,6 @@ const readability = initReadability({
 // thread created there registers with this resolver as soon as the host
 // confirms it.
 const commentResolve = initCommentResolve(content, vscode);
-// Req 23 US-23.4 AC4: where a thread lands once all four tiers have failed, and
-// the two equal routes (drag, Re-attach… picker / keyboard) back into the text.
-const commentPanel = initCommentPanel(content, commentResolve);
 // Req 23 US-23.2: the "Show Comments" inline highlight overlay — created
 // before the popover (which needs it to light up the open thread's range) and
 // before the toolbar (whose button toggles it).
@@ -267,6 +267,13 @@ const commentHighlight = initCommentHighlight(commentResolve);
 // Req 23 US-23.2: the thread popover — opened from a gutter pin (or a cluster
 // row). Created before the gutter, which needs its `open` as a callback.
 const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlight);
+// Req 23 US-23.9: the Comment tab in the shared right dock — every thread in
+// the file, and the absorbed US-23.4 re-attach affordances for the floating
+// ones. Created AFTER the popover, which its rows hand threads to.
+const commentPanel = initCommentPanel(content, commentResolve, (threadId, rect, returnFocusTo) =>
+  commentPopover.open(threadId, rect, returnFocusTo)
+);
+toc.dock.registerTab(commentPanel.tab);
 // Req 23 US-23.3 AC3: asks the Author "was this resolved, or did it lose its
 // anchor?" once per floating episode. Self-driven off commentResolve's change
 // notifications — no other module opens it.
@@ -275,9 +282,21 @@ const commentAnchorDialog = initCommentAnchorDialog(commentResolve, commentPopov
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
 );
-// The toolbar button carries the floating count, so it has to follow the
-// resolver even while the panel itself is closed.
-document.addEventListener('orca-comment-floating-changed', () => syncCommentPanelButton());
+// The toolbar `⚑` button carries the floating count and the tab strip carries
+// the thread count, so both have to follow the resolver even while the dock is
+// closed. AC1: the strip badge appears only when the file has threads.
+function syncCommentCounts(): void {
+  syncCommentPanelButton();
+  const threads = commentPanel.threadCount();
+  toc.dock.setBadge('comment', threads === 0 ? undefined : String(threads));
+}
+document.addEventListener('orca-comment-floating-changed', syncCommentCounts);
+// Switching tabs from the strip (header click, ←/→) changes what `⚑` and `☰`
+// mean, and the dock cannot reach the toolbar itself.
+document.addEventListener('orca-dock-tab-changed', () => {
+  syncTocButton();
+  syncCommentPanelButton();
+});
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
@@ -299,7 +318,7 @@ initToolbar(content, toolbarEl, {
 // Req 23 US-23.4 AC4: the unresolved-location button starts hidden (nothing is
 // floating yet) — sync it now so the toolbar's width-based overflow split is
 // computed without it, rather than with a button that is about to vanish.
-syncCommentPanelButton();
+syncCommentCounts();
 initInputRules(content, { scheduleSync, dom });
 
 // Req 20 US-20.1/20.2/20.3: ONE shared trigger-popup shell — created LAZILY on
@@ -518,6 +537,18 @@ window.addEventListener('message', (event) => {
       commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 23 US-23.2: the popover echoes docUri back on reply/delete, and
       // needs the author name for its own-authorship delete gating.
+      // US-23.9: a document switch invalidates the tab's whole picture — the
+      // previous file's rows, its sidecar report, and any armed re-attach. Back
+      // to the loading state until this document's own snapshot arrives, so the
+      // tab never flashes "No comments in this file" at a file it has not read.
+      if (currentDocUri !== msg.docUri) {
+        // Drop the previous document's threads before anything renders: they are
+        // not this document's, and every comment surface (pins, highlight, the
+        // tab's rows with their old line numbers) would otherwise show them as
+        // live and clickable until the new snapshot's own `syncAll` prunes them.
+        commentPopover.forgetThreads(commentResolve.syncAll([]));
+        commentPanel.beginLoad();
+      }
       currentDocUri = msg.docUri;
       commentPopover.setDocUri(msg.docUri);
       commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
@@ -628,6 +659,12 @@ window.addEventListener('message', (event) => {
       );
       commentPopover.forgetThreads(pruned);
       commentGutter.refresh();
+      // US-23.9: the snapshot also carries what only the host can know — a
+      // foreign or unreadable sidecar, a refusal, orphaned lines — so the tab
+      // can say WHY a list is empty instead of showing "no comments" for four
+      // different causes. This also ends its loading state and rebuilds it; the
+      // rows themselves come from the same resolver registry the pins read.
+      commentPanel.setSidecarState(msg.sidecar);
       break;
     }
     case 'replyResult': {
@@ -768,7 +805,9 @@ window.addEventListener('message', (event) => {
       } else if (msg.command === 'toggleZen') {
         readability.toggleZen();
       } else if (msg.command === 'openToc') {
-        toc.toggle();
+        // Named for the TOC, so it means the TOC — same explicit target as the
+        // `☰` button, not "whatever tab was last selected".
+        toc.toggle('toc');
         syncTocButton();
       } else if (msg.command === 'toggleTableFitMode') {
         // US-19.25: lật cờ, apply cục bộ + báo host để nhớ global + broadcast
@@ -795,8 +834,11 @@ window.addEventListener('resize', () => {
   toc.reflowWidth();
   const narrow = isNarrowViewport();
   if (narrow && !wasNarrowViewport && toc.isOpen()) {
-    toc.toggle();
+    // close(), not toggle(): auto-hide means "get out of the way" for whichever
+    // tab is showing, never "switch to TOC" (US-23.9).
+    toc.close();
     syncTocButton();
+    syncCommentPanelButton();
   }
   wasNarrowViewport = narrow;
 });

@@ -20,9 +20,10 @@
  * and closing hands focus back to the `⋯` button — which also keeps the panel
  * Escape-closable, since main.ts's dock handler requires focus inside the panel.
  *
- * Deferred to US-23.9, where a second tab makes each observable (see
- * `_bmad-output/quick-dev/deferred-work.md`): ←/→ traversal across headers, and
- * the visible half of tab switching / last-tab restore.
+ * US-23.9 added the second tab and with it ←/→ traversal across headers (focus
+ * follows activation, the strip still being one tab stop), per-tab count badges,
+ * and per-item menu sections/selection modes so one menu can hold a one-of-N
+ * group beside an independent toggle.
  */
 
 import {
@@ -32,7 +33,9 @@ import {
   RIGHT_DOCK_STRIP_CLASS,
   RIGHT_DOCK_TABLIST_CLASS,
   RIGHT_DOCK_TABPANEL_CLASS,
+  RIGHT_DOCK_TAB_BADGE_CLASS,
   RIGHT_DOCK_TAB_CLASS,
+  RIGHT_DOCK_TAB_LABEL_CLASS,
 } from './constants';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
@@ -42,6 +45,14 @@ export interface RightDockMenuItem {
   label: string;
   /** Renders the check column filled. Omit for a plain command row. */
   checked?: boolean;
+  /**
+   * Heading rendered above this row, and above every following row that repeats
+   * it. Lets one menu hold several groups — US-23.9's Comment tab needs a
+   * one-of-N sort group and an independent toggle in the same menu.
+   */
+  section?: string;
+  /** Overrides the tab-level `menuSelection` for this row. Drives ARIA only. */
+  selection?: 'single' | 'multiple' | 'none';
   onSelect(): void;
 }
 
@@ -68,6 +79,11 @@ export interface TabDock {
   /** Show `id`'s body and hide the rest. No-op for an unknown id. */
   activate(id: string): void;
   activeId(): string | undefined;
+  /**
+   * Set (or clear, with `undefined`/`''`) the count badge on a tab header.
+   * A live value, so it is pushed in rather than read off the tab descriptor.
+   */
+  setBadge(id: string, text?: string): void;
   /** Dismiss the `⋯` menu. The caller must call this whenever it closes the panel. */
   closeMenu(): void;
 }
@@ -84,7 +100,17 @@ const MENU_OFFSET_RIGHT_PX = 8;
 /** Disambiguates ARIA ids when more than one dock exists (tests build their own). */
 let dockSeq = 0;
 
-export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
+export function createTabDock(
+  panel: HTMLElement,
+  vscode?: VsCodeApi,
+  /**
+   * Called after every activation, including the ones the dock performs itself
+   * (a header click, ←/→). Without it the toolbar buttons — whose active/hidden
+   * state is derived from `activeId()` — only resync on the paths that go
+   * through them, so switching tabs from the strip leaves them lying.
+   */
+  onActivate?: (id: string) => void
+): TabDock {
   const uid = `right-dock-${++dockSeq}`;
   const tabs: RightDockTab[] = [];
   const headers = new Map<string, HTMLButtonElement>();
@@ -216,26 +242,35 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     }
   }
 
+  function appendMenuTitle(text: string): void {
+    const title = document.createElement('div');
+    title.className = 'right-dock-menu-title';
+    // role=menu may only own menuitem*/group/separator — a bare div would be
+    // announced unpredictably, so mark the section title as decoration.
+    title.setAttribute('role', 'presentation');
+    title.textContent = text;
+    menu.appendChild(title);
+  }
+
   function buildMenu(tab: RightDockTab, items: RightDockMenuItem[]): void {
     menu.textContent = '';
     if (tab.menuTitle !== undefined) {
-      const title = document.createElement('div');
-      title.className = 'right-dock-menu-title';
-      // role=menu may only own menuitem*/group/separator — a bare div would be
-      // announced unpredictably, so mark the section title as decoration.
-      title.setAttribute('role', 'presentation');
-      title.textContent = tab.menuTitle;
-      menu.appendChild(title);
+      appendMenuTitle(tab.menuTitle);
     }
-    const role = tab.menuSelection === 'multiple' ? 'menuitemcheckbox' : 'menuitemradio';
+    let openSection: string | undefined;
     for (const item of items) {
+      if (item.section !== undefined && item.section !== openSection) {
+        appendMenuTitle(item.section);
+      }
+      openSection = item.section;
       const row = document.createElement('button');
       row.type = 'button';
       row.className = RIGHT_DOCK_MENU_ITEM_CLASS;
-      if (item.checked === undefined) {
+      const selection = item.selection ?? tab.menuSelection;
+      if (item.checked === undefined || selection === 'none') {
         row.setAttribute('role', 'menuitem');
       } else {
-        row.setAttribute('role', role);
+        row.setAttribute('role', selection === 'multiple' ? 'menuitemcheckbox' : 'menuitemradio');
         row.setAttribute('aria-checked', String(item.checked));
       }
       const check = document.createElement('span');
@@ -303,6 +338,73 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     openBeforePress = false;
   });
 
+  /**
+   * US-23.7 AC6, observable only once a second tab exists (US-23.9): ←/→ walk the
+   * headers and move focus with the roving tabindex, wrapping at both ends. The
+   * strip stays ONE tab stop — activation follows focus, which is the standard
+   * automatic-activation tablist model and matches click.
+   */
+  tablist.addEventListener('keydown', (e) => {
+    // DOM order, not registration order: the strip is what the user is walking.
+    const order = Array.from(tablist.children)
+      .map((header) => [...headers].find(([, node]) => node === header)?.[0])
+      .filter((id): id is string => id !== undefined);
+    if (order.length < 2) {
+      return;
+    }
+    // From the FOCUSED header, not the active one. They coincide under today's
+    // automatic-activation model, but a programmatic focus must not make ← / →
+    // jump from somewhere the user is not.
+    const focused = (document.activeElement as HTMLElement | null)?.closest('[role="tab"]');
+    const fromId = [...headers].find(([, node]) => node === focused)?.[0] ?? activeTabId;
+    const current = fromId === undefined ? 0 : order.indexOf(fromId);
+    let next: number;
+    switch (e.key) {
+      case 'ArrowRight':
+        next = current + 1;
+        break;
+      case 'ArrowLeft':
+        next = current - 1;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = order.length - 1;
+        break;
+      default:
+        return;
+    }
+    // Wrap both ways: a tab strip is a ring, like the menu.
+    const wrapped = ((next % order.length) + order.length) % order.length;
+    activate(order[wrapped]);
+    headers.get(order[wrapped])?.focus();
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  function setBadge(id: string, text?: string): void {
+    const header = headers.get(id);
+    if (header === undefined) {
+      return;
+    }
+    const label = tabs.find((t) => t.id === id)?.label ?? '';
+    const existing = header.querySelector(`.${RIGHT_DOCK_TAB_BADGE_CLASS}`);
+    if (text === undefined || text === '') {
+      existing?.remove();
+      header.removeAttribute('aria-label');
+      return;
+    }
+    const badge = existing ?? header.appendChild(document.createElement('span'));
+    badge.className = RIGHT_DOCK_TAB_BADGE_CLASS;
+    // Hidden from AT and replaced by an explicit name: read raw, the badge turns
+    // the tab's accessible name into "Comment 6" and silently renames it every
+    // time the count moves.
+    badge.setAttribute('aria-hidden', 'true');
+    badge.textContent = text;
+    header.setAttribute('aria-label', `${label} (${text})`);
+  }
+
   function activate(id: string, persist = true): void {
     if (!headers.has(id)) {
       return;
@@ -324,6 +426,7 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
       // Same scope and merge discipline as tocWidth/tocMaxLevel (US-23.7 AC7).
       vscode?.setState({ ...vscode.getState(), rightDockTab: id });
     }
+    onActivate?.(id);
   }
 
   function registerTab(tab: RightDockTab): void {
@@ -336,7 +439,10 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     header.type = 'button';
     header.className = RIGHT_DOCK_TAB_CLASS;
     header.id = `${uid}-tab-${tab.id}`;
-    header.textContent = tab.label;
+    const headerLabel = document.createElement('span');
+    headerLabel.className = RIGHT_DOCK_TAB_LABEL_CLASS;
+    headerLabel.textContent = tab.label;
+    header.appendChild(headerLabel);
     header.setAttribute('role', 'tab');
     header.setAttribute('aria-selected', 'false');
     header.tabIndex = -1;
@@ -371,6 +477,7 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     registerTab,
     activate,
     activeId: () => activeTabId,
+    setBadge,
     closeMenu: () => menuDismiss.close(),
   };
 }

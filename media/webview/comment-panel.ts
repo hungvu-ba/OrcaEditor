@@ -1,42 +1,60 @@
 /**
- * Req 23 US-23.4 AC4: the "Unresolved location" panel — where a comment lands
- * once all four anchor tiers have failed, and the two equal routes back into the
- * document.
+ * Req 23 US-23.9: the Comment tab — every thread in the file, grouped by status,
+ * hosted in US-23.7's shared right dock beside the TOC. It exists for the one
+ * thing the gutter cannot do: a Closed thread keeps no pin and no highlight
+ * (US-23.2), so this list is the only route back to it.
  *
- * The list is uncapped and scrolls: a large edit can strand a dozen threads at
- * once and none of them may be collapsed away behind a "+N more" or dropped.
- * Cards are ordered newest-created first, because the author is looking for a
- * comment they remember writing, not for whichever anchor broke most recently.
+ * It also absorbs US-23.4's standalone "Unresolved location" `<aside>`: a
+ * floating thread is one GROUP here rather than a separate panel that used to
+ * fight the TOC for the same dock slot. Every re-attach affordance that panel
+ * shipped survives unchanged on a floating row — drag the handle onto a node,
+ * the ⋯ picker, or the Space/↑↓/Enter keyboard walk. All three still call the
+ * same `reattach(threadId, el)` on comment-resolve.ts, so the pointer route and
+ * the keyboard/screen-reader route cannot drift apart, and the picker's
+ * suggestions are RANKED, never applied — automatic matching is precisely what
+ * already failed for these threads.
  *
- * Re-attaching is offered twice over, on purpose: drag a card onto a node, or
- * open the Re-attach… picker and choose one. Both call the same
- * `reattach(threadId, el)` on comment-resolve.ts, so the pointer route and the
- * keyboard/screen-reader route cannot drift apart. Suggestions in the picker are
- * RANKED, never applied — automatic matching is precisely what already failed
- * for these threads.
+ * The list is uncapped and scrolls, groups are never filtered away (only
+ * "Hide closed" is offered, opt-in), and empty groups are omitted entirely.
  *
- * Nothing here writes to the `.md`: re-attaching only moves a session-only DOM
- * attribute and the native thread's Range (US-23.6), and it never touches the
- * Open/Resolved/Closed status axis (US-23.3) — floating is orthogonal to it.
+ * Rows are navigation only: activating one scrolls to the anchor and hands the
+ * thread to US-23.2's popover, which owns every mutation. Nothing here writes to
+ * the `.md` — re-attaching moves a session-only DOM attribute and the native
+ * thread's Range (US-23.6), and never touches the Open/Resolved/Closed axis
+ * (US-23.3), because floating is orthogonal to it.
  */
 import { anchorCandidates, type AnchorCandidateNode } from './block-map';
 import { normalizeAnchorText, rankReattachTargets, type ReattachTarget } from './comment-anchor';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
 import {
+  ANCHOR_REEVAL_DEBOUNCE_MS,
   COMMENT_PANEL_DRAG_THRESHOLD_PX,
   COMMENT_PANEL_REATTACH_SUGGESTIONS,
   COMMENT_PANEL_SNIPPET_CHARS,
 } from './constants';
 import { el, positionNear, showToast } from './dom-utils';
+import type { RightDockTab } from './right-dock';
 import { truncateDisplay } from './trigger-popup';
 import { initPopoverDismiss, registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
+import type { CommentSidecarState } from '../../src/shared/messages';
 
 export interface CommentPanelController {
-  /** Open/close the docked panel (the toolbar button's action). */
-  toggle(): void;
-  isOpen(): boolean;
-  /** How many threads are floating right now — the toolbar button's badge. */
+  /** The dock tab descriptor — registered by main.ts on the shared container. */
+  tab: RightDockTab;
+  /** Every non-tombstoned thread — the tab-strip count badge (absent at 0). */
+  threadCount(): number;
+  /** How many threads are floating right now — the toolbar `⚑` button's badge. */
   floatingCount(): number;
+  /**
+   * A `commentThreadsSync` snapshot arrived, carrying the host's report on the
+   * sidecar itself (still loading, foreign, unreadable, refused, or holding
+   * orphaned lines) — none of which the thread list can express.
+   */
+  setSidecarState(state: CommentSidecarState | undefined): void;
+  /** Back to the loading state — a new document, whose snapshot has not arrived. */
+  beginLoad(): void;
+  /** Rebuild now (coalesced). Safe to call while the tab is hidden. */
+  refresh(): void;
 }
 
 /** The drop target currently under the pointer/selection, plus the overlay marking it. */
@@ -46,9 +64,29 @@ interface AimState {
   outline: HTMLElement;
 }
 
-const OPEN_BODY_CLASS = 'comment-panel-open';
+/** The status groups, in the handoff's fixed order — live work first, archive last. */
+type GroupKey = 'open' | 'floating' | 'resolved' | 'closed';
 
-function formatTimestamp(iso: string): string {
+const GROUP_ORDER: GroupKey[] = ['open', 'floating', 'resolved', 'closed'];
+
+const GROUP_LABEL: Record<GroupKey, string> = {
+  open: 'Open',
+  floating: 'Unresolved location',
+  resolved: 'Resolved',
+  closed: 'Closed',
+};
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * The handoff's row stamp: "2h ago", "Yesterday", "Jul 21". Relative near the
+ * present because that is what a reviewer scans for, absolute past a day because
+ * "17d ago" is arithmetic the reader has to undo. Falls back to '' on an
+ * unparseable stamp rather than printing "Invalid Date".
+ */
+function formatRelative(iso: string): string {
   if (iso === '') {
     return '';
   }
@@ -56,15 +94,48 @@ function formatTimestamp(iso: string): string {
   if (Number.isNaN(date.getTime())) {
     return '';
   }
-  // Locale-shaped and short (the handoff's "Jul 24, 10:12"), with no relative
-  // "3 days ago" arithmetic — a review can sit for weeks and an absolute stamp
-  // stays true whenever the panel is reopened.
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  // Clock skew between two machines sharing one sidecar can put a stamp in the
+  // future; clamping keeps that "Just now" rather than a negative-hour reading.
+  const elapsed = Math.max(0, Date.now() - date.getTime());
+  if (elapsed < MINUTE_MS) {
+    return 'Just now';
+  }
+  if (elapsed < HOUR_MS) {
+    return `${Math.floor(elapsed / MINUTE_MS)}m ago`;
+  }
+  if (elapsed < DAY_MS) {
+    return `${Math.floor(elapsed / HOUR_MS)}h ago`;
+  }
+  if (elapsed < 2 * DAY_MS) {
+    return 'Yesterday';
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** Which group a thread belongs to. Floating wins: it is orthogonal to status,
+ *  but it is the fact that decides whether the row can be navigated to at all. */
+function groupOf(thread: ThreadAnchor): GroupKey {
+  if (thread.state === 'floating') {
+    return 'floating';
+  }
+  return thread.status === 'Resolved' ? 'resolved' : thread.status === 'Closed' ? 'closed' : 'open';
+}
+
+/** AC5: the row's stamp is the LAST TRANSITION, falling back to creation for a
+ *  thread that has never left Open (the schema's derived-status rule). */
+function lastTransitionAt(thread: ThreadAnchor): string {
+  // `??` is not enough: the sidecar validator accepts `timestamp: ''` and the
+  // host forwards it verbatim, and an empty string would print a blank stamp and
+  // sort to one end of its group instead of falling back to creation.
+  const transition = thread.lastTransitionTimestamp;
+  return transition === undefined || transition === '' ? thread.createdAt : transition;
+}
+
+/** Milliseconds for ordering. An unparseable stamp sorts oldest, deterministically,
+ *  rather than dragging the whole group into lexicographic order. */
+function transitionTime(thread: ThreadAnchor): number {
+  const parsed = Date.parse(lastTransitionAt(thread));
+  return Number.isNaN(parsed) ? -Infinity : parsed;
 }
 
 /** One-line form of a block of text — shared truncation, so the ellipsis rule lives in one place. */
@@ -100,24 +171,26 @@ function nodeTypeLabel(el: HTMLElement): string {
 
 export function initCommentPanel(
   content: HTMLElement,
-  resolve: CommentResolveController
+  resolve: CommentResolveController,
+  /**
+   * Hand a thread to US-23.2's popover, positioned against `rect` (the row's own
+   * box for a floating thread, which has nothing to scroll to) and returning
+   * focus to `returnFocusTo` when it closes. Injected rather than imported so the
+   * list never reaches into the popover's internals.
+   */
+  openThread: (threadId: string, rect: DOMRect, returnFocusTo?: HTMLElement) => void
 ): CommentPanelController {
-  let open = false;
-
-  const panel = el('aside', 'comment-panel');
-  panel.id = 'comment-panel';
-  panel.setAttribute('aria-label', 'Unresolved comment locations');
-  const header = el('div', 'comment-panel-header');
-  const title = el('span', 'comment-panel-title', 'Unresolved location');
-  const count = el('span', 'comment-panel-count');
-  header.appendChild(title);
-  header.appendChild(count);
-  const hint = el('div', 'comment-panel-hint');
+  // The tab BODY, not a panel: the dock owns the panel, the strip and visibility.
+  // It carries an author `display: flex`, so editor.css owes it a paired
+  // `#comment-tabpanel[hidden]` rule at matching ID specificity — without one the
+  // dock's `hidden` toggle loses and both tab bodies paint at once (US-23.7).
+  const panel = el('div', 'comment-tab');
+  panel.id = 'comment-tabpanel';
+  const banner = el('div', 'comment-tab-banner');
+  banner.hidden = true;
   const list = el('div', 'comment-panel-list');
-  panel.appendChild(header);
-  panel.appendChild(hint);
+  panel.appendChild(banner);
   panel.appendChild(list);
-  document.body.appendChild(panel);
 
   // --- Aiming (shared by the drag route and the keyboard route) --------------
 
@@ -240,6 +313,15 @@ export function initCommentPanel(
    */
   let dragTargets: AnchorCandidateNode[] = [];
   let dragFrame: number | undefined;
+  /**
+   * Set by a drag that actually moved, so the `click` it leaves behind does not
+   * also open the popover over the re-attach just committed. Cleared on the next
+   * task rather than by the row's own click handler: a successful drop ends with
+   * `mouseup` over `#content`, so `click` is dispatched on the common ancestor
+   * (`<body>`) and never reaches the row — a handler-cleared flag would stay
+   * latched and silently swallow the user's NEXT click on any row.
+   */
+  let justDragged = false;
 
   function endDrag(): void {
     document.removeEventListener('mousemove', onDragMove);
@@ -297,6 +379,12 @@ export function initCommentPanel(
     const node = aim?.node;
     const wasDragging = dragging;
     endDrag();
+    justDragged = wasDragging;
+    if (wasDragging) {
+      setTimeout(() => {
+        justDragged = false;
+      }, 0);
+    }
     if (wasDragging && threadId && node) {
       attach(threadId, node);
     }
@@ -383,17 +471,21 @@ export function initCommentPanel(
     }
   }
 
-  function onCardKeyDown(e: KeyboardEvent, thread: ThreadAnchor): void {
-    // The ⋯ button lives inside the card and has its own keyboard contract —
+  function onCardKeyDown(e: KeyboardEvent, thread: ThreadAnchor, row: HTMLElement): void {
+    // The ⋯ button lives inside the row and has its own keyboard contract —
     // swallowing Space here would stop it opening the picker.
     if ((e.target as HTMLElement).closest('.comment-panel-more')) {
       return;
     }
+    // The re-attach walk belongs to a floating row and only to a floating row:
+    // there is nothing to re-attach on a row whose anchor is fine, and Space
+    // there has to mean the same as Enter (activate), per the button convention.
+    const floating = thread.state === 'floating';
     const walking = walk?.threadId === thread.threadId;
-    if (e.key === ' ') {
+    if (e.key === ' ' && floating) {
       e.preventDefault();
-      // Space is both halves of the gesture: pick this card up, or drop the one
-      // already in hand. Pressing it on a DIFFERENT card takes that card
+      // Space is both halves of the gesture: pick this row up, or drop the one
+      // already in hand. Pressing it on a DIFFERENT row takes that row
       // instead of silently doing nothing.
       if (walking) {
         commitWalk();
@@ -402,17 +494,21 @@ export function initCommentPanel(
       }
       return;
     }
-    if (!walking) {
+    if (walking) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        stepWalk(e.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commitWalk();
+      }
       return;
     }
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      stepWalk(e.key === 'ArrowDown' ? 1 : -1);
-      return;
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      commitWalk();
+      activateRow(thread, row);
     }
   }
 
@@ -591,113 +687,428 @@ export function initCommentPanel(
 
   // --- Rendering -------------------------------------------------------------
 
-  function card(thread: ThreadAnchor): HTMLElement {
-    const item = el('div', 'comment-panel-card');
+  /** `⋯` menu state. Both are view-only — neither reaches the sidecar. */
+  let newestFirst = true;
+  let hideClosed = false;
+  /** The row the user last activated, redrawn as selected across a re-render. */
+  let selectedThreadId: string | undefined;
+  /** The host's report on the sidecar; `undefined` until the first snapshot. */
+  let sidecar: CommentSidecarState | undefined;
+  let loading = true;
+
+  function activateRow(thread: ThreadAnchor, row: HTMLElement): void {
+    // Anything still in hand belongs to the row the user just left: a walk armed
+    // on another row would keep its aim overlay painted over the document and
+    // would take the next Escape (DRAG outranks the popover's tier).
+    endDrag();
+    endWalk();
+    selectedThreadId = thread.threadId;
+    for (const other of list.querySelectorAll('.comment-row.selected')) {
+      other.classList.remove('selected');
+    }
+    row.classList.add('selected');
+    // The popover reveals a connected carrier itself and re-measures against it,
+    // which is AC8's "scroll first, then position". A floating thread has no
+    // carrier and nowhere to scroll to, so it opens against the row's own box.
+    // Neither path can raise US-23.3's anchor-lost dialog: that is armed only on
+    // the transition INTO floating, and is Author-only.
+    openThread(thread.threadId, row.getBoundingClientRect(), row);
+  }
+
+  /** One line of anchored text, or the stated fallback for a textless anchor
+   *  (caret anchor, image, diagram) — never a blank cell. */
+  function anchorSnippet(thread: ThreadAnchor): { text: string; empty: boolean } {
+    const text = snippet(thread.recordedText);
+    return text === '' ? { text: 'No anchored text', empty: true } : { text: `“${text}”`, empty: false };
+  }
+
+  function row(thread: ThreadAnchor): HTMLElement {
+    const floating = thread.state === 'floating';
+    const item = el('div', 'comment-row');
+    // Focusable, but deliberately NOT role="button": ARIA makes a button's
+    // subtree presentational, which would strip the nested `⋯` Re-attach control
+    // — the keyboard/screen-reader route this story promises to keep working —
+    // out of the accessibility tree while leaving it in the tab order.
     item.tabIndex = 0;
     item.dataset.threadId = thread.threadId;
+    item.dataset.group = groupOf(thread);
+    if (thread.threadId === selectedThreadId) {
+      item.classList.add('selected');
+    }
 
-    const handle = el('span', 'comment-panel-handle', '⠿');
-    handle.setAttribute('aria-hidden', 'true');
+    const top = el('div', 'comment-row-top');
+    // One pill per row for every status, except a floating row, whose pill says
+    // the anchor is gone — its resolve status moves down to line 2, because
+    // floating is orthogonal to status and must not look like a replacement.
+    const pillText = floating ? 'No anchor' : thread.status;
+    const pill = el('span', 'comment-row-pill', pillText);
+    pill.dataset.status = floating ? 'anchor' : thread.status.toLowerCase();
+    top.appendChild(pill);
+    if (!floating && thread.state === 'approximate') {
+      // AC6: a guessed location is never presented silently on this surface.
+      const approx = el('span', 'comment-row-approx', 'Approximate');
+      approx.title = 'This comment was relocated by a content match — its position is a best guess.';
+      top.appendChild(approx);
+    }
+    if (floating) {
+      top.appendChild(el('span', 'comment-row-snippet empty', 'Unresolved location'));
+    } else {
+      const { text, empty } = anchorSnippet(thread);
+      // textContent throughout `el()` — a recorded anchor can hold raw HTML
+      // (an <img>), and this surface must render it as characters (US-23.10 AC9).
+      top.appendChild(el('span', `comment-row-snippet${empty ? ' empty' : ''}`, text));
+    }
 
-    const meta = el('div', 'comment-panel-meta');
-    meta.appendChild(el('span', 'comment-panel-author', thread.author));
-    meta.appendChild(el('span', 'comment-panel-time', formatTimestamp(thread.createdAt)));
+    const meta = el('div', 'comment-row-meta');
+    // The thread's OPENER, not the last replier — the identity US-23.2 AC4 and
+    // the schema's `delete` rule both gate on.
+    meta.appendChild(el('span', 'comment-row-author', thread.author));
+    meta.appendChild(separatorDot());
+    meta.appendChild(
+      el('span', 'comment-row-where', floating ? thread.status : `Ln ${thread.lastKnownLine}`)
+    );
+    const stamp = lastTransitionAt(thread);
+    const time = el('span', 'comment-row-time', formatRelative(stamp));
+    // The relative form is computed once per render and never ticks; the absolute
+    // stamp on hover is what makes "2h ago" checkable hours later.
+    time.title = stamp;
+    meta.appendChild(time);
 
-    const more = el('button', 'comment-panel-more', '⋯');
-    (more as HTMLButtonElement).type = 'button';
-    more.title = 'Re-attach…';
-    more.setAttribute('aria-label', `Re-attach “${snippet(thread.body)}”`);
-    more.addEventListener('click', (e) => {
-      e.stopPropagation();
-      openPicker(thread, more.getBoundingClientRect());
-    });
+    const main = el('div', 'comment-row-main');
+    main.appendChild(top);
+    main.appendChild(meta);
 
-    const body = el('div', 'comment-panel-body');
-    const quote = el('div', 'comment-panel-quote', `“${snippet(thread.recordedText)}”`);
-    body.appendChild(quote);
-    body.appendChild(el('div', 'comment-panel-text', thread.body));
-
-    const main = el('div', 'comment-panel-card-main');
-    const topRow = el('div', 'comment-panel-card-top');
-    topRow.appendChild(meta);
-    topRow.appendChild(more);
-    main.appendChild(topRow);
-    main.appendChild(body);
-
-    item.appendChild(handle);
+    if (floating) {
+      // The absorbed US-23.4 affordances, unchanged: the handle drags onto a
+      // node, the ⋯ opens the ranked picker, and onCardKeyDown owns the walk.
+      const handle = el('span', 'comment-panel-handle', '⠿');
+      handle.setAttribute('aria-hidden', 'true');
+      item.appendChild(handle);
+    }
     item.appendChild(main);
-
-    item.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || (e.target as HTMLElement).closest('.comment-panel-more')) {
+    if (floating) {
+      const more = el('button', 'comment-panel-more', '⋯');
+      (more as HTMLButtonElement).type = 'button';
+      more.title = 'Re-attach…';
+      more.setAttribute('aria-label', `Re-attach “${snippet(thread.body)}”`);
+      more.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openPicker(thread, more.getBoundingClientRect());
+      });
+      item.appendChild(more);
+      item.addEventListener('mousedown', (e) => {
+        if (e.button !== 0 || (e.target as HTMLElement).closest('.comment-panel-more')) {
+          return;
+        }
+        e.preventDefault(); // keep the editor selection; the row is not a text surface
+        // preventDefault also suppresses the focus the click would have given, and
+        // the keyboard route needs the row focused to be reachable at all.
+        item.focus();
+        startDrag(thread.threadId, e);
+      });
+    }
+    item.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).closest('.comment-panel-more')) {
         return;
       }
-      e.preventDefault(); // keep the editor selection; the card is not a text surface
-      // preventDefault also suppresses the focus the click would have given, and
-      // the keyboard route needs the card focused to be reachable at all.
-      item.focus();
-      startDrag(thread.threadId, e);
+      // A drag that ended over its own row still fires a click; opening the
+      // popover on top of the re-attach the user just committed would bury it.
+      if (justDragged) {
+        justDragged = false;
+        return;
+      }
+      activateRow(thread, item);
     });
-    item.addEventListener('keydown', (e) => onCardKeyDown(e, thread));
+    item.addEventListener('keydown', (e) => onCardKeyDown(e, thread, item));
+    return item;
+  }
+
+  /** Decorative "·" between meta fields — hidden from AT, which would otherwise
+   *  read "reviewer middle dot Ln 7". */
+  function separatorDot(): HTMLElement {
+    const dot = el('span', 'comment-row-dot', '·');
+    dot.setAttribute('aria-hidden', 'true');
+    return dot;
+  }
+
+  function groupHeader(label: string, count: number, note?: string): HTMLElement {
+    const header = el('div', 'comment-group');
+    header.appendChild(el('span', 'comment-group-label', label));
+    // Every count on this surface is derived from the rows it heads — never a
+    // separately-maintained number that can disagree with what is listed.
+    header.appendChild(el('span', 'comment-group-count', String(count)));
+    if (note !== undefined) {
+      header.appendChild(el('span', 'comment-group-note', note));
+    }
+    return header;
+  }
+
+  /** The four distinguishable reasons the list can be empty (AC12). */
+  function emptyState(): HTMLElement | undefined {
+    const problem = sidecar?.problem;
+    if (problem !== undefined) {
+      return emptyBlock('Comments unavailable', problem, 'problem');
+    }
+    if (loading) {
+      return emptyBlock('Loading comments…');
+    }
+    if (hideClosed && resolve.allThreads().length > 0) {
+      // Threads exist and "Hide closed" is what left nothing on screen. Saying
+      // "no comments in this file" here would be a lie the user cannot act on —
+      // and the branch is gated on the toggle, so a future reason for an empty
+      // list cannot inherit this wording or its useless "Show closed" button.
+      const block = emptyBlock('No comments to show', 'Every thread in this file is Closed.');
+      const action = el('button', 'comment-empty-action', 'Show closed comments');
+      (action as HTMLButtonElement).type = 'button';
+      action.addEventListener('click', () => {
+        hideClosed = false;
+        flush();
+      });
+      block.appendChild(action);
+      return block;
+    }
+    return emptyBlock(
+      'No comments in this file',
+      'Select some text and choose Add comment, or right-click a line in the gutter.'
+    );
+  }
+
+  function emptyBlock(title: string, note?: string, kind?: string): HTMLElement {
+    const block = el('div', 'comment-empty');
+    if (kind !== undefined) {
+      block.dataset.kind = kind;
+    }
+    block.appendChild(el('div', 'comment-empty-title', title));
+    if (note !== undefined) {
+      block.appendChild(el('div', 'comment-empty-note', note));
+    }
+    return block;
+  }
+
+  function orphanRow(orphan: NonNullable<CommentSidecarState['orphans']>[number]): HTMLElement {
+    const item = el('div', 'comment-row orphan');
+    const top = el('div', 'comment-row-top');
+    const pill = el('span', 'comment-row-pill', orphan.kind === 'reply' ? 'Reply' : 'Status');
+    pill.dataset.status = 'anchor';
+    top.appendChild(pill);
+    top.appendChild(el('span', 'comment-row-snippet', snippet(orphan.detail)));
+    const meta = el('div', 'comment-row-meta');
+    meta.appendChild(el('span', 'comment-row-author', orphan.author));
+    meta.appendChild(separatorDot());
+    meta.appendChild(el('span', 'comment-row-where', 'No parent comment'));
+    meta.appendChild(el('span', 'comment-row-time', formatRelative(orphan.timestamp)));
+    const main = el('div', 'comment-row-main');
+    main.appendChild(top);
+    main.appendChild(meta);
+    item.appendChild(main);
     return item;
   }
 
   function build(): void {
-    const floating = resolve.floatingThreads();
-    count.textContent = String(floating.length);
+    // Scroll and focus have to survive a re-render triggered by someone else's
+    // reply landing (AC10) — the user did not ask to be moved.
+    const scrollTop = list.scrollTop;
+    const focusedRow =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement.closest<HTMLElement>('.comment-row')
+        : null;
+    const focusedId = focusedRow?.dataset.threadId;
+    // AC10: a row whose thread left the snapshot is removed and focus moves to
+    // the NEXT row — so the position has to be remembered as well as the id.
+    const focusedIndex =
+      focusedRow === null
+        ? -1
+        : Array.from(list.querySelectorAll('.comment-row')).indexOf(focusedRow);
+    // A picker anchored to a row that is about to be destroyed has nothing left
+    // to point at, and its captured thread may have been pruned by this very
+    // snapshot — closing is the honest answer.
+    if (pickerThread !== undefined && resolve.anchorOf(pickerThread.threadId) === undefined) {
+      pickerDismiss.close();
+    }
     list.textContent = '';
-    if (floating.length === 0) {
-      // Plain statement, no illustration and no call to action (handoff): the
-      // hint line goes with the cards, since there is nothing left to drag.
-      hint.hidden = true;
-      const empty = el('div', 'comment-panel-empty');
-      empty.appendChild(el('div', 'comment-panel-empty-title', 'No unresolved comments'));
-      empty.appendChild(
-        el(
-          'div',
-          'comment-panel-empty-note',
-          'Every thread in this file still points at a line. Comments land here only when their anchor is lost.'
-        )
+
+    // AC13: one banner naming the cause.
+    banner.hidden = sidecar?.foreign !== true;
+    banner.textContent =
+      sidecar?.foreign === true
+        ? 'None of the text these comments were written against is still in this file — the sidecar may describe a different document.'
+        : '';
+
+    const grouped = new Map<GroupKey, ThreadAnchor[]>();
+    for (const thread of resolve.allThreads()) {
+      const key = groupOf(thread);
+      if (key === 'closed' && hideClosed) {
+        continue;
+      }
+      const bucket = grouped.get(key);
+      if (bucket === undefined) {
+        grouped.set(key, [thread]);
+      } else {
+        bucket.push(thread);
+      }
+    }
+
+    const orphans = sidecar?.orphans ?? [];
+    let rendered = 0;
+    for (const key of GROUP_ORDER) {
+      const bucket = grouped.get(key);
+      // Empty groups are omitted entirely: a file with only closed threads shows
+      // one group, not four.
+      if (bucket === undefined || bucket.length === 0) {
+        continue;
+      }
+      bucket.sort((a, b) => {
+        // Parsed, not lexicographic: the sidecar is a plain JSONL file a merge or
+        // a hand edit can leave holding `+07:00` offsets and millisecond-less
+        // stamps, which string-compare in the wrong order. Same rule as
+        // sidecar-format.ts's own `byTimestamp`.
+        const delta = transitionTime(b) - transitionTime(a);
+        // Ties broken by thread id, so the order is total and a re-render with
+        // identical data can never reshuffle rows under the reader.
+        return (newestFirst ? delta : -delta) || a.threadId.localeCompare(b.threadId);
+      });
+      list.appendChild(
+        groupHeader(GROUP_LABEL[key], bucket.length, key === 'closed' ? 'no gutter pin' : undefined)
       );
-      list.appendChild(empty);
-      return;
+      for (const thread of bucket) {
+        list.appendChild(row(thread));
+      }
+      rendered += bucket.length;
     }
-    hint.hidden = false;
-    hint.textContent = 'Drag a card onto the document to re-attach it, or use ⋯ → Re-attach…';
-    for (const thread of floating) {
-      list.appendChild(card(thread));
+    if (orphans.length > 0) {
+      // Read-only, after Closed: merge-orphaned content stays recoverable rather
+      // than being held invisibly in host memory (US-23.5 AC4 only logged it).
+      list.appendChild(groupHeader('Orphaned', orphans.length, 'no parent comment'));
+      for (const orphan of orphans) {
+        list.appendChild(orphanRow(orphan));
+      }
+      rendered += orphans.length;
     }
+
+    if (rendered === 0) {
+      const empty = emptyState();
+      if (empty !== undefined) {
+        list.appendChild(empty);
+      }
+    }
+
+    if (focusedId !== undefined) {
+      const rowsNow = Array.from(list.querySelectorAll<HTMLElement>('.comment-row'));
+      const same = list.querySelector<HTMLElement>(
+        `.comment-row[data-thread-id="${CSS.escape(focusedId)}"]`
+      );
+      // Same thread if it survived; otherwise the row that took its place, so a
+      // deleted thread never drops the keyboard user out to <body> — which would
+      // also disarm main.ts's dock Escape handler, since that requires focus
+      // inside the panel.
+      const target = same ?? rowsNow[Math.min(focusedIndex, rowsNow.length - 1)];
+      // preventScroll: focus() scrolls its target into view, which would undo the
+      // scroll restore below on a list taller than the panel.
+      target?.focus({ preventScroll: true });
+    }
+    list.scrollTop = scrollTop;
   }
 
+  /**
+   * Coalesced at US-23.4 AC5's rate: one burst of snapshots (a reload settling,
+   * a debounced re-resolution finishing) rebuilds the list once, not per event.
+   */
+  let rebuildTimer: number | undefined;
   function refresh(): void {
-    if (!open) {
-      return;
+    if (rebuildTimer !== undefined) {
+      clearTimeout(rebuildTimer);
+    }
+    rebuildTimer = window.setTimeout(() => {
+      rebuildTimer = undefined;
+      build();
+    }, ANCHOR_REEVAL_DEBOUNCE_MS);
+  }
+
+  /** Rebuild NOW and drop any pending one, so a state change the user is waiting
+   *  on (the loading state ending, a menu pick) is not held behind the debounce. */
+  function flush(): void {
+    if (rebuildTimer !== undefined) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = undefined;
     }
     build();
   }
 
   resolve.onChange(() => {
     refresh();
-    // The toolbar badge tracks the count whether or not the panel is open.
+    // The toolbar badge tracks the count whether or not the tab is showing.
     document.dispatchEvent(new CustomEvent('orca-comment-floating-changed'));
   });
 
+  const tab: RightDockTab = {
+    id: 'comment',
+    label: 'Comment',
+    body: panel,
+    menuItems: () => [
+      {
+        label: 'Newest first',
+        section: 'Sort',
+        selection: 'single',
+        checked: newestFirst,
+        onSelect: () => {
+          newestFirst = true;
+          flush();
+        },
+      },
+      {
+        label: 'Oldest first',
+        section: 'Sort',
+        selection: 'single',
+        checked: !newestFirst,
+        onSelect: () => {
+          newestFirst = false;
+          flush();
+        },
+      },
+      {
+        label: 'Hide closed',
+        section: 'Show',
+        selection: 'multiple',
+        checked: hideClosed,
+        onSelect: () => {
+          hideClosed = !hideClosed;
+          flush();
+        },
+      },
+    ],
+  };
+
   return {
-    toggle(): void {
-      open = !open;
-      document.body.classList.toggle(OPEN_BODY_CLASS, open);
-      if (open) {
-        build();
+    tab,
+    threadCount: () => resolve.allThreads().length,
+    floatingCount: () => resolve.floatingThreads().length,
+    setSidecarState(state): void {
+      // `loading` stays set while the host says the sidecar read is still in
+      // flight: the `ready` handler posts a snapshot the moment the webview
+      // registers, which is usually BEFORE the disk read settles, and treating
+      // that as "loaded, nothing to report" would flash "No comments in this
+      // file" over a document that turns out to have twenty.
+      const wasLoading = loading;
+      loading = state?.loading === true;
+      sidecar = loading ? undefined : state;
+      // Only the loading→loaded transition jumps the queue; every other snapshot
+      // goes through the debounce, so a burst rebuilds the list once (AC10).
+      if (wasLoading && !loading) {
+        flush();
       } else {
-        endDrag();
-        endWalk();
-        pickerDismiss.close();
+        refresh();
       }
     },
-    isOpen(): boolean {
-      return open;
+    beginLoad(): void {
+      loading = true;
+      sidecar = undefined;
+      // Anything armed against the outgoing document is meaningless now.
+      endDrag();
+      endWalk();
+      pickerDismiss.close();
+      selectedThreadId = undefined;
+      flush();
     },
-    floatingCount(): number {
-      return resolve.floatingThreads().length;
-    },
+    refresh,
   };
 }

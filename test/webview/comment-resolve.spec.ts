@@ -13,7 +13,7 @@
  * host's own validation of those messages is covered in test/unit.ts.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { clearPosted, openEditor, DEFAULT_DOC_URI } from './_harness';
+import { clearPosted, openCommentTab, openEditor, DEFAULT_DOC_URI } from './_harness';
 
 /** Paragraphs share no wording, so a tier-2 miss below is a real miss. */
 const DOC = [
@@ -449,9 +449,10 @@ test.describe('AC3 — the anchor-lost confirmation', () => {
     // AC3: this answer moves it to the Unresolved-location list "instead of
     // changing its resolve state" — so it must write nothing at all.
     expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
-    // Still floating, and still listed: the panel is the route back into the text.
-    await page.locator('#comment-panel-toggle').click();
-    await expect(page.locator('.comment-panel-card')).toHaveCount(1);
+    // Still floating, and still listed: the Comment tab's "Unresolved location"
+    // group is the route back into the text (US-23.9 absorbed the old panel).
+    await openCommentTab(page);
+    await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(1);
   });
 
   test('the three no-decision exits decide nothing and do not re-raise the dialog', async ({ page }) => {
@@ -497,8 +498,8 @@ test.describe('AC3 — the anchor-lost confirmation', () => {
     await hostUpdate(page, '# Session expiry\n');
 
     await expect(page.locator('.comment-anchor-lost')).toBeHidden();
-    await page.locator('#comment-panel-toggle').click();
-    await expect(page.locator('.comment-panel-card')).toHaveCount(1);
+    await openCommentTab(page);
+    await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(1);
   });
 
   test('a Reopen of an already-anchorless thread asks the question, even though it never re-enters floating', async ({

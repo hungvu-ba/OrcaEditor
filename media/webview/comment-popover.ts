@@ -41,8 +41,12 @@ import type { CommentStatusAction } from '../../src/shared/messages';
 export type StatusOutcome = (ok: boolean, error?: string) => void;
 
 export interface CommentPopoverController {
-  /** Open (or re-focus) the popover for `threadId`, anchored beside `anchorRect`. */
-  open(threadId: string, anchorRect: DOMRect): void;
+  /**
+   * Open (or re-focus) the popover for `threadId`, anchored beside `anchorRect`.
+   * `returnFocusTo` is focused when the popover closes — US-23.9's list rows,
+   * which would otherwise orphan focus on a row that is about to be re-rendered.
+   */
+  open(threadId: string, anchorRect: DOMRect, returnFocusTo?: HTMLElement): void;
   /** Close the popover if it is showing one of these now-deleted threads. */
   forgetThreads(threadIds: string[]): void;
   setDocUri(uri: string): void;
@@ -260,10 +264,20 @@ export function initCommentPopover(
 
   // --- Dismiss lifecycle -------------------------------------------------------
 
+  /** Where focus goes when this popover closes — set per open (US-23.9 rows). */
+  let focusOnClose: HTMLElement | undefined;
+
   const cardDismiss = initPopoverDismiss(card, () => {
     currentThreadId = undefined;
     highlight.setActiveThread(undefined);
     confirmDismiss.close();
+    const returnTo = focusOnClose;
+    focusOnClose = undefined;
+    // Only reclaim focus the popover actually held: closing from a click
+    // elsewhere would otherwise steal it from whatever the user just clicked.
+    if (returnTo?.isConnected === true && card.contains(document.activeElement)) {
+      returnTo.focus();
+    }
   });
 
   /** Bring the anchored range into view first if it is off-screen (AC: "unfolding/scrolling ... into view"). */
@@ -523,12 +537,13 @@ export function initCommentPopover(
   });
 
   return {
-    open(threadId, anchorRect): void {
+    open(threadId, anchorRect, returnFocusTo): void {
       const anchor = resolve.anchorOf(threadId);
       if (!anchor) {
         showToast('That comment no longer exists.');
         return;
       }
+      focusOnClose = returnFocusTo;
       const isNewThread = currentThreadId !== threadId;
       currentThreadId = threadId;
       if (isNewThread) {

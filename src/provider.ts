@@ -593,8 +593,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return;
     }
     const threads = this.comments.listThreads(document);
+    // US-23.9: the sidecar's health travels with every snapshot, not only the
+    // first — a webview that reloads mid-session must still be able to explain
+    // an empty list, and it holds no state of its own across that reload.
+    const sidecar = this.comments.sidecarStateFor(document);
     for (const panel of panels) {
-      void panel.webview.postMessage({ type: 'commentThreadsSync', docUri: docUriStr, threads } satisfies HostToWebview);
+      void panel.webview.postMessage({
+        type: 'commentThreadsSync',
+        docUri: docUriStr,
+        threads,
+        sidecar,
+      } satisfies HostToWebview);
     }
   }
 

@@ -76,6 +76,14 @@ export function ensureCommentAnchorId(content: HTMLElement, el: HTMLElement): st
  * whole-document anchor would read as "gone".
  */
 function commentAnchorsFor(content: HTMLElement, anchorId: string): HTMLElement[] {
+  // An empty id means "this thread has no live anchor yet" — what `syncAll`
+  // seeds for every thread arriving in a host snapshot — not "the id ''".
+  // Without this guard `[data-comment-anchor-id=""]` matches any node one of
+  // them already stamped, so on a reload the second thread's tier-1 lookup
+  // "finds" the first thread's node and the whole file collapses onto one line.
+  if (anchorId === '') {
+    return [];
+  }
   const selector = `[${COMMENT_ANCHOR_ATTR}="${CSS.escape(anchorId)}"]`;
   const found = Array.from(content.querySelectorAll<HTMLElement>(selector));
   return content.matches(selector) ? [content, ...found] : found;

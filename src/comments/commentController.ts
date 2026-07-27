@@ -45,7 +45,7 @@ import {
   type SidecarThread,
 } from './sidecar-format';
 import type { SidecarStore } from './sidecar-store';
-import type { CommentSyncThread } from '../shared/messages';
+import type { CommentSidecarState, CommentSyncThread } from '../shared/messages';
 
 /** The structural anchor a thread was created against (US-23.1; re-resolved by US-23.4). */
 export interface CommentAnchor {
@@ -142,6 +142,13 @@ export interface CommentSupport extends vscode.Disposable {
    * get a gutter pin/highlight/popover.
    */
   listThreads(document: vscode.TextDocument): CommentSyncThread[];
+  /**
+   * US-23.9: what the sidecar load found beside the threads — a foreign sidecar,
+   * a refusal/read failure, or orphaned lines. Pushed alongside `listThreads` so
+   * the Comment tab can explain an empty or unexpected list instead of showing
+   * "no comments" for four different causes.
+   */
+  sidecarStateFor(document: vscode.TextDocument): CommentSidecarState | undefined;
   /**
    * US-23.2: reverse lookup from a native `vscode.CommentThread` (what a
    * `comments/commentThread/context` command receives via its
@@ -287,6 +294,10 @@ export function createCommentSupport(
   // Documents whose sidecar has already been loaded, so a second panel on the
   // same file doesn't duplicate every thread.
   const loaded = new Set<string>();
+  // US-23.9: per-document sidecar health, recorded by the load and read back by
+  // every later snapshot. Kept beside `loaded` and cleared with it, so a retry
+  // after a released claim reports the retry's outcome, not the failed attempt's.
+  const sidecarState = new Map<string, CommentSidecarState>();
 
   /**
    * One document's identity for the registry. Folded on a case-insensitive
@@ -419,6 +430,17 @@ export function createCommentSupport(
       }
       // Claimed before the await so two panels opening at once can't both load.
       loaded.add(docKey);
+      // Recorded BEFORE the first await, so a snapshot posted from the `ready`
+      // handler while this read is in flight says "still loading" rather than
+      // letting the webview conclude the file has no comments (US-23.9 AC12(d)).
+      sidecarState.set(docKey, { loading: true });
+      const refusal = store.refusalFor(document);
+      if (refusal !== null) {
+        // No sidecar is possible at all. Recorded rather than logged, so the tab
+        // shows the actionable reason instead of "No comments in this file".
+        sidecarState.set(docKey, { problem: refusal });
+        return;
+      }
       let folded;
       try {
         // US-23.5 AC5: a sidecar whose name drifted out of VS Code (case, or
@@ -431,6 +453,7 @@ export function createCommentSupport(
         // document permanently marked as loaded-with-nothing.
         loaded.delete(docKey);
         log(`Comment sidecar: loading ${document.uri.toString()} failed`, err);
+        sidecarState.set(docKey, { problem: 'The comment sidecar could not be read. Reopen the file to retry.' });
         return;
       }
       if (folded.unreadable) {
@@ -443,6 +466,9 @@ export function createCommentSupport(
         void vscode.window.showWarningMessage(
           'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.'
         );
+        sidecarState.set(docKey, {
+          problem: 'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.',
+        });
         return;
       }
       // AC7 clause 2: a sidecar found beside a document it does not describe (the
@@ -459,12 +485,22 @@ export function createCommentSupport(
         );
       }
       if (folded.orphans.length > 0) {
-        // AC4 routes these here "instead of silently dropping" — surfacing the
-        // count is the least that makes them non-silent until US-23.7 lists them.
+        // AC4 routes these here "instead of silently dropping"; US-23.9's tab is
+        // where they become visible, so the lines travel with the snapshot too.
         log(
           `Comment sidecar ${document.uri.toString()}: ${folded.orphans.length} orphaned reply/status line(s) have no parent comment`
         );
       }
+      sidecarState.set(docKey, {
+        foreign: belonging === 'foreign' ? true : undefined,
+        orphans: folded.orphans.map((line) => ({
+          id: line.id,
+          kind: line.type === 'reply' ? 'reply' : 'status-change',
+          author: line.author,
+          timestamp: line.timestamp,
+          detail: line.type === 'reply' ? line.body : line.to_status,
+        })),
+      });
       // Dedup within THIS document only, keyed by the durable comment id, so a
       // reload after a rename still builds the threads (a flat "seen this uuid"
       // check would skip them all) and a thread created this session is not
@@ -534,6 +570,7 @@ export function createCommentSupport(
       }
       byDoc.delete(docKey);
       loaded.delete(docKey);
+      sidecarState.delete(docKey);
     },
 
     updateAnchor(msg, document): string | null {
@@ -720,6 +757,10 @@ export function createCommentSupport(
       return { ok: true, status: toStatus, author: currentAuthor, timestamp };
     },
 
+    sidecarStateFor(document): CommentSidecarState | undefined {
+      return sidecarState.get(docKeyFor(document.uri));
+    },
+
     listThreads(document): CommentSyncThread[] {
       const docKey = docKeyFor(document.uri);
       const result: CommentSyncThread[] = [];
@@ -765,6 +806,7 @@ export function createCommentSupport(
       threads.clear();
       byDoc.clear();
       loaded.clear();
+      sidecarState.clear();
       creating.clear();
       // Disposing the controller disposes every thread it created.
       controller.dispose();

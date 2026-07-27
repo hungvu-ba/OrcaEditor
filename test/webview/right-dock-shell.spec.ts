@@ -6,13 +6,14 @@
  * opens on the `TOC` tab (AC4); the `⋯` button renders exactly when the active
  * tab has registered items (AC5); Escape closes the container but only after
  * a higher-priority surface has had its turn (AC6); the container keeps the
- * shipped docked-right geometry (AC1, AC3); mutual exclusion with US-23.4's
- * `#comment-panel` still holds (AC9).
+ * shipped docked-right geometry (AC1, AC3).
  *
- * Not covered here, and deliberately so — see the deferred-work entry for
- * US-23.7: tab switching, ←/→ traversal and last-tab restore are unobservable
- * with a single registered tab. The `⋯` menu now has items (US-10.8's depth
- * control), so its per-item behaviour is exercised in toc-filter.spec.ts; the
+ * The three clauses US-23.7 could not exhibit with one tab — switching, ←/→
+ * traversal and last-tab restore — became observable when US-23.9 registered
+ * the Comment tab, and are covered in `comment-tab.spec.ts` against the two real
+ * tabs. AC9's mutual exclusion with US-23.4's `#comment-panel` is gone with the
+ * panel itself: US-23.9 absorbed it, so the two can no longer race for the dock.
+ * The `⋯` menu's per-item behaviour is exercised in toc-filter.spec.ts; the
  * priority-table assertion below guards the menu's Escape ordering.
  */
 import { test, expect, type Page } from '@playwright/test';
@@ -53,14 +54,15 @@ test('the panel renders as the TOC tab inside a tab strip with tablist semantics
   await expect(tablist).toHaveAttribute('role', 'tablist');
   await expect(tablist.locator('> *:not([role="tab"])')).toHaveCount(0);
 
-  const tab = page.locator('.right-dock-tab');
-  await expect(tab).toHaveCount(1);
+  const tab = page.locator('.right-dock-tab').first();
+  await expect(page.locator('.right-dock-tab')).toHaveCount(2);
   await expect(tab).toHaveAttribute('role', 'tab');
   await expect(tab).toHaveAttribute('aria-selected', 'true');
   await expect(tab).toHaveText('TOC');
 
   // Single tab stop: the active tab is the only reachable header.
   await expect(tab).toHaveAttribute('tabindex', '0');
+  await expect(page.locator('.right-dock-tab').nth(1)).toHaveAttribute('tabindex', '-1');
 
   const bodyId = await tab.getAttribute('aria-controls');
   expect(bodyId).toBe('toc-tabpanel');
@@ -78,9 +80,9 @@ test('the ⋯ button renders because the TOC tab registers menu items, and its m
   await openDock(page);
 
   // US-10.8 registers the TOC tab's depth items, which is what puts the button in
-  // the strip; AC5's "absent when there are no items" branch is enforced by
-  // updateMenuButton() running from activate(), and stays observable the moment a
-  // second, item-less tab registers (US-23.9).
+  // the strip. AC5's "absent when there are no items" branch is enforced by
+  // updateMenuButton() running from activate(); both shipped tabs register items,
+  // so that branch has no live consumer and stays unit-guarded by the code path.
   await expect(page.locator('.right-dock-menu-btn')).toHaveCount(1);
   // The menu node exists (built once at dock creation) but stays hidden until asked.
   await expect(page.locator('.right-dock-menu')).toHaveCount(1);
@@ -181,7 +183,7 @@ test('Escape closes the container only when focus is inside it, and hands focus 
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
 
   // Focus inside the container: now Escape owns it.
-  await page.locator('.right-dock-tab').focus();
+  await page.locator('.right-dock-tab').first().focus();
   await page.keyboard.press('Escape');
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '0px');
   // Focus must not be orphaned on a control inside a panel that is collapsing
@@ -216,20 +218,25 @@ test('a comment popover consumes Escape and leaves the container open', async ({
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
 });
 
-test('the container and #comment-panel still never dock at once', async ({ page }) => {
+test('the ⚑ and ☰ buttons switch tabs inside one dock instead of swapping panels', async ({ page }) => {
   await openEditor(page, DOC);
   await addComment(page, 0, 'Why in order?');
   await hostUpdate(page, GUTTED);
   await expect(page.locator('#comment-panel-toggle')).toBeVisible();
 
   await openDock(page);
+  await expect(page.locator('#toc-tabpanel')).toBeVisible();
+
+  // US-23.9 retired the mutual exclusion: the panel never closes, the tab does.
   await page.locator('#comment-panel-toggle').click();
-  await expect(page.locator('#comment-panel')).toHaveCSS('width', '300px');
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '0px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#comment-tabpanel')).toBeVisible();
+  await expect(page.locator('#toc-tabpanel')).toBeHidden();
 
   await page.locator('#toc-toggle').click({ force: true });
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
-  await expect(page.locator('#comment-panel')).toHaveCSS('width', '0px');
+  await expect(page.locator('#toc-tabpanel')).toBeVisible();
+  await expect(page.locator('#comment-tabpanel')).toBeHidden();
 });
 
 /** Select the first three characters of paragraph `pIndex` and comment on them. */

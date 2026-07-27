@@ -324,6 +324,44 @@ export interface CommentSyncThread {
   lastTransitionTimestamp?: string;
 }
 
+/**
+ * Req 23 US-23.9: a `reply`/`status-change` sidecar line whose `parent_comment_id`
+ * matched no comment — merge-orphaned content the fold cannot place. Carried so
+ * the Comment tab can list it read-only, instead of it being held invisibly in
+ * host memory (US-23.5 AC4 only logged the count).
+ */
+export interface CommentSyncOrphan {
+  id: string;
+  kind: 'reply' | 'status-change';
+  author: string;
+  timestamp: string;
+  /** The reply's body, or the status the line recorded. */
+  detail: string;
+}
+
+/**
+ * Req 23 US-23.9: what the host knows about the sidecar behind a snapshot, so
+ * an empty list can say WHY it is empty. Absent fields mean "nothing to report".
+ */
+export interface CommentSidecarState {
+  /**
+   * The sidecar read for this document has not settled yet. The `ready` handler
+   * posts a snapshot the moment a webview registers, which is normally BEFORE
+   * the disk read finishes — without this flag an empty `threads` array plus an
+   * absent report is indistinguishable from "loaded, and the file has none".
+   */
+  loading?: boolean;
+  /**
+   * US-23.5's content-based belonging check said none of the recorded texts are
+   * in this document — a reused path or an out-of-VS-Code rename. One banner,
+   * rather than N unexplained "Unresolved location" rows.
+   */
+  foreign?: boolean;
+  /** Why this document can hold no comments, or why its sidecar could not be read. */
+  problem?: string;
+  orphans?: CommentSyncOrphan[];
+}
+
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */
 export type ZenChangedMessage = { type: 'zenChanged'; zen: boolean };
 
@@ -651,7 +689,13 @@ export type HostToWebview =
    * after every create/reply/delete/anchor-update. `docUri` guards a message
    * that arrives after a tab switch, same convention as `init`.
    */
-  | { type: 'commentThreadsSync'; docUri: string; threads: CommentSyncThread[] }
+  | {
+      type: 'commentThreadsSync';
+      docUri: string;
+      threads: CommentSyncThread[];
+      /** US-23.9: the sidecar's own health, so an empty list can name its cause. */
+      sidecar?: CommentSidecarState;
+    }
   /**
    * Req 23 US-23.2: reply to `replyToComment`. `ok: false` carries the reason in
    * `error` (empty body, unknown thread, thread Closed); on success `replyId`/

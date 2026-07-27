@@ -215,6 +215,10 @@ export const RIGHT_DOCK_STRIP_CLASS = 'right-dock-tabs';
 export const RIGHT_DOCK_TABLIST_CLASS = 'right-dock-tablist';
 /** DOM class for one tab header. */
 export const RIGHT_DOCK_TAB_CLASS = 'right-dock-tab';
+/** DOM class for the header's text, kept a separate node so the badge can sit beside it. */
+export const RIGHT_DOCK_TAB_LABEL_CLASS = 'right-dock-tab-label';
+/** DOM class for a tab header's count badge (US-23.9) — present only while the count is non-empty. */
+export const RIGHT_DOCK_TAB_BADGE_CLASS = 'right-dock-tab-badge';
 /**
  * DOM class stamped on every registered tab body. Its paired
  * `.right-dock-tabpanel[hidden]` rule is what makes the dock's `hidden` toggle

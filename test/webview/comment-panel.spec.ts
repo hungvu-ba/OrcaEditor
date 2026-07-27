@@ -1,15 +1,19 @@
 /**
- * Req 23 US-23.4 AC4 — the "Unresolved location" panel and the two routes back
- * into the document.
+ * Req 23 US-23.4 AC4 — the two routes back into the document for a thread whose
+ * anchor is lost, re-pointed by US-23.9 at their new host: the "Unresolved
+ * location" GROUP inside the Comment tab, not the standalone `<aside>` that used
+ * to fight the TOC for the dock. Every behaviour asserted here is unchanged —
+ * that the drag, the picker and the Space/↑↓/Enter walk still work from inside
+ * the tab is exactly what US-23.9 AC3 requires this file to prove.
  *
- * Playwright track (Plan/WEBVIEW_TEST.md): a card is dragged with real pointer
+ * Playwright track (Plan/WEBVIEW_TEST.md): a row is dragged with real pointer
  * events onto a real rendered node, the picker is driven with real keyboard
- * input, and the panel only exists after a real re-render floats a thread —
- * none of which a hand-built DOM snapshot can produce. Drags use raw
- * `page.mouse.move/down/up`, the convention every other drag spec here follows.
+ * input, and a thread only floats after a real re-render — none of which a
+ * hand-built DOM snapshot can produce. Drags use raw `page.mouse.move/down/up`,
+ * the convention every other drag spec here follows.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor } from './_harness';
+import { openCommentTab, openEditor } from './_harness';
 
 const DOC = [
   '# Session expiry',
@@ -88,23 +92,25 @@ async function hostUpdate(page: Page, text: string): Promise<void> {
   await page.waitForTimeout(450);
 }
 
-/** Float `count` threads (commenting from `startIndex`), replace the document, open the panel. */
+/** Float `count` threads (commenting from `startIndex`), replace the document, open the tab. */
 async function floatAndOpen(page: Page, count: number, replacement = GUTTED, startIndex = 0): Promise<void> {
   await openEditor(page, DOC);
   for (let i = 0; i < count; i++) {
     await addComment(page, startIndex + i, `Comment ${i + 1}.`);
   }
   await hostUpdate(page, replacement);
-  await page.locator('#comment-panel-toggle').click();
-  // The dock animates its width open; measuring a card mid-transition would give
-  // a box that has moved by the time the pointer gets there.
-  await expect(page.locator('#comment-panel')).toHaveCSS('width', '300px');
-  await expect(page.locator('.comment-panel-card')).toHaveCount(count);
+  await openCommentTab(page);
+  await expect(floatingRows(page)).toHaveCount(count);
 }
 
-/** Drag a card by its centre onto `targetSelector`, optionally cancelling with Escape. */
+/** The rows of the "Unresolved location" group — what used to be the whole panel. */
+function floatingRows(page: Page) {
+  return page.locator('.comment-row[data-group="floating"]');
+}
+
+/** Drag a row by its centre onto `targetSelector`, optionally cancelling with Escape. */
 async function dragCardOnto(page: Page, cardIndex: number, targetSelector: string, cancel = false): Promise<void> {
-  const card = page.locator('.comment-panel-card').nth(cardIndex);
+  const card = floatingRows(page).nth(cardIndex);
   const from = (await card.boundingBox())!;
   const to = (await page.locator(targetSelector).boundingBox())!;
   await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
@@ -119,55 +125,67 @@ async function dragCardOnto(page: Page, cardIndex: number, targetSelector: strin
   await page.mouse.up();
 }
 
-test('the toolbar button stays hidden until a thread actually floats', async ({ page }) => {
+test('the toolbar button appears with the first comment and counts only the floating ones', async ({ page }) => {
   await openEditor(page, DOC);
-  await addComment(page, 0, 'Does drains mean FIFO?');
   await expect(page.locator('#comment-panel-toggle')).toBeHidden();
 
-  await hostUpdate(page, GUTTED);
+  // US-23.9: the button is the Comment TAB's entry point, so it appears as soon
+  // as the file has a thread to browse — but its badge is still the UNRESOLVED
+  // count (US-23.4's contract), which is zero while every anchor holds.
+  await addComment(page, 0, 'Does drains mean FIFO?');
   await expect(page.locator('#comment-panel-toggle')).toBeVisible();
+  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '0');
+
+  await hostUpdate(page, GUTTED);
   await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '1');
 });
 
-test('a floated thread becomes a card carrying its author, comment and recorded context', async ({ page }) => {
+test('a floated thread becomes a row saying so in words, with its opener and status', async ({ page }) => {
   await floatAndOpen(page, 1);
 
-  const card = page.locator('.comment-panel-card');
-  await expect(card).toHaveCount(1);
-  await expect(card.locator('.comment-panel-author')).toHaveText('reviewer');
-  await expect(card.locator('.comment-panel-text')).toHaveText('Comment 1.');
-  await expect(card.locator('.comment-panel-quote')).toContainText('The refund queue drains in enqueue order.');
-  await expect(card.locator('.comment-panel-time')).not.toHaveText('');
+  const row = floatingRows(page);
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('.comment-row-pill')).toHaveText('No anchor');
+  // No snippet and no line number: there is no anchored text left to quote, and
+  // the row says that rather than showing an empty pair of quotes (AC5).
+  await expect(row.locator('.comment-row-snippet')).toHaveText('Unresolved location');
+  await expect(row.locator('.comment-row-author')).toHaveText('reviewer');
+  // Floating is orthogonal to status, so line 2 carries the resolve status.
+  await expect(row.locator('.comment-row-where')).toHaveText('Open');
+  await expect(row.locator('.comment-row-time')).not.toHaveText('');
 });
 
-test('every floated thread gets a card — no cap, no "+N more"', async ({ page }) => {
+test('every floated thread gets a row — no cap, no "+N more"', async ({ page }) => {
   await floatAndOpen(page, 2);
-  await expect(page.locator('.comment-panel-card')).toHaveCount(2);
+  await expect(floatingRows(page)).toHaveCount(2);
   await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '2');
 });
 
-test('cards list newest thread first', async ({ page }) => {
+test('rows list newest transition first', async ({ page }) => {
   await openEditor(page, DOC);
   await addComment(page, 0, 'Older comment.', new Date(2026, 6, 24, 9, 0).toISOString());
   await addComment(page, 1, 'Newer comment.', new Date(2026, 6, 24, 11, 0).toISOString());
-  await hostUpdate(page, GUTTED);
-  await page.locator('#comment-panel-toggle').click();
-  await expect(page.locator('#comment-panel')).toHaveCSS('width', '300px');
+  await openCommentTab(page);
 
-  const cards = page.locator('.comment-panel-card .comment-panel-text');
-  await expect(cards).toHaveCount(2);
-  await expect(cards.nth(0)).toHaveText('Newer comment.');
-  await expect(cards.nth(1)).toHaveText('Older comment.');
+  // Both anchors still hold, so both rows carry their anchored text — which is
+  // what makes the ordering observable at all (a floating row shows no snippet).
+  const rows = page.locator('.comment-row .comment-row-snippet');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('Identifiers are recorded for later audit.');
+  await expect(rows.nth(1)).toContainText('The refund queue drains in enqueue order.');
 });
 
-test('dragging a card onto a node re-attaches it and empties the panel', async ({ page }) => {
+test('dragging a row onto a node re-attaches it and empties the floating group', async ({ page }) => {
   await floatAndOpen(page, 1, SHORTER, 1);
   const editsBefore = await postedEditCount(page);
 
   await dragCardOnto(page, 0, '#content li >> nth=0');
 
-  await expect(page.locator('.comment-panel-card')).toHaveCount(0);
-  await expect(page.locator('.comment-panel-empty')).toBeVisible();
+  // The group is omitted entirely once it empties (US-23.9 AC4) and the thread
+  // reappears under Open — it was never deleted, only re-anchored.
+  await expect(floatingRows(page)).toHaveCount(0);
+  await expect(page.locator('.comment-group-label')).toHaveText('Open');
+  await expect(page.locator('.comment-row[data-group="open"]')).toHaveCount(1);
   // The thread now sits on the node it was dropped on, as an exact anchor.
   await expect(page.locator('#content li').first()).toHaveAttribute('data-comment-anchor-state', 'exact');
   await expect(page.locator('.comment-drop-chip')).toHaveCount(0);
@@ -181,7 +199,7 @@ test('Escape mid-drag cancels — the thread stays floating', async ({ page }) =
 
   await dragCardOnto(page, 0, '#content li >> nth=0', true);
 
-  await expect(page.locator('.comment-panel-card')).toHaveCount(1);
+  await expect(floatingRows(page)).toHaveCount(1);
   await expect(page.locator('.comment-drop-chip')).toHaveCount(0);
   await expect(page.locator('#content [data-comment-anchor-state="exact"]')).toHaveCount(0);
 });
@@ -199,11 +217,11 @@ test('the Re-attach… picker ranks by similarity, shows the score, and Enter at
   await expect(suggested.locator('.comment-reattach-text')).toContainText('Identifiers are recorded.');
   // Opening previews the current row rather than committing to it.
   await expect(page.locator('.comment-drop-chip')).toBeVisible();
-  await expect(page.locator('.comment-panel-card')).toHaveCount(1);
+  await expect(floatingRows(page)).toHaveCount(1);
 
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('.comment-panel-card')).toHaveCount(0);
+  await expect(floatingRows(page)).toHaveCount(0);
   await expect(page.locator('#content [data-comment-anchor-state="exact"]')).toHaveText('Identifiers are recorded.');
 });
 
@@ -224,22 +242,25 @@ test('the keyboard route attaches exactly like a drop — Space, arrows, Enter',
   await floatAndOpen(page, 1, SHORTER, 1);
   const editsBefore = await postedEditCount(page);
 
-  await page.locator('.comment-panel-card').focus();
+  await floatingRows(page).focus();
   await page.keyboard.press(' ');
   await expect(page.locator('.comment-drop-chip')).toBeVisible();
   // First target is the heading; one step down lands on the first list item.
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('.comment-panel-card')).toHaveCount(0);
+  await expect(floatingRows(page)).toHaveCount(0);
   await expect(page.locator('#content [data-comment-anchor-state="exact"]')).toHaveText('Identifiers are recorded.');
   expect(await postedEditCount(page)).toBe(editsBefore);
 });
 
-test('an empty panel states so plainly instead of showing nothing', async ({ page }) => {
+test('re-attaching the last floating thread retires the group, it does not empty the tab', async ({ page }) => {
   await floatAndOpen(page, 1, SHORTER, 1);
   await dragCardOnto(page, 0, '#content h1');
 
-  await expect(page.locator('.comment-panel-empty-title')).toHaveText('No unresolved comments');
-  await expect(page.locator('.comment-panel-hint')).toBeHidden();
+  // The tab lists every thread, so the file is not suddenly commentless — only
+  // the "Unresolved location" group is gone, and the ⚑ badge with it.
+  await expect(page.locator('.comment-group-label')).toHaveText('Open');
+  await expect(page.locator('.comment-empty')).toHaveCount(0);
+  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '0');
 });

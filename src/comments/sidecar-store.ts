@@ -65,6 +65,12 @@ export interface SidecarStore {
    * never reports. No-op when the exact name already exists.
    */
   adoptDrifted(document: vscode.TextDocument): Promise<void>;
+  /**
+   * Why this document can hold no sidecar at all (untitled, or a non-`file`
+   * scheme), or null when it can. US-23.9 shows this instead of "no comments":
+   * the two look identical in an empty list, and only one of them is fixable.
+   */
+  refusalFor(document: vscode.TextDocument): string | null;
 }
 
 const EMPTY_SIDECAR: FoldedSidecar = { threads: [], orphans: [], warnings: [] };
@@ -149,6 +155,8 @@ export function createSidecarStore(
 
   return {
     uriFor,
+
+    refusalFor: schemeRejection,
 
     async append(document, line): Promise<string | null> {
       const rejection = schemeRejection(document);

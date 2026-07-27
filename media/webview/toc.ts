@@ -12,7 +12,7 @@
 
 import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
-import { createTabDock, type RightDockTab } from './right-dock';
+import { createTabDock, type RightDockTab, type TabDock } from './right-dock';
 import { showTooltip, hideTooltip } from './tooltip';
 import { getDocHeight } from './match-utils';
 import { extractReadableText, countWords, estimateReadMinutes, formatCount } from './reading-stats';
@@ -21,10 +21,17 @@ import type { VsCodeApi } from './vscode-api';
 export interface TocController {
   /** Dựng lại danh sách mục lục (khi nội dung đổi) nếu panel đang mở. Có debounce. */
   refresh(): void;
-  /** Bật/tắt panel mục lục. */
-  toggle(): void;
+  /**
+   * Bật/tắt right dock. `tabId` chọn tab muốn mở (mặc định `toc`); nếu dock đang
+   * mở ở tab khác thì chuyển tab thay vì đóng (US-23.9).
+   */
+  toggle(tabId?: string): void;
+  /** Đóng dock bất kể tab nào đang hiện — dùng cho Escape và auto-hide. */
+  close(): void;
   /** Panel có đang mở không (để đồng bộ trạng thái nút toolbar). */
   isOpen(): boolean;
+  /** The shared tab container, so other modules can register their own tab (US-23.9). */
+  dock: TabDock;
   /** Re-apply the panel width, capped to the current window (call on window resize). */
   reflowWidth(): void;
 }
@@ -158,7 +165,13 @@ export function initToc(
   document.body.appendChild(panel);
 
   // createTabDock appends the strip, so it runs before any tab body is added.
-  const dock = createTabDock(panel, vscode);
+  // US-23.9: the toolbar's `☰`/`⚑` states are derived from which tab is active,
+  // so a switch made from the strip itself (header click, ←/→) has to reach them.
+  // A DOM event rather than a wired callback, matching the
+  // `orca-comment-floating-changed` precedent — toc.ts must not know the toolbar.
+  const dock = createTabDock(panel, vscode, () => {
+    document.dispatchEvent(new CustomEvent('orca-dock-tab-changed'));
+  });
   // US-10.8: the depth control is the first consumer of US-23.7's per-tab menu
   // API. `menuItems` must be on the object handed to registerTab() — the `⋯`
   // button's visibility is recomputed in activate(), which registerTab() calls,
@@ -671,15 +684,30 @@ export function initToc(
     requestAnimationFrame(step);
   }
 
-  function toggle(): void {
+  /**
+   * US-23.9: one container, two entry points. `#toc-toggle` asks for `toc` and
+   * the `⚑` button for `comment`; asking for a tab the container is already
+   * showing closes it (the shipped toggle gesture), asking for the other one
+   * switches instead — closing a panel the user is trying to switch inside of
+   * would read as a dropped click.
+   *
+   * Omitting `tabId` means "no explicit target", which is what US-23.7 AC7's
+   * last-tab restore needs: the auto-open paths and the toggle-closed gesture
+   * must not silently re-select TOC, or the restored tab would never survive to
+   * be seen. Only a caller that genuinely means TOC passes 'toc'.
+   */
+  function toggle(tabId?: string): void {
+    if (open && tabId !== undefined && dock.activeId() !== tabId) {
+      dock.activate(tabId);
+      return;
+    }
     // Capture the anchor at the current (pre-reflow) layout, then flip the class
     // so the padding transition starts; the pin loop holds the anchor afterwards.
     pinAnchorAcrossReflow();
     open = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {
-      // US-23.7: #toc-toggle always opens the container on the TOC tab.
-      dock.activate('toc');
+      dock.activate(tabId ?? dock.activeId() ?? 'toc');
       build();
       // padding của body vừa đổi → tính lại vị trí active ở frame kế tiếp
       requestAnimationFrame(updateActive);
@@ -695,6 +723,12 @@ export function initToc(
   return {
     isOpen: () => open,
     toggle,
+    close(): void {
+      if (open) {
+        toggle();
+      }
+    },
+    dock,
     reflowWidth,
     refresh(): void {
       if (!open) {

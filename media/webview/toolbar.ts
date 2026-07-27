@@ -322,17 +322,23 @@ function updateCommentPanelButton(): void {
     return;
   }
   const floating = ctx.commentPanel.floatingCount();
-  const open = ctx.commentPanel.isOpen();
+  const threads = ctx.commentPanel.threadCount();
+  // US-23.9: the button is the Comment TAB's entry point now, so "open" means
+  // the dock is showing that tab — not a panel of its own.
+  const open = ctx.toc.isOpen() && ctx.toc.dock.activeId() === 'comment';
   button.classList.toggle('active', open);
-  // Zero floating threads hides the button — EXCEPT while the panel itself is
-  // still open: the panel emptying (drag/keyboard re-attach, or the last thread
-  // resolving elsewhere) must not remove the only way to close it.
-  button.hidden = floating === 0 && !open;
+  // A file with no comments at all has nothing to route the user to — EXCEPT
+  // while the tab itself is showing: the list emptying (a re-attach, the last
+  // thread deleted elsewhere) must not remove the only way to close it.
+  button.hidden = threads === 0 && !open;
+  // The badge stays the UNRESOLVED count (US-23.4's contract): the strip's own
+  // badge carries the total, and two badges showing the same number would say
+  // nothing. Zero is hidden by the `[data-count='0']` CSS rule.
   button.setAttribute('data-count', String(floating));
   button.title =
     floating === 0
-      ? 'Unresolved comment locations'
-      : `${floating} comment${floating === 1 ? '' : 's'} lost their anchor — open the Unresolved location panel`;
+      ? 'Comments in this file'
+      : `${floating} comment${floating === 1 ? '' : 's'} lost their anchor — open the Comment tab`;
   // Appearing/disappearing changes how much room the toolbar needs, and the
   // overflow split is width-based (US-4.7) — without this, showing the button
   // pushes another one off the edge instead of collapsing one into "•••", and
@@ -844,15 +850,13 @@ const toolbarItems: ToolbarItem[] = [
     icon: TOC_ICON,
     title: 'Show/hide Table of Contents',
     action: () => {
-      // Both dock on the right at the same width — mutually exclusive rather
-      // than stacked, so one panel's offset math never has to account for
-      // the other also being open.
-      if (!ctx.toc.isOpen() && ctx.commentPanel.isOpen()) {
-        ctx.commentPanel.toggle();
-        updateCommentPanelButton();
-      }
-      ctx.toc.toggle();
+      // US-23.9 retired the mutual exclusion: there is one dock now, and the two
+      // panels are two tabs inside it. The explicit 'toc' is US-23.7 AC4 —
+      // `#toc-toggle` always opens the container on the TOC tab, whatever tab
+      // the last session left selected.
+      ctx.toc.toggle('toc');
       updateTocButton();
+      updateCommentPanelButton();
     },
     id: 'toc-toggle',
     // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
@@ -862,13 +866,12 @@ const toolbarItems: ToolbarItem[] = [
   {
     label: '⚑',
     icon: UNRESOLVED_COMMENT_ICON,
-    title: 'Unresolved comment locations',
+    title: 'Comments in this file',
     action: () => {
-      if (!ctx.commentPanel.isOpen() && ctx.toc.isOpen()) {
-        ctx.toc.toggle();
-        updateTocButton();
-      }
-      ctx.commentPanel.toggle();
+      // US-23.9: the `⚑` is the Comment tab's entry point — same dock, same
+      // gesture as `☰`, just a different tab pre-selected.
+      ctx.toc.toggle('comment');
+      updateTocButton();
       updateCommentPanelButton();
     },
     id: 'comment-panel-toggle',
@@ -2522,7 +2525,11 @@ function runTriggerBlockAction(id: TriggerDefineBlockId): void {
     case 'toc':
       // No standalone "insert a TOC block into the document" feature exists —
       // this reuses the existing sidebar TOC panel toggle (fmt id 'toc-toggle').
-      ctx.toc.toggle();
+      // Explicit 'toc' for the same reason that button passes it: the action is
+      // named for the outline, so it must not open whichever tab was last used.
+      ctx.toc.toggle('toc');
+      updateTocButton();
+      updateCommentPanelButton();
       return;
   }
 }

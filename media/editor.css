@@ -1504,30 +1504,12 @@ body.toc-open #select-viewport-band {
   right: var(--toc-width);
 }
 
-/* The comment panel docks in the same place as TOC (mutually exclusive, see
- * toolbar.ts) — same offset so the search box and overview rulers clear it too. */
-body.comment-panel-open #search-viewport-band {
-  right: var(--comment-panel-width);
-}
-
-body.comment-panel-open #select-viewport-band {
-  right: var(--comment-panel-width);
-}
-
-body.comment-panel-open #search-box {
-  right: calc(20px + var(--comment-panel-width));
-}
-
-body.comment-panel-open #search-overview {
-  right: var(--comment-panel-width);
-}
-
-body.comment-panel-open #select-overview {
-  right: var(--comment-panel-width);
-}
+/* US-23.9 retired `body.comment-panel-open` and its duplicate right-offsets:
+ * the Unresolved-location panel is a tab inside the one right dock now, so the
+ * `body.toc-open` rules above are the only offset mechanism. */
 
 /* toolbar.ts writes the live count into data-count; [data-count="0"] happens
- * while the panel is open with nothing left floating (the BLOCKER fix keeps
+ * while the tab is open with nothing left floating (the BLOCKER fix keeps
  * the button visible then) — the badge itself should still disappear. */
 #comment-panel-toggle {
   position: relative;
@@ -1770,6 +1752,10 @@ body.toc-resizing #toolbar {
 
 .right-dock-tab {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  /* Handoff: the count sits 6px after the label, not glued to it. */
+  gap: 6px;
   padding: 0 12px;
   border: none;
   background: transparent;
@@ -1792,6 +1778,19 @@ body.toc-resizing #toolbar {
 
 .right-dock-tab:hover:not(.active) {
   color: var(--toc-fg);
+}
+
+/* US-23.9 count badge. It sits inside the tab button, which is bold uppercase
+ * 11px with letter-spacing — all of which has to be undone here, or the count
+ * reads as part of the label. */
+.right-dock-tab-badge {
+  padding: 0 5px;
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--toc-muted);
+  background: color-mix(in srgb, var(--toc-fg) 8%, transparent);
+  border-radius: 8px;
 }
 
 .right-dock-menu-btn {
@@ -2507,12 +2506,17 @@ body.reading-zen.md-line-numbers #toolbar {
 }
 /* Zen's toolbar is already `position: fixed; right: 0`, spanning the full
  * viewport width on its own — the negative-margin "stretch to overlap the
- * dock's top strip" trick (body.comment-panel-open #toolbar above) is for the
- * in-flow toolbar only. Left uncountered, its margin/padding-right would shift
- * the fixed toolbar away from the true right edge, opening a gap while Zen and
- * the comment panel are both active. Same specificity (one class + #toolbar)
- * as the rule it must beat, so it has to repeat the extra class to win. */
-body.reading-zen.comment-panel-open #toolbar {
+ * dock's top strip" trick (body.toc-open #toolbar above) is for the in-flow
+ * toolbar only. Left uncountered, its margin/padding-right would shift the
+ * fixed toolbar away from the true right edge, opening a gap while Zen and the
+ * dock are both open. Same specificity (one class + #toolbar) as the rule it
+ * must beat, so it has to repeat the extra class to win.
+ *
+ * US-23.9 re-pointed this from `comment-panel-open` to `toc-open`: there is one
+ * right dock now, and the class this was written against is retired. The TOC
+ * never had its own copy of the counter-rule, so this also closes the same gap
+ * for the Contents tab. */
+body.reading-zen.toc-open #toolbar {
   margin-right: 0;
   padding-right: var(--toolbar-edge-pad);
 }
@@ -2658,6 +2662,12 @@ body.reading-mode-sepia {
   --toc-pill-bg: rgba(138, 75, 8, 0.14);
   --toc-pill-border: rgba(90, 60, 20, 0.25);
   --toc-pill-fg: rgba(59, 47, 34, 0.62);
+  /* COMMENT_SYSTEM_TOKENS.md, Sepia column. Anchor-trouble is deliberately NOT
+   * the shared amber here: Sepia's own accent (#8a4b08) is also amber-brown, so
+   * "Open" and "Anchor trouble" would be one hue at a glance — the tokens doc
+   * shifts it to ochre/gold for exactly this collision. */
+  --comment-status-done-fg: #4b7a3f;
+  --comment-warn-fg: #8f6a1a;
 }
 body.reading-mode-paper {
   --toolbar-bg: #f4f4ea;
@@ -2680,6 +2690,10 @@ body.reading-mode-paper {
   --toc-pill-bg: rgba(37, 84, 160, 0.1);
   --toc-pill-border: rgba(0, 0, 0, 0.14);
   --toc-pill-fg: rgba(0, 0, 0, 0.6);
+  /* COMMENT_SYSTEM_TOKENS.md, Paper column. Paper's accent is blue, so the amber
+   * anchor-trouble family stays — no collision to resolve. */
+  --comment-status-done-fg: #1a7a4a;
+  --comment-warn-fg: #9a6a1a;
 }
 /* #table-toolbar vẫn kế thừa --rp-* như US-19.11 (chỉ #toolbar tách sang
  * --toolbar-* riêng ở trên). */
@@ -2926,163 +2940,285 @@ body[class*='reading-mode-'] ::highlight(search-current) {
 }
 
 /*--------------------------------------------------------------------------*
- * Req 23 US-23.4 AC4 — "Unresolved location" panel
+ * Req 23 US-23.9 — Comment tab (absorbs US-23.4's "Unresolved location" panel)
  *
- * Same dock geometry and token discipline as the TOC panel above: every rule
- * reads through the --comment-panel-* layer, never a raw --vscode-* var, so a
- * reading mode can restyle the whole panel in one override block.
+ * The tab BODY only: US-23.7's dock owns the panel box, the strip and the
+ * width, so there is no dock geometry here at all. Token discipline is
+ * unchanged — every rule reads through the --comment-panel-* layer, never a raw
+ * --vscode-* var, so a reading mode can restyle the whole tab in one block.
  *--------------------------------------------------------------------------*/
 
 :root {
-  --comment-panel-width: 300px;
   --comment-panel-bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
   --comment-panel-fg: var(--vscode-foreground);
   --comment-panel-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.7));
-  --comment-panel-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
   --comment-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   --comment-card-border: var(--vscode-widget-border, rgba(128, 128, 128, 0.28));
-  --comment-card-hover-border: var(--vscode-focusBorder, #007acc);
   --comment-accent: var(--vscode-textLink-foreground, #3794ff);
   --comment-accent-soft: color-mix(in srgb, var(--comment-accent) 14%, transparent);
   --comment-warn-fg: var(--vscode-editorWarning-foreground, #cca700);
   --comment-panel-field-bg: var(--vscode-input-background, transparent);
   --comment-panel-field-fg: var(--vscode-input-foreground, inherit);
   --comment-panel-field-border: var(--vscode-input-border, var(--comment-card-border));
+  /* US-23.9 row chrome and status pills (COMMENT_SYSTEM_TOKENS.md). Derived from
+   * the rail's own --toc-* set rather than from --vscode-* directly: the tab is a
+   * body INSIDE #toc-panel, and --toc-* is the layer Sepia and Paper already
+   * override wholesale — so the list is per-mode correct without a second
+   * three-mode block to keep in sync. Open IS the mode's accent in every palette
+   * (no separate hue is invented for it); Resolved/Closed/Anchor-trouble keep
+   * independent hues, mixed against the mode's own foreground so a theme the
+   * handoff never saw still yields a pill that reads on its own background. */
+  --comment-row-hover: color-mix(in srgb, var(--toc-fg) 7%, transparent);
+  --comment-status-open-fg: var(--toc-accent);
+  --comment-status-open-bg: color-mix(in srgb, var(--toc-accent) 16%, transparent);
+  --comment-status-done-fg: #59c48a;
+  --comment-status-done-bg: color-mix(in srgb, var(--comment-status-done-fg) 18%, transparent);
+  --comment-status-closed-fg: var(--toc-muted);
+  --comment-status-closed-bg: color-mix(in srgb, var(--toc-fg) 10%, transparent);
+  --comment-status-anchor-bg: color-mix(in srgb, var(--comment-warn-fg) 16%, transparent);
 }
 
-body.comment-panel-open {
-  padding-right: calc(26px + var(--comment-panel-width));
-}
-
-body.comment-panel-open #toolbar {
-  margin-right: calc(-26px - var(--comment-panel-width));
-  padding-right: calc(var(--toolbar-edge-pad) + var(--comment-panel-width));
-}
-
-#comment-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 150;
+#comment-tabpanel {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  width: 0;
-  overflow: hidden;
-  color: var(--comment-panel-fg);
-  background: var(--comment-panel-bg);
-  border-left: 1px solid var(--comment-panel-border);
-  opacity: 0;
-  visibility: hidden;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
 }
 
-body.comment-panel-open #comment-panel {
-  width: var(--comment-panel-width);
-  opacity: 1;
-  visibility: visible;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
+/* The paired [hidden] rule US-23.7 names as a trap: the author `display: flex`
+ * above outranks both the UA sheet's `[hidden] { display: none }` and the
+ * dock's generic `.right-dock-tabpanel[hidden]`, so without a rule at MATCHING
+ * ID specificity this body keeps painting while the TOC tab is active. */
+#comment-tabpanel[hidden] {
+  display: none;
 }
 
-.comment-panel-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* AC13: one banner naming the cause, instead of N unexplained floating rows. */
+.comment-tab-banner {
   flex: 0 0 auto;
-  height: 32px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--comment-panel-border);
-}
-
-.comment-panel-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.comment-panel-count {
-  margin-left: auto;
-  padding: 0 6px;
-  font-size: 11px;
-  color: var(--comment-warn-fg);
-  border: 1px solid var(--comment-warn-fg);
-  border-radius: 9px;
-}
-
-.comment-panel-hint {
-  flex: 0 0 auto;
-  padding: 8px 12px;
+  padding: 7px 12px;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--comment-panel-muted);
+  color: var(--comment-warn-fg);
+  background: var(--comment-status-anchor-bg);
+  border-bottom: 1px solid var(--toc-border);
 }
 
 .comment-panel-list {
   flex: 1 1 auto;
-  /* Uncapped by design: seven cards or seventy, the list is the whole list. */
+  /* Uncapped by design: seven rows or seven hundred, the list is the whole list. */
   overflow-y: auto;
-  padding: 0 10px 12px;
 }
 
-.comment-panel-card {
+/* Sticky so the status of whatever is on screen is always named. Opaque, or
+ * rows would show through as they scroll under it (AC4). */
+.comment-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
-  gap: 7px;
-  margin-bottom: 8px;
-  padding: 8px 9px 9px;
-  background: var(--comment-card-bg);
-  border: 1px solid var(--comment-card-border);
-  border-radius: 6px;
-  cursor: grab;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--toc-muted);
+  background: var(--toc-bg);
+  border-bottom: 1px solid var(--toc-border);
 }
 
-.comment-panel-card:hover {
-  border-color: var(--comment-card-hover-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+/* Every group after the first is separated from the rows above it, matching the
+ * handoff's 2nd+ header treatment. */
+.comment-group:not(:first-child) {
+  border-top: 1px solid var(--toc-border);
 }
 
-.comment-panel-card:focus-visible {
-  outline: 1px solid var(--comment-accent);
-  outline-offset: 2px;
+.comment-group-count {
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
-/* Always drawn, never hover-revealed: a card that can be dragged should say so
+.comment-group-note {
+  margin-left: auto;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.comment-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--toc-border);
+  cursor: pointer;
+}
+
+.comment-row:hover {
+  background: var(--comment-row-hover);
+}
+
+.comment-row.selected {
+  background: var(--toc-accent-soft);
+  box-shadow: inset 2px 0 0 var(--toc-accent);
+}
+
+.comment-row:focus-visible {
+  outline: 1px solid var(--toc-accent);
+  outline-offset: -2px;
+}
+
+/* An orphaned line is a record, not a destination — nothing to activate, so it
+ * must not offer the hover affordance either. */
+.comment-row.orphan {
+  cursor: default;
+}
+
+.comment-row.orphan:hover {
+  background: transparent;
+}
+
+.comment-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.comment-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.comment-row-pill {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  border-radius: 8px;
+  color: var(--comment-status-open-fg);
+  background: var(--comment-status-open-bg);
+}
+
+.comment-row-pill[data-status='resolved'] {
+  color: var(--comment-status-done-fg);
+  background: var(--comment-status-done-bg);
+}
+
+.comment-row-pill[data-status='closed'] {
+  color: var(--comment-status-closed-fg);
+  background: var(--comment-status-closed-bg);
+}
+
+.comment-row-pill[data-status='anchor'] {
+  color: var(--comment-warn-fg);
+  background: var(--comment-status-anchor-bg);
+}
+
+/* AC6: a guessed location is never presented silently on this surface. */
+.comment-row-approx {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
+}
+
+.comment-row-snippet {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* "Unresolved location" / "No anchored text" — words, not an empty quote. */
+.comment-row-snippet.empty {
+  color: var(--toc-muted);
+  font-style: italic;
+}
+
+/* Readable, clearly past. */
+.comment-row[data-group='closed'] .comment-row-snippet {
+  color: var(--toc-muted);
+}
+
+.comment-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--toc-muted);
+}
+
+.comment-row-author {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.comment-row-where {
+  flex: none;
+}
+
+.comment-row-time {
+  flex: none;
+  margin-left: auto;
+}
+
+.comment-empty {
+  padding: 24px 26px;
+  text-align: center;
+}
+
+.comment-empty-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.comment-empty-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--toc-muted);
+}
+
+/* The only empty state with an accent: a sidecar that failed or was refused is
+ * not the same news as a file nobody has commented on. */
+.comment-empty[data-kind='problem'] .comment-empty-title {
+  color: var(--comment-warn-fg);
+}
+
+.comment-empty-action {
+  margin-top: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--toc-accent);
+  background: none;
+  border: 1px solid var(--toc-accent);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* Always drawn, never hover-revealed: a row that can be dragged should say so
  * at rest (design handoff). */
 .comment-panel-handle {
   flex: 0 0 auto;
+  padding-top: 1px;
   font-size: 12px;
   line-height: 1.2;
-  color: var(--comment-panel-muted);
-}
-
-.comment-panel-card-main {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.comment-panel-card-top {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.comment-panel-meta {
-  display: flex;
-  gap: 6px;
-  min-width: 0;
-  font-size: 11px;
-}
-
-.comment-panel-author {
-  font-weight: 600;
-}
-
-.comment-panel-time {
-  color: var(--comment-panel-muted);
+  color: var(--toc-muted);
+  cursor: grab;
 }
 
 .comment-panel-more {
-  margin-left: auto;
+  flex: 0 0 auto;
   padding: 0 4px;
   font-size: 13px;
   line-height: 1;
@@ -3094,42 +3230,6 @@ body.comment-panel-open #comment-panel {
 
 .comment-panel-more:hover {
   color: var(--comment-panel-fg);
-}
-
-.comment-panel-quote {
-  margin: 4px 0 3px;
-  overflow: hidden;
-  font-size: 11px;
-  color: var(--comment-panel-muted);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.comment-panel-text {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-
-.comment-panel-empty {
-  padding: 24px 6px;
-  text-align: center;
-}
-
-.comment-panel-empty-title {
-  margin-bottom: 6px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.comment-panel-empty-note {
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--comment-panel-muted);
 }
 
 /* Drop aim — one visual language for the pointer route and the keyboard route. */
