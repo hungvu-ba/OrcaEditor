@@ -292,7 +292,32 @@ export function pickAnchorCandidate(
 
   let best = -1;
   const scores = candidates.map((candidate) => {
-    const score = scoreNormalized(recorded, normalizeAnchorText(candidate.text), threshold);
+    const text = normalizeAnchorText(candidate.text);
+    // Req 24 US-23.13 AC4: a merge (two blocks joined into one, e.g. a
+    // Backspace at a paragraph boundary) can only GROW a node's text around
+    // what was already there — the recorded snapshot survives verbatim and
+    // contiguous, merely no longer alone. That routinely fails
+    // `scoreNormalized`'s length-ratio gate (built to reject an unrelated
+    // node, not a superset of this one), so a literal containment match wins
+    // outright here in tier 2's own scoring — never floated merely because the
+    // merged text diluted the symmetric similarity score.
+    //
+    // Gated on the SAME short-text floor `anchorThresholdFor` already uses
+    // (`ANCHOR_SHORT_TEXT_LEN`): below it, a bare containment check has no
+    // similarity signal left to reject a coincidental, unrelated match — a
+    // short recorded string (e.g. "Done.") turning up as a substring of some
+    // other, unrelated block elsewhere in the document must still clear the
+    // strict short-text threshold below, not win outright. Bounded like
+    // `anchorTextRetention`'s own window, for the same reason: an insertion
+    // has to be longer than the whole snapshot before any of it falls off the
+    // scanned end, and this stays off the "unthrottled whole-document work in
+    // a hot path" list (CLAUDE.md) the same way `scoreNormalized` does.
+    const score =
+      recorded.length >= ANCHOR_SHORT_TEXT_LEN &&
+      text.length > recorded.length &&
+      text.slice(0, recorded.length + ANCHOR_MAX_COMPARE_CHARS).includes(recorded)
+        ? 1
+        : scoreNormalized(recorded, text, threshold);
     if (score >= threshold && score > best) {
       best = score;
     }

@@ -440,6 +440,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     const previousAnchorId = anchor.anchorId;
     const previousDrift = anchor.contentDrifted;
     const previousAwaiting = anchor.awaitingAnchorDecision;
+    const previousCarrier = anchor.carrier;
     try {
       resolveOne(anchor, candidates);
       applyStatusIndicators(anchor, previousState);
@@ -458,9 +459,19 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       postUpdate(anchor);
       changed = true;
     }
-    if (anchor.contentDrifted !== previousDrift || anchor.awaitingAnchorDecision !== previousAwaiting) {
-      // Webview-only indicators: they must re-render the popover/dialog, but
-      // there is nothing for the host to follow, so no postUpdate.
+    if (
+      anchor.contentDrifted !== previousDrift ||
+      anchor.awaitingAnchorDecision !== previousAwaiting ||
+      anchor.carrier !== previousCarrier
+    ) {
+      // Webview-only concerns: they must re-render the gutter pin/highlight/
+      // popover, but there is nothing for the host to follow, so no postUpdate.
+      // The carrier check matters even when line/state/id land back on the same
+      // values as before a full re-render (US-23.13 AC4: a merge can resolve a
+      // thread onto a brand-new element while reporting an unchanged state/line)
+      // — every consumer reading `anchor.carrier` (gutter, highlight, popover)
+      // would otherwise keep pointing at the stale, now-disconnected element
+      // until some LATER, unrelated change happened to fire a notification.
       changed = true;
     }
     return changed;

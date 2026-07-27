@@ -473,3 +473,4 @@
 | 0.10.0 | 2026-07-27 | Feature (US-2.7): front matter redesigned — collapsed one-line row by default, click to expand into a title/badge/grid card or view raw YAML. |
 | 0.10.0 | 2026-07-27 | Fix (US-23.20): sidecar append always writes a leading newline (no more probe); a confirmed-overwrite rename backs up the destination's sidecar instead of deleting it. |
 | 0.10.0 | 2026-07-27 | Fix (US-23.19): a comment/reply/status-change/delete now saves the dirty document first, so its recorded text can never outlive an unsaved buffer. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.13 AC4/AC5): merging two commented paragraphs no longer floats the second thread; verified empty-text anchors already skip tier 2; fixes a stale gutter/highlight refresh after a same-state re-resolve. |

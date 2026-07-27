@@ -1030,3 +1030,52 @@ test.describe('US-23.8 AC3 — reply guard hardening', () => {
     expect(await postedOfType(page, 'replyToComment')).toHaveLength(1);
   });
 });
+
+test.describe('US-23.13 AC4/AC5 — merge survives as two threads, empty text skips tier 2', () => {
+  test('AC5: a thread with empty recorded_text skips tier 2 and resolves via tier 3, not floating', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    // Reload path (US-23.4 AC1): tier 1 is unreachable for a freshly-synced
+    // thread (anchorId ''), so this exercises tier 2 (must be skipped for an
+    // empty snapshot — scoring '' against anything is undefined or trivially
+    // 1.0) then tier 3 (must land on whatever block still covers line 3).
+    await seedCommentThreads(page, [{ threadId: 't-empty', recordedText: '', lastKnownLine: 3 }]);
+
+    await expect(page.locator('[data-comment-anchor-state="approximate"]')).toHaveCount(1);
+    await expect(page.locator('[data-comment-anchor-state="floating"]')).toHaveCount(0);
+    await openCommentTab(page);
+    await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(0);
+  });
+
+  test('AC4: two separately-anchored threads survive as two distinct threads when their nodes merge into one', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const a = await createThread(page, 0, 'First.');
+    const b = await createThread(page, 1, 'Second.');
+    await clearPosted(page);
+
+    // Backspace-join shape: the blank line and the second paragraph collapse
+    // into the first, so both recorded snippets now live on ONE merged node.
+    await hostUpdate(
+      page,
+      DOC.replace(
+        `${ANCHOR_TEXT}\n\nIdentifiers are recorded for later audit.`,
+        `${ANCHOR_TEXT} Identifiers are recorded for later audit.`
+      )
+    );
+
+    // Neither thread was dropped nor silently merged into the other: both
+    // still resolve (approximate or exact, never floating) and both are still
+    // independently listed and openable with their own body text.
+    await expect(page.locator('[data-comment-anchor-state="floating"]')).toHaveCount(0);
+    await openCommentTab(page);
+    await expect(page.locator('.comment-row[data-group="open"]')).toHaveCount(2);
+    await page.locator(`.comment-row[data-thread-id="${a.threadId}"]`).click();
+    await expect(page.locator('.comment-popover-body-text')).toHaveText('First.');
+    await page.keyboard.press('Escape');
+    await page.locator(`.comment-row[data-thread-id="${b.threadId}"]`).click();
+    await expect(page.locator('.comment-popover-body-text')).toHaveText('Second.');
+  });
+});

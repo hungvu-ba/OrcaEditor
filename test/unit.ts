@@ -1620,12 +1620,31 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
        candidate('Each entry records a reason code.', 40, 'Payouts')],
       { lastKnownLine: 41, nearestHeading: 'Nhật ký'.normalize('NFC') }
     )?.index === 0);
-  // A candidate whose length alone puts it out of reach is rejected without
-  // running the O(n*m) distance at all.
-  check('tier 2: a candidate too different in length to reach the threshold is skipped',
+  // A candidate whose length alone puts it out of reach, and does not contain
+  // the recorded text at all, is rejected without running the O(n*m) distance.
+  check('tier 2: a candidate too different in length AND unrelated in content is skipped',
     pickAnchorCandidate('The held queue drains in enqueue order.',
-      [candidate('The held queue drains in enqueue order. ' + 'x'.repeat(60), 3)],
+      [candidate('Something else entirely, padded out with unrelated words. ' + 'x'.repeat(60), 3)],
       { lastKnownLine: 3, nearestHeading: '' }) === null);
+  // Req 24 US-23.13 AC4: a merge (Backspace joining two paragraphs) grows a
+  // node's text around what was already there — the recorded snapshot still
+  // survives verbatim, so this now matches even though the length ratio alone
+  // would fail the usual threshold. Revises the pre-US-23.13 expectation above
+  // (a same-shaped padded candidate) since that shape is exactly what a merge
+  // produces.
+  check('tier 2 / US-23.13 AC4: a merged (grown) node still matches when the recorded text survives as a verbatim substring',
+    pickAnchorCandidate('The held queue drains in enqueue order.',
+      [candidate('The held queue drains in enqueue order. Another paragraph joined onto it.', 3)],
+      { lastKnownLine: 3, nearestHeading: '' })?.score === 1);
+  // US-23.13 AC4 review finding: the containment shortcut must not bypass the
+  // short-text threshold — a short recorded string turning up as a substring
+  // of some UNRELATED, longer block elsewhere in the document (not a merge of
+  // that block with the comment's own paragraph) must still be rejected, the
+  // same as before this AC existed.
+  check('tier 2 / US-23.13 AC4: a short recorded text appearing inside an unrelated longer block is still rejected, not containment-matched',
+    pickAnchorCandidate('Done.',
+      [candidate('Something unrelated. Done. Something else unrelated still.', 9)],
+      { lastKnownLine: 9, nearestHeading: '' }) === null);
 
   const update = (over: Partial<AnchorUpdateMessage> = {}): AnchorUpdateMessage => ({
     type: 'commentAnchorUpdate',
