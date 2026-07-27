@@ -69,6 +69,7 @@ import {
   parseSidecarText,
   serializeSidecarLine,
   sameAuthor,
+  sidecarBackupNameFor,
   sidecarNameFor,
   sidecarNameMatches,
   type CommentLine,
@@ -1441,6 +1442,41 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   const outsideRoot = modelRefusalFor(saved, false);
   check('refusalFor: the three reasons are pairwise distinct',
     untitled !== nonFile && nonFile !== outsideRoot && untitled !== outsideRoot);
+}
+
+// --- Req 23 US-23.20 AC2/AC8: unconditional-newline append, backup naming ---
+// sidecar-store.ts imports 'vscode' so `append`/`planRename` aren't reachable
+// here — but the AC8 helper (`sidecarBackupNameFor`) lives in sidecar-format.ts
+// with no vscode import, so it's real-unit-tested, not modeled. AC2's payload
+// composition is now trivial (no more endsWithNewline branch to model either).
+{
+  const anchor = {
+    offset_start: 0,
+    offset_end: 5,
+    recorded_text: 'AC-2 — the newline',
+    last_known_line: 1,
+    nearest_heading: '',
+  };
+  const line = buildCommentLine({
+    id: 'c1',
+    author: 'reviewer',
+    timestamp: '2026-07-27T21:11:40.000Z',
+    body: 'why?',
+    anchor,
+  });
+  const payload = '\n' + serializeSidecarLine(line);
+  check('append payload (AC2): always starts with a newline, regardless of any prior tail state',
+    payload.startsWith('\n'));
+  check('append payload (AC2): still ends with the line’s own terminating newline from serializeSidecarLine',
+    payload.endsWith('\n') && payload.slice(1, -1) === JSON.stringify(line));
+
+  check('sidecarBackupNameFor: appends the stamp and .bak suffix beside the sidecar name',
+    sidecarBackupNameFor('foo.md.orca-comments.jsonl', '2026-07-27T21-11-40-000Z')
+      === 'foo.md.orca-comments.jsonl.2026-07-27T21-11-40-000Z.bak');
+  check('sidecarBackupNameFor: the stamp is carried through unchanged (caller derives a filesystem-safe one)',
+    sidecarBackupNameFor('x', '2026-07-27T21-11-40-000Z').includes('2026-07-27T21-11-40-000Z'));
+  check('sidecarBackupNameFor: always ends with .bak',
+    sidecarBackupNameFor('foo.md.orca-comments.jsonl', 'stamp').endsWith('.bak'));
 }
 
 // --- Req 23 US-23.10 AC9: body neutralization + EOL reconciliation ----------

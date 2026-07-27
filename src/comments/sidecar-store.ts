@@ -25,6 +25,7 @@ import {
   mdNameForSidecar,
   parseSidecarText,
   serializeSidecarLine,
+  sidecarBackupNameFor,
   sidecarNameFor,
   sidecarNameMatches,
   type FoldedSidecar,
@@ -108,31 +109,6 @@ export function createSidecarStore(
 
   const uriFor = (document: vscode.TextDocument): vscode.Uri => sidecarForUri(document.uri);
 
-  /**
-   * Whether the file's last byte is a newline. True for a missing or empty file:
-   * there is no unterminated line to heal in either case.
-   */
-  const endsWithNewline = async (uri: vscode.Uri): Promise<boolean> => {
-    let handle: fs.promises.FileHandle | undefined;
-    try {
-      // eslint-disable-next-line security/detect-non-literal-fs-filename
-      handle = await fs.promises.open(uri.fsPath, 'r');
-      const { size } = await handle.stat();
-      if (size === 0) {
-        return true;
-      }
-      const tail = Buffer.alloc(1);
-      await handle.read(tail, 0, 1, size - 1);
-      return tail[0] === 0x0a;
-    } catch {
-      // Absent (the first ever append) or unreadable — append as-is rather than
-      // inventing a leading blank line.
-      return true;
-    } finally {
-      await handle?.close();
-    }
-  };
-
   /** Whether a path exists on disk. */
   const exists = async (uri: vscode.Uri): Promise<boolean> => {
     try {
@@ -184,19 +160,12 @@ export function createSidecarStore(
       }
       const target = uriFor(document);
       try {
-        // AC3 requires the file to end with a newline BEFORE the next append.
-        // `serializeSidecarLine` terminates its own line, which only keeps that
-        // invariant if every earlier write completed — and US-23.6 explicitly
-        // plans for one truncated final line (crashed append, bad merge, hand
-        // edit). Appending straight onto a fragment would fuse two records into
-        // one unparseable line, so the interrupted write would also cost THIS
-        // comment, which the Reviewer was just told was saved.
-        //
-        // Reading the last byte is not the read-modify-write US-23.6 rejects:
-        // nothing is rewritten, the heal is part of the same single append.
-        const separator = (await endsWithNewline(target)) ? '' : '\n';
+        // Always prepend a newline (US-23.20 AC2) — no probe, no check-then-act.
+        // A stray leading blank line costs nothing: `parseSidecarText` already
+        // skips it, and the earlier "does the file already end with a newline"
+        // read was the one real check-then-act race in this write path.
         // eslint-disable-next-line security/detect-non-literal-fs-filename
-        await fs.promises.appendFile(target.fsPath, separator + serializeSidecarLine(line), 'utf8');
+        await fs.promises.appendFile(target.fsPath, '\n' + serializeSidecarLine(line), 'utf8');
       } catch (err) {
         log(`Failed to append to comment sidecar ${target.toString()}`, err);
         return 'Failed to save the comment.';
@@ -270,10 +239,16 @@ export function createSidecarStore(
            === sidecarForUri(newUri).path.slice(0, -nameForUri(newUri).length);
       if (!sameEntry && (await exists(destination))) {
         // A rename that would discard another file's whole comment history has to
-        // ask first (AC5).
+        // ask first (AC5). Confirming displaces the existing sidecar to a
+        // timestamped backup rather than deleting it (US-23.20 AC8) — the ISO
+        // timestamp is de-colonised so the backup name is a valid Windows
+        // filename too.
+        const stamp = new Date().toISOString().replace(/:/g, '-');
+        const backupName = sidecarBackupNameFor(nameForUri(newUri), stamp);
+        const backup = vscode.Uri.joinPath(destination, '..', backupName);
         const overwrite = 'Overwrite comments';
         const answer = await vscode.window.showWarningMessage(
-          `${nameForUri(newUri)} already has comments. Overwrite them with the comments from ${nameForUri(oldUri)}?`,
+          `${nameForUri(newUri)} already has comments. Overwrite them with the comments from ${nameForUri(oldUri)}? The existing comments will be kept as ${backupName}.`,
           { modal: true },
           overwrite
         );
@@ -287,6 +262,10 @@ export function createSidecarStore(
           leaveInPlace(`${nameForUri(newUri)} already had comments, which were kept.`);
           return;
         }
+        // Queued ahead of the source→destination rename below so the same
+        // atomic WorkspaceEdit displaces the existing sidecar first, then frees
+        // `destination` for the incoming one (US-23.20 AC8).
+        edit.renameFile(destination, backup);
       }
       // A file operation on the WorkspaceEdit the caller hands back to
       // `onWillRenameFiles`, so VS Code performs both renames as one operation —

@@ -115,6 +115,15 @@ export function sidecarNameFor(mdFileName: string): string {
 }
 
 /**
+ * The timestamped-backup sibling name for a sidecar a rename would otherwise
+ * overwrite (US-23.20 AC8) — displaces rather than deletes it. `stamp` must
+ * already be filesystem-safe (no `:`); the caller derives it.
+ */
+export function sidecarBackupNameFor(sidecarFileName: string, stamp: string): string {
+  return `${sidecarFileName}.${stamp}.bak`;
+}
+
+/**
  * Whether two sidecar file names denote the same file. Never compare a sidecar
  * name with a raw `===`.
  *

@@ -1697,7 +1697,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * mọi file .md nên sẽ làm nhiễu picker `@` và ăn quota FILE_SEARCH_MAX_SCAN.
    */
   private static readonly FILE_SEARCH_EXCLUDE =
-    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,**/*.orca-comments.jsonl}';
+    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
 
   private static readonly FILE_SEARCH_MAX_SCAN = 5000;
   private static readonly FILE_SEARCH_MAX_RESULTS = 20;
@@ -1723,7 +1723,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar,' +
     // Req 23 US-23.5: comment sidecars are machine JSONL — searching them would
     // return raw `{"schema_version":1,...}` lines instead of document text.
-    '**/*.orca-comments.jsonl}';
+    // US-23.20 AC8: its timestamped `.bak` sibling is the same machine data.
+    '**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
