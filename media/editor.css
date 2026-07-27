@@ -887,32 +887,579 @@ body.reading-mode:not(.reading-zen) #content {
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-/* --- Front matter (không chỉnh sửa được, gấp gọn) --- */
+/* --- Front matter (US-2.7 redesign: collapsed line / expanded card / raw
+ * YAML — not editable, but interactive). Structural tokens + per-theme colors
+ * ported verbatim from Wireframe Handoff/design_handoff_front_matter/tokens.css;
+ * see media/webview/front-matter.ts for the markup these selectors target. --- */
+:root {
+  --fm-radius: 5px;
+  --fm-radius-collapsed: 4px;
+  --fm-border-width: 1px;
+  --fm-border-style-collapsed: dotted;
+  --fm-border-style-expanded: solid;
+  --fm-row-height: 30px;
+  --fm-header-height: 32px;
+  --fm-header-padding-x: 10px;
+  --fm-body-padding: 14px 14px 15px;
+  --fm-raw-padding: 12px;
+  --fm-key-col: 104px;
+  --fm-grid-gap: 11px 14px;
+  --fm-row-gap: 8px;
+  --fm-list-gap: 5px;
+  --fm-margin-bottom-collapsed: 20px;
+  --fm-margin-bottom-expanded: 22px;
+  --fm-label-size: 9.5px;
+  --fm-label-weight: 700;
+  --fm-label-tracking: 0.09em;
+  --fm-title-size: 14.5px;
+  --fm-title-weight: 600;
+  --fm-title-line-height: 1.4;
+  --fm-title-max-lines: 3;
+  --fm-value-size: 12px;
+  --fm-key-size: 11px;
+  --fm-meta-size: 10.5px;
+  --fm-badge-height: 19px;
+  --fm-badge-padding-x: 7px;
+  --fm-badge-radius: 3px;
+  --fm-badge-size: 10.5px;
+  --fm-badge-dot: 5px;
+  --fm-raw-line-height: 1.75;
+  /* Matches FM_COLLAPSE_THRESHOLD in front-matter.ts — keep both in sync by hand. */
+  --fm-collapse-threshold: 2;
+  --fm-transition: 120ms ease-out;
+}
+
+/* ---- VS Code Dark (default) ---- */
+.vscode-dark {
+  --fm-bg: rgba(255, 255, 255, 0.022);
+  --fm-header-bg: rgba(255, 255, 255, 0.028);
+  --fm-border: #333333;
+  --fm-border-collapsed: #3a3a3a;
+  --fm-divider: #2e2e2e;
+  --fm-title-fg: #e4e4e4;
+  --fm-value-fg: rgba(204, 204, 204, 0.9);
+  --fm-key-fg: #8c8c8c;
+  --fm-label-fg: #8c8c8c;
+  --fm-label-fg-open: #b4b4b4;
+  --fm-meta-fg: #787878;
+  --fm-sep: #343434;
+  --fm-link: #4daafc;
+  --fm-link-hover: #7cc4ff;
+  --fm-hover-bg: rgba(255, 255, 255, 0.055);
+  --fm-hover-border: #4a4a4a;
+  --fm-hover-fg: #cccccc;
+  --fm-toggle-on-bg: rgba(77, 170, 252, 0.16);
+  --fm-toggle-on-fg: #7cc4ff;
+  --fm-yaml-key: #9cdcfe;
+  --fm-yaml-string: #ce9178;
+  --fm-error: #f48771;
+  --fm-error-bg: rgba(244, 135, 113, 0.05);
+  --fm-error-border: rgba(244, 135, 113, 0.4);
+  --fm-error-divider: rgba(244, 135, 113, 0.28);
+  --fm-error-meta: #c98a7a;
+  --fm-badge-bg: rgba(255, 255, 255, 0.07);
+  --fm-badge-fg: #c8c8c8;
+  --fm-status-done: #4ec9b0;
+  --fm-status-done-bg: rgba(78, 201, 176, 0.14);
+  --fm-status-draft: #dcb45a;
+  --fm-status-draft-bg: rgba(220, 180, 90, 0.14);
+  --fm-status-blocked: #f48771;
+  --fm-status-blocked-bg: rgba(244, 135, 113, 0.14);
+}
+
+/* ---- VS Code Light ---- */
+.vscode-light {
+  --fm-bg: #fcfcfc;
+  --fm-header-bg: #f6f6f6;
+  --fm-border: #e0e0e0;
+  --fm-border-collapsed: #d4d4d4;
+  --fm-divider: #ececec;
+  --fm-title-fg: #2f2f2f;
+  --fm-value-fg: #3b3b3b;
+  --fm-key-fg: #767676;
+  --fm-label-fg: #767676;
+  --fm-label-fg-open: #5a5a5a;
+  --fm-meta-fg: #8a8a8a;
+  --fm-sep: #dedede;
+  --fm-link: #0a5fbd;
+  --fm-link-hover: #0846a0;
+  --fm-hover-bg: #f1f1f1;
+  --fm-hover-border: #c4c4c4;
+  --fm-hover-fg: #3b3b3b;
+  --fm-toggle-on-bg: rgba(10, 95, 189, 0.12);
+  --fm-toggle-on-fg: #0a5fbd;
+  --fm-yaml-key: #0451a5;
+  --fm-yaml-string: #a31515;
+  --fm-error: #c0392b;
+  --fm-error-bg: rgba(192, 57, 43, 0.045);
+  --fm-error-border: rgba(192, 57, 43, 0.34);
+  --fm-error-divider: rgba(192, 57, 43, 0.22);
+  --fm-error-meta: #9c5348;
+  --fm-badge-bg: rgba(0, 0, 0, 0.055);
+  --fm-badge-fg: #4a4a4a;
+  --fm-status-done: #137a55;
+  --fm-status-done-bg: rgba(26, 127, 95, 0.11);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(200, 150, 30, 0.14);
+  --fm-status-blocked: #b02f1c;
+  --fm-status-blocked-bg: rgba(176, 47, 28, 0.1);
+}
+
+/* ---- Reading Mode — Sepia (design handoff's `.rp-sepia` = this repo's body.reading-mode-sepia) ---- */
+body.reading-mode-sepia {
+  --fm-bg: rgba(139, 110, 60, 0.045);
+  --fm-header-bg: rgba(139, 110, 60, 0.06);
+  --fm-border: #d3c09a;
+  --fm-border-collapsed: #c9b489;
+  --fm-divider: #dccbaa;
+  --fm-title-fg: #4d3a2b;
+  --fm-value-fg: #5b4636;
+  --fm-key-fg: #8a7355;
+  --fm-label-fg: #8a7355;
+  --fm-label-fg-open: #7a6446;
+  --fm-meta-fg: #9c8562;
+  --fm-sep: #d3c09a;
+  --fm-link: #8a4f1e;
+  --fm-link-hover: #6d3d14;
+  --fm-hover-bg: rgba(139, 110, 60, 0.1);
+  --fm-hover-border: #bda677;
+  --fm-hover-fg: #4d3a2b;
+  --fm-toggle-on-bg: rgba(138, 79, 30, 0.14);
+  --fm-toggle-on-fg: #8a4f1e;
+  --fm-yaml-key: #6b5a86;
+  --fm-yaml-string: #8a4f1e;
+  --fm-error: #a33b23;
+  --fm-error-bg: rgba(163, 59, 35, 0.05);
+  --fm-error-border: rgba(163, 59, 35, 0.32);
+  --fm-error-divider: rgba(163, 59, 35, 0.22);
+  --fm-error-meta: #8d5b48;
+  --fm-badge-bg: rgba(91, 70, 54, 0.09);
+  --fm-badge-fg: #5b4636;
+  --fm-status-done: #2b6e50;
+  --fm-status-done-bg: rgba(43, 110, 80, 0.12);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(180, 140, 40, 0.14);
+  --fm-status-blocked: #a33b23;
+  --fm-status-blocked-bg: rgba(163, 59, 35, 0.11);
+  /* Label + badges stay sans even though the body is serif; serif runs small so the title gets +1.5px. */
+  --fm-label-font: 'Segoe UI', system-ui, sans-serif;
+  --fm-title-size: 16px;
+  --fm-value-size: 12px;
+}
+
+/* ---- Reading Mode — Paper (design handoff's `.rp-paper` = this repo's body.reading-mode-paper) ---- */
+body.reading-mode-paper {
+  --fm-bg: rgba(0, 0, 0, 0.015);
+  --fm-header-bg: rgba(0, 0, 0, 0.025);
+  --fm-border: rgba(0, 0, 0, 0.13);
+  --fm-border-collapsed: rgba(0, 0, 0, 0.16);
+  --fm-divider: rgba(0, 0, 0, 0.09);
+  --fm-title-fg: #111110;
+  --fm-value-fg: #23221e;
+  --fm-key-fg: #6b6a63;
+  --fm-label-fg: #6b6a63;
+  --fm-label-fg-open: #4e4d47;
+  --fm-meta-fg: #7b7a72;
+  --fm-sep: rgba(0, 0, 0, 0.13);
+  --fm-link: #14508f;
+  --fm-link-hover: #0f3d6e;
+  --fm-hover-bg: rgba(0, 0, 0, 0.045);
+  --fm-hover-border: rgba(0, 0, 0, 0.24);
+  --fm-hover-fg: #111110;
+  --fm-toggle-on-bg: rgba(20, 80, 143, 0.12);
+  --fm-toggle-on-fg: #14508f;
+  --fm-yaml-key: #0451a5;
+  --fm-yaml-string: #a31515;
+  --fm-error: #b02f1c;
+  --fm-error-bg: rgba(176, 47, 28, 0.045);
+  --fm-error-border: rgba(176, 47, 28, 0.32);
+  --fm-error-divider: rgba(176, 47, 28, 0.22);
+  --fm-error-meta: #8f5647;
+  --fm-badge-bg: rgba(0, 0, 0, 0.055);
+  --fm-badge-fg: #3f3e39;
+  --fm-status-done: #146b4c;
+  --fm-status-done-bg: rgba(26, 127, 95, 0.1);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(200, 150, 30, 0.13);
+  --fm-status-blocked: #b02f1c;
+  --fm-status-blocked-bg: rgba(176, 47, 28, 0.1);
+}
+
+/* ---- Reading Mode density overrides (tokens.css: follows the existing
+ * --reading-embed-padding scale). No `.rp-density-*` toggle exists in this app
+ * yet — ported verbatim and ready for whenever a density feature adds the
+ * class; inert (unreachable) until then, same as the source token file. ---- */
+.rp-density-compact {
+  --fm-body-padding: 10px 10px 11px;
+  --fm-raw-padding: 9px;
+  --fm-grid-gap: 9px 12px;
+}
+.rp-density-comfortable {
+  --fm-body-padding: 14px 14px 15px;
+  --fm-raw-padding: 12px;
+  --fm-grid-gap: 11px 14px;
+}
+.rp-density-academic {
+  --fm-body-padding: 16px 16px 18px;
+  --fm-raw-padding: 14px;
+  --fm-grid-gap: 13px 16px;
+}
+
+/* ---- High Contrast ---- */
+.vscode-high-contrast {
+  --fm-bg: #000000;
+  --fm-header-bg: #000000;
+  --fm-border: #ffffff;
+  --fm-border-collapsed: #ffffff;
+  --fm-border-width: 2px;
+  --fm-divider: #ffffff;
+  --fm-title-fg: #ffffff;
+  --fm-value-fg: #ffffff;
+  --fm-key-fg: #ffffff;
+  --fm-label-fg: #ffffff;
+  --fm-label-fg-open: #ffffff;
+  --fm-meta-fg: #ffffff;
+  --fm-sep: #ffffff;
+  --fm-link: #6fc3ff;
+  --fm-link-hover: #9ad8ff;
+  --fm-hover-bg: #000000;
+  --fm-hover-border: #6fc3ff;
+  --fm-hover-fg: #ffffff;
+  --fm-badge-bg: transparent;
+  --fm-badge-fg: #ffffff;
+  --fm-error: #f48771;
+}
+/* README a11y: "transparent badge fills" needs its own border in HC or a
+ * badge is invisible — the one addition beyond the ported token values, using
+ * currentColor (not a new color). */
+.vscode-high-contrast .md-fm-badge {
+  border: 1px solid currentColor;
+}
+
+/* ---- Structure: wrapper + collapsed row / expanded header (same button,
+ * content swapped per data-fm-view — README: "single <button aria-expanded>"). ---- */
 .md-front-matter {
-  margin: 0 0 16px;
-  padding: var(--reading-embed-padding);
-  border: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.4));
-  border-radius: 4px;
-  opacity: 0.75;
-  user-select: none;
+  display: block;
+  max-width: 640px;
+  margin: 0 0 var(--fm-margin-bottom-collapsed);
+  font-family: var(--vscode-font-family);
+  color: var(--fm-value-fg);
+  transition: var(--fm-transition);
+}
+.md-front-matter[data-fm-view='expanded'],
+.md-front-matter[data-fm-view='invalid'] {
+  margin-bottom: var(--fm-margin-bottom-expanded);
+}
+.md-front-matter[data-fm-view='collapsed'],
+.md-front-matter[data-fm-view='line'] {
+  border-radius: var(--fm-radius-collapsed);
+  border: var(--fm-border-width) var(--fm-border-style-collapsed) var(--fm-border-collapsed);
+  background: transparent;
+}
+.md-front-matter[data-fm-view='collapsed']:hover,
+.md-front-matter[data-fm-view='line']:hover {
+  background: var(--fm-hover-bg);
+  border-color: var(--fm-hover-border);
+  color: var(--fm-hover-fg);
+}
+.md-front-matter[data-fm-view='expanded'] {
+  /* Implementation notes: overflow:hidden clips the header strip to the
+   * corner radius — don't drop it in favour of matching the radius on the header. */
+  overflow: hidden;
+  border-radius: var(--fm-radius);
+  border: var(--fm-border-width) var(--fm-border-style-expanded) var(--fm-border);
+  background: var(--fm-bg);
+}
+.md-front-matter[data-fm-view='invalid'] {
+  border-radius: var(--fm-radius);
+  border: var(--fm-border-width) var(--fm-border-style-expanded) var(--fm-error-border);
+  background: var(--fm-error-bg);
 }
 
-.md-front-matter .md-front-matter-label {
-  /* em, not px: scales with #content's --reading-font-size (embedded-block
-   * chrome, not a --reading-ui-* bucket — see US-19.6 note further below).
-   * 0.714286em × 14px Standard base ≈ 10px (unchanged). */
-  font-size: 0.714286em;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  opacity: 0.7;
-  margin-bottom: 2px;
+.md-fm-topline {
+  display: flex;
+  align-items: center;
+  gap: var(--fm-row-gap);
+  height: var(--fm-row-height);
+  padding: 0 var(--fm-header-padding-x);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-topline,
+.md-front-matter[data-fm-view='invalid'] .md-fm-topline {
+  height: var(--fm-header-height);
+  background: var(--fm-header-bg);
+  border-bottom: var(--fm-border-width) solid var(--fm-divider);
+}
+.md-front-matter[data-fm-view='invalid'] .md-fm-topline {
+  border-bottom-color: var(--fm-error-divider);
 }
 
-.md-front-matter pre {
-  margin: 0;
-  padding: 0;
+.md-fm-toggle,
+.md-fm-line {
+  display: flex;
+  align-items: center;
+  gap: var(--fm-row-gap);
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   background: none;
-  font-size: 0.85em;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.md-fm-toggle {
+  cursor: pointer;
+}
+
+.md-fm-chevron {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: var(--fm-transition);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-chevron {
+  transform: rotate(45deg);
+}
+
+.md-fm-label {
+  flex-shrink: 0;
+  font-size: var(--fm-label-size);
+  font-weight: var(--fm-label-weight);
+  letter-spacing: var(--fm-label-tracking);
+  text-transform: uppercase;
+  font-family: var(--fm-label-font, inherit);
+  color: var(--fm-label-fg);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-label {
+  color: var(--fm-label-fg-open);
+}
+.md-fm-label-error {
+  color: var(--fm-error);
+}
+
+.md-fm-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fm-value-size);
+  color: var(--fm-title-fg);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-row-title {
+  display: none;
+}
+
+.md-fm-count,
+.md-fm-error-line {
+  flex-shrink: 0;
+  font-size: var(--fm-meta-size);
+  color: var(--fm-meta-fg);
+}
+
+.md-fm-actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 6px;
+  contain: layout;
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-actions {
+  display: flex;
+}
+.md-fm-raw-toggle,
+.md-fm-copy {
+  border: none;
+  background: none;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: var(--fm-meta-size);
+  font-family: inherit;
+  color: var(--fm-meta-fg);
+  cursor: pointer;
+}
+.md-fm-raw-toggle:hover,
+.md-fm-copy:hover {
+  background: var(--fm-hover-bg);
+}
+.md-fm-raw-toggle[aria-pressed='true'] {
+  background: var(--fm-toggle-on-bg);
+  color: var(--fm-toggle-on-fg);
+}
+
+/* Screen-reader-only live region for the Copy confirmation — standard
+ * visually-hidden clip pattern, not `display: none` (which would stop it
+ * being announced at all). */
+.md-fm-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* ---- Body: title / badges / grid (structured) — hidden while raw or collapsed. ---- */
+.md-fm-body,
+.md-fm-raw-body,
+.md-fm-error-body {
+  display: none;
+}
+.md-front-matter[data-fm-view='expanded'][data-fm-raw='false'] .md-fm-body {
+  display: block;
+  padding: var(--fm-body-padding);
+}
+.md-front-matter[data-fm-view='expanded'][data-fm-raw='true'] .md-fm-raw-body {
+  display: block;
+}
+.md-front-matter[data-fm-view='invalid'] .md-fm-error-body {
+  display: block;
+}
+
+.md-fm-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--fm-title-max-lines);
+  overflow: hidden;
+  font-size: var(--fm-title-size);
+  font-weight: var(--fm-title-weight);
+  line-height: var(--fm-title-line-height);
+  color: var(--fm-title-fg);
+}
+
+.md-fm-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.md-fm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--fm-badge-height);
+  padding: 0 var(--fm-badge-padding-x);
+  border-radius: var(--fm-badge-radius);
+  font-size: var(--fm-badge-size);
+  font-weight: 600;
+  background: var(--fm-badge-bg);
+  color: var(--fm-badge-fg);
+}
+.md-fm-badge-inline {
+  margin-left: auto;
+}
+.md-fm-status-dot {
+  flex-shrink: 0;
+  width: var(--fm-badge-dot);
+  height: var(--fm-badge-dot);
+  border-radius: 50%;
+  background: currentColor;
+}
+.md-fm-status-done {
+  color: var(--fm-status-done);
+  background: var(--fm-status-done-bg);
+}
+.md-fm-status-draft {
+  color: var(--fm-status-draft);
+  background: var(--fm-status-draft-bg);
+}
+.md-fm-status-blocked {
+  color: var(--fm-status-blocked);
+  background: var(--fm-status-blocked-bg);
+}
+.md-fm-status-neutral {
+  color: var(--fm-badge-fg);
+  background: var(--fm-badge-bg);
+}
+.md-fm-meta {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-meta-size);
+  color: var(--fm-meta-fg);
+}
+
+.md-fm-hairline {
+  height: 1px;
+  margin: 10px 0;
+  background: var(--fm-sep);
+}
+
+.md-fm-grid {
+  display: grid;
+  grid-template-columns: var(--fm-key-col) 1fr;
+  gap: var(--fm-grid-gap);
+}
+/* `display: contents` removes the row's own box so its children become the
+ * actual grid items (2 per row: key + value) — the raw-fallback row instead
+ * wraps its single spanning cell in `.md-fm-value-raw` below, never bare text
+ * directly inside a `display: contents` element. */
+.md-fm-grid-row {
+  display: contents;
+}
+.md-fm-key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-key-size);
+  color: var(--fm-key-fg);
+}
+.md-fm-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-value-size);
+  color: var(--fm-value-fg);
+}
+.md-fm-value a {
+  color: var(--fm-link);
+}
+.md-fm-value a:hover {
+  color: var(--fm-link-hover);
+}
+.md-fm-value-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fm-list-gap);
+  white-space: normal;
+}
+.md-fm-value-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-fm-value-raw {
+  grid-column: 1 / -1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Raw YAML view (opt-in third state) + invalid state's verbatim body. ---- */
+.md-fm-raw-body,
+.md-fm-error-body {
+  margin: 0;
+  padding: var(--fm-raw-padding);
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-value-size);
+  line-height: var(--fm-raw-line-height);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-fm-error-body {
+  color: var(--fm-error-meta);
+}
+.md-fm-yaml-key {
+  color: var(--fm-yaml-key);
+}
+.md-fm-yaml-string {
+  color: var(--fm-yaml-string);
 }
 
 /* --- Math atom (KaTeX): công thức đã dựng, có nút "Edit" mở popup sửa TeX
@@ -2884,10 +3431,8 @@ body[class*='reading-mode-'] .md-plantuml-chart {
   background: var(--rp-elev-bg);
 }
 
-/* Front matter (khối YAML gấp gọn, viền dashed). */
-body[class*='reading-mode-'] .md-front-matter {
-  border-color: var(--rp-embed-border);
-}
+/* Front matter's border color is now theme-tokenized directly (body.reading-mode-sepia/-paper
+ * blocks above), superseding the old single --rp-embed-border override (US-2.7 redesign). */
 
 /* Drag-and-drop ghost / cell-highlight outline: --vscode-focusBorder is always
  * a VS Code accent blue, which clashes with sepia's deliberately low-blue

@@ -30,6 +30,8 @@ import {
   MD_CODE_LANG_CLASS,
   MD_CODE_WRAP_CLASS,
   MD_CODE_WRAPPED_CLASS,
+  initFrontMatterToggle,
+  applyFrontMatterViewState,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
@@ -138,6 +140,7 @@ registerEscapeHandler(ESCAPE_PRIORITY.DOCK, () => {
 const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
+initFrontMatterToggle(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
 // X-12: filesystem case-sensitivity, from InitConfig — folds the ref-nav key so
@@ -878,6 +881,11 @@ function renderDocument(markdown: string): void {
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
   content.innerHTML = html;
+  // US-2.7: reapply the last known collapsed/expanded/raw state onto the
+  // fresh `.md-front-matter` node this innerHTML assignment just replaced —
+  // Boundaries: in-memory only (no extension-host persistence), so this must
+  // run on every render, not just cold-open.
+  applyFrontMatterViewState(content);
   postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(content, document);
   postProcessPlantumlDom(content, document);

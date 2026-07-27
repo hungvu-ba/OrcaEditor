@@ -10,10 +10,7 @@ import taskLists from 'markdown-it-task-lists';
 import frontMatterPlugin from 'markdown-it-front-matter';
 import katexPlugin from '@vscode/markdown-it-katex';
 import hljs from 'highlight.js/lib/common';
-// escapeHtml/escapeAttr là hàm thuần chuỗi (không đụng global DOM ở top-level
-// của dom-utils.ts) nên import được ở đây mà vẫn giữ code chạy trên Node
-// cho round-trip test. Gộp về một nguồn, tránh trùng bản private (finding C-new).
-import { escapeHtml, escapeAttr } from './dom-utils';
+import { buildFrontMatterHtml, parseFrontMatterFields } from './front-matter';
 
 export interface PipelineConfig {
   breaks: boolean;
@@ -383,11 +380,7 @@ interface BlockToken extends TokenLike {
   hidden: boolean;
 }
 
+/** US-2.7 redesign: card-building logic lives in front-matter.ts (mirrors Mermaid/PlantUML's shared frame logic in diagram-frame.ts) — this stays a thin delegation so the `*_CLASS` constants above keep living here per existing convention. */
 function renderFrontMatterBlock(raw: string, line: number): string {
-  return (
-    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${escapeAttr(raw)}">` +
-    `<div class="md-front-matter-label">front matter</div>` +
-    `<pre>${escapeHtml(raw)}</pre>` +
-    `</div>\n`
-  );
+  return buildFrontMatterHtml(raw, line, parseFrontMatterFields(raw));
 }

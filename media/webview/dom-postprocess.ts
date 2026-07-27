@@ -384,7 +384,12 @@ const RELATIVE_PATH_RE =
 function inSkippedContext(node: Node): boolean {
   return hasAncestor(node, (el) => {
     const tag = el.nodeName;
-    if (tag === 'A' || tag === 'CODE' || tag === 'PRE') {
+    // BUTTON: the interactive-content model forbids a nested <a> inside a
+    // <button> (e.g. US-2.7's collapsed-row title, which sits inside the
+    // toggle button) -- linkifying there would also make the link
+    // unreachable by a plain click, since the button's own click handler
+    // fires first.
+    if (tag === 'A' || tag === 'CODE' || tag === 'PRE' || tag === 'BUTTON') {
       return true;
     }
     const cl = el.classList;
@@ -409,6 +414,14 @@ function collectTextNodes(node: Node, out: Text[]): void {
   }
 }
 
+/**
+ * US-2.7: also linkifies path-like values inside an expanded `.md-front-matter`
+ * card's key/value grid — no special-casing needed, since `collectTextNodes`
+ * below already walks every descendant text node of `root` and the grid's
+ * value cells are plain elements (not `<pre>`/`<code>`, the only tags
+ * `inSkippedContext` excludes). The RAW view's `<pre>` and the invalid state's
+ * verbatim `<pre>` stay excluded the same way body code blocks already are.
+ */
 export function postProcessRelativePathLinks(root: ParentNode & Node, doc: Document): void {
   const textNodes: Text[] = [];
   collectTextNodes(root, textNodes);
