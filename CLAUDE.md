@@ -92,6 +92,11 @@ Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-pr
 
 - **Never compare paths/filenames/text with a raw `===`/`startsWith`/`includes`.** Windows vs macOS differ in path separator, filesystem case-sensitivity, filename Unicode form (NFC/NFD), and line ending (CRLF/LF) — a raw comparison usually coincides on macOS and silently breaks on Windows. Route file/entity-name comparisons through a shared normalizer (decode → NFC → normalize separator → optional case-fold) and reconcile text to `document.eol` before diffing/writing. Keyboard-shortcut handlers must test both `metaKey` and `ctrlKey`; shortcut labels shown in UI must not hardcode `⌘`. See [Plan/Cross-Environment Defects — Audit.md](Plan/Cross-Environment%20Defects%20%E2%80%94%20Audit.md) for the full defect family and fix patterns.
 
+**Test-infra trap:**
+
+- **A bare `npx playwright test <spec>` runs against a stale bundle.** The Playwright harness loads the built `dist/webview/main.js`, never the TypeScript sources. `npm run test:webview` rebuilds first (`node esbuild.js --test && playwright test`); a targeted run does not. Edit `media/webview/*.ts`, then run a single spec without rebuilding, and the result — pass *or* fail — describes the previous build. Always write `node esbuild.js --test && npx playwright test test/webview/<name>.spec.ts`.
+- **`flaky` is not `passed`.** The webview suite has real timing flake, so gate runs use `npm run test:webview -- --retries=2`. A retried test is reported as `flaky`, not `failed`, and the suite still exits 0 — record every `N flaky` line as debt instead of letting it pass silently. See [Plan/WEBVIEW_TEST.md](Plan/WEBVIEW_TEST.md) § Running the suite.
+
 ## Mandatory Rule: Git Workflow
 
 For any git operation (branch, commit, merge, PR, release, hotfix, worktree...), read and follow [Plan/GIT_WORKFLOW.md](Plan/GIT_WORKFLOW.md) — it defines branch structure, commit conventions, feature/release/hotfix lifecycle, and presentation style (explain for newcomers + a status sitemap after each commit).
