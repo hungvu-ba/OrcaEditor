@@ -16,6 +16,46 @@ export function escapeAttr(s: string): string {
   return escapeHtml(s).replace(/"/g, '&quot;');
 }
 
+/** Bidi override/isolate control characters — the "Trojan Source" family (LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI). */
+function isBidiControlChar(codePoint: number): boolean {
+  return (codePoint >= 0x202a && codePoint <= 0x202e) || (codePoint >= 0x2066 && codePoint <= 0x2069);
+}
+
+/** C0/C1 control characters other than `\n` (a comment body is multi-line) and `\t`. */
+function isOtherControlChar(codePoint: number): boolean {
+  return (codePoint <= 0x1f && codePoint !== 0x0a && codePoint !== 0x09) || (codePoint >= 0x7f && codePoint <= 0x9f);
+}
+
+/**
+ * Req 23 US-23.10 AC9: strip bidi-override/isolate characters and other
+ * control characters from a comment body before it is inserted into the DOM
+ * or written to the sidecar. `textContent` alone does not neutralize these —
+ * a bidi override reorders the DISPLAYED text of everything that follows it
+ * regardless of how it was inserted, so it needs active stripping rather than
+ * just avoiding `innerHTML`.
+ */
+export function neutralizeBodyText(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const codePoint = ch.codePointAt(0) ?? 0;
+    if (isBidiControlChar(codePoint) || isOtherControlChar(codePoint)) {
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Req 23 US-23.10 AC9: a submitted comment body's line endings, reconciled to
+ * LF before it reaches the sidecar — never `document.eol` (the JSONL sidecar
+ * is a separate append-only file, not the `.md`, so this repo's usual
+ * "reconcile to document.eol" rule does not apply here).
+ */
+export function normalizeBodyEol(text: string): string {
+  return text.split('\r\n').join('\n').split('\r').join('\n');
+}
+
 /**
  * Mã hóa từng đoạn đường dẫn để href hợp lệ trong markdown. encodeURIComponent
  * bỏ qua ( ) nhưng ngoặc không cân bằng phá cú pháp [text](url) → mã hóa luôn.

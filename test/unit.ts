@@ -42,6 +42,7 @@ import { buildGroups } from '../media/webview/comment-gutter';
 import type { ThreadAnchor } from '../media/webview/comment-resolve';
 import {
   anchorUpdateRejection,
+  authorNamePromptRejection,
   commentThreadLine,
   createCommentRejection,
   deleteRejection,
@@ -89,6 +90,7 @@ import {
   type AnchorCandidate,
 } from '../media/webview/comment-anchor';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
+import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
 
 let pass = 0;
 let fail = 0;
@@ -1383,6 +1385,79 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   // 1-based webview line -> 0-based vscode.Range line; 0 means "maps to no source line".
   check('comment thread line: 1-based source line becomes 0-based', commentThreadLine(3) === 2);
   check('comment thread line: an unmapped anchor lands on line 0', commentThreadLine(0) === 0);
+}
+
+// --- Req 23 US-23.10 AC4: author-prompt name validation ----------------------
+{
+  check('author prompt: a plain name is accepted', authorNamePromptRejection('Alice') === null);
+  check('author prompt: leading/trailing whitespace is trimmed before validating',
+    authorNamePromptRejection('  Alice  ') === null);
+  check('author prompt: empty-after-trim is rejected', authorNamePromptRejection('   ') !== null);
+  check('author prompt: empty string is rejected', authorNamePromptRejection('') !== null);
+  check('author prompt: NFD and NFC forms both validate the same way',
+    (authorNamePromptRejection('Nhật'.normalize('NFD')) === null) === (authorNamePromptRejection('Nhật'.normalize('NFC')) === null));
+  check('author prompt: a newline is rejected', authorNamePromptRejection('Alice\nBob') !== null);
+  check('author prompt: a control character (NUL) is rejected', authorNamePromptRejection(`Alice${String.fromCharCode(0)}`) !== null);
+  check('author prompt: exactly 100 characters is accepted', authorNamePromptRejection('a'.repeat(100)) === null);
+  check('author prompt: 101 characters is rejected', authorNamePromptRejection('a'.repeat(101)) !== null);
+}
+
+// --- Req 23 US-23.10 AC7: sidecar refusalFor's three-reason completeness ----
+// sidecar-store.ts imports 'vscode' so it cannot be loaded here — MODELED
+// against its own `outsideRootRejection` (untitled -> non-file scheme ->
+// outside-allowed-root via the injected guard), same convention as the Bug #3
+// echo-suppression model above.
+{
+  interface FakeDoc {
+    isUntitled: boolean;
+    scheme: string;
+  }
+  // Synchronous model: the real `outsideRootRejection` awaits the injected
+  // `guard`, but nothing here depends on that being genuinely asynchronous —
+  // `insideAllowedRoots` stands in for its already-resolved answer.
+  function modelRefusalFor(doc: FakeDoc, insideAllowedRoots: boolean): string | null {
+    if (doc.isUntitled) {
+      return 'Save the file first to comment on it.';
+    }
+    if (doc.scheme !== 'file') {
+      return 'Comments need a file on disk; this document is on a virtual filesystem.';
+    }
+    if (!insideAllowedRoots) {
+      return 'The comment sidecar would be written outside the allowed workspace.';
+    }
+    return null;
+  }
+
+  const saved = { isUntitled: false, scheme: 'file' };
+  check('refusalFor: untitled is refused', modelRefusalFor({ isUntitled: true, scheme: 'file' }, true) !== null);
+  check('refusalFor: a non-file scheme is refused', modelRefusalFor({ isUntitled: false, scheme: 'untitled' }, true) !== null);
+  check('refusalFor: outside the allowed workspace roots is refused (US-23.10 AC7 — the third, previously-missing case)',
+    modelRefusalFor(saved, false) !== null);
+  check('refusalFor: a saved, file-scheme, in-root document is accepted', modelRefusalFor(saved, true) === null);
+  // The three reasons must be distinct — a caller wiring the specific reason
+  // into the UI (AC7) needs to tell them apart, not just "refused".
+  const untitled = modelRefusalFor({ isUntitled: true, scheme: 'file' }, true);
+  const nonFile = modelRefusalFor({ isUntitled: false, scheme: 'untitled' }, true);
+  const outsideRoot = modelRefusalFor(saved, false);
+  check('refusalFor: the three reasons are pairwise distinct',
+    untitled !== nonFile && nonFile !== outsideRoot && untitled !== outsideRoot);
+}
+
+// --- Req 23 US-23.10 AC9: body neutralization + EOL reconciliation ----------
+{
+  check('neutralizeBodyText: plain text is unchanged', neutralizeBodyText('Why this wording?') === 'Why this wording?');
+  check('neutralizeBodyText: a newline is kept (multi-line body)', neutralizeBodyText('line one\nline two') === 'line one\nline two');
+  check('neutralizeBodyText: a tab is kept', neutralizeBodyText('a\tb') === 'a\tb');
+  check('neutralizeBodyText: a right-to-left override (RLO) is stripped',
+    neutralizeBodyText(`safe${String.fromCharCode(0x202e)}evil`) === 'safeevil');
+  check('neutralizeBodyText: every bidi override/isolate control char is stripped',
+    neutralizeBodyText([0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((c) => String.fromCharCode(c)).join('x')) === 'xxxxxxxx');
+  check('neutralizeBodyText: a NUL byte is stripped', neutralizeBodyText(`a${String.fromCharCode(0)}b`) === 'ab');
+  check('neutralizeBodyText: DEL is stripped', neutralizeBodyText(`a${String.fromCharCode(0x7f)}b`) === 'ab');
+
+  check('normalizeBodyEol: CRLF becomes LF', normalizeBodyEol('line one\r\nline two') === 'line one\nline two');
+  check('normalizeBodyEol: a lone CR becomes LF', normalizeBodyEol('line one\rline two') === 'line one\nline two');
+  check('normalizeBodyEol: LF-only text is unchanged', normalizeBodyEol('line one\nline two') === 'line one\nline two');
 }
 
 // --- Req 23 US-23.4: tier-2 anchor matching + anchor-update validation -------

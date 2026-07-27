@@ -25,7 +25,7 @@ import {
 } from './block-map';
 import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
 import { COMMENT_ANCHOR_ACTIVE_CLASS } from './constants';
-import { el, getOffsetWithin, positionNear, showToast } from './dom-utils';
+import { el, getOffsetWithin, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
 import type { VsCodeApi } from './vscode-api';
@@ -103,6 +103,15 @@ export interface CommentMenuController {
   setDocUri(uri: string): void;
   /** Seed from `InitConfig.commentAuthorName` — display only (the host resolves the real author at create time). */
   setAuthorName(name: string): void;
+  /**
+   * Req 23 US-23.10 AC7: the document-level reason "Add Comment" must be
+   * disabled up front (untitled / non-`file` scheme / outside the allowed
+   * workspace roots — or a sidecar the host could not read), or undefined
+   * when the document has no such problem. Sourced from the SAME
+   * `commentThreadsSync.sidecar.problem` field US-23.9's Comment tab already
+   * reads — not a new channel.
+   */
+  setDocumentGuard(reason: string | undefined): void;
 }
 
 export function initCommentMenu(
@@ -126,6 +135,13 @@ export function initCommentMenu(
    */
   let inFlightSeed: PendingSeed | undefined;
   let pending: PendingAnchor | undefined;
+  /**
+   * US-23.10 AC7: the up-front reason "Add Comment" is disabled for the WHOLE
+   * document (untitled / non-`file` scheme / outside the allowed workspace
+   * roots / an unreadable sidecar), pushed via `setDocumentGuard`. Undefined
+   * means the document has no such problem — anchorability alone decides.
+   */
+  let documentGuardReason: string | undefined;
 
   // --- Context menu ------------------------------------------------------------------------
 
@@ -193,7 +209,15 @@ export function initCommentMenu(
   function openMenuAt(x: number, y: number, anchorable: boolean, hasSelection: boolean): void {
     // Re-opening over an already-open menu would double the scroll-lock refcount.
     closeMenu();
-    setItemDisabled(addCommentItem, !anchorable, 'No commentable block under the cursor');
+    // US-23.10 AC7: a document-level problem always wins — it is discovered
+    // up front with its OWN specific reason, never after the anchorability
+    // check runs (a doomed create would otherwise show the generic
+    // "no commentable block" reason instead of why it is actually refused).
+    setItemDisabled(
+      addCommentItem,
+      documentGuardReason !== undefined || !anchorable,
+      documentGuardReason ?? 'No commentable block under the cursor'
+    );
     setItemDisabled(cutItem, !hasSelection, 'Nothing selected');
     setItemDisabled(copyItem, !hasSelection, 'Nothing selected');
     menu.hidden = false;
@@ -201,13 +225,6 @@ export function initCommentMenu(
     menuDismiss.arm();
     lockPageScroll();
   }
-
-  content.addEventListener('contextmenu', (e) => {
-    const range = currentRange();
-    const node = range ? resolveCommentAnchorNode(content, range) : null;
-    e.preventDefault();
-    openMenuAt(e.clientX, e.clientY, node !== null, range !== undefined && !range.collapsed);
-  });
 
   /** The live selection Range, but only when it actually sits inside the document. */
   function currentRange(): Range | undefined {
@@ -218,6 +235,77 @@ export function initCommentMenu(
     const range = sel.getRangeAt(0);
     return content.contains(range.commonAncestorContainer) ? range : undefined;
   }
+
+  /**
+   * US-23.1 AC1: the click-resolved caret Range at (x, y), or null when
+   * nothing addressable sits there (no `caretRangeFromPoint` support — every
+   * VS Code webview is Chromium-based so it always has it — or the point maps
+   * outside the document, e.g. an image/mermaid/table-chrome node with no
+   * text position).
+   */
+  function caretRangeAt(x: number, y: number): Range | null {
+    const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+    return typeof doc.caretRangeFromPoint === 'function' ? doc.caretRangeFromPoint(x, y) : null;
+  }
+
+  /**
+   * Whether (node, offset) sits inside `range` — a Range containment check,
+   * never the selection's bounding rect (a wrapped-line dead zone or an
+   * indentation-column click must resolve consistently either way).
+   */
+  function pointInsideRange(range: Range, node: Node, offset: number): boolean {
+    try {
+      return range.comparePoint(node, offset) === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Real pointer coordinates captured at the last `contextmenu`, or undefined for a keyboard-invoked one (AC1). */
+  interface ContextClick {
+    x: number;
+    y: number;
+  }
+  let lastContextClick: ContextClick | undefined;
+
+  /**
+   * US-23.1 AC1: the Range "Add Comment" anchors to for `click` — a click
+   * INSIDE the live selection keeps that selection (no collapse); a click
+   * OUTSIDE it collapses to the click point; no click info at all (a
+   * keyboard-invoked menu, or nothing left to consume) always keeps the live
+   * selection untouched. Read-only — the actual collapse is a side effect of
+   * which Range this returns, never a `window.getSelection()` mutation, so
+   * calling this to decide the menu's enabled state costs nothing.
+   */
+  function resolveEffectiveRange(click: ContextClick | undefined): Range | undefined {
+    const selection = currentRange();
+    if (!click) {
+      return selection;
+    }
+    const caret = caretRangeAt(click.x, click.y);
+    if (
+      selection &&
+      !selection.collapsed &&
+      caret &&
+      pointInsideRange(selection, caret.startContainer, caret.startOffset)
+    ) {
+      return selection;
+    }
+    return caret ?? undefined;
+  }
+
+  content.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const range = currentRange();
+    // A real mouse right-click reports `button === 2`; a keyboard-invoked
+    // context menu (Shift+F10 / the Menu key) reports `button === 0` with no
+    // meaningful click point in Chromium (every VS Code webview) — never
+    // collapse an existing selection for one of those (AC1).
+    lastContextClick = e.button === 2 ? { x: e.clientX, y: e.clientY } : undefined;
+    const effective = resolveEffectiveRange(lastContextClick);
+    const node = effective ? resolveCommentAnchorNode(content, effective) : null;
+    openMenuAt(e.clientX, e.clientY, node !== null, range !== undefined && !range.collapsed);
+  });
 
   // --- Composer ----------------------------------------------------------------------------
 
@@ -243,6 +331,17 @@ export function initCommentMenu(
   input.placeholder = 'Comment text — required';
   input.setAttribute('aria-label', 'Comment text');
 
+  // US-23.10 AC5: refusal reason shown INLINE (never a toast), with a
+  // re-target affordance offered only for a stale/unresolvable-anchor refusal.
+  const errorBox = el('div', 'comment-composer-error');
+  errorBox.hidden = true;
+  errorBox.setAttribute('role', 'alert');
+  const errorText = el('span', 'comment-composer-error-text');
+  const retargetBtn = el('button', 'comment-composer-retarget', 'Use current selection');
+  retargetBtn.type = 'button';
+  retargetBtn.hidden = true;
+  errorBox.append(errorText, retargetBtn);
+
   const footer = el('div', 'comment-composer-footer');
   const hint = el('div', 'comment-composer-hint');
   const cancelBtn = el('button', 'comment-composer-btn comment-composer-cancel', 'Cancel');
@@ -253,24 +352,85 @@ export function initCommentMenu(
   actions.append(cancelBtn, submitBtn);
   footer.append(hint, actions);
 
-  card.append(header, quoteEl, authorRow, input, footer);
+  card.append(header, quoteEl, authorRow, input, errorBox, footer);
   document.body.appendChild(card);
+
+  /**
+   * US-23.10 AC5: whether "That location changed…"/"lost its anchor…" — the
+   * exact refusal strings `submit`'s own pre-check and the host's
+   * `createCommentRejection` both use — is what came back, i.e. the refusal
+   * this AC calls out for a re-target offer specifically. A heuristic tied to
+   * those known strings rather than a new wire field, since every other
+   * refusal (document guard, empty body, sidecar write failure) has nothing
+   * useful to re-target.
+   */
+  function isAnchorRefusal(message: string): boolean {
+    return message.includes('anchor') || message.includes('location');
+  }
+
+  function showInlineError(message: string, offerRetarget: boolean): void {
+    errorText.textContent = message;
+    errorBox.hidden = false;
+    retargetBtn.hidden = !offerRetarget;
+  }
+
+  function clearInlineError(): void {
+    errorBox.hidden = true;
+    errorText.textContent = '';
+    retargetBtn.hidden = true;
+  }
 
   const composerDismiss = initPopoverDismiss(card, () => {
     pending?.node.classList.remove(COMMENT_ANCHOR_ACTIVE_CLASS);
     pending = undefined;
     input.value = '';
+    clearInlineError();
+    submitBusy = false;
+    input.readOnly = false;
   });
 
   const EMPTY_HINT = 'Submit stays inactive until text is entered';
+  const BUSY_HINT = 'Submitting…';
+  /** US-23.10 AC5: while a create is in flight, the input is read-only and Submit inert — never after a refusal, which re-arms both. */
+  let submitBusy = false;
 
   function syncSubmitState(): void {
-    const ready = input.value.trim() !== '';
+    const ready = !submitBusy && input.value.trim() !== '';
     // aria-disabled, not `disabled`: the button stays focusable so a Reviewer
     // tabbing to it still reads why it is inert (design C4 — pressing it before
     // then does nothing and the card stays open, there is no error to recover from).
     submitBtn.setAttribute('aria-disabled', String(!ready));
-    hint.textContent = ready ? `${mod}⏎ to submit · Esc to cancel` : EMPTY_HINT;
+    hint.textContent = submitBusy ? BUSY_HINT : ready ? `${mod}⏎ to submit · Esc to cancel` : EMPTY_HINT;
+  }
+
+  /** The anchor for `range`/`node`, or null when the selection cannot be measured within `node` (US-23.1 AC3). */
+  function mintAnchor(range: Range, node: HTMLElement): PendingAnchor | null {
+    const offsetStart = getOffsetWithin(node, range.startContainer, range.startOffset);
+    const offsetEnd = getOffsetWithin(node, range.endContainer, range.endOffset);
+    if (offsetStart === null || offsetEnd === null) {
+      return null;
+    }
+    return {
+      node,
+      anchorId: ensureCommentAnchorId(content, node),
+      offsetStart,
+      offsetEnd,
+      line: commentAnchorLine(content, node),
+      quote: range.toString(),
+      recordedText: node.textContent ?? '',
+      nearestHeading: nearestHeadingBefore(content, node),
+    };
+  }
+
+  /** Refresh the composer's target/quote/author display from `anchor` — shared by `openComposer` and the AC5 re-target action. */
+  function applyPendingToComposer(anchor: PendingAnchor): void {
+    const onSelection = anchor.quote !== '';
+    const what = onSelection ? 'on selection' : `on ${anchor.node.tagName.toLowerCase()}`;
+    targetEl.textContent = anchor.line > 0 ? `${what} · Ln ${anchor.line}` : what;
+    quoteEl.hidden = !onSelection;
+    quoteText.textContent = onSelection ? `“${anchor.quote}”` : '';
+    authorLabel.textContent = authorName;
+    avatar.textContent = (authorName[0] ?? '?').toUpperCase();
   }
 
   /**
@@ -282,38 +442,35 @@ export function initCommentMenu(
     if (inFlightRequestId !== undefined) {
       return; // US-23.1 dedup guard: one action, one thread.
     }
-    const range = currentRange();
+    // US-23.1 AC1: the collapse-to-click-point decision is applied HERE, at
+    // invoke, never at menu-open — `lastContextClick` is consumed once.
+    const click = lastContextClick;
+    lastContextClick = undefined;
+    const range = resolveEffectiveRange(click);
     const node = range ? resolveCommentAnchorNode(content, range) : null;
-    if (!range || !node) {
+    const minted = range && node ? mintAnchor(range, node) : null;
+    if (!range || !node || !minted) {
       showToast('No commentable block under the cursor.');
       return;
     }
-    const offsetStart = getOffsetWithin(node, range.startContainer, range.startOffset);
-    const offsetEnd = getOffsetWithin(node, range.endContainer, range.endOffset);
-    if (offsetStart === null || offsetEnd === null) {
-      showToast('Could not anchor a comment to that selection.');
-      return;
+    // US-23.1 AC1: "the caret is collapsed to the click point (and the stale
+    // selection discarded)" — a pointer-originated click must actually replace
+    // the live browser selection with the resolved range, not just compute one
+    // internally, so a later re-target ("Use current selection") reads the
+    // point the Reviewer clicked rather than whatever was selected before.
+    // Skipped for a keyboard-invoked menu (`click` undefined) — that path must
+    // never touch the selection at all.
+    if (click) {
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range.cloneRange());
     }
-    const quote = range.toString();
-    pending = {
-      node,
-      anchorId: ensureCommentAnchorId(content, node),
-      offsetStart,
-      offsetEnd,
-      line: commentAnchorLine(content, node),
-      quote,
-      recordedText: node.textContent ?? '',
-      nearestHeading: nearestHeadingBefore(content, node),
-    };
-
-    const onSelection = quote !== '';
-    const what = onSelection ? 'on selection' : `on ${node.tagName.toLowerCase()}`;
-    targetEl.textContent = pending.line > 0 ? `${what} · Ln ${pending.line}` : what;
-    quoteEl.hidden = !onSelection;
-    quoteText.textContent = onSelection ? `“${quote}”` : '';
-    authorLabel.textContent = authorName;
-    avatar.textContent = (authorName[0] ?? '?').toUpperCase();
+    pending = minted;
+    applyPendingToComposer(minted);
     input.value = '';
+    clearInlineError();
+    submitBusy = false;
+    input.readOnly = false;
     syncSubmitState();
 
     node.classList.add(COMMENT_ANCHOR_ACTIVE_CLASS);
@@ -332,14 +489,27 @@ export function initCommentMenu(
     }
     // The anchored node can be gone by now (a host 'update' re-rendered the
     // document under the open composer). Creating a thread against an id that
-    // no longer resolves would leave it pointing at nothing.
+    // no longer resolves would leave it pointing at nothing (US-23.10 AC5: the
+    // composer stays open, body intact, with a re-target offer — never a toast).
     if (!findCommentAnchor(content, pending.anchorId)) {
-      showToast('That location changed — the comment was not created.');
-      composerDismiss.close();
+      showInlineError('That location changed — use your current selection to retry.', true);
+      syncSubmitState();
       return;
     }
+    clearInlineError();
     const requestId = ++requestSeq;
     inFlightRequestId = requestId;
+    submitBusy = true;
+    input.readOnly = true;
+    syncSubmitState();
+    // US-23.10 AC9: neutralize bidi/control characters and reconcile CRLF to
+    // LF before the body ever leaves the webview, so every later surface
+    // (gutter, tab, popover, the native `vscode.comments` UI) renders the same
+    // already-clean text without re-applying this itself.
+    // EOL must normalize FIRST: neutralizeBodyText's control-char strip also
+    // removes a lone CR, so the composed order applied here would fuse a
+    // CR-only line break into a run-on line before normalizeBodyEol ever saw it.
+    const cleanBody = neutralizeBodyText(normalizeBodyEol(body));
     // US-23.4: the thread's handle for later anchor updates. Minted here because
     // the webview is the side that re-resolves the anchor and therefore the side
     // that has to name the thread it is talking about. It must be unique across
@@ -349,7 +519,7 @@ export function initCommentMenu(
     // and an update for one document would move another document's thread.
     const seed: PendingSeed = {
       threadId: `${docUri}#${sessionSalt}-${requestId}`,
-      body,
+      body: cleanBody,
       anchorId: pending.anchorId,
       offsetStart: pending.offsetStart,
       offsetEnd: pending.offsetEnd,
@@ -367,11 +537,13 @@ export function initCommentMenu(
       offsetStart: pending.offsetStart,
       offsetEnd: pending.offsetEnd,
       line: pending.line,
-      body,
+      body: cleanBody,
       recordedText: pending.recordedText,
       nearestHeading: pending.nearestHeading,
     });
-    composerDismiss.close();
+    // US-23.10 AC5: stays open until the result arrives — closing here (the
+    // old behavior) lost the typed body the instant a refusal came back, since
+    // the dismiss callback above clears it.
   }
 
   input.addEventListener('input', syncSubmitState);
@@ -384,6 +556,24 @@ export function initCommentMenu(
   cancelBtn.addEventListener('click', () => composerDismiss.close());
   submitBtn.addEventListener('mousedown', (e) => e.preventDefault());
   submitBtn.addEventListener('click', submit);
+  // US-23.10 AC5: re-target to whatever is selected/caretted RIGHT NOW,
+  // keeping the typed body intact — offered only after a stale-anchor refusal.
+  retargetBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  retargetBtn.addEventListener('click', () => {
+    const range = currentRange();
+    const node = range ? resolveCommentAnchorNode(content, range) : null;
+    const minted = range && node ? mintAnchor(range, node) : null;
+    if (!minted) {
+      // Nothing to retarget to right now — leave the reason showing.
+      return;
+    }
+    pending?.node.classList.remove(COMMENT_ANCHOR_ACTIVE_CLASS);
+    pending = minted;
+    minted.node.classList.add(COMMENT_ANCHOR_ACTIVE_CLASS);
+    applyPendingToComposer(minted);
+    clearInlineError();
+    syncSubmitState();
+  });
 
   return {
     notifyCreateResult(requestId, ok, error, author, timestamp): void {
@@ -393,10 +583,25 @@ export function initCommentMenu(
       inFlightRequestId = undefined;
       const seed = inFlightSeed;
       inFlightSeed = undefined;
+      submitBusy = false;
+      input.readOnly = false;
       if (!ok) {
-        showToast(error ?? 'The comment could not be created.');
+        const message = error ?? 'The comment could not be created.';
+        if (card.hidden) {
+          // The composer was already dismissed (outside click / Escape) while
+          // this request was in flight — there is no inline surface left to
+          // show the reason on, so fall back to a toast rather than writing
+          // into a hidden element nobody sees (US-23.10 AC5: never silent).
+          showToast(message);
+          return;
+        }
+        // US-23.10 AC5: the composer stays open with the body intact and the
+        // reason shown inline — never a toast, never a silent close.
+        showInlineError(message, isAnchorRefusal(message));
+        syncSubmitState();
         return;
       }
+      clearInlineError();
       // US-23.4: only a thread the host actually created gets tracked — a
       // refused request must leave nothing behind to re-resolve. The author and
       // timestamp come from the reply, not from the composer's display hint:
@@ -413,6 +618,12 @@ export function initCommentMenu(
           statusChanges: [],
         });
       }
+      // Only NOW, on success — closing at submit-time (the old behavior) lost
+      // the composer's content the instant a refusal came back.
+      composerDismiss.close();
+    },
+    setDocumentGuard(reason): void {
+      documentGuardReason = reason;
     },
     setDocUri(uri): void {
       docUri = uri;

@@ -667,6 +667,10 @@ window.addEventListener('message', (event) => {
       // different causes. This also ends its loading state and rebuilds it; the
       // rows themselves come from the same resolver registry the pins read.
       commentPanel.setSidecarState(msg.sidecar);
+      // Req 23 US-23.10 AC7: the SAME field disables "Add Comment" up front —
+      // not a new channel, `sidecar.problem` while `loading` is still undefined
+      // (not yet settled), same as the tab above.
+      commentMenu.setDocumentGuard(msg.sidecar?.problem);
       break;
     }
     case 'replyResult': {

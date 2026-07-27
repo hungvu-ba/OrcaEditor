@@ -4123,6 +4123,43 @@ body[class*='reading-mode-'] #md-lightbox-stage[data-canvas='light'] {
   cursor: not-allowed;
 }
 
+/* US-23.10 AC5: a create refusal's reason, shown inline instead of a toast —
+ * the composer stays open with the body intact. */
+.comment-composer-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+}
+
+.comment-composer-error[hidden] {
+  display: none;
+}
+
+.comment-composer-retarget {
+  padding: 3px 9px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+}
+
+.comment-composer-retarget[hidden] {
+  display: none;
+}
+
+.comment-composer-retarget:hover {
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 15%, transparent);
+}
+
 /* The anchor stays lit while the composer is open, so it is obvious what the
  * comment will attach to. Background only — no weight, size or spacing change,
  * so the document never reflows while composing. */
@@ -4459,6 +4496,20 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 }
 
 .comment-popover-reply-box[hidden] {
+  display: none;
+}
+
+/* US-23.10 AC5: a reply refusal's reason, shown inline instead of a toast —
+ * mirrors `.comment-composer-error`. */
+.comment-popover-reply-error {
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+}
+
+.comment-popover-reply-error[hidden] {
   display: none;
 }
 

@@ -32,7 +32,7 @@ import {
   COMMENT_POPOVER_CLASS,
   COMMENT_REPLY_INPUT_CLASS,
 } from './constants';
-import { el, positionNear, showToast } from './dom-utils';
+import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 import { sameAuthor } from '../../src/comments/sidecar-format';
@@ -155,13 +155,18 @@ export function initCommentPopover(
   replyInput.setAttribute('aria-label', 'Reply text');
 
   const replyBox = el('div', 'comment-popover-reply-box');
+  // US-23.10 AC5: a refusal is shown INLINE here (never a toast), and keeps
+  // the typed draft — mirrors the composer's own `comment-composer-error`.
+  const replyError = el('div', 'comment-popover-reply-error');
+  replyError.hidden = true;
+  replyError.setAttribute('role', 'alert');
   const replyActions = el('div', 'comment-popover-reply-actions');
   const replyCancel = el('button', 'comment-popover-reply-cancel', 'Cancel');
   replyCancel.type = 'button';
   const replySubmit = el('button', 'comment-popover-reply-submit', 'Submit');
   replySubmit.type = 'button';
   replyActions.append(replyCancel, replySubmit);
-  replyBox.append(replyInput, replyActions);
+  replyBox.append(replyInput, replyError, replyActions);
 
   // Re-opens the reply box after Cancel collapsed it (AC6: Cancel "discards the
   // draft and closes the input") — without this the user would have to close and
@@ -455,17 +460,31 @@ export function initCommentPopover(
     replyOpen.hidden = closed || !replyCollapsed;
   }
 
+  /** US-23.10 AC5: while a reply is in flight, the input is read-only and Submit inert — never after a refusal, which re-arms both. */
+  let replyBusy = false;
+
+  function showReplyError(message: string): void {
+    replyError.textContent = message;
+    replyError.hidden = false;
+  }
+
+  function clearReplyError(): void {
+    replyError.hidden = true;
+    replyError.textContent = '';
+  }
+
   /** Cancel: discard the draft AND close the input (AC6), appending no sidecar line. */
   function closeReplyDraft(): void {
     replyInput.value = '';
     replyCollapsed = true;
+    clearReplyError();
     syncSubmitState();
     const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
     applyReplyVisibility(anchor?.status === 'Closed');
   }
 
   function syncSubmitState(): void {
-    const ready = replyInput.value.trim() !== '';
+    const ready = !replyBusy && replyInput.value.trim() !== '';
     replySubmit.setAttribute('aria-disabled', String(!ready));
   }
 
@@ -480,10 +499,23 @@ export function initCommentPopover(
       showToast('This thread is closed — reopen it before replying.');
       return;
     }
+    clearReplyError();
     const requestId = ++requestSeq;
     inFlightReplyRequest = requestId;
     inFlightReplyThread = threadId;
-    vscode.postMessage({ type: 'replyToComment', requestId, docUri, threadId, body });
+    replyBusy = true;
+    replyInput.readOnly = true;
+    syncSubmitState();
+    // US-23.10 AC9: same neutralize + CRLF->LF treatment as a new comment's
+    // body, applied here since a reply is authored the same way. EOL first —
+    // see the matching comment in comment-menu.ts's `submit`.
+    vscode.postMessage({
+      type: 'replyToComment',
+      requestId,
+      docUri,
+      threadId,
+      body: neutralizeBodyText(normalizeBodyEol(body)),
+    });
   }
 
   replyInput.addEventListener('input', syncSubmitState);
@@ -494,6 +526,7 @@ export function initCommentPopover(
   });
   replyOpen.addEventListener('click', () => {
     replyCollapsed = false;
+    clearReplyError();
     const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
     applyReplyVisibility(anchor?.status === 'Closed');
     replyInput.focus();
@@ -526,7 +559,15 @@ export function initCommentPopover(
       if (isNewThread) {
         replyInput.value = '';
         replyCollapsed = false;
+        clearReplyError();
       }
+      // US-23.10 AC5: the shared reply box is busy/read-only only for the
+      // thread whose OWN reply is actually in flight — opening a DIFFERENT
+      // thread while thread A's reply is still with the host must not lock
+      // thread B's draft too (the `inFlightReplyRequest` guard already blocks
+      // an actual double-submit regardless of this attribute).
+      replyBusy = inFlightReplyRequest !== undefined && inFlightReplyThread === threadId;
+      replyInput.readOnly = replyBusy;
       syncSubmitState();
       render(anchor);
       card.hidden = false;
@@ -562,13 +603,24 @@ export function initCommentPopover(
       inFlightReplyRequest = undefined;
       const forThread = inFlightReplyThread;
       inFlightReplyThread = undefined;
-      if (!ok) {
-        showToast(error ?? 'The reply could not be saved.');
+      replyBusy = false;
+      replyInput.readOnly = false;
+      if (forThread !== currentThreadId) {
+        // Resolved, but the user has moved to another thread — the inline
+        // error surface belongs to the thread whose box is showing now, not
+        // the one this result is for, so a refusal here still needs SOME
+        // visible surface (US-23.10 AC5: never silent) — fall back to a toast
+        // rather than dropping it, but never touch the current thread's box.
+        if (!ok) {
+          showToast(error ?? 'The reply could not be saved.');
+        }
         return;
       }
-      if (forThread !== currentThreadId) {
-        // Resolved, but the user has moved to another thread — clearing the
-        // shared input now would destroy that thread's unsent draft.
+      if (!ok) {
+        // US-23.10 AC5: the reply box stays open with its text intact and the
+        // reason shown inline — never a toast.
+        showReplyError(error ?? 'The reply could not be saved.');
+        syncSubmitState();
         return;
       }
       closeReplyDraft();

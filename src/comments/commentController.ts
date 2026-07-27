@@ -16,16 +16,17 @@
  * US-23.4.
  */
 import * as crypto from 'crypto';
-import * as os from 'os';
 import * as vscode from 'vscode';
 import {
   anchorUpdateRejection,
+  authorNamePromptRejection,
   commentThreadContextValue,
   commentThreadLine,
   createCommentRejection,
   deleteRejection,
   replyRejection,
   resolveCommentAuthor,
+  safeOsUsername,
   statusChangeRejection,
   STATUS_CHANGE_TARGET,
   type AnchorUpdateMessage,
@@ -102,6 +103,15 @@ export interface CommentSupport extends vscode.Disposable {
    * threads.
    */
   loadThreads(document: vscode.TextDocument): Promise<void>;
+  /**
+   * US-23.10 AC7: re-check the up-front document guard (untitled / non-`file` /
+   * outside-allowed-root) for a document that was previously refused, and push
+   * a fresh `commentThreadsSync` if the answer changed — the bridge that lets
+   * an untitled document saved to disk enable "Add Comment" without reopening
+   * the editor. A no-op when nothing was ever refused for this document (the
+   * common case), so it is safe to call on every save.
+   */
+  revalidateAfterSave(document: vscode.TextDocument): Promise<void>;
   /**
    * US-23.2: append a reply under `msg.threadId`. Validated against the
    * thread's LIVE status (Closed blocks it) — `replyRejection` needs that,
@@ -200,7 +210,10 @@ function applyThreadFacets(
  */
 function asNativeComment(source: { author: string; timestamp: string; body: string }): vscode.Comment {
   return {
-    body: new vscode.MarkdownString(source.body),
+    // US-23.10 AC9: a plain string, never `vscode.MarkdownString` — a body
+    // containing Markdown syntax or raw HTML (`<script>`...) must render as
+    // literal text on the native surface, not be interpreted.
+    body: source.body,
     mode: vscode.CommentMode.Preview,
     author: { name: source.author },
     // An unparseable timestamp would make `new Date` Invalid Date, which VS Code
@@ -346,12 +359,78 @@ export function createCommentSupport(
     }
   };
 
+  /**
+   * US-23.10 AC4 (added during step-04 review): at most one author-name prompt
+   * is ever open at a time — `webview.onDidReceiveMessage` does not await its
+   * handlers and the native `vscode.comments` commands call `reply`/
+   * `deleteComment`/`changeStatus` directly, so two actions can race into
+   * `promptForAuthorName` together. `showInputBox` only allows one active quick
+   * input; without this, the second caller's prompt would never show and it
+   * would resolve `undefined` — refusing with "no author name was provided"
+   * even though the user answered the first one. Every concurrent caller
+   * instead awaits the SAME prompt and gets its answer.
+   */
+  let pendingAuthorPrompt: Promise<string> | undefined;
+
+  /**
+   * US-23.10 AC4: `os.userInfo()` cannot resolve a username (thrown, or an
+   * empty string — seen in some containerized/CI environments with no
+   * matching passwd entry) and no `authorName` setting is configured — prompt
+   * for a name rather than proceed with an empty author. Returns `''` when the
+   * user cancels, the sentinel every call site below checks: `resolveCommentAuthor`
+   * never itself returns `''` for a non-empty answer, so this cannot collide
+   * with a real name.
+   */
+  const promptForAuthorName = (document: vscode.TextDocument): Promise<string> => {
+    if (pendingAuthorPrompt) {
+      return pendingAuthorPrompt;
+    }
+    const promise = promptForAuthorNameOnce(document).finally(() => {
+      pendingAuthorPrompt = undefined;
+    });
+    pendingAuthorPrompt = promise;
+    return promise;
+  };
+
+  const promptForAuthorNameOnce = async (document: vscode.TextDocument): Promise<string> => {
+    const answer = await vscode.window.showInputBox({
+      title: 'Comment Author Name',
+      prompt: 'No author name could be determined automatically — enter the name to record on this comment.',
+      placeHolder: 'Your name',
+      ignoreFocusOut: true,
+      validateInput: (value) => authorNamePromptRejection(value) ?? null,
+    });
+    if (answer === undefined) {
+      // Cancelled: the caller must stop this ONE action here, never proceed
+      // with an empty name — the composer/reply box stays open with its
+      // typed content intact (the webview treats this like any other refusal).
+      return '';
+    }
+    const name = answer.trim().normalize('NFC');
+    try {
+      // Global, never Workspace: a workspace write would commit a personal
+      // name into a shared repo, and `update(..., Workspace)` throws outright
+      // with no folder open anyway.
+      await vscode.workspace
+        .getConfiguration('orcaEditor.comments', document.uri)
+        .update('authorName', name, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+      // Policy-locked settings.json, multi-root ambiguity... the answered name
+      // still carries this ONE action through; only the persistence failed.
+      log('Could not persist the comment author name to the Global settings', err);
+      void vscode.window.showWarningMessage(
+        `Could not save the author name to settings — using "${name}" for this action only.`
+      );
+    }
+    return name;
+  };
+
   /** The author name recorded on a new comment — re-read per create (the setting is live). */
-  const authorFor = (document: vscode.TextDocument): string =>
-    resolveCommentAuthor(
-      vscode.workspace.getConfiguration('orcaEditor.comments', document.uri).get<string>('authorName'),
-      os.userInfo().username
-    );
+  const authorFor = async (document: vscode.TextDocument): Promise<string> => {
+    const configured = vscode.workspace.getConfiguration('orcaEditor.comments', document.uri).get<string>('authorName');
+    const resolved = resolveCommentAuthor(configured, safeOsUsername());
+    return resolved !== '' ? resolved : promptForAuthorName(document);
+  };
 
   return {
     async createThread(msg, document): Promise<CreateThreadOutcome> {
@@ -364,7 +443,13 @@ export function createCommentSupport(
         // silently replace another thread's entry and misdirect its updates.
         return { ok: false, error: 'A comment thread with this id already exists.' };
       }
-      const author = authorFor(document);
+      const author = await authorFor(document);
+      if (author === '') {
+        // US-23.10 AC4: the author prompt was cancelled — cancel only this
+        // create, same as any other refusal (the webview keeps the composer
+        // open with its typed body intact).
+        return { ok: false, error: 'No author name was provided — the comment was not created.' };
+      }
       const createdAt = new Date();
       const timestamp = createdAt.toISOString();
       // US-23.5: persist first. The id written here is the thread's durable
@@ -444,7 +529,7 @@ export function createCommentSupport(
       // handler while this read is in flight says "still loading" rather than
       // letting the webview conclude the file has no comments (US-23.9 AC12(d)).
       sidecarState.set(docKey, { loading: true });
-      const refusal = store.refusalFor(document);
+      const refusal = await store.refusalFor(document);
       if (refusal !== null) {
         // No sidecar is possible at all. Recorded rather than logged, so the tab
         // shows the actionable reason instead of "No comments in this file".
@@ -566,6 +651,20 @@ export function createCommentSupport(
       }
     },
 
+    async revalidateAfterSave(document): Promise<void> {
+      // US-23.10 AC7: a no-op for the common case (nothing was ever refused
+      // for this document) — safe to call unconditionally on every save.
+      const docKey = docKeyFor(document.uri);
+      if (sidecarState.get(docKey)?.problem === undefined) {
+        return;
+      }
+      // Release the claim so the retry below is a real reload, not the
+      // idempotency guard's "already loaded" no-op — the same release-and-
+      // retry shape `loadThreads` itself already uses for an unreadable sidecar.
+      loaded.delete(docKey);
+      await this.loadThreads(document);
+    },
+
     forgetDocument(uri): void {
       // A renamed/closed document's threads are bound to a uri that no longer
       // resolves. Dropping them lets the reopened document rebuild from the moved
@@ -637,7 +736,12 @@ export function createCommentSupport(
         // never durable) has no id a reply line could reference.
         return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
       }
-      const author = authorFor(document);
+      const author = await authorFor(document);
+      if (author === '') {
+        // US-23.10 AC4: cancelled prompt — cancel only this reply, leaving the
+        // reply box open with its typed text intact (same as any other refusal).
+        return { ok: false, error: 'No author name was provided — the reply was not saved.' };
+      }
       const createdAt = new Date();
       const timestamp = createdAt.toISOString();
       const replyId = crypto.randomUUID();
@@ -664,7 +768,11 @@ export function createCommentSupport(
 
     async deleteComment(msg, document) {
       const entry = threads.get(msg.threadId);
-      const currentAuthor = authorFor(document);
+      const currentAuthor = await authorFor(document);
+      if (currentAuthor === '') {
+        // US-23.10 AC4: cancelled prompt — cancel only this delete.
+        return { ok: false, error: 'No author name was provided — nothing was deleted.' };
+      }
       const target =
         entry === undefined
           ? undefined
@@ -715,7 +823,6 @@ export function createCommentSupport(
 
     async changeStatus(msg, document) {
       const entry = threads.get(msg.threadId);
-      const currentAuthor = authorFor(document);
       // US-23.11 AC5: validated against `entry.status` — the freshly-folded status
       // this registry holds — never against the `contextValue` the native menu was
       // built from, which may be several transitions stale by the time it is
@@ -723,6 +830,11 @@ export function createCommentSupport(
       const rejection = statusChangeRejection(msg, document.uri.toString(), entry?.status);
       if (rejection !== null || !entry) {
         return { ok: false, error: rejection ?? 'This comment thread no longer exists.' };
+      }
+      const currentAuthor = await authorFor(document);
+      if (currentAuthor === '') {
+        // US-23.10 AC4: cancelled prompt — cancel only this transition.
+        return { ok: false, error: 'No author name was provided — the status was not changed.' };
       }
       if (changingStatus.has(msg.threadId)) {
         // US-23.11 AC7: a transition for this thread is already between its append

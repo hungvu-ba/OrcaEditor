@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import * as os from 'os';
 import type {
   CrossFileMatch,
   CrossFileMatchGroup,
@@ -41,7 +40,7 @@ import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 import { createCommentSupport, type CommentSupport } from './comments/commentController';
-import { resolveCommentAuthor } from './comments/comment-utils';
+import { resolveCommentAuthor, safeOsUsername } from './comments/comment-utils';
 import { createSidecarStore } from './comments/sidecar-store';
 
 /**
@@ -901,6 +900,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       void this.cleanupOrphanImages(saved);
+      // Req 23 US-23.10 AC7: an untitled document that was just saved to disk
+      // (or one that moved into the allowed workspace roots) may now be able
+      // to hold a sidecar where it previously could not — re-check the guard
+      // and push a fresh snapshot so "Add Comment" enables without reopening
+      // the editor. A no-op when nothing was ever refused for this document.
+      void this.comments?.revalidateAfterSave(saved).then(() => this.syncCommentThreads(saved));
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
@@ -930,7 +935,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         // go stale or its Resolve/Close/Reopen gating disagrees with the host's.
         commentAuthorName: resolveCommentAuthor(
           wysiwygCfg.get<string>('comments.authorName'),
-          os.userInfo().username
+          safeOsUsername()
         ),
       });
     });
@@ -997,7 +1002,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               // host resolves the author again when the thread is created.
               commentAuthorName: resolveCommentAuthor(
                 wysiwygCfg.get<string>('comments.authorName'),
-                os.userInfo().username
+                safeOsUsername()
               ),
               // Req 23 US-23.2: per-file persisted "Show Comments" toggle —
               // defaults off until the Author first turns it on for this file.

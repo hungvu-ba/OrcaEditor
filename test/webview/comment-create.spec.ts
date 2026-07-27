@@ -6,7 +6,7 @@
  * menu/composer only exist after real event dispatch.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor, clearPosted } from './_harness';
+import { openEditor, clearPosted, seedCommentThreads } from './_harness';
 
 const DOC = '# Heading one\n\nAlpha paragraph text.\n\nBeta paragraph text.\n';
 
@@ -55,6 +55,38 @@ function postedCreates(page: Page): Promise<Array<Record<string, unknown>>> {
   return page.evaluate(() =>
     (window as unknown as { __posted: Array<{ type: string }> }).__posted.filter((m) => m.type === 'createComment')
   ) as Promise<Array<Record<string, unknown>>>;
+}
+
+function postedOfType(page: Page, type: string): Promise<Array<Record<string, unknown>>> {
+  return page.evaluate(
+    (t) => (window as unknown as { __posted: Array<{ type: string }> }).__posted.filter((m) => m.type === t),
+    type
+  ) as Promise<Array<Record<string, unknown>>>;
+}
+
+async function simulate(page: Page, msg: Record<string, unknown>): Promise<void> {
+  await page.evaluate((m) => window.postMessage(m, '*'), msg);
+}
+
+/** How many toasts are CURRENTLY shown (`showToast`'s `.show` class) — AC5 asserts a refusal never shows one. */
+function shownToastCount(page: Page): Promise<number> {
+  return page.locator('#wysiwyg-toast.show').count();
+}
+
+/**
+ * Dispatch a real `contextmenu` MouseEvent with a specific `button`, needed
+ * for AC1's pointer-vs-keyboard distinction. `locator.dispatchEvent` does not
+ * propagate `button` through for `contextmenu` (verified: it reads back as
+ * `undefined` regardless of what is passed), so this constructs the event
+ * directly in the page instead of going through that helper.
+ */
+async function dispatchContextMenu(page: Page, x: number, y: number, button: number): Promise<void> {
+  await page.locator('#content').evaluate(
+    (el, { x, y, button }) => {
+      el.dispatchEvent(new MouseEvent('contextmenu', { clientX: x, clientY: y, button, bubbles: true, cancelable: true }));
+    },
+    { x, y, button }
+  );
 }
 
 test('right-click over a selection anchors the comment to that node with within-node offsets', async ({ page }) => {
@@ -198,7 +230,7 @@ test('submitting twice before the host replies creates only one thread', async (
   expect(await postedCreates(page)).toHaveLength(1);
 });
 
-test('a host refusal is surfaced and releases the guard so the Reviewer can retry', async ({ page }) => {
+test('a host refusal is surfaced INLINE (US-23.10 AC5) and releases the guard so the Reviewer can retry', async ({ page }) => {
   await openEditor(page, DOC);
   await selectIn(page, 0, 0, 5);
   await clearPosted(page);
@@ -207,17 +239,16 @@ test('a host refusal is surfaced and releases the guard so the Reviewer can retr
   await page.locator('.comment-composer-submit').click();
 
   const first = (await postedCreates(page))[0];
-  await page.evaluate(
-    (requestId) =>
-      window.postMessage(
-        { type: 'createCommentResult', requestId, ok: false, error: 'That location changed.' },
-        '*'
-      ),
-    first.requestId
-  );
-  await expect(page.locator('#wysiwyg-toast')).toHaveText('That location changed.');
+  await simulate(page, { type: 'createCommentResult', requestId: first.requestId, ok: false, error: 'That location changed.' });
 
-  // Guard released — a second attempt goes through.
+  // AC5: stays open, body intact, reason shown INLINE — never a toast.
+  await expect(page.locator('.comment-composer')).toBeVisible();
+  await expect(page.locator('.comment-composer-input')).toHaveValue('First try.');
+  await expect(page.locator('.comment-composer-error-text')).toHaveText('That location changed.');
+  expect(await shownToastCount(page)).toBe(0);
+
+  // Guard released — starting a fresh comment elsewhere goes through.
+  await page.locator('.comment-composer-cancel').click();
   await selectIn(page, 1, 0, 4);
   await openComposer(page);
   await page.locator('.comment-composer-input').fill('Second try.');
@@ -250,4 +281,243 @@ test('the anchor attribute never reaches the serialized .md', async ({ page }) =
     { timeout: 2000 }
   );
   expect(await md.jsonValue()).not.toContain('data-comment-anchor-id');
+});
+
+/**
+ * US-23.10 AC1 — click-point anchoring: a keyboard-invoked menu never
+ * collapses the selection; a pointer right-click outside it collapses only
+ * when "Add Comment" is actually invoked; a click with no anchorable position
+ * leaves the selection untouched and the menu item reflects that.
+ */
+test.describe('US-23.10 AC1 — click-point anchoring', () => {
+  test('a keyboard-invoked context menu (button 0) never collapses the selection, even at a stray click point', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 6, 15); // "paragraph" inside Alpha (Ln 3)
+    await clearPosted(page);
+    // Chromium reports button 0 (not 2) for a keyboard-invoked context menu
+    // (Shift+F10 / the Menu key) — dispatched here over the SECOND paragraph
+    // to prove those coordinates are genuinely ignored, not coincidentally unused.
+    await dispatchContextMenu(page, 10, 400, 0);
+    await expect(page.locator('.comment-context-menu')).toBeVisible();
+    await page.locator('.comment-menu-item', { hasText: 'Add Comment' }).click();
+
+    await expect(page.locator('.comment-composer-quote-text')).toHaveText('“paragraph”');
+    await page.locator('.comment-composer-input').fill('Kept the selection.');
+    await page.locator('.comment-composer-submit').click();
+    const [msg] = await postedCreates(page);
+    expect(msg.offsetStart).toBe(6);
+    expect(msg.offsetEnd).toBe(15);
+    expect(msg.line).toBe(3);
+  });
+
+  test('a pointer right-click outside the selection collapses to the click point ONLY when "Add Comment" is invoked, not at menu-open', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 6, 15); // "paragraph" inside Alpha
+    await clearPosted(page);
+    const betaBox = (await page.locator('#content p').nth(1).boundingBox())!;
+    const x = betaBox.x + 5;
+    const y = betaBox.y + betaBox.height / 2;
+    await dispatchContextMenu(page, x, y, 2);
+    await expect(page.locator('.comment-context-menu')).toBeVisible();
+
+    // Opening the menu alone must not have touched the selection yet.
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('paragraph');
+
+    await page.locator('.comment-menu-item', { hasText: 'Add Comment' }).click();
+    // No quote: the click collapsed to a bare caret in Beta, not Alpha's selection.
+    await expect(page.locator('.comment-composer-quote')).toBeHidden();
+    await page.locator('.comment-composer-input').fill('Collapsed to the click.');
+    await page.locator('.comment-composer-submit').click();
+    const [msg] = await postedCreates(page);
+    expect(msg.offsetStart).toBe(msg.offsetEnd); // bare caret
+    expect(msg.line).toBe(5); // Beta's line, not Alpha's (3)
+  });
+
+  test('a click resolving to no anchorable position leaves the existing selection untouched, and the menu item reflects that', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 6, 15); // a perfectly valid selection exists
+    await clearPosted(page);
+    // Force the click-point resolution to find nothing addressable there —
+    // stands in for a click landing on an image/mermaid/table-chrome node.
+    await page.evaluate(() => {
+      (document as unknown as { caretRangeFromPoint: () => null }).caretRangeFromPoint = () => null;
+    });
+    await dispatchContextMenu(page, 10, 10, 2);
+
+    const item = page.locator('.comment-menu-item', { hasText: 'Add Comment' });
+    await expect(item).toHaveAttribute('aria-disabled', 'true');
+    await expect(item).toHaveAttribute('title', 'No commentable block under the cursor');
+
+    // The pre-existing selection is untouched.
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe('paragraph');
+
+    // Clicking the disabled item is a no-op — no composer, no message.
+    await item.dispatchEvent('click');
+    await expect(page.locator('.comment-composer')).toBeHidden();
+    expect(await postedCreates(page)).toHaveLength(0);
+  });
+});
+
+/** US-23.10 AC5 — a refusal keeps the composer/reply open, body intact, reason inline. */
+test.describe('US-23.10 AC5 — refusal keeps the composer/reply open', () => {
+  test('while a create is in flight the input is read-only and Submit is inert; a stale-anchor refusal re-arms both, keeps the body, and offers re-targeting', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 0, 5);
+    await clearPosted(page);
+    await openComposer(page);
+    await page.locator('.comment-composer-input').fill('Keep me.');
+    await page.locator('.comment-composer-submit').click();
+
+    const isReadOnly = () =>
+      page.locator('.comment-composer-input').evaluate((el) => (el as HTMLTextAreaElement).readOnly);
+    // In flight: read-only input, inert Submit — never after a refusal.
+    expect(await isReadOnly()).toBe(true);
+    await expect(page.locator('.comment-composer-submit')).toHaveAttribute('aria-disabled', 'true');
+
+    const [msg] = await postedCreates(page);
+    await simulate(page, {
+      type: 'createCommentResult',
+      requestId: msg.requestId,
+      ok: false,
+      error: 'This comment lost its anchor before it could be created.',
+    });
+
+    // AC5: stays open, body intact, reason inline (never a toast); re-armed.
+    await expect(page.locator('.comment-composer')).toBeVisible();
+    await expect(page.locator('.comment-composer-input')).toHaveValue('Keep me.');
+    await expect(page.locator('.comment-composer-error-text')).toHaveText(
+      'This comment lost its anchor before it could be created.'
+    );
+    expect(await shownToastCount(page)).toBe(0);
+    expect(await isReadOnly()).toBe(false);
+    await expect(page.locator('.comment-composer-submit')).toHaveAttribute('aria-disabled', 'false');
+    // Stale-anchor refusal specifically offers re-targeting.
+    await expect(page.locator('.comment-composer-retarget')).toBeVisible();
+
+    // Re-target to the current selection and retry — the typed body survives.
+    await selectIn(page, 1, 0, 4);
+    await page.locator('.comment-composer-retarget').click();
+    await expect(page.locator('.comment-composer-error')).toBeHidden();
+    await expect(page.locator('.comment-composer-input')).toHaveValue('Keep me.');
+    await page.locator('.comment-composer-submit').click();
+    const creates = await postedCreates(page);
+    expect(creates).toHaveLength(2);
+    expect(creates[1].offsetStart).toBe(0);
+    expect(creates[1].offsetEnd).toBe(4);
+  });
+
+  test('a non-anchor refusal keeps the composer open with the reason inline and offers no re-target', async ({ page }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 0, 5);
+    await clearPosted(page);
+    await openComposer(page);
+    await page.locator('.comment-composer-input').fill('Keep me too.');
+    await page.locator('.comment-composer-submit').click();
+
+    const [msg] = await postedCreates(page);
+    await simulate(page, { type: 'createCommentResult', requestId: msg.requestId, ok: false, error: 'Failed to save the comment.' });
+
+    await expect(page.locator('.comment-composer')).toBeVisible();
+    await expect(page.locator('.comment-composer-input')).toHaveValue('Keep me too.');
+    await expect(page.locator('.comment-composer-error-text')).toHaveText('Failed to save the comment.');
+    await expect(page.locator('.comment-composer-retarget')).toBeHidden();
+    expect(await shownToastCount(page)).toBe(0);
+  });
+
+  test('a reply refusal (comment-popover.ts mirror) keeps the reply box open with text intact and the reason inline, not a toast', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 0, 5);
+    await openComposer(page);
+    await page.locator('.comment-composer-input').fill('Original.');
+    await page.locator('.comment-composer-submit').click();
+    const [create] = await postedCreates(page);
+    await simulate(page, {
+      type: 'createCommentResult',
+      requestId: create.requestId,
+      ok: true,
+      author: 'harness-user',
+      timestamp: new Date(2026, 6, 24, 10, 0).toISOString(),
+    });
+
+    await page.locator('.comment-gutter-pin').first().click();
+    await expect(page.locator('.comment-popover')).toBeVisible();
+
+    await page.locator('.comment-popover-reply-input').fill('My reply.');
+    await page.locator('.comment-popover-reply-submit').click();
+    const [reply] = await postedOfType(page, 'replyToComment');
+    await simulate(page, { type: 'replyResult', requestId: reply.requestId, ok: false, error: 'This comment thread no longer exists.' });
+
+    await expect(page.locator('.comment-popover-reply-box')).toBeVisible();
+    await expect(page.locator('.comment-popover-reply-input')).toHaveValue('My reply.');
+    await expect(page.locator('.comment-popover-reply-error')).toHaveText('This comment thread no longer exists.');
+    expect(await shownToastCount(page)).toBe(0);
+  });
+});
+
+/** US-23.10 AC7 — the up-front document guard, pushed via `commentThreadsSync.sidecar.problem`. */
+test.describe('US-23.10 AC7 — up-front document guard', () => {
+  test('"Add Comment" is disabled up front with the specific document-guard reason, and re-enables once the guard clears without reopening the editor', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await seedCommentThreads(page, [], { problem: 'Save the file first to comment on it.' });
+    await selectIn(page, 0, 0, 5);
+
+    await openContextMenu(page);
+    const item = page.locator('.comment-menu-item', { hasText: 'Add Comment' });
+    await expect(item).toHaveAttribute('aria-disabled', 'true');
+    await expect(item).toHaveAttribute('title', 'Save the file first to comment on it.');
+    await clearPosted(page);
+    await item.dispatchEvent('click');
+    await expect(page.locator('.comment-composer')).toBeHidden();
+    expect(await postedCreates(page)).toHaveLength(0);
+
+    // The guard clears (e.g. the document was saved) — re-evaluated from the
+    // SAME channel, with no reopen of the editor.
+    await seedCommentThreads(page, [], {});
+    await openContextMenu(page);
+    await expect(item).toHaveAttribute('aria-disabled', 'false');
+  });
+});
+
+/** US-23.10 AC9 — plain-text rendering everywhere, bidi/control-char neutralization on submit. */
+test.describe('US-23.10 AC9 — plain-text rendering', () => {
+  test('a body with <script>/Markdown syntax renders as literal text in the popover, multi-line preserved via computed white-space', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const bodyText = '<script>alert(1)</script>\n**bold** not-actually-bold\nthird line';
+    await seedCommentThreads(page, [{ threadId: 't1', body: bodyText }]);
+
+    await page.locator('.comment-gutter-pin').first().click();
+    const bodyEl = page.locator('.comment-popover-original .comment-popover-body-text');
+    await expect(bodyEl).toBeVisible();
+    // Literal text — the raw body, never interpreted as HTML or Markdown.
+    expect(await bodyEl.textContent()).toBe(bodyText);
+    expect(await page.locator('.comment-popover-original script').count()).toBe(0);
+    // Multi-line preserved via the ACTUAL computed style, not just the source CSS.
+    expect(await bodyEl.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe('pre-wrap');
+  });
+
+  test('a submitted body has its bidi-override characters stripped before it ever leaves the webview', async ({ page }) => {
+    await openEditor(page, DOC);
+    await selectIn(page, 0, 0, 5);
+    await clearPosted(page);
+    await openComposer(page);
+    const rlo = String.fromCharCode(0x202e); // U+202E RIGHT-TO-LEFT OVERRIDE
+    await page.locator('.comment-composer-input').fill(`safe text${rlo}evil suffix`);
+    await page.locator('.comment-composer-submit').click();
+    const [msg] = await postedCreates(page);
+    expect(msg.body).toBe('safe textevil suffix');
+  });
 });

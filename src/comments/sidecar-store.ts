@@ -66,11 +66,15 @@ export interface SidecarStore {
    */
   adoptDrifted(document: vscode.TextDocument): Promise<void>;
   /**
-   * Why this document can hold no sidecar at all (untitled, or a non-`file`
-   * scheme), or null when it can. US-23.9 shows this instead of "no comments":
-   * the two look identical in an empty list, and only one of them is fixable.
+   * Why this document can hold no sidecar at all (untitled, a non-`file`
+   * scheme, or a saved document whose sidecar sibling would land outside the
+   * allowed workspace roots — US-23.10 AC7 added this third case, previously
+   * only discoverable by actually calling `append`), or null when it can.
+   * US-23.9 shows this instead of "no comments": the two look identical in an
+   * empty list, and only one of them is fixable. Async because the third case
+   * needs the same `guard` check `append` makes.
    */
-  refusalFor(document: vscode.TextDocument): string | null;
+  refusalFor(document: vscode.TextDocument): Promise<string | null>;
 }
 
 const EMPTY_SIDECAR: FoldedSidecar = { threads: [], orphans: [], warnings: [] };
@@ -153,21 +157,32 @@ export function createSidecarStore(
     return null;
   };
 
+  /** The reason `append` would refuse THIS document outright — shared by `append` and `refusalFor` so the two never disagree (US-23.10 AC7). */
+  const outsideRootRejection = async (document: vscode.TextDocument): Promise<string | null> => {
+    const rejection = schemeRejection(document);
+    if (rejection !== null) {
+      return rejection;
+    }
+    if (!(await guard(document.uri, uriFor(document)))) {
+      return 'The comment sidecar would be written outside the allowed workspace.';
+    }
+    return null;
+  };
+
   return {
     uriFor,
 
-    refusalFor: schemeRejection,
+    refusalFor: outsideRootRejection,
 
     async append(document, line): Promise<string | null> {
-      const rejection = schemeRejection(document);
+      const rejection = await outsideRootRejection(document);
       if (rejection !== null) {
+        if (rejection === 'The comment sidecar would be written outside the allowed workspace.') {
+          log(`Refused to write comment sidecar outside the allowed workspace: ${uriFor(document).toString()}`);
+        }
         return rejection;
       }
       const target = uriFor(document);
-      if (!(await guard(document.uri, target))) {
-        log(`Refused to write comment sidecar outside the allowed workspace: ${target.toString()}`);
-        return 'The comment sidecar would be written outside the allowed workspace.';
-      }
       try {
         // AC3 requires the file to end with a newline BEFORE the next append.
         // `serializeSidecarLine` terminates its own line, which only keeps that

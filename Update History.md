@@ -467,3 +467,4 @@
 | 0.10.0 | 2026-07-27 | Feature (US-23.11): resolve state machine revised — no author gate on Resolve/Close/Reopen, full transition trail, one-directional drift, illegal status lines skipped at load, anchor-lost dialog becomes a notice. |
 | 0.10.0 | 2026-07-27 | Feature (US-19.26): table fit-mode only caps columns when max-content overflows the panel, hands the freed width back, and ignores empty cells in p75. |
 | 0.10.0 | 2026-07-27 | Fix (US-19.26): fit-mode no longer pins width when there's room — typing into a cell grows it live instead of waiting for the debounced re-fit. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.10): comment create hardened — click-point anchoring, refusals stay inline with retry, up-front document guard, author-name prompt, plain-text rendering everywhere. |

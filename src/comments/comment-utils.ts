@@ -3,8 +3,25 @@
  * `vscode` import, so test/unit.ts can exercise them directly (commentController.ts
  * itself needs the VS Code runtime and cannot be imported there).
  */
+import * as os from 'os';
 import type { CommentStatus, CommentStatusAction, WebviewToHost } from '../shared/messages';
 import { sameAuthor } from './sidecar-format';
+
+/**
+ * US-23.10 AC4: `os.userInfo()` throws on some containerized/CI environments
+ * with no passwd entry for the running uid — the ONE place that guard is
+ * applied, so `commentController.ts`'s `authorFor` and `provider.ts`'s two
+ * display-only author-name hints all fall back to `''` instead of one of them
+ * crashing its caller (the requirement's own Source line names all three call
+ * sites as needing this coverage).
+ */
+export function safeOsUsername(): string {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return '';
+  }
+}
 
 /** A `createComment` message, narrowed out of the WebviewToHost union. */
 export type CreateCommentMessage = Extract<WebviewToHost, { type: 'createComment' }>;
@@ -34,6 +51,45 @@ const ANCHOR_STATES: readonly AnchorUpdateMessage['state'][] = ['exact', 'approx
 export function resolveCommentAuthor(configured: string | undefined, osUsername: string): string {
   const trimmed = (configured ?? '').trim();
   return trimmed !== '' ? trimmed : osUsername;
+}
+
+/**
+ * US-23.10 AC4: why the AC4 author-prompt's raw answer is rejected, or null
+ * when it is valid — meant for `showInputBox`'s `validateInput`, run against
+ * the SAME trim+NFC form the answer is persisted in, so a name that passes
+ * validation here is exactly what gets saved (no second, disagreeing check at
+ * confirm time). Distinct from `resolveCommentAuthor` above, which resolves a
+ * DISPLAY name from already-trusted config/OS values — this validates
+ * untrusted free-text typed into a prompt.
+ */
+export function authorNamePromptRejection(raw: string): string | null {
+  const normalized = raw.trim().normalize('NFC');
+  if (normalized === '') {
+    return 'Enter a name.';
+  }
+  // Newline/control characters would corrupt the sidecar's one-line-per-record
+  // shape or spoof the author column when rendered -- rejected here rather than
+  // silently stripped, so the user sees why and can retype. Compared by code
+  // point rather than a regex literal, so no raw control byte sits in this
+  // source file itself.
+  if (containsControlChar(normalized)) {
+    return 'The name cannot contain a newline or control character.';
+  }
+  if (normalized.length > 100) {
+    return 'The name must be 100 characters or fewer.';
+  }
+  return null;
+}
+
+/** C0 control characters (below code point 32) or DEL (code point 127) -- see `authorNamePromptRejection`. */
+function containsControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code < 32 || code === 127) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
