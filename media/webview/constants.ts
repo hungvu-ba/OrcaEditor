@@ -191,6 +191,29 @@ export const COMMENT_ANCHOR_STATE_ATTR = 'data-comment-anchor-state';
  */
 export const COMMENT_ANCHOR_ACTIVE_CLASS = 'comment-anchor-active';
 
+// --- Req 24 US-23.8: launch-load resolve pass (AC1, AC6, AC7) ---
+
+/**
+ * A `syncAll` reload seeding more new threads than this runs the chunked load
+ * pass (`ANCHOR_RESOLVE_CHUNK_SIZE` per tick) instead of one synchronous
+ * sweep, so a heavily-commented file's first paint is never blocked. Below
+ * it, resolution stays the existing single-pass behavior other call sites
+ * (a fresh `register`, the debounced `refresh`) already rely on.
+ */
+export const ANCHOR_LOAD_BATCH_THRESHOLD = 30;
+
+/** Threads resolved per tick once the chunked load pass (above) is running. */
+export const ANCHOR_RESOLVE_CHUNK_SIZE = 25;
+
+/**
+ * Req 24 US-23.8 AC3(i): how long `comment-popover.ts` waits for a reply's
+ * `replyResult` before giving up and releasing the in-flight guard (host busy,
+ * panel disposed, message dropped). Same bound the create path's sibling guard
+ * (US-23.10 AC6, not yet built) is meant to use — a default, not a proven
+ * constant.
+ */
+export const COMMENT_REPLY_RESULT_TIMEOUT_MS = 10_000;
+
 // --- Req 23 US-23.4 AC4: "Unresolved location" panel ---
 
 /** Pointer travel before a mousedown on a card becomes a drag rather than a click. */
@@ -214,6 +237,17 @@ export const COMMENT_PANEL_SNIPPET_CHARS = 60;
 export const COMMENT_HIGHLIGHT_NAME = 'comment-anchor';
 
 /**
+ * Req 24 US-23.8 AC2: a SEPARATE registration for a non-exact (tier 3
+ * `approximate`) anchor's wash — the Custom Highlight API styles one whole
+ * registration at a time, so telling exact and approximate apart needs its
+ * own name, not a class on the (non-existent) highlighted element. A
+ * `floating` anchor has no live carrier at all (tier 4: `carrier` is
+ * `undefined`), so it was never in the highlighted set on either name —
+ * unchanged by this story, not a gap it needs to close.
+ */
+export const COMMENT_HIGHLIGHT_NONEXACT_NAME = 'comment-anchor-nonexact';
+
+/**
  * Gutter pins on lines within this many BLANK lines of each other collapse
  * into one "+N" cluster marker (design handoff: "Ln 7/9/11 sit inside the
  * cluster window"). A blank-line gap of 1 (i.e. consecutive or one blank line
@@ -225,6 +259,12 @@ export const COMMENT_GUTTER_CLUSTER_BLANK_GAP = 1;
 export const COMMENT_PIN_CLASS = 'comment-gutter-pin';
 /** DOM class for a collapsed "+N" cluster pin. */
 export const COMMENT_PIN_CLUSTER_CLASS = 'comment-gutter-pin-cluster';
+/**
+ * Req 24 US-23.8 AC2: marks a pin (or a cluster whose threads are ALL
+ * non-exact) whose anchor resolved at tier 3/4 (`approximate`/`floating`),
+ * paired with an icon/label in CSS — never colour alone.
+ */
+export const COMMENT_PIN_NONEXACT_CLASS = 'comment-gutter-pin-nonexact';
 /** DOM class for the thread popover, mounted on `document.body` (comment-panel.ts convention). */
 export const COMMENT_POPOVER_CLASS = 'comment-popover';
 /** DOM class for the popover's reply `<textarea>` — native field undo, not the document's (US-23.6 AC2). */

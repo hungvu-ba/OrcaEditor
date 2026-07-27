@@ -138,16 +138,46 @@ export async function readWebviewState(page: Page): Promise<Record<string, unkno
   return page.evaluate(() => (window as unknown as { acquireVsCodeApi: () => { getState(): Record<string, unknown> } }).acquireVsCodeApi().getState());
 }
 
-/** Open the harness page and bootstrap it with the given markdown, like the host's 'init' message. */
-export async function openEditor(page: Page, markdown: string, configOverrides: Partial<InitConfig> = {}): Promise<void> {
+/**
+ * Req 24 US-23.8 AC6: open the harness page WITHOUT posting 'init' — for a spec
+ * that needs to control exactly when the first render happens (e.g. racing a
+ * `commentThreadsSync` against it, the way the host's own best-effort immediate
+ * sync can race the webview's first paint). Pair with `postInit` below once the
+ * race has been set up.
+ */
+export async function openBlankHarness(page: Page, configOverrides: Partial<InitConfig> = {}): Promise<InitConfig> {
   const config = { ...DEFAULT_CONFIG, ...configOverrides };
   ensureHarnessFile(config.readability);
   await page.goto('file://' + HARNESS_FILE);
+  return config;
+}
+
+/**
+ * Post the host's 'init' message and wait for the first render — the other
+ * half of `openEditor`. `docUri` defaults to `DEFAULT_DOC_URI`; a spec racing
+ * a pre-init `commentThreadsSync` (AC6, see `seedCommentThreads`'s own
+ * `docUri` param) must pass the SAME `''` here too — `main.ts`'s 'init'
+ * handler treats an actual docUri change as switching documents and prunes
+ * every resolver thread via `syncAll([])` before rendering, which would
+ * wipe the very thread the race is trying to observe.
+ */
+export async function postInit(
+  page: Page,
+  markdown: string,
+  config: InitConfig,
+  docUri: string = DEFAULT_DOC_URI
+): Promise<void> {
   await page.evaluate(
     ({ text, cfg, docUri }) => window.postMessage({ type: 'init', text, docUri, config: cfg }, '*'),
-    { text: markdown, cfg: config, docUri: DEFAULT_DOC_URI }
+    { text: markdown, cfg: config, docUri }
   );
   await page.locator('#content').waitFor();
+}
+
+/** Open the harness page and bootstrap it with the given markdown, like the host's 'init' message. */
+export async function openEditor(page: Page, markdown: string, configOverrides: Partial<InitConfig> = {}): Promise<void> {
+  const config = await openBlankHarness(page, configOverrides);
+  await postInit(page, markdown, config);
 }
 
 /**
@@ -212,8 +242,20 @@ export interface SeedSidecar {
  * Push a `commentThreadsSync` snapshot, exactly as `provider.syncCommentThreads`
  * does. This is the ONLY way to reach a Closed thread or a foreign sidecar from
  * a spec: neither can be produced by driving the webview's own UI.
+ *
+ * `docUri` defaults to `DEFAULT_DOC_URI` (the normal case, matching whatever
+ * `openEditor`/`postInit` set as `currentDocUri`). Req 24 US-23.8 AC6: a spec
+ * racing this against the first render (via `openBlankHarness`, before any
+ * 'init') must pass `''` instead — before 'init', the webview's `currentDocUri`
+ * is still its `''` default, and the sync handler drops anything that doesn't
+ * match it.
  */
-export async function seedCommentThreads(page: Page, threads: SeedThread[], sidecar?: SeedSidecar): Promise<void> {
+export async function seedCommentThreads(
+  page: Page,
+  threads: SeedThread[],
+  sidecar?: SeedSidecar,
+  docUri: string = DEFAULT_DOC_URI
+): Promise<void> {
   await page.evaluate(
     ({ list, docUri, side }) =>
       window.postMessage(
@@ -238,7 +280,7 @@ export async function seedCommentThreads(page: Page, threads: SeedThread[], side
         },
         '*'
       ),
-    { list: threads, docUri: DEFAULT_DOC_URI, side: sidecar }
+    { list: threads, docUri, side: sidecar }
   );
 }
 

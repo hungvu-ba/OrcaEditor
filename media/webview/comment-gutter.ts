@@ -17,8 +17,13 @@
  * `COMMENT_GUTTER_CLUSTER_BLANK_GAP` blank lines of each other) collapse into
  * one "+N" pin; a Closed thread renders no pin at all (design handoff).
  */
-import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
-import { COMMENT_GUTTER_CLUSTER_BLANK_GAP, COMMENT_PIN_CLASS, COMMENT_PIN_CLUSTER_CLASS } from './constants';
+import type { AnchorState, CommentResolveController, ThreadAnchor } from './comment-resolve';
+import {
+  COMMENT_GUTTER_CLUSTER_BLANK_GAP,
+  COMMENT_PIN_CLASS,
+  COMMENT_PIN_CLUSTER_CLASS,
+  COMMENT_PIN_NONEXACT_CLASS,
+} from './constants';
 import { el, positionNear } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { truncateDisplay } from './trigger-popup';
@@ -54,6 +59,21 @@ function threadLine(anchor: ThreadAnchor): number {
 /** Comments + replies under one thread — what the pin's badge counts (design handoff). */
 function messageCount(anchor: ThreadAnchor): number {
   return 1 + anchor.replies.length;
+}
+
+/**
+ * Req 24 US-23.8 AC2: the requirement's own wording for a single non-exact
+ * thread; a cluster whose threads are ALL non-exact but disagree on tier gets
+ * the more honest combined phrasing rather than picking one arbitrarily.
+ */
+function nonExactLabel(states: AnchorState[]): string {
+  if (states.every((s) => s === 'floating')) {
+    return 'Unresolved location';
+  }
+  if (states.every((s) => s === 'approximate')) {
+    return 'Approximate location';
+  }
+  return 'Approximate or unresolved locations';
 }
 
 /** Consecutive-line clustering: a new group starts once the gap to the previous thread's line exceeds the blank-line window. */
@@ -111,6 +131,13 @@ export function initCommentGutter(
         el('span', 'comment-gutter-cluster-row-snippet', truncateDisplay(anchor.body.replace(/\s+/g, ' ').trim(), 48))
       );
       row.appendChild(el('span', `comment-gutter-cluster-row-status status-${anchor.status.toLowerCase()}`, anchor.status));
+      // AC2: per-row, not just the cluster pin as a whole — a chooser listing
+      // one exact and one approximate thread must not read as if both are exact.
+      if (anchor.state !== 'exact') {
+        row.appendChild(
+          el('span', 'comment-gutter-cluster-row-nonexact', nonExactLabel([anchor.state]))
+        );
+      }
       row.addEventListener('click', () => {
         listDismiss.close();
         openThread(anchor.threadId, row.getBoundingClientRect());
@@ -130,22 +157,39 @@ export function initCommentGutter(
     // made a same-line pair look like a single-thread pin but behave clustered,
     // with a badge that conflated 2 threads × 1 reply with 1 thread × 3 replies.
     const isCluster = anchors.length > 1;
-    const classes = [COMMENT_PIN_CLASS, isCluster ? COMMENT_PIN_CLUSTER_CLASS : '', allResolved ? 'resolved' : '']
+    // AC2: a cluster pin is marked non-exact only when EVERY thread in it is —
+    // one exact thread sharing a line with an approximate one still resolves
+    // exactly on click for the reader who picked it, so the pin itself must
+    // not claim otherwise.
+    const allNonExact = anchors.every((a) => a.state !== 'exact');
+    const classes = [
+      COMMENT_PIN_CLASS,
+      isCluster ? COMMENT_PIN_CLUSTER_CLASS : '',
+      allResolved ? 'resolved' : '',
+      allNonExact ? COMMENT_PIN_NONEXACT_CLASS : '',
+    ]
       .filter(Boolean)
       .join(' ');
     const pin = el('div', classes);
     pin.setAttribute('role', 'button');
     pin.tabIndex = 0;
     pin.appendChild(bubbleIcon());
+    if (allNonExact) {
+      // Shape cue, not colour alone: a small glyph badge, styled in editor.css.
+      const badge = el('span', 'comment-gutter-pin-nonexact-badge', '~');
+      badge.setAttribute('aria-hidden', 'true');
+      pin.appendChild(badge);
+    }
     const totalMessages = anchors.reduce((sum, a) => sum + messageCount(a), 0);
     pin.appendChild(el('span', 'comment-gutter-pin-count', isCluster ? `+${anchors.length}` : String(totalMessages)));
     const lines = Array.from(new Set(anchors.map(threadLine))).sort((a, b) => a - b);
     // A cluster describes THREADS (that is what picking one from the chooser
     // selects); a single pin describes the messages inside its one thread.
     const span = lines[0] === lines[lines.length - 1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[lines.length - 1]}`;
+    const nonExactSuffix = allNonExact ? ` · ${nonExactLabel(anchors.map((a) => a.state))}` : '';
     pin.title = isCluster
-      ? `${anchors.length} comment threads on ${span}`
-      : `${totalMessages} comment${totalMessages === 1 ? '' : 's'} · ${allResolved ? 'Resolved' : 'Open'}`;
+      ? `${anchors.length} comment threads on ${span}${nonExactSuffix}`
+      : `${totalMessages} comment${totalMessages === 1 ? '' : 's'} · ${allResolved ? 'Resolved' : 'Open'}${nonExactSuffix}`;
     const activate = (): void => {
       if (anchors.length === 1) {
         openThread(anchors[0].threadId, pin.getBoundingClientRect());

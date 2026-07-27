@@ -922,6 +922,13 @@ function renderDocument(markdown: string): void {
   stickyTableHeader.refresh();
   // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
   dragDrop.refresh();
+  // Req 24 US-23.8 AC6/AC7: #content just finished this render pass — flip the
+  // ready gate (releasing a `commentThreadsSync` that raced this render and
+  // deferred its resolution rather than read an empty/stale DOM) and bump the
+  // generation stamp a still-running chunked load pass checks. Must run BEFORE
+  // the debounced `refresh()` below so a fresh reload's deferred pass isn't
+  // itself immediately stamped stale by that debounce's own later generation bump.
+  commentResolve.notifyContentRendered();
   // Req 23 US-23.4 AC5: the document just changed (edit, undo, redo or reload) —
   // re-run every comment through the tiers once it settles, so a thread whose
   // node or text reappeared is promoted back out of the floating list.

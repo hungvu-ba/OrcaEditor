@@ -4194,6 +4194,17 @@ body[class*='reading-mode-'] .comment-composer-input {
   background-color: rgba(130, 110, 220, 0.22);
 }
 
+/* Req 24 US-23.8 AC2: a tier-3 (approximate) anchor's wash — the same warm
+ * "anchor trouble" tone US-23.9's Comment-tab pill already uses
+ * (--comment-warn-fg/--comment-status-anchor-bg), plus a dashed underline so
+ * the distinction is never colour alone. Tier 4 (floating) never reaches
+ * here — no live carrier to highlight (see COMMENT_HIGHLIGHT_NONEXACT_NAME). */
+::highlight(comment-anchor-nonexact) {
+  background-color: var(--comment-status-anchor-bg);
+  text-decoration: underline dashed var(--comment-warn-fg);
+  text-decoration-thickness: 1.5px;
+}
+
 /* --- Req 23 US-23.2: gutter pins ---------------------------------------------
  * A lane immediately left of #content, independent of gutter.ts's numbered
  * line gutter (a separate lane, own reservation) and of the showLineNumbers
@@ -4267,6 +4278,28 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 
 .comment-gutter-pin-count {
   white-space: nowrap;
+}
+
+/* Req 24 US-23.8 AC2: tier 3 (approximate) — the same "anchor trouble" tone
+ * as the Comment tab's pill (US-23.9), plus a badge glyph so the distinction
+ * survives forced-colors/greyscale, not colour alone. */
+.comment-gutter-pin-nonexact {
+  background: var(--comment-status-anchor-bg);
+  color: var(--comment-warn-fg);
+}
+.comment-gutter-pin-nonexact:hover,
+.comment-gutter-pin-nonexact:focus-visible {
+  background: color-mix(in srgb, var(--comment-warn-fg) 26%, transparent);
+}
+.comment-gutter-pin-nonexact-badge {
+  font-weight: 700;
+}
+
+.comment-gutter-cluster-row-nonexact {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
 }
 
 .comment-gutter-cluster-list {
@@ -4391,6 +4424,19 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 .comment-popover-status.status-closed {
   background: rgba(128, 128, 128, 0.14);
   color: var(--vscode-descriptionForeground, #8a8a8a);
+}
+
+/* Req 24 US-23.8 AC2: "Approximate location" / "Unresolved location" — same
+ * warm "anchor trouble" tone as the gutter pin and the Comment tab's pill
+ * (US-23.9), so the three surfaces read as one signal, not colour alone. */
+.comment-popover-anchor-state {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
+}
+
+.comment-popover-anchor-state[hidden] {
+  display: none;
 }
 
 .comment-popover-quote {

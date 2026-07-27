@@ -313,6 +313,14 @@ export function createCommentSupport(
   // double-click, or the popover and the native menu fired back to back, would
   // both pass it and append two lines for one intended transition.
   const changingStatus = new Set<string>();
+  // Req 24 US-23.8 AC3(ii)/(iii): threadIds with a reply write in flight. Same
+  // shape and reason as `creating`/`changingStatus` — the check below runs
+  // before the `authorFor` await, so a webview retry racing the native
+  // `orcaEditor.replyComment` command (which calls `reply` directly, with no
+  // dedup of its own) can't both pass it. A separate Set, not shared with the
+  // other two: a create or a status change in flight for a thread must never
+  // block (or be released by) a reply to it, and vice versa.
+  const replying = new Set<string>();
   // Documents whose sidecar has already been loaded, so a second panel on the
   // same file doesn't duplicate every thread.
   const loaded = new Set<string>();
@@ -736,34 +744,47 @@ export function createCommentSupport(
         // never durable) has no id a reply line could reference.
         return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
       }
-      const author = await authorFor(document);
-      if (author === '') {
-        // US-23.10 AC4: cancelled prompt — cancel only this reply, leaving the
-        // reply box open with its typed text intact (same as any other refusal).
-        return { ok: false, error: 'No author name was provided — the reply was not saved.' };
+      if (replying.has(msg.threadId)) {
+        // AC3(ii): covers BOTH the webview's own retry (its `inFlightReplyRequest`
+        // guard) and the native `orcaEditor.replyComment` command, which calls
+        // this function directly with no dedup of its own (hardcoded requestId
+        // 0). The check runs before the `authorFor` await below, so two
+        // concurrent replies for this thread can't both pass it.
+        return { ok: false, error: 'A reply to this thread is already being submitted.' };
       }
-      const createdAt = new Date();
-      const timestamp = createdAt.toISOString();
-      const replyId = crypto.randomUUID();
-      const writeError = await store.append(
-        document,
-        buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
-      );
-      if (writeError !== null) {
-        return { ok: false, error: writeError };
-      }
-      entry.replies.push({ id: replyId, author, timestamp, body: msg.body });
+      replying.add(msg.threadId);
       try {
-        entry.thread.comments = [
-          asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
-          ...entry.replies.map(asNativeComment),
-        ];
-      } catch {
-        // Thread disposed concurrently (deleted from the native UI mid-reply) —
-        // the sidecar line is already durable and reassembles correctly on the
-        // next reload; nothing more to reconcile on this live object.
+        const author = await authorFor(document);
+        if (author === '') {
+          // US-23.10 AC4: cancelled prompt — cancel only this reply, leaving the
+          // reply box open with its typed text intact (same as any other refusal).
+          return { ok: false, error: 'No author name was provided — the reply was not saved.' };
+        }
+        const createdAt = new Date();
+        const timestamp = createdAt.toISOString();
+        const replyId = crypto.randomUUID();
+        const writeError = await store.append(
+          document,
+          buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
+        );
+        if (writeError !== null) {
+          return { ok: false, error: writeError };
+        }
+        entry.replies.push({ id: replyId, author, timestamp, body: msg.body });
+        try {
+          entry.thread.comments = [
+            asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
+            ...entry.replies.map(asNativeComment),
+          ];
+        } catch {
+          // Thread disposed concurrently (deleted from the native UI mid-reply) —
+          // the sidecar line is already durable and reassembles correctly on the
+          // next reload; nothing more to reconcile on this live object.
+        }
+        return { ok: true, replyId, author, timestamp };
+      } finally {
+        replying.delete(msg.threadId);
       }
-      return { ok: true, replyId, author, timestamp };
     },
 
     async deleteComment(msg, document) {

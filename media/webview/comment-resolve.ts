@@ -31,7 +31,12 @@ import {
   nearestHeadingBefore,
   type AnchorCandidateNode,
 } from './block-map';
-import { ANCHOR_REEVAL_DEBOUNCE_MS, COMMENT_ANCHOR_STATE_ATTR } from './constants';
+import {
+  ANCHOR_LOAD_BATCH_THRESHOLD,
+  ANCHOR_REEVAL_DEBOUNCE_MS,
+  ANCHOR_RESOLVE_CHUNK_SIZE,
+  COMMENT_ANCHOR_STATE_ATTR,
+} from './constants';
 import type { VsCodeApi } from './vscode-api';
 import type { CommentStatus, CommentSyncReply, CommentTransition } from '../../src/shared/messages';
 
@@ -167,6 +172,17 @@ export interface CommentResolveController {
   anchorOf(threadId: string): ThreadAnchor | undefined;
   /** Seed from `InitConfig.docUri` — echoed on every update so the host can verify the document. */
   setDocUri(uri: string): void;
+  /**
+   * Req 24 US-23.8 AC6/AC7: `main.ts` calls this once per `renderDocument`,
+   * right after `content.innerHTML` is assigned. Two jobs share the one call:
+   * it is the readiness gate a resolution pass requested before first paint
+   * was waiting on (a `commentThreadsSync` racing `renderDocument` — see
+   * `syncCommentThreads`'s "best-effort immediate sync" in `provider.ts` — must
+   * never read an empty `#content`, which would float every thread), and it
+   * bumps the generation stamp a still-running chunked load pass checks so a
+   * fresher pass always wins over a stale one (AC7).
+   */
+  notifyContentRendered(): void;
 }
 
 export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): CommentResolveController {
@@ -174,6 +190,24 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
   const threads = new Map<string, ThreadAnchor>();
   const listeners: Array<() => void> = [];
   let timer: number | undefined;
+  /**
+   * AC6: false until `notifyContentRendered()`'s first call. A resolution
+   * pass requested before then is deferred rather than run against whatever
+   * `#content` happens to hold (empty, or a previous document) — resolving
+   * early would fail every tier and float every thread for no real reason.
+   */
+  let contentReady = false;
+  /** Which deferred pass to run once `contentReady` flips true; last request wins. */
+  let deferredResolve: (() => void) | undefined;
+  /**
+   * AC7: bumped at the start of every full pass (`resolveAll` or a chunked
+   * pass's setup). A chunked pass captures the value at its own start and
+   * checks it before applying each chunk — a mismatch means some later pass
+   * (the debounced `refresh`, a fresh sync, another load) has already
+   * superseded it, so its remaining chunks are abandoned rather than
+   * overwriting fresher results.
+   */
+  let resolveGeneration = 0;
 
   /**
    * Mark the node so US-23.2's pin/highlight — and AC3's "visibly marked as
@@ -393,11 +427,47 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     }
   }
 
-  function resolveAll(): void {
-    if (threads.size === 0) {
-      return;
+  /**
+   * One thread's resolution, isolated: a throw from `resolveOne` (an
+   * unexpected DOM shape, a corrupt candidate) floats just this thread and
+   * never aborts the pass for every other one (AC6). Returns whether the
+   * thread's observable state changed, so the caller can batch `postUpdate`/
+   * `notifyChanged` decisions.
+   */
+  function resolveAnchor(anchor: ThreadAnchor, candidates: readonly AnchorCandidateNode[]): boolean {
+    const previousLine = anchor.lastKnownLine;
+    const previousState = anchor.state;
+    const previousAnchorId = anchor.anchorId;
+    const previousDrift = anchor.contentDrifted;
+    const previousAwaiting = anchor.awaitingAnchorDecision;
+    try {
+      resolveOne(anchor, candidates);
+      applyStatusIndicators(anchor, previousState);
+    } catch (err) {
+      console.warn(`[comment-resolve] resolveOne threw for thread ${anchor.threadId}; floating it.`, err);
+      anchor.carrier = undefined;
+      anchor.state = 'floating';
+      applyStatusIndicators(anchor, previousState);
     }
     let changed = false;
+    if (
+      anchor.lastKnownLine !== previousLine ||
+      anchor.state !== previousState ||
+      anchor.anchorId !== previousAnchorId
+    ) {
+      postUpdate(anchor);
+      changed = true;
+    }
+    if (anchor.contentDrifted !== previousDrift || anchor.awaitingAnchorDecision !== previousAwaiting) {
+      // Webview-only indicators: they must re-render the popover/dialog, but
+      // there is nothing for the host to follow, so no postUpdate.
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Shared setup for a full pass: dedup clones, clear stale marks, gather this pass's candidates. */
+  function prepareFullPass(): readonly AnchorCandidateNode[] {
     const keep = new Set<HTMLElement>();
     for (const anchor of threads.values()) {
       if (anchor.carrier?.isConnected) {
@@ -406,32 +476,73 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     }
     dedupeCommentAnchors(content, keep);
     clearStates();
-    const candidates = anchorCandidates(content);
+    return anchorCandidates(content);
+  }
+
+  function resolveAll(): void {
+    if (threads.size === 0) {
+      return;
+    }
+    if (!contentReady) {
+      // AC6: `#content` has not painted its first block yet — queue this pass
+      // rather than resolve against an empty DOM.
+      deferredResolve = resolveAll;
+      return;
+    }
+    resolveGeneration++;
+    const candidates = prepareFullPass();
+    let changed = false;
     for (const anchor of threads.values()) {
-      const previousLine = anchor.lastKnownLine;
-      const previousState = anchor.state;
-      const previousAnchorId = anchor.anchorId;
-      const previousDrift = anchor.contentDrifted;
-      const previousAwaiting = anchor.awaitingAnchorDecision;
-      resolveOne(anchor, candidates);
-      applyStatusIndicators(anchor, previousState);
-      if (
-        anchor.lastKnownLine !== previousLine ||
-        anchor.state !== previousState ||
-        anchor.anchorId !== previousAnchorId
-      ) {
-        postUpdate(anchor);
-        changed = true;
-      }
-      if (anchor.contentDrifted !== previousDrift || anchor.awaitingAnchorDecision !== previousAwaiting) {
-        // Webview-only indicators: they must re-render the popover/dialog, but
-        // there is nothing for the host to follow, so no postUpdate.
+      if (resolveAnchor(anchor, candidates)) {
         changed = true;
       }
     }
     if (changed) {
       notifyChanged();
     }
+  }
+
+  /**
+   * AC7: the load-time twin of `resolveAll`, used when a `syncAll` reload
+   * seeds more than `ANCHOR_LOAD_BATCH_THRESHOLD` new threads at once. Same
+   * per-thread work, spread across `setTimeout(0)` ticks so a heavily-
+   * commented file's first paint is never blocked, notifying (and so drawing
+   * pins) after each completed chunk rather than only at the very end.
+   */
+  function resolveAllChunked(): void {
+    if (threads.size === 0) {
+      return;
+    }
+    if (!contentReady) {
+      deferredResolve = resolveAllChunked;
+      return;
+    }
+    const generation = ++resolveGeneration;
+    const candidates = prepareFullPass();
+    const pending = Array.from(threads.values());
+    let index = 0;
+    const step = (): void => {
+      if (generation !== resolveGeneration) {
+        // Superseded by a newer pass (a debounced `refresh`, another load, a
+        // fresh `registerSeed`) — its results are already fresher than
+        // anything this stale chunk could still apply. Stop, don't overwrite.
+        return;
+      }
+      const end = Math.min(index + ANCHOR_RESOLVE_CHUNK_SIZE, pending.length);
+      let changed = false;
+      for (; index < end; index++) {
+        if (resolveAnchor(pending[index], candidates)) {
+          changed = true;
+        }
+      }
+      if (changed) {
+        notifyChanged();
+      }
+      if (index < pending.length) {
+        window.setTimeout(step, 0);
+      }
+    };
+    step();
   }
 
   function cancelPending(): void {
@@ -526,21 +637,27 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
           pruned.push(threadId);
         }
       }
-      let seeded = false;
+      let newlySeeded = 0;
       for (const seed of seeds) {
         const existing = threads.get(seed.threadId);
         if (existing) {
           refreshFromSeed(existing, seed);
         } else {
           threads.set(seed.threadId, seedToAnchor(seed));
-          seeded = true;
+          newlySeeded++;
         }
       }
-      if (seeded) {
+      if (newlySeeded > 0) {
         // Only a newly seeded thread needs the tiers run; a metadata-only
         // refresh leaves every anchor exactly where the last pass put it.
         cancelPending();
-        resolveAll();
+        // AC7: a reload seeding hundreds of threads at once runs the chunked
+        // pass instead of blocking first paint with one synchronous sweep.
+        if (newlySeeded > ANCHOR_LOAD_BATCH_THRESHOLD) {
+          resolveAllChunked();
+        } else {
+          resolveAll();
+        }
       }
       notifyChanged();
       return pruned;
@@ -607,6 +724,21 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     },
     setDocUri(uri): void {
       docUri = uri;
+    },
+    notifyContentRendered(): void {
+      contentReady = true;
+      // AC7: bump unconditionally, not only when flushing a deferred resolve —
+      // `renderDocument` calling this replaces `content.innerHTML` wholesale,
+      // which disconnects every element a still-running chunked pass captured
+      // in its `candidates`/`carrier` references. Without bumping here, that
+      // stale pass would keep applying results against the old (now-detached)
+      // DOM for up to `ANCHOR_REEVAL_DEBOUNCE_MS` — until `refresh()`'s own
+      // debounced `resolveAll()` finally ran and bumped it — instead of being
+      // caught on its very next tick.
+      resolveGeneration++;
+      const run = deferredResolve;
+      deferredResolve = undefined;
+      run?.();
     },
   };
 }

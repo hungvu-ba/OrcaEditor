@@ -14,7 +14,15 @@
  * host's own validation of those messages is covered in test/unit.ts.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { clearPosted, openCommentTab, openEditor, DEFAULT_DOC_URI } from './_harness';
+import {
+  clearPosted,
+  openBlankHarness,
+  openCommentTab,
+  openEditor,
+  postInit,
+  seedCommentThreads,
+  DEFAULT_DOC_URI,
+} from './_harness';
 
 /** Paragraphs share no wording, so a tier-2 miss below is a real miss. */
 const DOC = [
@@ -800,5 +808,218 @@ test.describe('AC3 / US-23.11 AC4 — the anchor-lost notice', () => {
     // ...but a Reopen of a still-anchorless thread genuinely does re-raise it.
     await hostSyncStatus(page, threadId, 'Open', { actor: SOMEONE_ELSE });
     await expect(page.locator('.comment-anchor-lost')).toBeVisible();
+  });
+});
+
+test.describe('US-23.8 AC1/AC6/AC7 — the reload/load-time resolve pass', () => {
+  test('AC1: a thread seeded fresh via commentThreadsSync (no live anchorId) resolves through tier 2 before its pin draws', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    // Never created this session (`register`) — only ever seeded, exactly like a
+    // thread persisted before the file was last closed (US-23.5) reaching the
+    // webview through `commentThreadsSync`.
+    await seedCommentThreads(page, [
+      { threadId: 'reload-1', recordedText: ANCHOR_TEXT, lastKnownLine: 3, body: 'Reload check.' },
+    ]);
+    const anchored = page.locator('[data-comment-anchor-state="exact"]');
+    await expect(anchored).toHaveCount(1);
+    await expect(anchored).toHaveText(ANCHOR_TEXT);
+    await expect(page.locator('.comment-gutter-pin')).toHaveCount(1);
+  });
+
+  test('AC6: a commentThreadsSync racing the first render is deferred, never resolved against an empty #content', async ({
+    page,
+  }) => {
+    // No 'init' posted yet: `#content` is still empty and `currentDocUri` is
+    // still '' — the exact race AC6 guards (the host's early sync can reach the
+    // webview before its first render). Both the sync and the later init below
+    // use the SAME docUri ('') — main.ts's 'init' handler treats an ACTUAL
+    // docUri change as switching documents and prunes every resolver thread
+    // via `syncAll([])` before rendering, which is a separate, pre-existing
+    // concern this AC does not own; matching them isolates the resolver's own
+    // readiness gate from that unrelated reset.
+    const config = await openBlankHarness(page);
+    await seedCommentThreads(page, [{ threadId: 'race-1', recordedText: ANCHOR_TEXT, lastKnownLine: 3 }], undefined, '');
+    await page.waitForTimeout(SETTLE_MS);
+    // Deferred, not resolved against nothing — no pin drawn yet.
+    await expect(page.locator('.comment-gutter-pin')).toHaveCount(0);
+
+    // The real render now happens — the deferred pass must flush against it.
+    await postInit(page, DOC, config, '');
+    const anchored = page.locator('[data-comment-anchor-state="exact"]');
+    await expect(anchored).toHaveCount(1);
+    await expect(page.locator('.comment-gutter-pin')).toHaveCount(1);
+  });
+
+  test('AC7: a load seeding more threads than the batch threshold still resolves every one of them', async ({ page }) => {
+    await openEditor(page, DOC);
+    const BULK = 35; // over ANCHOR_LOAD_BATCH_THRESHOLD (30) — forces the chunked pass
+    await seedCommentThreads(
+      page,
+      Array.from({ length: BULK }, (_, i) => ({
+        threadId: `bulk-${i}`,
+        recordedText: ANCHOR_TEXT,
+        lastKnownLine: 3,
+        body: `Bulk ${i}`,
+      }))
+    );
+    // All BULK threads land on the SAME node (identical recorded text — the
+    // design's own "several threads sharing one anchor is permitted" rule), so a
+    // fully-converged pass draws ONE cluster pin counting every thread, not a
+    // partial count stuck mid-batch.
+    await expect(page.locator('.comment-gutter-pin-cluster')).toHaveText(`+${BULK}`);
+  });
+});
+
+test.describe('US-23.8 AC2 — non-exact anchor state, marked on all three surfaces', () => {
+  test('a tier-3 (approximate) thread is marked on the gutter pin, the inline highlight, and the popover — and clears once exact again', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Does drains mean FIFO?');
+    await clearPosted(page);
+
+    // Rewrite the anchored paragraph in place — the DOM node (and its structural
+    // id) survives, but the recorded text no longer matches closely enough for
+    // tier 2, so it parks on the covering block at tier 3 (comment-anchor.spec.ts's
+    // own "tier 3" recipe).
+    await hostUpdate(page, DOC.replace(ANCHOR_TEXT, 'Nothing like it.'));
+
+    const anchored = page.locator('[data-comment-anchor-state="approximate"]');
+    await expect(anchored).toHaveCount(1);
+
+    // Gutter: the badge class plus a non-colour glyph, never colour alone.
+    const pin = page.locator('.comment-gutter-pin');
+    await expect(pin).toHaveClass(/comment-gutter-pin-nonexact/);
+    await expect(pin.locator('.comment-gutter-pin-nonexact-badge')).toHaveCount(1);
+    await expect(pin).toHaveAttribute('title', /Approximate location/);
+
+    // Popover: the requirement's own wording, next to the status pill. Opened
+    // BEFORE the highlight check below — the highlight overlay only ever draws
+    // for the toggle's passive set (off by default in this harness) or the
+    // thread whose popover is currently open (US-23.2 AC3), so its own thread
+    // needs to be active for the registry to hold anything to inspect at all.
+    await openPopover(page);
+    await expect(page.locator('.comment-popover-anchor-state')).toHaveText('Approximate location');
+
+    // Inline highlight: a SEPARATE Custom Highlight API registration from the
+    // exact one — no DOM class exists for it, so read the registry directly.
+    const highlightState = await page.evaluate(() => ({
+      exact: CSS.highlights.has('comment-anchor'),
+      nonexact: CSS.highlights.has('comment-anchor-nonexact'),
+    }));
+    expect(highlightState.nonexact).toBe(true);
+    expect(highlightState.exact).toBe(false);
+
+    // The Author restores the original text — back to exact, and every mark clears.
+    await hostUpdate(page, DOC);
+    await expect(page.locator(`[data-comment-anchor-state="approximate"]`)).toHaveCount(0);
+    await expect(pin).not.toHaveClass(/comment-gutter-pin-nonexact/);
+    await expect(page.locator('.comment-popover-anchor-state')).toBeHidden();
+    const clearedHighlight = await page.evaluate(() => CSS.highlights.has('comment-anchor-nonexact'));
+    expect(clearedHighlight).toBe(false);
+  });
+
+  test('a cluster pin is marked non-exact only when EVERY thread in it is', async ({ page }) => {
+    await openEditor(page, DOC);
+    // Two INDEPENDENT anchors (different paragraphs), one blank line apart —
+    // COMMENT_GUTTER_CLUSTER_BLANK_GAP still clusters them into one pin, but
+    // each has its own anchor id, so their resolutions never interact.
+    await createThread(page, 0, 'First.');
+    await createThread(page, 1, 'Second.');
+    await clearPosted(page);
+    const pin = page.locator('.comment-gutter-pin-cluster');
+    await expect(pin).toHaveCount(1); // sanity: they did cluster
+
+    // Only the first paragraph relocates — one exact, one approximate in the
+    // cluster, so the pin must NOT read as if both are non-exact.
+    await hostUpdate(page, DOC.replace(ANCHOR_TEXT, 'Nothing like it.'));
+    await expect(pin).not.toHaveClass(/comment-gutter-pin-nonexact/);
+
+    // The second paragraph relocates too — now every thread in the cluster is
+    // non-exact, and the pin must say so.
+    await hostUpdate(
+      page,
+      DOC.replace(ANCHOR_TEXT, 'Nothing like it.').replace(
+        'Identifiers are recorded for later audit.',
+        'Totally different now.'
+      )
+    );
+    await expect(pin).toHaveClass(/comment-gutter-pin-nonexact/);
+  });
+});
+
+test.describe('US-23.8 AC3 — reply guard hardening', () => {
+  test('AC3: clicking Submit twice before the host replies posts exactly one reply, not two', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await page.locator('.comment-popover-reply-input').fill('Following up.');
+    await clearPosted(page);
+
+    const submit = page.locator('.comment-popover-reply-submit');
+    await submit.click();
+    await submit.dispatchEvent('click'); // a second trigger before any result — no re-render disables it first
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await postedOfType(page, 'replyToComment')).toHaveLength(1);
+  });
+
+  test('AC3(i): Cancel during an in-flight reply abandons it — a late result stays silent and a fresh resubmit is never stuck', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await page.locator('.comment-popover-reply-input').fill('Following up.');
+    await clearPosted(page);
+    await page.locator('.comment-popover-reply-submit').click();
+    const [firstRequest] = await postedOfType(page, 'replyToComment');
+    expect(firstRequest).toBeTruthy();
+
+    // Cancel while the host has not answered yet.
+    await page.locator('.comment-popover-reply-cancel').click();
+    await expect(page.locator('.comment-popover-reply-box')).toBeHidden();
+
+    // A late failure for the ABANDONED request must land nowhere visible —
+    // before the fix, this wrote into `.comment-popover-reply-error` inside
+    // the now-hidden box, silently losing the "never silent" guarantee.
+    await simulate(page, { type: 'replyResult', requestId: firstRequest.requestId, ok: false, error: 'Too late.' });
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator('.comment-popover-reply-error')).toBeHidden();
+
+    // A fresh reply must not be blocked by the abandoned request's guard.
+    await page.locator('.comment-popover-reply-open').click();
+    await page.locator('.comment-popover-reply-input').fill('Second attempt.');
+    await clearPosted(page);
+    await page.locator('.comment-popover-reply-submit').click();
+    expect(await postedOfType(page, 'replyToComment')).toHaveLength(1);
+  });
+
+  test('AC3(i): a reply that never gets a result times out, releases the guard, and surfaces a failure', async ({
+    page,
+  }) => {
+    test.setTimeout(15_000);
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await page.locator('.comment-popover-reply-input').fill('Following up.');
+    await clearPosted(page);
+    await page.locator('.comment-popover-reply-submit').click();
+    expect(await postedOfType(page, 'replyToComment')).toHaveLength(1);
+    const isReadOnly = () =>
+      page.locator('.comment-popover-reply-input').evaluate((el) => (el as HTMLTextAreaElement).readOnly);
+    // Busy while in flight — the shipped US-23.10 AC5 behavior this guard reuses.
+    expect(await isReadOnly()).toBe(true);
+
+    // No `replyResult` ever arrives — host busy, panel disposed, message dropped.
+    await page.waitForTimeout(10_300);
+    await expect(page.locator('.comment-popover-reply-error')).toBeVisible();
+    expect(await isReadOnly()).toBe(false);
+
+    // The guard is actually released, not just visually — a fresh submit goes through.
+    await clearPosted(page);
+    await page.locator('.comment-popover-reply-submit').click();
+    expect(await postedOfType(page, 'replyToComment')).toHaveLength(1);
   });
 });

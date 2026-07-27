@@ -31,6 +31,7 @@ import {
   COMMENT_DRIFT_STRIP_CLASS,
   COMMENT_POPOVER_CLASS,
   COMMENT_REPLY_INPUT_CLASS,
+  COMMENT_REPLY_RESULT_TIMEOUT_MS,
 } from './constants';
 import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
@@ -118,6 +119,8 @@ export function initCommentPopover(
   let currentThreadId: string | undefined;
   let requestSeq = 0;
   let inFlightReplyRequest: number | undefined;
+  /** AC3(i): released if `replyResult` never arrives — a host-busy/disposed-panel/dropped-message never leaves this dead for the session. */
+  let replyTimeoutHandle: number | undefined;
   let inFlightDeleteRequest: number | undefined;
   /** Which reply (its durable id), or 'thread' for the thread itself, the in-flight delete targets — released on either outcome. */
   let inFlightDeleteTarget: string | 'thread' | undefined;
@@ -140,7 +143,13 @@ export function initCommentPopover(
   const headerTitle = el('span', 'comment-popover-title', 'Comment thread');
   const headerLine = el('span', 'comment-popover-line');
   const statusPill = el('span', 'comment-popover-status');
-  header.append(headerTitle, headerLine, statusPill);
+  // AC2: tier 3/4 anchors are never silently indistinguishable from an exact
+  // one on this surface — the requirement's own wording, matching the native
+  // `vscode.comments` surface (US-23.4 AC3) and the Comment tab's anchor pill
+  // (US-23.9 AC6).
+  const anchorStateNote = el('span', 'comment-popover-anchor-state');
+  anchorStateNote.hidden = true;
+  header.append(headerTitle, headerLine, statusPill, anchorStateNote);
 
   const quoteRow = el('div', 'comment-popover-quote');
   const quoteText = el('div', 'comment-popover-quote-text');
@@ -397,6 +406,9 @@ export function initCommentPopover(
     headerLine.textContent = anchor.lastKnownLine > 0 ? `Ln ${anchor.lastKnownLine}` : '';
     statusPill.textContent = anchor.status;
     statusPill.className = `comment-popover-status status-${anchor.status.toLowerCase()}`;
+    anchorStateNote.hidden = anchor.state === 'exact';
+    anchorStateNote.textContent =
+      anchor.state === 'floating' ? 'Unresolved location' : 'Approximate location';
 
     const quote = anchorQuote(anchor);
     quoteRow.hidden = quote === '';
@@ -473,8 +485,21 @@ export function initCommentPopover(
     replyError.textContent = '';
   }
 
-  /** Cancel: discard the draft AND close the input (AC6), appending no sidecar line. */
+  /**
+   * Cancel: discard the draft AND close the input (AC6), appending no sidecar
+   * line. Req 24 US-23.8 AC3(i): if THIS thread's reply is still in flight,
+   * abandon it here too — otherwise Cancel leaves `inFlightReplyRequest` set
+   * with no visible box to show a late result in (a failure would land
+   * silently inside the now-hidden `replyBox`), and blocks a fresh Submit for
+   * up to the timeout's full duration. A late `notifyReplyResult`/timeout for
+   * the abandoned request is a safe no-op once released (its `requestId` no
+   * longer matches anything in flight) — the write, if it succeeds host-side,
+   * still reaches this thread through the next `commentThreadsSync`.
+   */
   function closeReplyDraft(): void {
+    if (inFlightReplyRequest !== undefined && inFlightReplyThread === currentThreadId) {
+      releaseReplyGuard();
+    }
     replyInput.value = '';
     replyCollapsed = true;
     clearReplyError();
@@ -486,6 +511,41 @@ export function initCommentPopover(
   function syncSubmitState(): void {
     const ready = !replyBusy && replyInput.value.trim() !== '';
     replySubmit.setAttribute('aria-disabled', String(!ready));
+  }
+
+  /** AC3(i): clears the in-flight state and its timeout, whatever released it (a result or a timeout). */
+  function releaseReplyGuard(): void {
+    if (replyTimeoutHandle !== undefined) {
+      window.clearTimeout(replyTimeoutHandle);
+      replyTimeoutHandle = undefined;
+    }
+    inFlightReplyRequest = undefined;
+    inFlightReplyThread = undefined;
+    replyBusy = false;
+    replyInput.readOnly = false;
+  }
+
+  /**
+   * AC3(i): `replyResult` never arrived. Same surfacing rule `notifyReplyResult`
+   * uses below — inline on the thread whose box is still showing, a toast if the
+   * user has since moved to another thread. A `replyResult` that does arrive
+   * after this fires is for a request id that no longer matches anything
+   * in-flight, so `notifyReplyResult`'s own guard drops it as a harmless no-op —
+   * the reply itself is not lost, since a successful host-side append still
+   * reaches this thread through the next `commentThreadsSync` push regardless.
+   */
+  function handleReplyTimeout(requestId: number, forThread: string): void {
+    if (requestId !== inFlightReplyRequest) {
+      return;
+    }
+    releaseReplyGuard();
+    const message = 'No response from the host — the reply may not have been saved. Try again.';
+    if (forThread !== currentThreadId) {
+      showToast(message);
+      return;
+    }
+    showReplyError(message);
+    syncSubmitState();
   }
 
   function submitReply(): void {
@@ -505,6 +565,10 @@ export function initCommentPopover(
     inFlightReplyThread = threadId;
     replyBusy = true;
     replyInput.readOnly = true;
+    replyTimeoutHandle = window.setTimeout(
+      () => handleReplyTimeout(requestId, threadId),
+      COMMENT_REPLY_RESULT_TIMEOUT_MS
+    );
     syncSubmitState();
     // US-23.10 AC9: same neutralize + CRLF->LF treatment as a new comment's
     // body, applied here since a reply is authored the same way. EOL first —
@@ -600,11 +664,8 @@ export function initCommentPopover(
       if (requestId !== inFlightReplyRequest) {
         return;
       }
-      inFlightReplyRequest = undefined;
       const forThread = inFlightReplyThread;
-      inFlightReplyThread = undefined;
-      replyBusy = false;
-      replyInput.readOnly = false;
+      releaseReplyGuard();
       if (forThread !== currentThreadId) {
         // Resolved, but the user has moved to another thread — the inline
         // error surface belongs to the thread whose box is showing now, not

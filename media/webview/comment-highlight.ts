@@ -20,7 +20,7 @@
  */
 import { rangeWithinOffsets } from './dom-utils';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
-import { COMMENT_HIGHLIGHT_NAME } from './constants';
+import { COMMENT_HIGHLIGHT_NAME, COMMENT_HIGHLIGHT_NONEXACT_NAME } from './constants';
 
 export interface CommentHighlightController {
   /** "Show Comments" toolbar toggle changed. */
@@ -59,7 +59,11 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
     if (!supportsHighlight) {
       return;
     }
-    const ranges: Range[] = [];
+    const exactRanges: Range[] = [];
+    // AC2: tier 3 (approximate) washes render distinct from exact — a separate
+    // Highlight registration below, never colour alone (dashed decoration too).
+    // Tier 4 (floating) has no carrier and so never reaches either bucket.
+    const nonExactRanges: Range[] = [];
     for (const anchor of resolve.allThreads()) {
       // A Closed thread keeps no pin and no highlight (design handoff) — only
       // the not-yet-built Comment tab (US-23.7) can still reach it.
@@ -71,14 +75,20 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
         continue;
       }
       const r = rangeForAnchor(anchor);
-      if (r) {
-        ranges.push(r);
+      if (!r) {
+        continue;
       }
+      (anchor.state === 'exact' ? exactRanges : nonExactRanges).push(r);
     }
-    if (ranges.length === 0) {
+    if (exactRanges.length === 0) {
       CSS.highlights.delete(COMMENT_HIGHLIGHT_NAME);
     } else {
-      CSS.highlights.set(COMMENT_HIGHLIGHT_NAME, new Highlight(...ranges));
+      CSS.highlights.set(COMMENT_HIGHLIGHT_NAME, new Highlight(...exactRanges));
+    }
+    if (nonExactRanges.length === 0) {
+      CSS.highlights.delete(COMMENT_HIGHLIGHT_NONEXACT_NAME);
+    } else {
+      CSS.highlights.set(COMMENT_HIGHLIGHT_NONEXACT_NAME, new Highlight(...nonExactRanges));
     }
   }
 
