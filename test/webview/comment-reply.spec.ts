@@ -428,31 +428,31 @@ test('no edit/document-undo message is ever emitted by any comment action', asyn
   void threadId;
 });
 
+/** One `commentThreadsSync` snapshot line for `threadId`, with optional overrides. */
+function syncThread(threadId: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    threadId,
+    status: 'Open',
+    author: 'harness-user',
+    timestamp: new Date(2026, 6, 24, 10, 12).toISOString(),
+    body: 'Original comment.',
+    recordedText: 'Alpha paragraph text.',
+    offsetStart: 0,
+    offsetEnd: 5,
+    lastKnownLine: 3,
+    nearestHeading: 'Session expiry',
+    replies: [],
+    statusChanges: [],
+    ...over,
+  };
+}
+
 /**
  * Regression cases for the defects the adversarial review found — each pins a
  * behaviour the original 14 cases either did not cover or asserted more weakly
  * than the acceptance criterion.
  */
 test.describe('review regressions', () => {
-  /** One snapshot line for `threadId`, with optional overrides. */
-  function syncThread(threadId: string, over: Record<string, unknown> = {}): Record<string, unknown> {
-    return {
-      threadId,
-      status: 'Open',
-      author: 'harness-user',
-      timestamp: new Date(2026, 6, 24, 10, 12).toISOString(),
-      body: 'Original comment.',
-      recordedText: 'Alpha paragraph text.',
-      offsetStart: 0,
-      offsetEnd: 5,
-      lastKnownLine: 3,
-      nearestHeading: 'Session expiry',
-      replies: [],
-      statusChanges: [],
-      ...over,
-    };
-  }
-
   test('a thread absent from a host snapshot loses its pin, its highlight and its popover', async ({ page }) => {
     await openEditor(page, DOC);
     const { threadId } = await createThread(page, 0, 'Alpha comment.');
@@ -602,5 +602,173 @@ test.describe('review regressions', () => {
     });
     await expect(page.locator('.comment-popover-closed-notice')).toBeVisible();
     await expect(page.locator('.comment-popover-reply-box')).toBeHidden();
+  });
+});
+
+test.describe('Req 24 US-23.8 AC4 — reply draft survives a concurrent native Close', () => {
+  test('draft stays visible+editable with Submit disabled, and clears symmetrically on Reopen', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await page.locator('.comment-popover-reply-input').fill('My unsent draft.');
+
+    await simulate(page, {
+      type: 'commentThreadsSync',
+      docUri: DEFAULT_DOC_URI,
+      threads: [syncThread(threadId, { status: 'Closed' })],
+    });
+
+    await expect(page.locator('.comment-popover-reply-box')).toBeVisible();
+    await expect(page.locator('.comment-popover-reply-input')).toHaveValue('My unsent draft.');
+    const readOnly = await page
+      .locator('.comment-popover-reply-input')
+      .evaluate((el) => (el as HTMLTextAreaElement).readOnly);
+    expect(readOnly).toBe(false);
+    await expect(page.locator('.comment-popover-reply-submit')).toHaveAttribute('aria-disabled', 'true');
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeVisible();
+    await expect(page.locator('.comment-popover-closed-notice')).toBeHidden();
+
+    await simulate(page, {
+      type: 'commentThreadsSync',
+      docUri: DEFAULT_DOC_URI,
+      threads: [syncThread(threadId, { status: 'Open' })],
+    });
+
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeHidden();
+    await expect(page.locator('.comment-popover-reply-submit')).toHaveAttribute('aria-disabled', 'false');
+    await expect(page.locator('.comment-popover-reply-input')).toHaveValue('My unsent draft.');
+    expect(await postedOfType(page, 'replyToComment')).toHaveLength(0);
+  });
+
+  test('a reply already in flight is not cancelled by the Close — its own result decides, and the notice appears only afterwards', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await page.locator('.comment-popover-reply-input').fill('In-flight reply.');
+    await page.locator('.comment-popover-reply-submit').click();
+    const [reply] = await postedOfType(page, 'replyToComment');
+
+    await simulate(page, {
+      type: 'commentThreadsSync',
+      docUri: DEFAULT_DOC_URI,
+      threads: [syncThread(threadId, { status: 'Closed' })],
+    });
+    // Still mid-flight: the box reads as a normal busy composer, no closed
+    // notice yet — the Close has not been allowed to interrupt it.
+    await expect(page.locator('.comment-popover-reply-box')).toBeVisible();
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeHidden();
+    await expect(page.locator('.comment-popover-closed-notice')).toBeHidden();
+
+    await simulate(page, { type: 'replyResult', requestId: reply.requestId, ok: false, error: 'Refused.' });
+
+    await expect(page.locator('.comment-popover-reply-error')).toHaveText('Refused.');
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeVisible();
+    await expect(page.locator('.comment-popover-reply-input')).toHaveValue('In-flight reply.');
+    await expect(page.locator('.comment-popover-reply-submit')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  test('an in-flight reply that times out (no result ever arrives) after a concurrent Close also reveals the notice only afterwards', async ({ page }) => {
+    test.setTimeout(15_000);
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await page.locator('.comment-popover-reply-input').fill('Stuck reply.');
+    await page.locator('.comment-popover-reply-submit').click();
+
+    await simulate(page, {
+      type: 'commentThreadsSync',
+      docUri: DEFAULT_DOC_URI,
+      threads: [syncThread(threadId, { status: 'Closed' })],
+    });
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeHidden();
+
+    // No `replyResult` ever arrives — same AC3(i) timeout path, now racing AC4's Close.
+    await page.waitForTimeout(10_300);
+
+    await expect(page.locator('.comment-popover-reply-error')).toBeVisible();
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeVisible();
+    await expect(page.locator('.comment-popover-reply-input')).toHaveValue('Stuck reply.');
+    await expect(page.locator('.comment-popover-reply-submit')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  test('the thread being deleted while its popover is open closes it and states the deletion in a toast', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+
+    await simulate(page, { type: 'commentThreadsSync', docUri: DEFAULT_DOC_URI, threads: [] });
+
+    await expect(page.locator('.comment-popover')).toBeHidden();
+    await expect(page.locator('#wysiwyg-toast')).toHaveText('This thread was deleted.');
+  });
+
+  test('an ordinary Cancel still discards the draft even on a thread that is Closed', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await page.locator('.comment-popover-reply-input').fill('Draft to abandon.');
+    await simulate(page, {
+      type: 'commentThreadsSync',
+      docUri: DEFAULT_DOC_URI,
+      threads: [syncThread(threadId, { status: 'Closed' })],
+    });
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeVisible();
+
+    await page.locator('.comment-popover-reply-cancel').click();
+
+    await expect(page.locator('.comment-popover-reply-box')).toBeHidden();
+    await expect(page.locator('.comment-popover-closed-while-draft')).toBeHidden();
+    await expect(page.locator('.comment-popover-closed-notice')).toBeVisible();
+  });
+});
+
+test.describe('Req 24 US-23.8 AC5 — temporary highlight independent of the "Show Comments" toggle', () => {
+  test('toggle off: opening a popover draws only the independent active-thread highlight, closing clears it', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Alpha comment.');
+    await clickPin(page, 0);
+
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBe(1);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor')?.size ?? 0)).toBe(0);
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.comment-popover')).toBeHidden();
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBeFalsy();
+  });
+
+  test('opening a second thread transfers the active highlight instead of accumulating', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Thread A.');
+    await createThread(page, 2, 'Thread B.');
+
+    await clickPin(page, 0);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBe(1);
+
+    await clickPin(page, 1);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBe(1);
+  });
+
+  test('toggling the "Show Comments" switch while a popover is open never disturbs the temporary highlight, and closing removes only the temporary scope', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Alpha comment.');
+    await clickPin(page, 0);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBe(1);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor')?.size ?? 0)).toBe(0);
+
+    // The keyboard shortcut, not the toolbar button — clicking the button is a
+    // real mousedown OUTSIDE the popover card, which the popover's own
+    // (unrelated, pre-existing) outside-click dismiss would legitimately close
+    // on, defeating the "mid-popover" scenario this AC describes.
+    await page.locator('#content').press('Alt+Shift+C');
+    await expect(page.locator('.comment-popover')).toBeVisible();
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBe(1);
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor')?.size ?? 0)).toBe(1);
+
+    // Closing while the toggle is ON: only the temporary scope goes away — the
+    // thread keeps the highlight the toggle itself gives it.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.comment-popover')).toBeHidden();
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBeFalsy();
+    expect(await page.evaluate(() => CSS.highlights.get('comment-anchor')?.size ?? 0)).toBe(1);
   });
 });

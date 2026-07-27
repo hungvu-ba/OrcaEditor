@@ -898,26 +898,33 @@ test.describe('US-23.8 AC2 — non-exact anchor state, marked on all three surfa
     // Popover: the requirement's own wording, next to the status pill. Opened
     // BEFORE the highlight check below — the highlight overlay only ever draws
     // for the toggle's passive set (off by default in this harness) or the
-    // thread whose popover is currently open (US-23.2 AC3), so its own thread
+    // thread whose popover is currently open (US-23.2 AC3; Req 24 US-23.8 AC5:
+    // the active thread's own independent registration), so its own thread
     // needs to be active for the registry to hold anything to inspect at all.
     await openPopover(page);
     await expect(page.locator('.comment-popover-anchor-state')).toHaveText('Approximate location');
 
     // Inline highlight: a SEPARATE Custom Highlight API registration from the
     // exact one — no DOM class exists for it, so read the registry directly.
+    // With the toggle off, an active non-exact thread draws through AC5's own
+    // active/non-exact registration, not the toggle-gated one.
     const highlightState = await page.evaluate(() => ({
       exact: CSS.highlights.has('comment-anchor'),
       nonexact: CSS.highlights.has('comment-anchor-nonexact'),
+      activeExact: CSS.highlights.has('comment-anchor-open'),
+      activeNonexact: CSS.highlights.has('comment-anchor-open-nonexact'),
     }));
-    expect(highlightState.nonexact).toBe(true);
+    expect(highlightState.activeNonexact).toBe(true);
     expect(highlightState.exact).toBe(false);
+    expect(highlightState.nonexact).toBe(false);
+    expect(highlightState.activeExact).toBe(false);
 
     // The Author restores the original text — back to exact, and every mark clears.
     await hostUpdate(page, DOC);
     await expect(page.locator(`[data-comment-anchor-state="approximate"]`)).toHaveCount(0);
     await expect(pin).not.toHaveClass(/comment-gutter-pin-nonexact/);
     await expect(page.locator('.comment-popover-anchor-state')).toBeHidden();
-    const clearedHighlight = await page.evaluate(() => CSS.highlights.has('comment-anchor-nonexact'));
+    const clearedHighlight = await page.evaluate(() => CSS.highlights.has('comment-anchor-open-nonexact'));
     expect(clearedHighlight).toBe(false);
   });
 

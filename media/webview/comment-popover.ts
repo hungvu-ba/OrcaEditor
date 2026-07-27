@@ -185,6 +185,15 @@ export function initCommentPopover(
 
   const closedNotice = el('div', 'comment-popover-closed-notice', 'This thread is closed');
 
+  // Req 24 US-23.8 AC4: a Close landing while a draft is open must never drop
+  // it — this transient notice sits ABOVE the still-visible, still-editable
+  // replyBox instead of the permanent `closedNotice` replacing it outright.
+  // Cleared the moment the thread leaves Closed (Reopen) or the draft itself
+  // is cleared (Cancel, or a successful submit).
+  const closedWhileDraftNotice = el('div', 'comment-popover-closed-while-draft', 'This thread was just closed — your reply has not been sent.');
+  closedWhileDraftNotice.hidden = true;
+  closedWhileDraftNotice.setAttribute('role', 'status');
+
   // AC2: a passive strip, directly under the header as in the design. No button
   // and no dismiss — it is recomputed from the anchor on every render, so it
   // leaves on its own once the text matches again and returns if it drifts later.
@@ -230,6 +239,7 @@ export function initCommentPopover(
     driftStrip,
     quoteRow,
     list,
+    closedWhileDraftNotice,
     replyBox,
     replyOpen,
     closedNotice,
@@ -276,6 +286,22 @@ export function initCommentPopover(
       returnTo.focus();
     }
   });
+
+  /**
+   * Req 24 US-23.8 AC4: a thread (or its parent comment) deleted while this
+   * popover is open must never close silently — state it in a toast. Guarded
+   * on `card.hidden` since both `resolve.onChange`'s `!anchor` branch and
+   * `forgetThreads` can observe the SAME deletion off the same sync and would
+   * otherwise toast twice; `cardDismiss.close()` itself is a no-op once the
+   * card is already hidden, so only the first caller ever gets here.
+   */
+  function closeForDeletion(): void {
+    if (card.hidden) {
+      return;
+    }
+    cardDismiss.close();
+    showToast('This thread was deleted.');
+  }
 
   /** Bring the anchored range into view first if it is off-screen (AC: "unfolding/scrolling ... into view"). */
   function revealIfNeeded(target: HTMLElement): void {
@@ -441,9 +467,9 @@ export function initCommentPopover(
     }
 
     // Replying is blocked while the thread is Closed (US-23.3) — the popover
-    // shows a notice instead of the reply box, per the AC.
+    // shows a notice instead of the reply box, unless AC4's protected-draft
+    // case applies (an open draft or an in-flight submit survives the Close).
     const closed = anchor.status === 'Closed';
-    closedNotice.hidden = !closed;
     applyReplyVisibility(closed);
 
     // AC2: live and derived. Suppressed once the thread reaches Resolved/Closed —
@@ -463,17 +489,41 @@ export function initCommentPopover(
     renderActionBar(anchor);
   }
 
-  /**
-   * The reply affordance is a three-way state: the notice (thread Closed), the
-   * open composer, or the collapsed "Reply" button once Cancel discarded a draft.
-   */
-  function applyReplyVisibility(closed: boolean): void {
-    replyBox.hidden = closed || replyCollapsed;
-    replyOpen.hidden = closed || !replyCollapsed;
-  }
-
   /** US-23.10 AC5: while a reply is in flight, the input is read-only and Submit inert — never after a refusal, which re-arms both. */
   let replyBusy = false;
+
+  /** Req 24 US-23.8 AC4: unsubmitted text sitting in an open composer. */
+  function hasProtectedDraft(): boolean {
+    return !replyCollapsed && replyInput.value.trim() !== '';
+  }
+
+  /**
+   * The reply affordance is a four-way state: the permanent notice (thread
+   * Closed, nothing to protect), the AC4 protected-draft state (thread Closed
+   * but the box stays visible+editable with Submit disabled and a transient
+   * notice above it), the open composer, or the collapsed "Reply" button once
+   * Cancel discarded a draft.
+   */
+  function applyReplyVisibility(closed: boolean): void {
+    if (replyBusy) {
+      // Req 24 US-23.8 AC4: a submit already in flight is never interrupted by
+      // a concurrent Close — it stays a normal in-flight composer, and no
+      // closed-related notice appears until its OWN result (notifyReplyResult)
+      // decides the outcome and re-runs this function.
+      replyBox.hidden = replyCollapsed;
+      replyOpen.hidden = !replyCollapsed;
+      closedNotice.hidden = true;
+      closedWhileDraftNotice.hidden = true;
+      syncSubmitState();
+      return;
+    }
+    const protectedDraft = closed && hasProtectedDraft();
+    replyBox.hidden = (closed && !protectedDraft) || replyCollapsed;
+    replyOpen.hidden = closed || !replyCollapsed;
+    closedNotice.hidden = !closed || protectedDraft;
+    closedWhileDraftNotice.hidden = !protectedDraft;
+    syncSubmitState();
+  }
 
   function showReplyError(message: string): void {
     replyError.textContent = message;
@@ -503,13 +553,16 @@ export function initCommentPopover(
     replyInput.value = '';
     replyCollapsed = true;
     clearReplyError();
-    syncSubmitState();
     const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
     applyReplyVisibility(anchor?.status === 'Closed');
   }
 
   function syncSubmitState(): void {
-    const ready = !replyBusy && replyInput.value.trim() !== '';
+    // Req 24 US-23.8 AC4: Submit stays disabled while the thread is Closed,
+    // even in the protected-draft case — reopening is what re-enables it.
+    const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
+    const closed = anchor?.status === 'Closed';
+    const ready = !replyBusy && !closed && replyInput.value.trim() !== '';
     replySubmit.setAttribute('aria-disabled', String(!ready));
   }
 
@@ -545,7 +598,11 @@ export function initCommentPopover(
       return;
     }
     showReplyError(message);
-    syncSubmitState();
+    // Req 24 US-23.8 AC4: same reasoning as `notifyReplyResult`'s failure
+    // branch — `replyBusy` just cleared, so this reveals a "just closed"
+    // notice if a concurrent Close landed while the request was stuck.
+    const anchor = resolve.anchorOf(forThread);
+    applyReplyVisibility(anchor?.status === 'Closed');
   }
 
   function submitReply(): void {
@@ -604,7 +661,7 @@ export function initCommentPopover(
     }
     const anchor = resolve.anchorOf(currentThreadId);
     if (!anchor) {
-      cardDismiss.close();
+      closeForDeletion();
       return;
     }
     render(anchor);
@@ -651,7 +708,7 @@ export function initCommentPopover(
       // A thread pruned by a host snapshot (deleted here, in a second panel, or
       // from the native Comments UI) must not keep an open popover alive.
       if (currentThreadId !== undefined && threadIds.includes(currentThreadId)) {
-        cardDismiss.close();
+        closeForDeletion();
       }
     },
     setDocUri(uri): void {
@@ -679,9 +736,14 @@ export function initCommentPopover(
       }
       if (!ok) {
         // US-23.10 AC5: the reply box stays open with its text intact and the
-        // reason shown inline — never a toast.
+        // reason shown inline — never a toast. Req 24 US-23.8 AC4: `replyBusy`
+        // is already cleared by `releaseReplyGuard` above, so re-running
+        // `applyReplyVisibility` here is what surfaces the "just closed" notice
+        // if a concurrent Close landed while this request was in flight —
+        // exactly the "notice appears only afterwards" case.
         showReplyError(error ?? 'The reply could not be saved.');
-        syncSubmitState();
+        const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
+        applyReplyVisibility(anchor?.status === 'Closed');
         return;
       }
       closeReplyDraft();

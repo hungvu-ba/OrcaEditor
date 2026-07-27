@@ -4205,6 +4205,24 @@ body[class*='reading-mode-'] .comment-composer-input {
   text-decoration-thickness: 1.5px;
 }
 
+/* Req 24 US-23.8 AC5: the temporary, thread-scoped wash for whichever
+ * thread's popover is open right now — its own registrations (never the
+ * toggle-gated buckets above), so they render even with "Show Comments" off
+ * and for a Closed thread opened from the Comment tab. Slightly stronger than
+ * the passive exact wash so the "this is what you're looking at" cue reads
+ * clearly even when it overlaps one of the buckets above. Split exact/
+ * non-exact so AC2's distinction (dashed underline, never colour alone)
+ * still holds for the active thread with the toggle off. */
+::highlight(comment-anchor-open) {
+  background-color: rgba(130, 110, 220, 0.34);
+}
+
+::highlight(comment-anchor-open-nonexact) {
+  background-color: var(--comment-status-anchor-bg);
+  text-decoration: underline dashed var(--comment-warn-fg);
+  text-decoration-thickness: 1.5px;
+}
+
 /* --- Req 23 US-23.2: gutter pins ---------------------------------------------
  * A lane immediately left of #content, independent of gutter.ts's numbered
  * line gutter (a separate lane, own reservation) and of the showLineNumbers
@@ -4654,6 +4672,23 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 }
 
 .comment-popover-closed-notice[hidden] {
+  display: none;
+}
+
+/* Req 24 US-23.8 AC4: the transient notice shown ABOVE a still-visible reply
+ * box when a Close lands while a draft is open — same "anchor trouble" warn
+ * tone as .comment-popover-drift above (Req 23 US-23.3), since it is
+ * likewise passive and informational, not an error. */
+.comment-popover-closed-while-draft {
+  flex: none;
+  padding: 7px 12px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #a4680b) 14%, transparent);
+  color: var(--vscode-editorWarning-foreground, #a4680b);
+}
+
+.comment-popover-closed-while-draft[hidden] {
   display: none;
 }
 

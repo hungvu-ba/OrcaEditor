@@ -10,23 +10,34 @@
  * and an active search-match highlight render as two distinct, non-overriding
  * layers, never mixed.
  *
- * The toggle only gates the PASSIVE set (every non-Closed thread); the
- * currently open popover's thread is always included regardless of the
- * toggle, since "clicking a gutter pin opens the popover with the anchored
- * range highlighted" (US-23.2 AC) must hold even with "Show Comments" off.
+ * The toggle only gates the PASSIVE set (every non-Closed thread). Req 24
+ * US-23.8 AC5: the currently open popover's thread gets its own THIRD,
+ * independent registration (`COMMENT_HIGHLIGHT_ACTIVE_NAME`) instead of being
+ * folded into the passive set — it is always drawn regardless of the toggle
+ * (since "clicking a gutter pin opens the popover with the anchored range
+ * highlighted", US-23.2 AC, must hold even with "Show Comments" off) and even
+ * for a Closed thread (the Comment tab, US-23.9, can open one), which the
+ * passive set deliberately excludes. Keeping it a separate registration means
+ * toggling on/off never adds or removes it, and closing the popover never
+ * disturbs whatever the toggle itself already draws for that thread.
  *
  * Nothing here writes to `#content` — Ranges are pure text-position handles,
  * so there is no DOM class/attribute for turndown.ts to strip.
  */
 import { rangeWithinOffsets } from './dom-utils';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
-import { COMMENT_HIGHLIGHT_NAME, COMMENT_HIGHLIGHT_NONEXACT_NAME } from './constants';
+import {
+  COMMENT_HIGHLIGHT_ACTIVE_NAME,
+  COMMENT_HIGHLIGHT_ACTIVE_NONEXACT_NAME,
+  COMMENT_HIGHLIGHT_NAME,
+  COMMENT_HIGHLIGHT_NONEXACT_NAME,
+} from './constants';
 
 export interface CommentHighlightController {
   /** "Show Comments" toolbar toggle changed. */
   setToggle(on: boolean): void;
   isOn(): boolean;
-  /** The thread whose popover is currently open (or none) — always highlighted regardless of the toggle. */
+  /** The thread whose popover is currently open (or none) — always highlighted (its own registration) regardless of the toggle or Closed status. */
   setActiveThread(threadId: string | undefined): void;
   /** Recompute the highlighted ranges — call after a re-render (anchors may have moved to new nodes). */
   refresh(): void;
@@ -65,13 +76,11 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
     // Tier 4 (floating) has no carrier and so never reaches either bucket.
     const nonExactRanges: Range[] = [];
     for (const anchor of resolve.allThreads()) {
-      // A Closed thread keeps no pin and no highlight (design handoff) — only
-      // the not-yet-built Comment tab (US-23.7) can still reach it.
-      if (anchor.status === 'Closed') {
-        continue;
-      }
-      const isActive = anchor.threadId === activeThreadId;
-      if (!on && !isActive) {
+      // A Closed thread keeps no pin and no highlight in the TOGGLE set
+      // (design handoff) — the Comment tab (US-23.9) can still open one, and
+      // that case is covered below by the independent active-thread bucket,
+      // which has no status gate of its own (Req 24 US-23.8 AC5).
+      if (anchor.status === 'Closed' || !on) {
         continue;
       }
       const r = rangeForAnchor(anchor);
@@ -89,6 +98,39 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
       CSS.highlights.delete(COMMENT_HIGHLIGHT_NONEXACT_NAME);
     } else {
       CSS.highlights.set(COMMENT_HIGHLIGHT_NONEXACT_NAME, new Highlight(...nonExactRanges));
+    }
+
+    // Req 24 US-23.8 AC5: a temporary, thread-scoped wash for whichever thread's
+    // popover is open right now — its own independent registrations, so they
+    // never share a Highlight object with (and never disturb) the toggle-gated
+    // buckets above. Driven solely by `activeThreadId`: unaffected by the
+    // toggle in either direction, and reachable even for a Closed thread
+    // (opened from the Comment tab), which the toggle buckets deliberately
+    // exclude. Split exact/non-exact, same as the toggle buckets, so AC2's
+    // distinction still holds here even with the toggle off. Reassigned
+    // wholesale on every `setActiveThread` call, so switching threads
+    // transfers it instead of accumulating.
+    const activeAnchor = activeThreadId === undefined ? undefined : resolve.anchorOf(activeThreadId);
+    const activeRange = activeAnchor ? rangeForAnchor(activeAnchor) : null;
+    const activeIsExact = activeRange !== null && activeAnchor!.state === 'exact';
+    if (activeRange && activeIsExact) {
+      // `.priority` pins this ABOVE the toggle buckets regardless of `Map`
+      // insertion order — without it, the Custom Highlight API paints
+      // whichever registration was `.set()` most recently on top, so opening
+      // a popover and only THEN toggling "Show Comments" on would silently
+      // invert which wash actually renders.
+      const h = new Highlight(activeRange);
+      h.priority = 1;
+      CSS.highlights.set(COMMENT_HIGHLIGHT_ACTIVE_NAME, h);
+    } else {
+      CSS.highlights.delete(COMMENT_HIGHLIGHT_ACTIVE_NAME);
+    }
+    if (activeRange && !activeIsExact) {
+      const h = new Highlight(activeRange);
+      h.priority = 1;
+      CSS.highlights.set(COMMENT_HIGHLIGHT_ACTIVE_NONEXACT_NAME, h);
+    } else {
+      CSS.highlights.delete(COMMENT_HIGHLIGHT_ACTIVE_NONEXACT_NAME);
     }
   }
 

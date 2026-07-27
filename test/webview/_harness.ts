@@ -226,6 +226,9 @@ export interface SeedThread {
   timestamp?: string;
   body?: string;
   recordedText?: string;
+  /** Defaults to a bare-caret anchor (0, 0) — override both to give the thread a real washable range. */
+  offsetStart?: number;
+  offsetEnd?: number;
   lastKnownLine?: number;
   /** US-23.11 AC2: the applied transition trail, oldest first. */
   statusChanges?: Array<{ toStatus: 'Open' | 'Resolved' | 'Closed'; author: string; timestamp: string }>;
@@ -270,8 +273,8 @@ export async function seedCommentThreads(
             timestamp: t.timestamp ?? '2026-07-20T09:00:00.000Z',
             body: t.body ?? 'Body.',
             recordedText: t.recordedText ?? '',
-            offsetStart: 0,
-            offsetEnd: 0,
+            offsetStart: t.offsetStart ?? 0,
+            offsetEnd: t.offsetEnd ?? 0,
             lastKnownLine: t.lastKnownLine ?? 1,
             nearestHeading: '',
             replies: [],

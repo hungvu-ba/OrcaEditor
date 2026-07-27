@@ -469,3 +469,4 @@
 | 0.10.0 | 2026-07-27 | Fix (US-19.26): fit-mode no longer pins width when there's room — typing into a cell grows it live instead of waiting for the debounced re-fit. |
 | 0.10.0 | 2026-07-27 | Fix (US-23.10): comment create hardened — click-point anchoring, refusals stay inline with retry, up-front document guard, author-name prompt, plain-text rendering everywhere. |
 | 0.10.0 | 2026-07-27 | Fix (US-23.8): reload resolves comment threads through the anchor tiers before drawing, marks non-exact anchor state on all three surfaces, hardens the reply guard with a timeout. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.8): reply draft survives a concurrent native Close (Reopen re-enables it), and the popover's temporary highlight is independent of the "Show Comments" toggle. |

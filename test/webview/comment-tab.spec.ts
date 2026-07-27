@@ -336,6 +336,27 @@ test('a Closed thread is reachable from a row even though it has no gutter pin',
   await expect(page.locator('.comment-popover')).toBeVisible();
 });
 
+test('Req 24 US-23.8 AC5: a Closed thread opened from this row still gets the temporary highlight', async ({ page }) => {
+  // The toggle-gated highlight buckets deliberately exclude Closed threads
+  // (US-23.2 AC1) — the independent active-thread registration must not.
+  // CLOSED's own default offsets (0, 0) are a bare-caret anchor with nothing
+  // to wash, so this needs its own real range.
+  await openWith(page, [{ ...CLOSED, offsetStart: 0, offsetEnd: 14 }]);
+
+  await rows(page).first().click();
+  await expect(page.locator('.comment-popover')).toBeVisible();
+  const active = await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0);
+  expect(active).toBe(1);
+  const toggled = await page.evaluate(
+    () => (CSS.highlights.get('comment-anchor')?.size ?? 0) + (CSS.highlights.get('comment-anchor-nonexact')?.size ?? 0)
+  );
+  expect(toggled).toBe(0);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.comment-popover')).toBeHidden();
+  expect(await page.evaluate(() => CSS.highlights.get('comment-anchor-open')?.size ?? 0)).toBeFalsy();
+});
+
 test('closing the popover returns focus to the row that opened it', async ({ page }) => {
   await openWith(page, [RESOLVED]);
 

@@ -248,6 +248,21 @@ export const COMMENT_HIGHLIGHT_NAME = 'comment-anchor';
 export const COMMENT_HIGHLIGHT_NONEXACT_NAME = 'comment-anchor-nonexact';
 
 /**
+ * Req 24 US-23.8 AC5: independent registrations for the single thread whose
+ * popover is currently open — driven solely by that fact, never by the "Show
+ * Comments" toggle or the thread's status, so they never share a `Highlight`
+ * object with the toggle-gated exact/non-exact buckets above. Split into an
+ * exact/non-exact pair, same as the toggle buckets, so AC2's "never silently
+ * indistinguishable from an exact anchor" still holds for the active thread
+ * even with the toggle off (where the toggle buckets draw nothing at all).
+ * Named distinctly from the unrelated `.comment-anchor-active` DOM class
+ * (the composer's "anchor stays lit while composing" style, editor.css) —
+ * same neighbourhood, different mechanism (Highlight registration vs. class).
+ */
+export const COMMENT_HIGHLIGHT_ACTIVE_NAME = 'comment-anchor-open';
+export const COMMENT_HIGHLIGHT_ACTIVE_NONEXACT_NAME = 'comment-anchor-open-nonexact';
+
+/**
  * Gutter pins on lines within this many BLANK lines of each other collapse
  * into one "+N" cluster marker (design handoff: "Ln 7/9/11 sit inside the
  * cluster window"). A blank-line gap of 1 (i.e. consecutive or one blank line
