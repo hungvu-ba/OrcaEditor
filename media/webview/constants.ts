@@ -226,6 +226,8 @@ export const RIGHT_DOCK_TABPANEL_CLASS = 'right-dock-tabpanel';
 export const RIGHT_DOCK_MENU_BTN_CLASS = 'right-dock-menu-btn';
 /** DOM class for the overflow menu, mounted on `document.body` (comment-popover.ts convention). */
 export const RIGHT_DOCK_MENU_CLASS = 'right-dock-menu';
+/** DOM class for one selectable row in the overflow menu — the arrow-traversal unit. */
+export const RIGHT_DOCK_MENU_ITEM_CLASS = 'right-dock-menu-item';
 
 // --- Req 23 US-23.3: two-step resolve (Open -> Resolved -> Closed) ---
 

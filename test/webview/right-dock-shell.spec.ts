@@ -3,18 +3,17 @@
  *
  * Covers: the panel renders as the `TOC` tab inside a tab strip with correct
  * `tablist`/`tab`/`tabpanel` ARIA and a single tab stop (AC1, AC6); `#toc-toggle`
- * opens on the `TOC` tab (AC4); the `⋯` button is not rendered while the active
- * tab has registered no items (AC5); Escape closes the container but only after
+ * opens on the `TOC` tab (AC4); the `⋯` button renders exactly when the active
+ * tab has registered items (AC5); Escape closes the container but only after
  * a higher-priority surface has had its turn (AC6); the container keeps the
  * shipped docked-right geometry (AC1, AC3); mutual exclusion with US-23.4's
  * `#comment-panel` still holds (AC9).
  *
  * Not covered here, and deliberately so — see the deferred-work entry for
  * US-23.7: tab switching, ←/→ traversal and last-tab restore are unobservable
- * with a single registered tab, and the `⋯` menu's own open/close behaviours
- * have no item to be exercised with until US-10.8 registers the depth controls.
- * The priority-table assertion below is what guards the menu's Escape ordering
- * in the meantime.
+ * with a single registered tab. The `⋯` menu now has items (US-10.8's depth
+ * control), so its per-item behaviour is exercised in toc-filter.spec.ts; the
+ * priority-table assertion below guards the menu's Escape ordering.
  */
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
@@ -74,16 +73,22 @@ test('the panel renders as the TOC tab inside a tab strip with tablist semantics
   await expect(page.locator('#toc-tabpanel #toc-list .toc-item')).toHaveCount(3);
 });
 
-test('the ⋯ button is not rendered while the active tab has registered no menu items', async ({ page }) => {
+test('the ⋯ button renders because the TOC tab registers menu items, and its menu starts closed', async ({ page }) => {
   await openEditor(page, DOC);
   await openDock(page);
 
-  // Literally absent from the DOM, not merely hidden — US-10.8 registering the
-  // TOC tab's depth items is what puts it in the strip.
-  await expect(page.locator('.right-dock-menu-btn')).toHaveCount(0);
-  // The menu node itself exists (built once at dock creation) but stays hidden.
+  // US-10.8 registers the TOC tab's depth items, which is what puts the button in
+  // the strip; AC5's "absent when there are no items" branch is enforced by
+  // updateMenuButton() running from activate(), and stays observable the moment a
+  // second, item-less tab registers (US-23.9).
+  await expect(page.locator('.right-dock-menu-btn')).toHaveCount(1);
+  // The menu node exists (built once at dock creation) but stays hidden until asked.
   await expect(page.locator('.right-dock-menu')).toHaveCount(1);
   await expect(page.locator('.right-dock-menu')).toBeHidden();
+
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu')).toBeVisible();
+  await expect(page.locator('.right-dock-menu-title')).toHaveText('Outline depth');
 });
 
 test('an inactive tabpanel is really hidden — an author display must not defeat [hidden]', async ({ page }) => {
@@ -131,7 +136,7 @@ test('AC8: the strip and its menu re-tint and re-scale with Reading Mode', async
   const panelBg = await page.locator('#toc-panel').evaluate((el) => getComputedStyle(el).backgroundColor);
   await expect(page.locator('.right-dock-tabs')).toHaveCSS('background-color', panelBg);
 
-  // Rail chrome scales with the reading UI size (the .toc-depth-btn precedent),
+  // Rail chrome scales with the reading UI size (the outline-row precedent),
   // rather than staying at the OS-chrome 11px beside outline rows that grew.
   const [tabSize, itemSize] = await page.evaluate(() => {
     const probe = document.createElement('div');

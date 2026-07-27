@@ -15,6 +15,11 @@
  * that closes the panel MUST call `closeMenu()`: the menu is not a child of the
  * panel and will not disappear with it.
  *
+ * The menu owns its own keyboard model (added with US-10.8, the first tab to
+ * register items): opening moves focus to the checked row, ↑/↓/Home/End traverse,
+ * and closing hands focus back to the `⋯` button — which also keeps the panel
+ * Escape-closable, since main.ts's dock handler requires focus inside the panel.
+ *
  * Deferred to US-23.9, where a second tab makes each observable (see
  * `_bmad-output/quick-dev/deferred-work.md`): ←/→ traversal across headers, and
  * the visible half of tab switching / last-tab restore.
@@ -23,6 +28,7 @@
 import {
   RIGHT_DOCK_MENU_BTN_CLASS,
   RIGHT_DOCK_MENU_CLASS,
+  RIGHT_DOCK_MENU_ITEM_CLASS,
   RIGHT_DOCK_STRIP_CLASS,
   RIGHT_DOCK_TABLIST_CLASS,
   RIGHT_DOCK_TABPANEL_CLASS,
@@ -128,9 +134,67 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     () => {
       menuBtn.setAttribute('aria-expanded', 'false');
       menuBtn.classList.remove('open');
+      // Hiding the menu would drop focus to <body> whenever a row held it, and
+      // the dock-level Escape handler (main.ts) bails unless focus is inside the
+      // panel — so a keyboard user who opened the menu could no longer Escape the
+      // panel. The button lives in the strip, i.e. inside the panel, so handing
+      // focus back there restores both that path and the expected menu-button
+      // return. Guarded: only reclaim focus we actually owned, or closing the
+      // menu from a click elsewhere would steal focus from the click target.
+      if (menu.contains(document.activeElement)) {
+        menuBtn.focus();
+      }
     },
     ESCAPE_PRIORITY.DOCK_MENU
   );
+
+  /** Focusable menu rows, in DOM order. Rebuilt per open, so never cached. */
+  function menuRows(): HTMLButtonElement[] {
+    return Array.from(menu.querySelectorAll<HTMLButtonElement>(`.${RIGHT_DOCK_MENU_ITEM_CLASS}`));
+  }
+
+  /**
+   * `role="menu"` implies ↑/↓/Home/End, and without it the rows are reachable
+   * only by tabbing past every element between the menu (a document.body child,
+   * appended last) and the button — for the TOC that means the whole outline. So
+   * the menu owns arrow traversal itself and moves focus in on open.
+   */
+  function focusRow(index: number): void {
+    const rows = menuRows();
+    if (rows.length === 0) {
+      return;
+    }
+    // Wrap both ways: a menu is a closed ring, unlike a tablist's roving tabindex.
+    const wrapped = ((index % rows.length) + rows.length) % rows.length;
+    rows[wrapped].focus();
+  }
+
+  menu.addEventListener('keydown', (e) => {
+    const rows = menuRows();
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    switch (e.key) {
+      case 'ArrowDown':
+        focusRow(current + 1);
+        break;
+      case 'ArrowUp':
+        // -1 (nothing focused yet) + -1 = -2 → wraps to the last row, which is
+        // what ArrowUp on a freshly-opened menu should do.
+        focusRow(current - 1);
+        break;
+      case 'Home':
+        focusRow(0);
+        break;
+      case 'End':
+        focusRow(rows.length - 1);
+        break;
+      default:
+        return;
+    }
+    // Only after a handled key: an unhandled one must stay available to the
+    // escape stack, and the arrows must not scroll the document behind the menu.
+    e.preventDefault();
+    e.stopPropagation();
+  });
 
   function activeTab(): RightDockTab | undefined {
     return tabs.find((t) => t.id === activeTabId);
@@ -167,7 +231,7 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     for (const item of items) {
       const row = document.createElement('button');
       row.type = 'button';
-      row.className = 'right-dock-menu-item';
+      row.className = RIGHT_DOCK_MENU_ITEM_CLASS;
       if (item.checked === undefined) {
         row.setAttribute('role', 'menuitem');
       } else {
@@ -209,6 +273,11 @@ export function createTabDock(panel: HTMLElement, vscode?: VsCodeApi): TabDock {
     menuDismiss.arm();
     menuBtn.setAttribute('aria-expanded', 'true');
     menuBtn.classList.add('open');
+    // Focus lands on the checked row (a single-select menu opens "at" its current
+    // value) or the first row otherwise — mouse users are unaffected, since the
+    // rows carry no visible focus-only styling beyond :focus-visible.
+    const checkedAt = items.findIndex((item) => item.checked === true);
+    focusRow(checkedAt >= 0 ? checkedAt : 0);
   }
 
   // The menu is fixed-positioned against a rect measured once at open time, and

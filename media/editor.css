@@ -1574,6 +1574,27 @@ body.comment-panel-open #select-overview {
   --toc-accent: var(--vscode-textLink-foreground, #3794ff);
   --toc-accent-soft: color-mix(in srgb, var(--toc-accent) 18%, transparent);
   --toc-pill-bg: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
+  /* US-10.8 progress-bar track. Deliberately NOT --toc-accent-soft: the rail
+   * handoff specifies a neutral per-mode track, distinct from the accent tint the
+   * retired ring reused (dark 0.16 vs 0.18, paper 0.14 vs 0.07). Dark is the
+   * baseline here, matching VS Code's default theme kind; light and the two
+   * high-contrast kinds are scoped below. */
+  --toc-progress-track: rgba(230, 225, 213, 0.16);
+}
+
+body.vscode-light {
+  --toc-progress-track: rgba(28, 27, 24, 0.14);
+}
+
+/* Both high-contrast kinds, light and dark. The retired ring's track read
+ * --toc-accent-soft, which was theme-derived and so could never lose contrast;
+ * the handoff's literals cover only the four normal modes, and vscode-high-contrast-light
+ * would otherwise inherit the near-white dark value onto a white panel and vanish.
+ * --vscode-contrastBorder is the token VS Code defines only in HC themes for
+ * exactly this purpose, so the bar stays visible without inventing a colour. */
+body.vscode-high-contrast,
+body.vscode-high-contrast-light {
+  --toc-progress-track: var(--vscode-contrastBorder, var(--toc-fg));
 }
 
 /* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục.
@@ -1719,7 +1740,7 @@ body.toc-resizing #toolbar {
 
 /*---------------------------------------------------------------------------
  * US-23.7 — shared right-dock tab strip. Owns the panel's top edge, so it is
- * what now clears the toolbar band (see #toc-header below, which used to).
+ * what clears the toolbar band (the TOC header used to, before US-10.8).
  *--------------------------------------------------------------------------*/
 
 /* A tab body carries its own author `display` (see #toc-tabpanel below), and an
@@ -1734,6 +1755,10 @@ body.toc-resizing #toolbar {
   flex: none;
   display: flex;
   align-items: stretch;
+  /* border-box so the bottom border lands INSIDE the 32px: there is no global
+   * box-sizing reset, and content-box made the strip occupy 33px, breaking both
+   * this rule's own "exactly 32px" intent and US-10.8's 63px chrome budget. */
+  box-sizing: border-box;
   height: 32px;
   /* Clears the #toolbar band (position:sticky, full-width, higher z-index than
    * the panel) that overlaps the panel's top edge. Margin rather than padding so
@@ -1870,135 +1895,59 @@ body.toc-resizing #toolbar {
   display: none;
 }
 
-#toc-header {
+/* US-10.8: the 54px ring, the two stacked stat lines and the depth-pill row are
+ * restacked into a 3px progress bar plus one 28px meta row — 31px of chrome
+ * instead of 110px (design handoff: design_handoff_comment_system/
+ * design_handoff_rail_panel_tabs). Toolbar clearance lives on
+ * .right-dock-tabs (US-23.7), so neither of these reserves it. */
+#toc-progress {
   flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* Toolbar clearance moved to .right-dock-tabs (US-23.7) — the strip, not this
-   * header, is the panel's top edge now. */
-  padding: 8px 14px;
-  /* Must resolve to the SAME value as #toc-panel's own background (--toc-bg
-   * === --toc-chrome-bg, see :root above) — otherwise a lighter/darker band
-   * shows behind the progress ring. */
-  background: var(--toc-chrome-bg);
+  height: 3px;
+  background: var(--toc-progress-track);
 }
 
-/* US-10.7: reading-stats block (progress ring + read-time/word-count text),
- * replaces the former #toc-title row. Sits inside #toc-header, which already
- * reserves the toolbar-height top padding above. */
-#toc-stats {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  width: 100%;
-}
-
-/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is a
- * fixed 54px. It used to scale with --toc-width, but a ring that grows/shrinks
- * as the panel is resized read as unstable — pinned to the hifi's 54px target
- * regardless of panel width. */
-#toc-progress-ring {
-  flex: none;
-  width: 54px;
-  height: 54px;
-}
-
-/* SVG elements aren't covered by the UA [hidden] { display: none } rule
- * (that rule only targets the HTML namespace) — enforce it explicitly. */
-#toc-progress-ring[hidden] {
+#toc-progress[hidden] {
   display: none;
 }
 
-/* Track = a soft accent tint (design: faint ring, not a hard theme border),
- * fill + percent value = the palette accent — one mechanism for every mode. */
-#toc-progress-ring .toc-progress-track {
-  fill: none;
-  stroke: var(--toc-accent-soft);
-  stroke-width: 6;
+.toc-progress-fill {
+  height: 3px;
+  width: 0;
+  background: var(--toc-accent);
+  transition: width 0.2s ease;
 }
 
-#toc-progress-ring .toc-progress-fill {
-  fill: none;
-  stroke: var(--toc-accent);
-  stroke-width: 6;
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  transform-origin: 50% 50%;
-  transition: stroke-dashoffset 0.15s linear;
+/* border-box: there is no global box-sizing reset, so content-box would ADD the
+ * 1px bottom border on top of the 28px and blow the handoff's 31px budget. */
+#toc-meta {
+  box-sizing: border-box;
+  flex: none;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 11.5px;
+  color: var(--toc-muted);
+  border-bottom: 1px solid var(--toc-border);
 }
 
-#toc-progress-ring .toc-progress-value {
-  fill: var(--toc-fg);
-  font-size: 12px;
-  font-weight: 700;
-  text-anchor: middle;
-  dominant-baseline: central;
-}
-
-#toc-stats-text {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.toc-stats-minutes,
-.toc-stats-words {
+#toc-meta-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.toc-stats-minutes {
-  font-size: 13px;
-  font-weight: 600;
+/* No --toc-heading token exists; --toc-fg is the per-palette heading colour the
+ * retired ring's percent label already used. */
+#toc-meta-pct {
+  margin-left: auto;
+  padding-left: 8px;
+  font-weight: 700;
+  color: var(--toc-fg);
 }
 
-.toc-stats-words {
-  font-size: 12px;
-  opacity: 0.75;
-}
-
-/* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
- * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ.
- * 3 nút pill (design handoff: Wireframe Handoff/design_handoff_orca_editor —
- * depthBtns) thay cho slider liên tục trước đây. */
-#toc-filter-bar {
-  flex: none;
-  display: flex;
-  gap: 5px;
-  padding: 0 14px 8px;
-  border-bottom: 1px solid var(--toc-border);
-}
-
-/* Borderless-filter design: inactive pills are plain muted text, only the
- * active depth gets a soft-fill pill — no border on either state. Routed
- * through --toc-* (see :root above) so Standard and Sepia/Paper share one
- * mechanism; Standard's --toc-pill-bg/--toc-accent already map to the VS Code
- * "active option" convention (--vscode-inputOption-active*), so it keeps
- * looking native. */
-.toc-depth-btn {
-  padding: 3px 11px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 6px;
-  cursor: pointer;
-  /* 1px transparent, not `none` — keeps the same box footprint as before this
-   * design (avoids a 2px layout shift), just invisible. */
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--toc-muted);
-  transition: background 0.18s, border-color 0.18s, color 0.18s;
-}
-
-.toc-depth-btn:hover {
-  background: var(--toc-accent-soft);
-}
-
-.toc-depth-btn.active {
-  border-color: transparent;
-  background: var(--toc-pill-bg);
-  color: var(--toc-accent);
+#toc-meta-pct[hidden] {
+  display: none;
 }
 
 #toc-list {
@@ -2596,17 +2545,11 @@ body.reading-mode .toc-item,
 body.reading-mode .right-dock-menu {
   font-family: var(--reading-font-override, var(--reading-ui-font-family));
 }
-body.reading-mode #toc-progress-ring .toc-progress-value {
+/* US-10.8: one meta row replaces the ring's percent label and the two stat lines;
+ * it shares the 12px bucket with .right-dock-menu-item, where the depth control
+ * now lives. The 3px bar has no text to scale. */
+body.reading-mode #toc-meta {
   font-size: var(--reading-ui-fs-12);
-}
-body.reading-mode .toc-stats-minutes {
-  font-size: var(--reading-ui-fs-13);
-}
-body.reading-mode .toc-stats-words {
-  font-size: var(--reading-ui-fs-12);
-}
-body.reading-mode .toc-depth-btn {
-  font-size: var(--reading-ui-fs-11);
 }
 body.reading-mode .toc-empty-msg {
   font-size: var(--reading-ui-fs-12);
@@ -2677,9 +2620,10 @@ body.reading-mode .cross-file-search-more {
 body.reading-mode #wysiwyg-toast {
   font-size: var(--reading-ui-fs-12);
 }
-/* US-23.7: the tab strip and its overflow menu are rail chrome like .toc-depth-btn
- * above — scale them with Reading Mode too, or the strip stays at OS-chrome size
- * beside outline rows that grew. */
+/* US-23.7: the tab strip and its overflow menu are rail chrome like the outline
+ * rows above — scale them with Reading Mode too, or the strip stays at OS-chrome
+ * size beside outline rows that grew. US-10.8 put the depth control in this menu,
+ * so these rules also carry the depth rows' Reading-Mode scaling. */
 body.reading-mode .right-dock-tab,
 body.reading-mode .right-dock-menu-title {
   font-size: var(--reading-ui-fs-11);
@@ -2710,6 +2654,7 @@ body.reading-mode-sepia {
   --toc-muted: #8a7a63;
   --toc-accent: #8a4b08;
   --toc-accent-soft: rgba(90, 60, 20, 0.2);
+  --toc-progress-track: rgba(90, 60, 20, 0.18);
   --toc-pill-bg: rgba(138, 75, 8, 0.14);
   --toc-pill-border: rgba(90, 60, 20, 0.25);
   --toc-pill-fg: rgba(59, 47, 34, 0.62);
@@ -2731,6 +2676,7 @@ body.reading-mode-paper {
   --toc-muted: rgba(0, 0, 0, 0.55);
   --toc-accent: #2554a0;
   --toc-accent-soft: rgba(0, 0, 0, 0.07);
+  --toc-progress-track: rgba(0, 0, 0, 0.14);
   --toc-pill-bg: rgba(37, 84, 160, 0.1);
   --toc-pill-border: rgba(0, 0, 0, 0.14);
   --toc-pill-fg: rgba(0, 0, 0, 0.6);
@@ -2789,7 +2735,7 @@ body[class*='reading-mode-'] .toolbar-popover-item.selected {
  * --toc-* RIÊNG (như --toolbar-* ở US-4.25), KHÔNG kế thừa --rp-* của content, vì highContrast
  * card (nền đen/chữ trắng) đảo ngược hẳn so với highContrast content (nền
  * trắng/chữ đen) trong design spec — hai hệ không thể dùng chung token.
- * Every #toc-panel/#toc-header/.toc-item/.toc-depth-btn/#toc-progress-ring/
+ * Every #toc-panel/.toc-item/#toc-progress/#toc-meta/.right-dock-menu-item/
  * .toc-empty-reset/#toc-resize color rule now reads var(--toc-*) directly in
  * its base (non-reading-mode-scoped) declaration — Standard's own --toc-*
  * baseline (see :root near --toc-width) already renders identically to the

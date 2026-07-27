@@ -1,14 +1,15 @@
 /**
- * US-10.6: TOC heading-level filter (3 pill buttons H1/H2/H3, replacing the
- * native range slider on 2026-07-19 to match the design handoff) — filters
- * .toc-item entries by heading level, persists per-tab via vscode.setState()
- * (tocMaxLevel), and falls scrollspy back to the nearest visible ancestor when
- * the actual nearest heading is filtered out. Also a regression check for bug
- * 0716 #7 (TOC drag & drop removed entirely): dragging a .toc-item must no
- * longer reorder document headings.
+ * US-10.6: TOC heading-level filter — filters .toc-item entries by heading level,
+ * persists per-tab via vscode.setState() (tocMaxLevel), and falls scrollspy back
+ * to the nearest visible ancestor when the actual nearest heading is filtered out.
+ * US-10.8 moved the control itself out of the header (3 in-panel pills) into the
+ * dock's `⋯` overflow menu under an "Outline depth" section; every behaviour below
+ * is unchanged, only the surface the test drives it through moved. Also a
+ * regression check for bug 0716 #7 (TOC drag & drop removed entirely): dragging a
+ * .toc-item must no longer reorder document headings.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor, clearPosted, waitForEdit } from './_harness';
+import { openEditor, clearPosted, waitForEdit, openDepthMenu, setDepth, expectActiveDepth } from './_harness';
 
 /** Paragraph filler so the document is tall enough to actually scroll. */
 function filler(section: string, lines = 30): string {
@@ -16,7 +17,7 @@ function filler(section: string, lines = 30): string {
 }
 
 // level<=2 heading count is 4 (H1 A, H2 A1, H2 A2, H1 B) — well under the
-// >20 smart-fallback threshold, so the default slider position is always 2.
+// >20 smart-fallback threshold, so the default depth is always 3.
 const DOC = `# H1 A
 
 ${filler('A')}
@@ -48,17 +49,6 @@ async function openToc(page: Page, markdown = DOC): Promise<void> {
   await page.locator('#toc-toggle').click({ force: true });
 }
 
-async function setDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
-  await page.locator(`.toc-depth-btn[data-level="${level}"]`).click();
-}
-
-/** Asserts exactly one depth pill is active, and it's the expected level. */
-async function expectActiveDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
-  await expect(page.locator('.toc-depth-btn.active')).toHaveCount(1);
-  await expect(page.locator('.toc-depth-btn.active')).toHaveAttribute('data-level', String(level));
-  await expect(page.locator(`.toc-depth-btn[data-level="${level}"]`)).toHaveAttribute('aria-pressed', 'true');
-}
-
 test('defaults to H1-H2-H3 (level 3) when heading count is below the smart-fallback threshold', async ({ page }) => {
   await openToc(page);
   await expectActiveDepth(page, 3);
@@ -83,7 +73,7 @@ test('smart-fallback: a dense doc (>20 H1–H3 headings) defaults to H2, not H1 
   await expect(page.locator('.toc-item')).toHaveCount(11); // 1 H1 + 10 H2
 });
 
-test('clicking each depth pill filters visible .toc-item entries by level', async ({ page }) => {
+test('picking each Outline depth row filters visible .toc-item entries by level', async ({ page }) => {
   await openToc(page);
 
   await setDepth(page, 1);
@@ -124,6 +114,48 @@ test('editing content triggers a debounced rebuild and the filter level is prese
 
   await expectActiveDepth(page, 1);
   await expect(page.locator('.toc-item')).toHaveCount(2);
+});
+
+test('the depth menu is fully keyboard-operable and hands focus back to the ⋯ button', async ({ page }) => {
+  await openToc(page);
+  const focused = (): Promise<string> => page.evaluate(() => document.activeElement?.textContent ?? '');
+
+  // Opening focuses the CHECKED row (default H1–H2–H3), not blindly the first —
+  // a single-select menu opens at its current value.
+  await page.locator('.right-dock-menu-btn').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.right-dock-menu')).toBeVisible();
+  expect(await focused()).toMatch(/H1–H2–H3$/);
+
+  // ↑/↓ traverse and wrap; Home/End jump. None of them may scroll the document
+  // behind the open menu, which is what an unhandled arrow key would do.
+  await page.keyboard.press('ArrowDown');
+  expect(await focused()).toMatch(/H1$/); // wrapped past the last row
+  await page.keyboard.press('ArrowUp');
+  expect(await focused()).toMatch(/H1–H2–H3$/);
+  await page.keyboard.press('Home');
+  expect(await focused()).toMatch(/H1$/);
+  await page.keyboard.press('End');
+  expect(await focused()).toMatch(/H1–H2–H3$/);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  // Enter on a row applies it. Focus must land back on the ⋯ button — it lives in
+  // the strip, i.e. inside #toc-panel, which is what keeps the dock's own Escape
+  // handler (it requires focus inside the panel) alive after a menu interaction.
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
+  await expect(page.locator('.right-dock-menu-btn')).toBeFocused();
+  await expect(page.locator('.toc-item')).toHaveCount(2); // H1 A, H1 B
+
+  // Escape takes the menu first, then the panel — only reachable because focus
+  // came back inside the panel above.
+  await openDepthMenu(page);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
+  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#toc-panel')).toHaveCSS('width', '0px');
 });
 
 test('a .toc-item is not natively draggable (no native link-drag ghost)', async ({ page }) => {

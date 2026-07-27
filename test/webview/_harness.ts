@@ -10,7 +10,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import type { InitConfig } from '../../src/shared/messages';
 
 const DIST_WEBVIEW = path.join(__dirname, '..', '..', 'dist', 'webview');
@@ -162,4 +162,38 @@ export async function waitForEdit(page: Page, timeoutMs = 2000): Promise<string>
   );
   const msg = (await handle.jsonValue()) as { text: string };
   return msg.text;
+}
+
+/**
+ * US-10.8: the TOC's heading-depth control lives in the dock's `⋯` overflow menu,
+ * so every spec that drives the depth filter goes through the same three steps
+ * (open the menu, click the row for `level`, wait for the menu to close). Shared
+ * here rather than copied per spec — the rows carry no `data-level`, so the level
+ * is positional and the mapping belongs in one place.
+ */
+export const DEPTH_MENU_LABELS = { 1: 'H1', 2: 'H1–H2', 3: 'H1–H2–H3' } as const;
+
+/** Open the dock's `⋯` menu and assert it is the TOC tab's "Outline depth" section. */
+export async function openDepthMenu(page: Page): Promise<void> {
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu-title')).toHaveText('Outline depth');
+  await expect(page.locator('.right-dock-menu-item')).toHaveCount(3);
+}
+
+/** Set the TOC heading-depth filter to `level` via the `⋯` menu. */
+export async function setDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
+  await openDepthMenu(page);
+  await page.locator('.right-dock-menu-item').nth(level - 1).click();
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
+}
+
+/** Assert exactly one depth row is checked, and it is `level`. Leaves the menu closed. */
+export async function expectActiveDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
+  await openDepthMenu(page);
+  const checked = page.locator('.right-dock-menu-item[aria-checked="true"]');
+  await expect(checked).toHaveCount(1);
+  // Suffix match: the label shares its button with the ✓ check column.
+  await expect(checked).toHaveText(new RegExp(`${DEPTH_MENU_LABELS[level]}$`));
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
 }
