@@ -256,7 +256,8 @@ const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
 /** US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap). */
 const FIT_CLASS = 'md-table-fit';
 
-// US-19.25 — hằng số thuật toán fit-mode (chốt PO 2026-07-24).
+// US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ
+// còn áp khi Σmax-content > budget (thiếu chỗ thật) — còn chỗ ngang thì không cắt.
 const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
 const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
 const FIT_COMFORT_FLOOR_CH = 30; // sàn dễ đọc: (a) không cắt cột lệch xuống dưới ngần này; (b) co cột cũng không xuống dưới ngần này (dưới nữa thì scroll)
@@ -332,10 +333,25 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
 }
 
 /**
+ * US-19.26: ô "rỗng" = không chữ và không nội dung nhúng (ảnh/SVG/video/checkbox).
+ * Ô mới do `emptyCell()` tạo chỉ chứa `<br>` placeholder nên vẫn tính là rỗng. Xét
+ * theo NỘI DUNG, không so bề rộng với padding (sai số sub-pixel, `&nbsp;`).
+ */
+function isEmptyCell(cell: HTMLTableCellElement): boolean {
+  return (cell.textContent ?? '').trim() === '' && !cell.querySelector('img,svg,video,input');
+}
+
+/**
  * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
  * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
- * `false` để caller rơi về hành vi mặc định (scroll) — khi hết đường co
- * (`Σ min-content > W`) hoặc không đo được khung.
+ * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
+ * max-width) — khi còn đủ chỗ ngang (`Σ max-content ≤ W`, US-19.26), hết đường co
+ * (`Σ min-content > W`), hay không đo được khung.
+ *
+ * US-19.26: chỉ ghim width/max-width khi THIẾU chỗ. Còn chỗ ngang → bail SỚM (không
+ * cắt gì), để cột tự giãn theo layout auto — kể cả khi gõ thêm chữ, không cần đợi
+ * debounced re-fit mới nới ra. Thiếu chỗ mới vào thang cắt: ①b (cắt xong dư thì trả
+ * lại phần dư) → ② (co tỉ lệ) → ③ (scroll tại sàn).
  */
 function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
   const parent = table.parentElement;
@@ -370,13 +386,19 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   table.classList.add(MEASURE_CLASS);
   const range = document.createRange();
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
+  // US-19.26: cùng số đo nhưng CHỈ ô có nội dung — mẫu để tính p75 (xem dưới).
+  const contentWidths: number[][] = Array.from({ length: colCount }, () => []);
   // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
   // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
   const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
       range.selectNodeContents(row.cells[i]);
-      colWidths[i].push(range.getBoundingClientRect().width + padBorderX);
+      const cellW = range.getBoundingClientRect().width + padBorderX;
+      colWidths[i].push(cellW);
+      if (!isEmptyCell(row.cells[i])) {
+        contentWidths[i].push(cellW);
+      }
       const wf = widestWordWidth(row.cells[i], range) + padBorderX;
       if (wf > wordFloorByCol[i]) {
         wordFloorByCol[i] = wf;
@@ -384,6 +406,20 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     }
   }
   table.classList.remove(MEASURE_CLASS);
+
+  // US-19.26 (revised): max-content mỗi cột đã đủ để biết còn chỗ ngang hay không —
+  // bail NGAY tại đây, TRƯỚC khi đo min-content/tính cap, khi `Σmax ≤ W`. Lý do bail
+  // hẳn (không tự ghim width=natural như bản trước) thay vì áp rồi mới nới: nếu ghim
+  // `width`/`max-width` = bề rộng đo LÚC NÀY, gõ thêm chữ vào ô sẽ bị max-width cũ
+  // chặn wrap ngay, đợi đủ 200ms debounce (`scheduleFitRefit`) mới nới lại ra — co
+  // trước, giãn sau, giật hình. Bail để rơi về `applyDefaultColumnWidths` (chỉ đặt
+  // min-width, không đặt max-width) thì cột tự giãn theo layout auto ngay khi gõ,
+  // không cần đợi refit — vì hoàn toàn không cần bóp gì trong trường hợp này.
+  const natural: number[] = colWidths.map((w) => (w.length ? Math.max(...w) : 0));
+  const sumNatural = natural.reduce((a, b) => a + b, 0);
+  if (sumNatural <= budgetW) {
+    return false;
+  }
 
   // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
   table.classList.add(MIN_MEASURE_CLASS);
@@ -402,11 +438,18 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
   }
 
-  // comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max].
+  // Comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max]. Chỉ chạy
+  // tới đây khi đã biết THIẾU chỗ (sumNatural > budgetW ở trên) nên cắt là cần thiết.
   const comf: number[] = new Array(colCount);
   for (let i = 0; i < colCount; i++) {
-    const maxI = colWidths[i].length ? Math.max(...colWidths[i]) : minByCol[i];
-    const p75I = percentile(colWidths[i], 75);
+    const maxI = natural[i];
+    // US-19.26: p75 chỉ tính trên ô CÓ NỘI DUNG. Ô rỗng chỉ rộng bằng padding, để
+    // chúng vào mẫu thì bảng nhiều dòng trống (bảng "Các bước" đang điền dở) luôn có
+    // p75 ≈ padding → cột nào cũng bị coi là lệch và bị cắt, và cột co lại mỗi lần
+    // thêm một dòng trống. Cột TOÀN rỗng → dùng lại mẫu đầy đủ, vì mẫu trống sẽ cho
+    // p75 = 0 làm `max > K×p75` đúng vô điều kiện — đúng cái đang muốn tránh.
+    const sample = contentWidths[i].length > 0 ? contentWidths[i] : colWidths[i];
+    const p75I = percentile(sample, 75);
     const capI = maxI > FIT_OUTLIER_K * p75I ? Math.min(maxI, Math.max(comfortFloorPx, p75I * FIT_CAP_M)) : maxI;
     comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
   }
@@ -419,11 +462,17 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   const desired = comf.reduce((a, b) => a + b, 0);
   const sumFloor = shrinkFloor.reduce((a, b) => a + b, 0);
   const totalSlack = comf.reduce((a, c, i) => a + (c - shrinkFloor[i]), 0);
+  // US-19.26: tổng phần đã bị cap cắt đi — dùng để trả lại khi khung còn chỗ (①b).
+  const capSlack = natural.reduce((a, n, i) => a + (n - comf[i]), 0);
 
   let widths: number[];
   let scroll = false;
   if (desired <= budgetW) {
-    widths = comf; // ① vừa khung → comfortable (không kéo giãn full-width)
+    // ①b US-19.26: cắt outlier xong lại dư chỗ → trả phần dư về đúng những cột đã bị
+    // cắt, theo tỉ lệ phần bị cắt, trần là max-content → bảng lấp đúng budget, không
+    // chừa khoảng trắng cạnh cột đang wrap. capSlack > 0 vì desired < sumNatural.
+    const spare = budgetW - desired;
+    widths = comf.map((c, i) => c + (natural[i] - c) * (spare / capSlack));
   } else if (sumFloor >= budgetW || totalSlack <= 0) {
     // ③ co tới sàn dễ đọc vẫn không vừa → SCROLL ngang, GIỮ độ rộng = sàn. Đây đúng
     // là độ rộng mà nhánh ② tiến tới ở tới hạn (deficit→totalSlack) nên qua mốc

@@ -465,3 +465,5 @@
 | 0.10.0 | 2026-07-27 | Feature (US-10.8): TOC header restacked — ring and stat lines become a 3px bar plus one 28px meta row; depth pills move into the keyboard-operable `⋯` menu. |
 | 0.10.0 | 2026-07-27 | Feature (US-23.9): Comment tab beside the TOC lists every thread grouped by status, absorbing the Unresolved-location panel; fixes reloaded threads collapsing onto one anchor. |
 | 0.10.0 | 2026-07-27 | Feature (US-23.11): resolve state machine revised — no author gate on Resolve/Close/Reopen, full transition trail, one-directional drift, illegal status lines skipped at load, anchor-lost dialog becomes a notice. |
+| 0.10.0 | 2026-07-27 | Feature (US-19.26): table fit-mode only caps columns when max-content overflows the panel, hands the freed width back, and ignores empty cells in p75. |
+| 0.10.0 | 2026-07-27 | Fix (US-19.26): fit-mode no longer pins width when there's room — typing into a cell grows it live instead of waiting for the debounced re-fit. |
