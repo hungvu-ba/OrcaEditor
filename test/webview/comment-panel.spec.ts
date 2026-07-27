@@ -13,7 +13,7 @@
  * the convention every other drag spec here follows.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openCommentTab, openEditor } from './_harness';
+import { dismissAnchorLost, openCommentTab, openEditor } from './_harness';
 
 const DOC = [
   '# Session expiry',
@@ -99,6 +99,9 @@ async function floatAndOpen(page: Page, count: number, replacement = GUTTED, sta
     await addComment(page, startIndex + i, `Comment ${i + 1}.`);
   }
   await hostUpdate(page, replacement);
+  // US-23.11 AC1: floating now raises the anchor-lost question for whoever is at
+  // the keyboard, and its scrim would swallow the clicks below.
+  await dismissAnchorLost(page);
   await openCommentTab(page);
   await expect(floatingRows(page)).toHaveCount(count);
 }
@@ -192,6 +195,15 @@ test('dragging a row onto a node re-attaches it and empties the floating group',
   // Re-attaching only rewrites session-only data-comment-anchor-* attributes
   // (stripped by turndown's TRANSIENT_ATTRS) — it must not dirty the document.
   expect(await postedEditCount(page)).toBe(editsBefore);
+
+  // US-23.11 AC3: the snapshot follows the anchor. Without the rewrite the thread
+  // reads as permanently drifted against a paragraph that no longer exists, so it
+  // would open with the "text may have changed" strip up on a node the user
+  // deliberately chose. The offsets are dropped with it, so no stale quote either.
+  await page.locator('.comment-row[data-group="open"]').first().click();
+  await expect(page.locator('.comment-popover')).toBeVisible();
+  await expect(page.locator('.comment-popover-drift')).toBeHidden();
+  await expect(page.locator('.comment-popover-quote')).toBeHidden();
 });
 
 test('Escape mid-drag cancels — the thread stays floating', async ({ page }) => {

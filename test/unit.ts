@@ -67,17 +67,20 @@ import {
   sidecarBelongsToDocument,
   parseSidecarText,
   serializeSidecarLine,
+  sameAuthor,
   sidecarNameFor,
   sidecarNameMatches,
   type CommentLine,
+  type CommentStatus,
   type DeleteLine,
   type SidecarThread,
   type ReplyLine,
   type StatusChangeLine,
 } from '../src/comments/sidecar-format';
 import {
-  anchorTextMatches,
+  anchorTextRetention,
   anchorThresholdFor,
+  driftBandFor,
   levenshtein,
   normalizeAnchorText,
   pickAnchorCandidate,
@@ -1598,93 +1601,70 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     action: 'resolve',
     ...over,
   });
-  const AUTHOR = 'hungvu';
-  const REVIEWER = 'mai.tran';
-
-  // AC1: Open -> Resolved is the AUTHOR's move.
-  check('resolve: the thread author may resolve an Open thread',
-    statusChangeRejection(move(), 'file:///a.md', 'Open', AUTHOR, AUTHOR) === null);
-  check('resolve: a reviewer may not resolve',
-    statusChangeRejection(move(), 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
-  check('resolve: an already-Resolved thread cannot be resolved again',
-    statusChangeRejection(move(), 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
-  check('resolve: a Closed thread cannot be resolved',
-    statusChangeRejection(move(), 'file:///a.md', 'Closed', AUTHOR, AUTHOR) !== null);
-
-  // AC1: only the REVIEWER closes, and only from Resolved — the Author cannot
-  // close directly, and Close is a no-op while the thread is still Open.
+  // US-23.11 AC1: every transition is legal for WHOEVER is at the keyboard. The
+  // thread's recorded author is no longer an input to the validator at all —
+  // which is exactly what the arity check below pins.
   const close = move({ action: 'close' });
-  check('close: a reviewer may close a Resolved thread',
-    statusChangeRejection(close, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null);
-  check('close: an Open thread cannot be closed — resolve it first',
-    statusChangeRejection(close, 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
-  // AC6: the soft self-close nudge. Name-matched, not authenticated.
-  check('close: the thread author is nudged away from closing their own thread',
-    statusChangeRejection(close, 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
-  // The status reason must win over the role reason: a reviewer looking at an
-  // Open thread is waiting on the Author, not lacking permission.
-  check('close: an Open thread reports the status reason, not a permission one',
-    statusChangeRejection(close, 'file:///a.md', 'Open', REVIEWER, AUTHOR) ===
-      'Resolve the thread before closing it.');
-
-  // AC5: Reopen is one Reviewer-only action available from EITHER Resolved or
-  // Closed, and it goes straight back to Open.
   const reopen = move({ action: 'reopen' });
-  check('reopen: a reviewer may reopen a Resolved thread',
-    statusChangeRejection(reopen, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null);
-  check('reopen: a reviewer may reopen a Closed thread',
-    statusChangeRejection(reopen, 'file:///a.md', 'Closed', REVIEWER, AUTHOR) === null);
-  check('reopen: an Open thread cannot be reopened',
-    statusChangeRejection(reopen, 'file:///a.md', 'Open', REVIEWER, AUTHOR) !== null);
-  check('reopen: the thread author is nudged away from reopening their own thread',
-    statusChangeRejection(reopen, 'file:///a.md', 'Resolved', AUTHOR, AUTHOR) !== null);
-  // The state machine as an invariant rather than a restatement: no action may be
-  // invoked from the status it produces, or a thread could be resolved twice /
-  // reopened into Open, appending a no-op transition line each time.
+  check('US-23.11 AC1: identity is not an input — the validator takes no author',
+    statusChangeRejection.length === 3);
+  check('US-23.11 AC1: an Open thread may be resolved, whoever is asking',
+    statusChangeRejection(move(), 'file:///a.md', 'Open') === null);
+  check('US-23.11 AC1: the thread author may close a Resolved thread',
+    statusChangeRejection(close, 'file:///a.md', 'Resolved') === null);
+  check('US-23.11 AC1: the thread author may reopen their own Resolved thread',
+    statusChangeRejection(reopen, 'file:///a.md', 'Resolved') === null);
+  check('US-23.11 AC1: the thread author may reopen their own Closed thread — no lockout',
+    statusChangeRejection(reopen, 'file:///a.md', 'Closed') === null);
+
+  // US-23.11 AC5: the full matrix, enforced on the status axis alone.
+  // Open -> Resolve only; Resolved -> Close and Reopen; Closed -> Reopen.
+  const MATRIX: Record<CommentStatus, StatusChangeMessage['action'][]> = {
+    Open: ['resolve'],
+    Resolved: ['close', 'reopen'],
+    Closed: ['reopen'],
+  };
+  check('US-23.11 AC5: exactly the legal action set is permitted from each status',
+    (['Open', 'Resolved', 'Closed'] as const).every((status) =>
+      (['resolve', 'close', 'reopen'] as const).every(
+        (act) =>
+          (statusChangeRejection(move({ action: act }), 'file:///a.md', status) === null) ===
+          MATRIX[status].includes(act)
+      )
+    ));
+  // The status reason must still name the workflow step, not a permission.
+  check('close: an Open thread reports the status reason',
+    statusChangeRejection(close, 'file:///a.md', 'Open') ===
+      'Resolve the thread before closing it.');
+  // AC7's second half, and the reason no transition can be appended twice: no
+  // action is legal from the status it produces.
   check('status change: no action is legal from the status it produces',
     (['resolve', 'close', 'reopen'] as const).every(
       (act) =>
-        statusChangeRejection(
-          move({ action: act }),
-          'file:///a.md',
-          STATUS_CHANGE_TARGET[act],
-          act === 'resolve' ? AUTHOR : REVIEWER,
-          AUTHOR
-        ) !== null
+        statusChangeRejection(move({ action: act }), 'file:///a.md', STATUS_CHANGE_TARGET[act]) !==
+        null
     ));
   // Reopen must land on Open in ONE step (AC5) — not Closed -> Resolved -> Open.
   check('status change: reopen from either Resolved or Closed lands on Open in one step',
     STATUS_CHANGE_TARGET.reopen === 'Open' &&
-      statusChangeRejection(reopen, 'file:///a.md', 'Resolved', REVIEWER, AUTHOR) === null &&
-      statusChangeRejection(reopen, 'file:///a.md', 'Closed', REVIEWER, AUTHOR) === null);
+      statusChangeRejection(reopen, 'file:///a.md', 'Resolved') === null &&
+      statusChangeRejection(reopen, 'file:///a.md', 'Closed') === null);
 
   // Same untrusted-input rules every other comment validator carries.
   check('status change: a request for another document is refused',
-    statusChangeRejection(move(), 'file:///b.md', 'Open', AUTHOR, AUTHOR) !== null);
+    statusChangeRejection(move(), 'file:///b.md', 'Open') !== null);
   check('status change: a request naming no thread is refused',
-    statusChangeRejection(move({ threadId: '' }), 'file:///a.md', 'Open', AUTHOR, AUTHOR) !== null);
+    statusChangeRejection(move({ threadId: '' }), 'file:///a.md', 'Open') !== null);
   check('status change: a vanished thread is refused',
-    statusChangeRejection(move(), 'file:///a.md', undefined, AUTHOR, undefined) !== null);
+    statusChangeRejection(move(), 'file:///a.md', undefined) !== null);
   // An unknown action must be refused outright: falling through would look up
   // `undefined` as the target status and append a malformed sidecar line.
   check('status change: an unknown action is refused',
     statusChangeRejection(
       move({ action: 'archive' as StatusChangeMessage['action'] }),
       'file:///a.md',
-      'Open',
-      AUTHOR,
-      AUTHOR
+      'Open'
     ) !== null);
-  // The Author/Reviewer split is one NFC-normalized name comparison, exactly as
-  // the delete gating already is — the same person on macOS and Windows is one.
-  check('status change: the author match is NFC-normalized',
-    statusChangeRejection(
-      move(),
-      'file:///a.md',
-      'Open',
-      'Nguyễn'.normalize('NFC'),
-      'Nguyễn'.normalize('NFD')
-    ) === null);
 
   // --- contextValue <-> package.json `when` clauses ------------------------
   //
@@ -1746,31 +1726,99 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     ));
 }
 
-// --- Req 23 US-23.3 AC2: the content-drift check behind the popover strip ----
+// --- Req 23 US-23.11 AC3: the one-directional content-drift measure ---------
 {
   const RECORDED = 'The refund drains the queued session before the retry window closes.';
-  check('drift: identical text matches',
-    anchorTextMatches(RECORDED, RECORDED));
+  const band = driftBandFor(RECORDED);
+  /** The enter edge, i.e. a thread that is not currently latched into drift. */
+  const drifted = (recorded: string, current: string): boolean => {
+    const enter = driftBandFor(recorded).enter;
+    return anchorTextRetention(recorded, current, enter) < enter;
+  };
+  /** Retention measured at a threshold low enough that the early bail never fires. */
+  const retentionOf = (recorded: string, current: string): number =>
+    anchorTextRetention(recorded, current, 0);
+
+  check('drift: identical text is fully retained',
+    retentionOf(RECORDED, RECORDED) === 1);
   // Re-wrapping a paragraph changes no words, so it must not read as drift.
-  check('drift: re-wrapped whitespace still matches',
-    anchorTextMatches(RECORDED, RECORDED.replace(/ /g, '\n  ')));
-  check('drift: a one-word tweak still matches (above the 0.8 tier-2 threshold)',
-    anchorTextMatches(RECORDED, RECORDED.replace('drains', 'clears')));
-  check('drift: a rewritten sentence no longer matches',
-    !anchorTextMatches(RECORDED, 'Totally different prose about something else entirely here.'));
-  check('drift: deleted-to-nothing no longer matches',
-    !anchorTextMatches(RECORDED, ''));
-  // Short recorded text uses the stricter 0.95 threshold (US-23.4 PO decision),
-  // so a single-character change to a short heading IS drift.
-  check('drift: short text is held to the stricter threshold',
-    !anchorTextMatches('Done', 'Dane'));
+  check('drift: re-wrapped whitespace is fully retained',
+    retentionOf(RECORDED, RECORDED.replace(/ /g, '\n  ')) === 1);
+  // THE bug US-23.11 AC3 exists for: text typed into the paragraph AFTER the
+  // comment was written is text outside the comment and is not drift, however
+  // much of it there is. The old symmetric score divided by the longer string,
+  // so this read as drift.
+  check('drift: appending a whole sentence is not drift',
+    retentionOf(RECORDED, `${RECORDED} A brand new sentence follows it now.`) === 1 &&
+      !drifted(RECORDED, `${RECORDED} A brand new sentence follows it now.`));
+  check('drift: a one-word tweak is not drift',
+    !drifted(RECORDED, RECORDED.replace('drains', 'clears')));
+  // ...but removing or rewriting the recorded text is, one-directionally.
+  check('drift: half the paragraph rewritten is drift',
+    drifted(RECORDED, 'The refund drains the queued session ' + 'and then something else entirely happens here.'));
+  check('drift: a rewritten sentence is drift',
+    drifted(RECORDED, 'Totally different prose about something else entirely here.'));
+  check('drift: deleted-to-nothing retains none of the snapshot',
+    retentionOf(RECORDED, '') === 0 && drifted(RECORDED, ''));
   // An empty recorded text has nothing to drift from — never report drift on it,
   // or every bare-caret anchor would show the strip forever.
-  check('drift: an empty recorded text always matches',
-    anchorTextMatches('', 'anything at all'));
+  check('drift: an empty recorded text is always fully retained',
+    retentionOf('', 'anything at all') === 1);
   // The same prose typed on macOS vs Windows differs only by Unicode form.
   check('drift: NFD vs NFC of the same prose is not drift',
-    anchorTextMatches('Nguyễn Văn A'.normalize('NFD'), 'Nguyễn Văn A'.normalize('NFC')));
+    retentionOf('Nguyễn Văn A'.normalize('NFD'), 'Nguyễn Văn A'.normalize('NFC')) === 1);
+
+  // AC3: the drift band is the drift check's OWN, not tier 2's relocation pair.
+  check('drift: the band is independent of tier 2 thresholds',
+    band.enter !== anchorThresholdFor(RECORDED) && band.enter < band.exit);
+  // Short text gets a MORE permissive band, not tier 2's stricter one: one
+  // character edited in a ten-character heading is not "the text may have
+  // changed", while half of it rewritten is.
+  const short = driftBandFor('Done');
+  check('drift: short text uses a more permissive band than ordinary text',
+    short.enter < band.enter && short.enter < short.exit);
+  check('drift: a one-character change to a short heading is not drift',
+    !drifted('Session expiry', 'Session expiries'));
+  check('drift: a short heading rewritten IS drift',
+    drifted('Done', 'Not applicable'));
+
+  // AC3's hysteresis, exercised as `applyStatusIndicators` runs it: the edge in
+  // play depends on the state the thread is ALREADY in, so a retention sitting
+  // between the two edges holds that state instead of flickering.
+  const latch = (recorded: string, current: string, wasDrifted: boolean): boolean => {
+    const band = driftBandFor(recorded);
+    const threshold = wasDrifted ? band.exit : band.enter;
+    return anchorTextRetention(recorded, current, threshold) < threshold;
+  };
+  const HYSTERESIS = 'A short paragraph of prose that a single keystroke can nudge across the line.';
+  const edge = HYSTERESIS.slice(0, Math.round(HYSTERESIS.length * 0.92));
+  const retention = retentionOf(HYSTERESIS, edge);
+  check('drift: the band leaves room between enter and exit for hysteresis',
+    retention > driftBandFor(HYSTERESIS).enter && retention < driftBandFor(HYSTERESIS).exit);
+  check('drift: inside the band an undrifted thread stays undrifted',
+    !latch(HYSTERESIS, edge, false));
+  check('drift: inside the band a drifted thread stays drifted',
+    latch(HYSTERESIS, edge, true));
+  // ...and both edges still resolve outside the band, so the latch is hysteresis
+  // and not a state that can never be left.
+  check('drift: a full restore clears drift even from the latched state',
+    !latch(HYSTERESIS, HYSTERESIS, true));
+  check('drift: a heavy deletion enters drift even from the clean state',
+    latch(HYSTERESIS, HYSTERESIS.slice(0, 20), false));
+
+  // The early bail must never change the ANSWER, only the work: a current text
+  // too short to clear the threshold returns its own upper bound, which is below
+  // the threshold exactly when the full pass would have been.
+  const BAIL = 'The refund drains the queued session before the retry window closes.';
+  check('drift: the length bail agrees with the full pass',
+    (anchorTextRetention(BAIL, BAIL.slice(0, 10), 0.9) < 0.9) ===
+      (retentionOf(BAIL, BAIL.slice(0, 10)) < 0.9));
+  // Text inserted BEFORE the snapshot, past the compare cap, is still not drift —
+  // capping both sides at the same absolute prefix used to cut the snapshot's own
+  // tail out of the window and report drift for an edit that removed nothing.
+  const LONG = 'x'.repeat(400);
+  check('drift: a long insertion BEFORE the snapshot is not drift',
+    !drifted(LONG, `${'y'.repeat(200)} ${LONG}`));
 }
 
 // --- Req 23 US-23.2 AC1: gutter-pin line clustering -------------------------
@@ -1958,6 +2006,42 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       statusChange({ id: 's3', timestamp: '2026-07-26T15:00:00.000Z', from_status: 'Resolved', to_status: 'Open' }),
     ]).threads[0].status === 'Open');
 
+  // US-23.11 AC6: `from_status` is a guard, not a note. A line whose recorded
+  // origin disagrees with what the strictly-earlier lines folded to is SKIPPED —
+  // a hand-edited file or a git merge cannot land an illegal Open -> Closed jump
+  // that no control would ever have offered.
+  const illegalJump = foldSidecarRecords([
+    comment(),
+    statusChange({ id: 'sX', from_status: 'Resolved', to_status: 'Closed' }),
+  ]);
+  check('US-23.11 AC6: a status-change from the wrong status is skipped, not applied',
+    illegalJump.threads[0].status === 'Open');
+  check('US-23.11 AC6: the skipped transition is still flagged',
+    illegalJump.warnings.length === 1);
+  check('US-23.11 AC6: a skipped transition is dropped from the thread trail',
+    illegalJump.threads[0].statusChanges.length === 0);
+  // ...and the fold carries on: a legal line AFTER a skipped one still applies,
+  // measured against the status the skip preserved.
+  const skipThenApply = foldSidecarRecords([
+    comment(),
+    statusChange({ id: 'sX', timestamp: '2026-07-26T12:00:00.000Z', from_status: 'Closed', to_status: 'Open' }),
+    statusChange({ id: 'sY', timestamp: '2026-07-26T13:00:00.000Z', from_status: 'Open', to_status: 'Resolved' }),
+  ]);
+  check('US-23.11 AC6: a legal transition after a skipped one still applies',
+    skipThenApply.threads[0].status === 'Resolved' &&
+      skipThenApply.threads[0].statusChanges.length === 1);
+  // AC2 reads this list straight through to the popover, so its order and
+  // contents are part of the loader's contract.
+  const trail = foldSidecarRecords([
+    comment(),
+    statusChange({ id: 's3', timestamp: '2026-07-26T15:00:00.000Z', from_status: 'Resolved', to_status: 'Closed', author: 'mai' }),
+    statusChange({ id: 's1', timestamp: '2026-07-26T12:00:00.000Z', from_status: 'Open', to_status: 'Resolved', author: 'hungvu' }),
+  ]).threads[0].statusChanges;
+  check('US-23.11 AC2: the whole applied trail survives the fold, oldest first',
+    trail.length === 2 &&
+      trail[0].to_status === 'Resolved' && trail[0].author === 'hungvu' &&
+      trail[1].to_status === 'Closed' && trail[1].author === 'mai');
+
   // Tombstones: applied last, cascade for a comment, single for a reply.
   const replyDeleted = foldSidecarRecords([comment(), reply(), reply({ id: 'r2' }), tombstone()]);
   check('sidecar: deleting a reply leaves the thread and its siblings',
@@ -1984,6 +2068,45 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       reply({ author: 'Nguyễn'.normalize('NFC') }),
       tombstone({ author: 'Nguyễn'.normalize('NFD') }),
     ]).threads[0].replies.length === 0);
+
+  // US-23.11 AC9: the one author normalizer — decode, trim, NFC, case-fold — and
+  // a blank side that never matches anything. AC1 removed this comparison from
+  // the status actions, but US-23.2's delete-gating still runs on it and a
+  // trailing space left in the setting used to split one person into two.
+  check('US-23.11 AC9: the same name matches itself',
+    sameAuthor('hungvu', 'hungvu'));
+  check('US-23.11 AC9: a trailing space in the setting still matches',
+    sameAuthor('hungvu ', 'hungvu'));
+  check('US-23.11 AC9: case differences still match',
+    sameAuthor('HungVu', 'hungvu'));
+  check('US-23.11 AC9: NFD and NFC of the same name match',
+    sameAuthor('Nguyễn'.normalize('NFD'), 'Nguyễn'.normalize('NFC')));
+  check('US-23.11 AC9: a percent-encoded name matches its decoded form',
+    sameAuthor('nguy%E1%BB%85n', 'nguyễn'));
+  check('US-23.11 AC9: a malformed percent escape falls back to the literal text',
+    sameAuthor('100%', '100%'));
+  check('US-23.11 AC9: an unconfigured (empty) name matches no real author',
+    !sameAuthor('', 'hungvu') && !sameAuthor('hungvu', ''));
+  // AC9's "an empty authorName never matches any stored author" is scoped to the
+  // CURRENT USER's name, and `resolveCommentAuthor` is what enforces it: a blank
+  // setting is replaced by the OS username before it is ever compared, so the
+  // blank identity never reaches `sameAuthor` from the live path at all.
+  check('US-23.11 AC9: a blank configured name never becomes an identity',
+    resolveCommentAuthor('', 'os-user') === 'os-user' &&
+      resolveCommentAuthor('   ', 'os-user') === 'os-user');
+  // Two blank STORED authors still compare equal on purpose: the loader's
+  // tombstone check compares two recorded names, and refusing that match would
+  // stop a `delete` line from deleting its target — resurrecting, on the next
+  // load, a comment the user had removed.
+  check('US-23.11 AC9: two blank stored authors still match, so a tombstone still applies',
+    sameAuthor('', '') && sameAuthor('   ', ''));
+  // Case-folding can itself denormalize (İ U+0130 lowercases to `i` + a combining
+  // dot), so the normalizer re-normalizes afterwards — without that, the NFD and
+  // NFC spellings of such a name compare unequal.
+  check('US-23.11 AC9: a name whose case-folding denormalizes still matches its NFD form',
+    sameAuthor('İlker', 'İlker'.normalize('NFD')));
+  check('US-23.11 AC9: different names still do not match',
+    !sameAuthor('hungvu', 'mai.tran'));
   // A stray delete from a race between two sessions must not error the load.
   const strayDelete = foldSidecarRecords([comment(), tombstone({ target_id: 'nope' }), tombstone(), tombstone()]);
   check('sidecar: a delete naming an unknown target is a silent no-op',

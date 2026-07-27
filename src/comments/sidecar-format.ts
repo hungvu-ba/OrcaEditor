@@ -420,18 +420,50 @@ export function parseSidecarText(text: string): ParsedSidecar {
 }
 
 /**
- * Author comparison for the delete-ownership check. NFC-normalized on both
- * sides: the same name typed on macOS (often NFD) and on Windows (NFC) must
- * count as one person, per this repo's cross-platform rule. Not a security
- * boundary — `orcaEditor.comments.authorName` is free text (US-23.3's PO
- * decision), so this is the same soft nudge as the disabled Close control.
+ * Author comparison for the delete-ownership check (US-23.11 AC9).
+ *
+ * Normalizes decode → trim → NFC → case-fold on both sides, per this repo's
+ * cross-platform rule: the same name typed on macOS (often NFD) and on Windows
+ * (NFC) must count as one person, and neither a trailing space left in the
+ * setting nor a capitalized first letter may split one person into two. Not a
+ * security boundary — `orcaEditor.comments.authorName` is free text, so this is
+ * a soft nudge only; US-23.11 AC1 removed the status-action gate that used to
+ * lean on it.
+ *
+ * AC9's other half — "an empty or whitespace-only `orcaEditor.comments.authorName`
+ * never matches any stored author" — is scoped to the CURRENT USER's name, so it
+ * lives at the callers that have one (`deleteRejection`, the popover), not here.
+ * Two blank names still compare equal in this function on purpose: the loader's
+ * tombstone check compares two STORED authors, and refusing a blank-vs-blank
+ * match there would silently stop a `delete` line from deleting its target,
+ * resurrecting a comment the user had removed.
  *
  * Exported (not local to this fold) so US-23.2's own delete-gating in
  * `comment-utils.ts`/`commentController.ts` uses this exact comparison rather
  * than a second, potentially-diverging copy.
  */
 export function sameAuthor(a: string, b: string): boolean {
-  return a.normalize('NFC') === b.normalize('NFC');
+  return normalizeAuthorName(a) === normalizeAuthorName(b);
+}
+
+/**
+ * The one normalizer every author-name comparison goes through.
+ *
+ * `decodeURIComponent` is attempted first because a name can reach here from a
+ * `vscode.Uri`-derived string; a malformed escape sequence throws, in which case
+ * the raw text is the best available answer.
+ */
+function normalizeAuthorName(name: string): string {
+  let decoded = name;
+  try {
+    decoded = decodeURIComponent(name);
+  } catch {
+    // Not percent-encoded (or malformed) — compare the literal text.
+  }
+  // NFC last as well as first: case-folding can itself denormalize (İ U+0130
+  // lowercases to `i` + a combining dot), so normalizing only before it would
+  // leave two spellings of one name comparing unequal.
+  return decoded.trim().normalize('NFC').toLowerCase().normalize('NFC');
 }
 
 /**
@@ -558,20 +590,26 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
     const replies = (repliesByParent.get(id) ?? [])
       .filter((reply) => !deletedReplies.has(reply.id))
       .sort(byTimestamp);
-    const statusChanges = (statusByParent.get(id) ?? []).slice().sort(byTimestamp);
+    const recordedChanges = (statusByParent.get(id) ?? []).slice().sort(byTimestamp);
     // Last-write-wins on `to_status`, defaulting to Open when nothing has been
     // recorded: the current status is always this fold, never a stored field on
-    // the comment line. `from_status` decides nothing — a disagreeing chain still
-    // folds — but a disagreement means one writer acted on a status another had
-    // already moved past (two windows on one file, or a git merge interleaving two
-    // branches), so it is surfaced rather than silently overwritten.
+    // the comment line. US-23.11 AC6: `from_status` is a guard, not a note — a
+    // line whose recorded origin disagrees with what the strictly-earlier lines
+    // folded to is SKIPPED and the prior status retained, so a hand-edited file
+    // or a git merge interleaving two branches cannot land an illegal jump
+    // (Open → Closed) that no control would ever have offered. The disagreement
+    // is still surfaced as a warning; the skipped line is also dropped from the
+    // thread's transition list, since it never took effect.
+    const statusChanges: StatusChangeLine[] = [];
     let status: CommentStatus = 'Open';
-    for (const change of statusChanges) {
+    for (const change of recordedChanges) {
       if (change.from_status !== status) {
         warnings.push(
-          `status-change ${change.id}: recorded a move from ${change.from_status}, but the thread was ${status} — a concurrent transition was overwritten`
+          `status-change ${change.id}: recorded a move from ${change.from_status}, but the thread was ${status} — the transition was skipped`
         );
+        continue;
       }
+      statusChanges.push(change);
       status = change.to_status;
     }
     threads.push({

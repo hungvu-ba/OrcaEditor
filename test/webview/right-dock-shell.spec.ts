@@ -17,7 +17,7 @@
  * priority-table assertion below guards the menu's Escape ordering.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor } from './_harness';
+import { dismissAnchorLost, openEditor } from './_harness';
 
 const DOC = `# Alpha
 
@@ -223,6 +223,9 @@ test('the ⚑ and ☰ buttons switch tabs inside one dock instead of swapping pa
   await addComment(page, 0, 'Why in order?');
   await hostUpdate(page, GUTTED);
   await expect(page.locator('#comment-panel-toggle')).toBeVisible();
+  // US-23.11 AC1: floating raises the anchor-lost question for whoever is at the
+  // keyboard, and its scrim would swallow the dock click below.
+  await dismissAnchorLost(page);
 
   await openDock(page);
   await expect(page.locator('#toc-tabpanel')).toBeVisible();

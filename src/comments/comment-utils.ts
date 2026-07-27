@@ -196,23 +196,6 @@ const STATUS_CHANGE_SOURCE: Record<CommentStatusAction, readonly CommentStatus[]
 };
 
 /**
- * Whether each action is the Author's or the Reviewer's (US-23.3 AC1/AC5/AC6).
- *
- * This extension has no authentication and no role model: `author` is
- * `orcaEditor.comments.authorName`, free text the user can change at any time.
- * So "Author" can only mean "the configured name matches the one recorded on
- * this thread" and "Reviewer" its negation — the same non-authenticated
- * name-string match US-23.2's delete-gating uses. AC6 states the consequence
- * explicitly: this is a soft UX nudge, not a security boundary, and a user who
- * edits the setting can still act on their own thread.
- */
-const STATUS_CHANGE_ACTOR: Record<CommentStatusAction, 'author' | 'reviewer'> = {
-  resolve: 'author',
-  close: 'reviewer',
-  reopen: 'reviewer',
-};
-
-/**
  * The native `CommentThread.contextValue` for a thread, carrying BOTH axes
  * (US-23.4's anchor resolution and US-23.3's status).
  *
@@ -230,22 +213,25 @@ export function commentThreadContextValue(
 }
 
 /**
- * Why a `changeCommentStatus` request is refused, or null when valid (US-23.3).
- * The thread's live status and its recorded author are passed in for the same
- * reason `replyRejection` takes the status: only `commentController.ts` holds the
- * live registry, so this stays a pure validator. `threadStatus`/`threadAuthor`
- * `undefined` means the named thread does not exist.
+ * Why a `changeCommentStatus` request is refused, or null when valid
+ * (US-23.3, revised by US-23.11 AC1/AC5).
  *
- * Checks run status-before-role deliberately: a Reviewer looking at an Open
- * thread should be told to wait for the Author's Resolve (the design's "Resolve
- * the thread before closing"), not that they lack permission.
+ * The thread's live status is passed in for the same reason `replyRejection`
+ * takes it: only `commentController.ts` holds the live registry, so this stays a
+ * pure validator. `threadStatus` `undefined` means the named thread does not
+ * exist.
+ *
+ * **No identity check.** US-23.11 AC1 (PO decision, supersedes US-23.3 AC6):
+ * `orcaEditor.comments.authorName` is free text on a local single-machine
+ * extension, so gating an action on it bought nothing and — because the recorded
+ * author is the Reviewer who filed the thread — the gate was inverted, locking a
+ * Reviewer out of their own Closed thread. Availability is a function of the
+ * thread's current status alone; accountability comes from the transition trail.
  */
 export function statusChangeRejection(
   msg: StatusChangeMessage,
   docUri: string,
-  threadStatus: CommentStatus | undefined,
-  currentAuthor: string,
-  threadAuthor: string | undefined
+  threadStatus: CommentStatus | undefined
 ): string | null {
   if (msg.docUri !== docUri) {
     return 'This status change was written for a different document.';
@@ -258,22 +244,16 @@ export function statusChangeRejection(
   if (!Object.prototype.hasOwnProperty.call(STATUS_CHANGE_TARGET, msg.action)) {
     return 'This status change carries an unknown action.';
   }
-  if (threadStatus === undefined || threadAuthor === undefined) {
+  if (threadStatus === undefined) {
     return 'This comment thread no longer exists.';
   }
+  // Also covers US-23.11 AC7's "already at that status" case: no action is legal
+  // from the status it produces, so a request that would be a no-op is refused
+  // here before any line is appended.
   if (!STATUS_CHANGE_SOURCE[msg.action].includes(threadStatus)) {
     return msg.action === 'close'
       ? 'Resolve the thread before closing it.'
       : `A ${threadStatus} thread cannot be ${msg.action === 'resolve' ? 'resolved' : 'reopened'}.`;
-  }
-  const isThreadAuthor = sameAuthor(currentAuthor, threadAuthor);
-  if (STATUS_CHANGE_ACTOR[msg.action] === 'author' && !isThreadAuthor) {
-    return 'Only the comment’s author can mark it resolved.';
-  }
-  if (STATUS_CHANGE_ACTOR[msg.action] === 'reviewer' && isThreadAuthor) {
-    return msg.action === 'close'
-      ? 'You can’t close your own comment.'
-      : 'You can’t reopen your own comment.';
   }
   return null;
 }

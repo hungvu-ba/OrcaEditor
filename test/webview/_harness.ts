@@ -197,8 +197,8 @@ export interface SeedThread {
   body?: string;
   recordedText?: string;
   lastKnownLine?: number;
-  lastTransitionAuthor?: string;
-  lastTransitionTimestamp?: string;
+  /** US-23.11 AC2: the applied transition trail, oldest first. */
+  statusChanges?: Array<{ toStatus: 'Open' | 'Resolved' | 'Closed'; author: string; timestamp: string }>;
 }
 
 /** What the host reports about the sidecar behind a snapshot (US-23.9 AC12/AC13). */
@@ -233,14 +233,40 @@ export async function seedCommentThreads(page: Page, threads: SeedThread[], side
             lastKnownLine: t.lastKnownLine ?? 1,
             nearestHeading: '',
             replies: [],
-            lastTransitionAuthor: t.lastTransitionAuthor,
-            lastTransitionTimestamp: t.lastTransitionTimestamp,
+            statusChanges: t.statusChanges ?? [],
           })),
         },
         '*'
       ),
     { list: threads, docUri: DEFAULT_DOC_URI, side: sidecar }
   );
+}
+
+/**
+ * Answer away every anchor-lost confirmation currently queued, with "Later" —
+ * the exit that decides nothing and writes nothing.
+ *
+ * Needed by any spec that floats a thread without being ABOUT the dialog: since
+ * US-23.11 AC1 dropped the identity filter, whoever is at the keyboard is asked
+ * about every floating thread, and the dialog's scrim swallows clicks meant for
+ * the dock or the gutter underneath it.
+ */
+export async function dismissAnchorLost(page: Page): Promise<void> {
+  const dialog = page.locator('.comment-anchor-lost');
+  // Bounded: one pass per thread a spec could plausibly float, so a dialog that
+  // refuses to close fails the spec instead of hanging the run. Each pass waits
+  // out ANCHOR_REEVAL_DEBOUNCE_MS first — a thread does not float, and the next
+  // queued question does not open, until a resolution pass has run, so polling
+  // `isVisible()` straight away sees nothing and lets the dialog appear over
+  // whatever the spec does next.
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(300);
+    if (!(await dialog.isVisible())) {
+      return;
+    }
+    await page.locator('.comment-anchor-lost-later').click();
+  }
+  await expect(dialog).toBeHidden();
 }
 
 /**

@@ -448,6 +448,7 @@ test.describe('review regressions', () => {
       lastKnownLine: 3,
       nearestHeading: 'Session expiry',
       replies: [],
+      statusChanges: [],
       ...over,
     };
   }

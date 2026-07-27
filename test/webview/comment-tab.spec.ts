@@ -16,6 +16,7 @@
  */
 import { test, expect, type Page } from '@playwright/test';
 import {
+  dismissAnchorLost,
   openCommentTab,
   openEditor,
   presetWebviewState,
@@ -63,8 +64,7 @@ const RESOLVED: SeedThread = {
   // Deliberately long past: `formatRelative` switches to an absolute stamp after
   // two days, so a date near "now" would make this assertion drift day by day.
   timestamp: '2020-01-05T09:00:00.000Z',
-  lastTransitionAuthor: 'author',
-  lastTransitionTimestamp: '2020-03-11T09:00:00.000Z',
+  statusChanges: [{ toStatus: 'Resolved', author: 'author', timestamp: '2020-03-11T09:00:00.000Z' }],
 };
 const CLOSED: SeedThread = {
   threadId: 'closed-1',
@@ -72,7 +72,10 @@ const CLOSED: SeedThread = {
   recordedText: 'A reason code is written for every entry.',
   lastKnownLine: 9,
   timestamp: '2026-07-17T09:00:00.000Z',
-  lastTransitionTimestamp: '2026-07-24T09:00:00.000Z',
+  statusChanges: [
+    { toStatus: 'Resolved', author: 'author', timestamp: '2026-07-23T09:00:00.000Z' },
+    { toStatus: 'Closed', author: 'reviewer', timestamp: '2026-07-24T09:00:00.000Z' },
+  ],
 };
 /** Recorded text nothing matches, but its last known line is still covered → tier 3. */
 const APPROX: SeedThread = {
@@ -98,6 +101,9 @@ const ALL = [OPEN_OLD, OPEN_NEW, RESOLVED, CLOSED, APPROX, FLOATING];
 async function openWith(page: Page, threads: SeedThread[], sidecar?: Parameters<typeof seedCommentThreads>[2]): Promise<void> {
   await openEditor(page, DOC);
   await seedCommentThreads(page, threads, sidecar);
+  // US-23.11 AC1: a seeded floating thread now raises the anchor-lost question
+  // whoever authored it, and its scrim would swallow the dock click below.
+  await dismissAnchorLost(page);
   await openCommentTab(page);
 }
 

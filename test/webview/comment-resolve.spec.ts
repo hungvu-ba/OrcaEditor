@@ -1,7 +1,8 @@
 /**
  * Req 23 US-23.3 — two-step resolve (Open → Resolved → Closed): the popover's
- * action bar and its Author/Reviewer gating, the live drift suggestion, and the
- * anchor-lost confirmation.
+ * action bar, the live drift suggestion, and the anchor-lost confirmation, all
+ * as revised by US-23.11 (no identity gate anywhere, the full transition trail
+ * on the thread, one-directional drift, Open-or-Resolved arming).
  *
  * Playwright track (Plan/WEBVIEW_TEST.md): every case needs a real popover
  * opened by a real click on a real positioned gutter pin, and the drift/
@@ -92,12 +93,17 @@ async function createThread(
   return { threadId: String(create.threadId), anchorId: String(create.anchorId) };
 }
 
+/** Settle window for asserting that something did NOT happen (postMessage is async). */
+const SETTLE_MS = 250;
+
 interface StatusOpts {
-  /** Who the thread's original comment is recorded against (decides Author vs Reviewer). */
+  /** Who the thread's original comment is recorded against. US-23.11 AC1: no longer gates anything. */
   commentAuthor?: string;
-  /** Who performed the transition — what AC4's "Resolved by …" line reads from. */
+  /** Who performed the transition — what the trail's newest row reads from. */
   actor?: string;
   at?: string;
+  /** US-23.11 AC2: the whole trail, when a case needs more than the one transition it just made. */
+  trail?: Array<{ toStatus: 'Open' | 'Resolved' | 'Closed'; author: string; timestamp: string }>;
 }
 
 /**
@@ -112,6 +118,13 @@ async function hostSyncStatus(
   opts: StatusOpts = {}
 ): Promise<void> {
   const transitioned = status !== 'Open' || opts.actor !== undefined;
+  // US-23.11 AC2: the snapshot carries the applied trail, not a last-transition
+  // pair. One entry unless a case supplies its own.
+  const statusChanges =
+    opts.trail ??
+    (transitioned
+      ? [{ toStatus: status, author: opts.actor ?? SOMEONE_ELSE, timestamp: opts.at ?? CREATED_AT }]
+      : []);
   await simulate(page, {
     type: 'commentThreadsSync',
     docUri: DEFAULT_DOC_URI,
@@ -128,13 +141,16 @@ async function hostSyncStatus(
         lastKnownLine: 3,
         nearestHeading: 'Session expiry',
         replies: [],
-        ...(transitioned
-          ? { lastTransitionAuthor: opts.actor ?? SOMEONE_ELSE, lastTransitionTimestamp: opts.at ?? CREATED_AT }
-          : {}),
+        statusChanges,
       },
     ],
   });
-  await expect(page.locator('.comment-popover-status')).toHaveText(status);
+  if (await page.locator('.comment-popover').isVisible()) {
+    await expect(page.locator('.comment-popover-status')).toHaveText(status);
+  } else {
+    // No popover open to observe: give the snapshot a beat to reach the registry.
+    await page.waitForTimeout(SETTLE_MS);
+  }
 }
 
 /** Stand in for the host answering a transition this popover just requested, then syncing. */
@@ -170,9 +186,6 @@ async function openPopover(page: Page): Promise<void> {
 const action = (page: Page, name: 'resolve' | 'close' | 'reopen') =>
   page.locator(`.comment-popover-action-${name}`);
 
-/** Settle window for asserting that something did NOT happen (postMessage is async). */
-const SETTLE_MS = 250;
-
 test.describe('action bar — the two-step flow', () => {
   test('AC1: the Author gets "Mark as Resolved" and no Close; resolving posts the transition and the pill follows the host', async ({
     page,
@@ -199,24 +212,51 @@ test.describe('action bar — the two-step flow', () => {
     await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
   });
 
-  test('AC1: a Reviewer looking at an Open thread sees Close disabled with the reason in place', async ({ page }) => {
+  test('US-23.11 AC1: a thread recorded against someone else offers the SAME actions — no identity gate', async ({
+    page,
+  }) => {
     await openEditor(page, DOC);
-    // Recorded against someone else, so the viewer is the Reviewer here.
-    await createThread(page, 0, 'Does drains mean FIFO?', SOMEONE_ELSE);
+    // Recorded against someone else: under US-23.3 this viewer got a dead Close
+    // and no Resolve at all. AC1 removed that gate — the action set is a function
+    // of the status alone.
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?', SOMEONE_ELSE);
     await openPopover(page);
 
-    await expect(action(page, 'resolve')).toHaveCount(0);
-    const close = action(page, 'close');
-    await expect(close).toHaveAttribute('aria-disabled', 'true');
-    await expect(close).toHaveAttribute('title', 'Resolve the thread before closing');
+    await expect(action(page, 'resolve')).toBeVisible();
+    await expect(action(page, 'resolve')).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(action(page, 'close')).toHaveCount(0);
 
-    // Disabled means inert, not merely styled. Forced past Playwright's own
-    // enabled check on purpose: the assertion is that NO handler is attached, not
-    // that the harness declined to click.
     await clearPosted(page);
-    await close.click({ force: true });
-    await page.waitForTimeout(SETTLE_MS);
-    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
+    await action(page, 'resolve').click();
+    const posted = await postedOfType(page, 'changeCommentStatus');
+    expect(posted).toHaveLength(1);
+    expect(posted[0].action).toBe('resolve');
+    expect(posted[0].threadId).toBe(threadId);
+  });
+
+  test('US-23.11 AC5: no disabled status control is ever rendered — an illegal action is simply absent', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+
+    // Open → Resolve only.
+    await expect(action(page, 'resolve')).toBeVisible();
+    await expect(action(page, 'close')).toHaveCount(0);
+    await expect(action(page, 'reopen')).toHaveCount(0);
+    // Resolved → Close and Reopen.
+    await hostSyncStatus(page, threadId, 'Resolved', { actor: ME });
+    await expect(action(page, 'resolve')).toHaveCount(0);
+    await expect(action(page, 'close')).toBeVisible();
+    await expect(action(page, 'reopen')).toBeVisible();
+    // Closed → Reopen.
+    await hostSyncStatus(page, threadId, 'Closed', { actor: ME });
+    await expect(action(page, 'resolve')).toHaveCount(0);
+    await expect(action(page, 'close')).toHaveCount(0);
+    await expect(action(page, 'reopen')).toBeVisible();
+
+    expect(await page.locator('.comment-popover-action[aria-disabled="true"]').count()).toBe(0);
   });
 
   test('AC1/AC4: a Reviewer closes a Resolved thread, and the transition records who and when', async ({ page }) => {
@@ -227,9 +267,10 @@ test.describe('action bar — the two-step flow', () => {
     // Arrive at Resolved the way the real system does — the Author resolved it
     // elsewhere (another panel, or the native Comments UI) and the host synced.
     await hostSyncStatus(page, threadId, 'Resolved', { commentAuthor: SOMEONE_ELSE, actor: SOMEONE_ELSE });
-    // AC4: the acting user and timestamp, shown alongside the thread.
-    await expect(page.locator('.comment-popover-action-note')).toContainText(`Resolved by ${SOMEONE_ELSE}`);
-    await expect(page.locator('.comment-popover-action-note')).toContainText('Jul 24');
+    // US-23.11 AC2: the acting user and timestamp, as a row of the trail.
+    await expect(page.locator('.comment-popover-transition')).toHaveCount(1);
+    await expect(page.locator('.comment-popover-transition')).toContainText(`Resolved · ${SOMEONE_ELSE}`);
+    await expect(page.locator('.comment-popover-transition')).toContainText('Jul 24');
 
     await expect(action(page, 'close')).not.toHaveAttribute('aria-disabled', 'true');
     await expect(action(page, 'reopen')).toBeVisible();
@@ -241,7 +282,7 @@ test.describe('action bar — the two-step flow', () => {
     expect(posted[0].action).toBe('close');
   });
 
-  test('AC6: the self-close nudge disables Close AND Reopen for the thread\'s own author, with the reason in the tooltip', async ({
+  test('US-23.11 AC1: the thread\'s own author may Close and Reopen it — the inverted nudge is gone', async ({
     page,
   }) => {
     await openEditor(page, DOC);
@@ -251,19 +292,56 @@ test.describe('action bar — the two-step flow', () => {
     await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
 
     const close = action(page, 'close');
-    await expect(close).toHaveAttribute('aria-disabled', 'true');
-    await expect(close).toHaveAttribute('title', 'You can’t close your own comment');
-    // AC5 makes Reopen Reviewer-only too, so the same nudge applies — the static
-    // design file left it enabled, the requirement's own wording does not.
     const reopen = action(page, 'reopen');
-    await expect(reopen).toHaveAttribute('aria-disabled', 'true');
-    await expect(reopen).toHaveAttribute('title', 'You can’t reopen your own comment');
+    await expect(close).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(reopen).not.toHaveAttribute('aria-disabled', 'true');
 
+    // Both are live, not merely un-styled: US-23.3 left this viewer with neither.
     await clearPosted(page);
-    await close.click({ force: true });
-    await reopen.click({ force: true });
-    await page.waitForTimeout(SETTLE_MS);
-    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
+    await close.click();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(1);
+    await hostAppliedStatus(page, threadId, 'Closed', { actor: ME, commentAuthor: ME });
+
+    // ...and the lockout AC1 names: a Closed thread had no reply box, no Reopen
+    // and only "delete the whole thread" left. Reopen is the way out now.
+    await clearPosted(page);
+    await action(page, 'reopen').click();
+    const posted = await postedOfType(page, 'changeCommentStatus');
+    expect(posted).toHaveLength(1);
+    expect(posted[0].action).toBe('reopen');
+  });
+
+  test('US-23.11 AC2: every transition is listed, oldest first — Resolve and Close by two people are distinguishable', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    // A thread that has never left Open lists nothing and keeps the design's hint.
+    await expect(page.locator('.comment-popover-transitions')).toBeHidden();
+    await expect(page.locator('.comment-popover-action-note')).toHaveText('Moves the thread to Resolved');
+
+    await hostSyncStatus(page, threadId, 'Closed', {
+      trail: [
+        { toStatus: 'Resolved', author: ME, timestamp: CREATED_AT },
+        { toStatus: 'Closed', author: SOMEONE_ELSE, timestamp: CREATED_AT },
+      ],
+    });
+
+    const rows = page.locator('.comment-popover-transition');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText(`Resolved · ${ME}`);
+    await expect(rows.nth(1)).toContainText(`Closed · ${SOMEONE_ELSE}`);
+    // A Reopen lands on Open; naming it by the bare status would read as authorship.
+    await hostSyncStatus(page, threadId, 'Open', {
+      trail: [
+        { toStatus: 'Resolved', author: ME, timestamp: CREATED_AT },
+        { toStatus: 'Closed', author: SOMEONE_ELSE, timestamp: CREATED_AT },
+        { toStatus: 'Open', author: ME, timestamp: CREATED_AT },
+      ],
+    });
+    await expect(page.locator('.comment-popover-transition')).toHaveCount(3);
+    await expect(page.locator('.comment-popover-transition').nth(2)).toContainText(`Reopened · ${ME}`);
   });
 
   test('AC5: Reopen takes a Closed thread straight back to Open in one step, and the reply box returns', async ({
@@ -290,7 +368,8 @@ test.describe('action bar — the two-step flow', () => {
     await hostAppliedStatus(page, threadId, 'Open', { commentAuthor: SOMEONE_ELSE });
     await expect(page.locator('.comment-popover-closed-notice')).toBeHidden();
     await expect(page.locator('.comment-popover-reply-box')).toBeVisible();
-    await expect(action(page, 'resolve')).toHaveCount(0); // still the Reviewer's view
+    // US-23.11 AC1: Open offers Resolve to whoever is looking, author or not.
+    await expect(action(page, 'resolve')).toBeVisible();
   });
 
   test('AC5/AC4: Reopen from Resolved returns the thread to Open and still reports who reopened it', async ({
@@ -308,14 +387,16 @@ test.describe('action bar — the two-step flow', () => {
     expect(posted[0].action).toBe('reopen');
 
     await hostAppliedStatus(page, threadId, 'Open', { commentAuthor: SOMEONE_ELSE, actor: ME });
-    // AC4 requires the actor and timestamp of EVERY transition to be shown. A
-    // Reopen lands on Open, so reporting by status alone ("Moves the thread to
-    // Resolved") threw the reopen away entirely.
-    await expect(page.locator('.comment-popover-action-note')).toContainText(`Reopened by ${ME}`);
-    await expect(page.locator('.comment-popover-action-note')).toContainText('Jul 24');
+    // The actor and timestamp of EVERY transition are shown. A Reopen lands on
+    // Open, so reporting by status alone ("Moves the thread to Resolved") threw
+    // the reopen away entirely.
+    await expect(page.locator('.comment-popover-transition').last()).toContainText(`Reopened · ${ME}`);
+    await expect(page.locator('.comment-popover-transition').last()).toContainText('Jul 24');
   });
 
-  test('a refused transition surfaces the reason and leaves the status where it was', async ({ page }) => {
+  test('US-23.11 AC8: a refused transition surfaces the reason, keeps the status, and leaves the control live for a retry', async ({
+    page,
+  }) => {
     await openEditor(page, DOC);
     await createThread(page, 0, 'Does drains mean FIFO?');
     await openPopover(page);
@@ -330,6 +411,38 @@ test.describe('action bar — the two-step flow', () => {
     });
     await expect(page.locator('#wysiwyg-toast')).toHaveText('Disk full');
     await expect(page.locator('.comment-popover-status')).toHaveText('Open');
+
+    // AC8's last clause: "the control is re-enabled for retry — never a silent
+    // no-op that leaves the user clicking a live-looking button". The in-flight
+    // slot has to have been released by the refusal, or every later action dies.
+    await clearPosted(page);
+    await action(page, 'resolve').click();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(1);
+  });
+
+  test('US-23.11 AC7: clicking Resolve twice before the host replies posts one transition, not two', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await clearPosted(page);
+
+    // Two clicks with no host reply in between — the same dedup shape US-23.1
+    // applies to create and US-23.8 to reply. The host carries its own guard for
+    // the popover-then-native-menu race this surface cannot see.
+    await action(page, 'resolve').click();
+    await action(page, 'resolve').click();
+    await page.waitForTimeout(SETTLE_MS);
+    const posted = await postedOfType(page, 'changeCommentStatus');
+    expect(posted).toHaveLength(1);
+    expect(posted[0].threadId).toBe(threadId);
+
+    // ...and the guard is released by the reply, not stuck for the session.
+    await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
+    await clearPosted(page);
+    await action(page, 'close').click();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(1);
   });
 
   test('US-23.6: no status action ever reaches the document edit path', async ({ page }) => {
@@ -347,7 +460,47 @@ test.describe('action bar — the two-step flow', () => {
   });
 });
 
-test.describe('AC2 — the live drift suggestion', () => {
+test.describe('AC2 / US-23.11 AC3 — the live drift suggestion', () => {
+  test('US-23.11 AC3: appending a sentence to the commented paragraph is NOT drift', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await expect(page.locator('.comment-popover-drift')).toBeHidden();
+
+    // The bug this AC exists for: the recorded snapshot is the whole paragraph,
+    // and the old symmetric score divided by the LONGER string — so typing more
+    // prose into the paragraph read as drift even though every recorded word was
+    // still there. Text added after the comment is text outside the comment.
+    await hostUpdate(
+      page,
+      DOC.replace(ANCHOR_TEXT, `${ANCHOR_TEXT} Held entries replay after re-authentication.`)
+    );
+    await openPopover(page);
+    await expect(page.locator('.comment-popover-drift')).toBeHidden();
+
+    // ...while removing the recorded text still is drift.
+    await hostUpdate(page, DOC.replace(ANCHOR_TEXT, 'The refund queue.'));
+    await openPopover(page);
+    await expect(page.locator('.comment-popover-drift')).toBeVisible();
+  });
+
+  test('US-23.11 AC3: a floating thread shows no drift strip — the anchor-lost dialog owns that question', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
+    // Float it while CLOSED, so the anchor-lost dialog (AC4) never opens and the
+    // popover is reachable.
+    await hostSyncStatus(page, threadId, 'Closed', { actor: ME });
+    await hostUpdate(page, '# Session expiry\n');
+    await expect(page.locator('.comment-anchor-lost')).toBeHidden();
+
+    await openCommentTab(page);
+    await page.locator('.comment-row[data-group="floating"]').first().click();
+    await expect(page.locator('.comment-popover')).toBeVisible();
+    await expect(page.locator('.comment-popover-drift')).toBeHidden();
+  });
+
   test('an in-place edit of the anchored text shows the suggestion even though tier 1 still resolves the node', async ({
     page,
   }) => {
@@ -408,31 +561,42 @@ test.describe('AC2 — the live drift suggestion', () => {
   });
 });
 
-test.describe('AC3 — the anchor-lost confirmation', () => {
+test.describe('AC3 / US-23.11 AC4 — the anchor-lost notice', () => {
   /** Delete everything from the anchored paragraph down, so no tier can place it. */
   async function floatThread(page: Page): Promise<void> {
     await hostUpdate(page, '# Session expiry\n');
     await expect(page.locator('.comment-anchor-lost')).toBeVisible();
   }
 
-  test('"This was resolved" asks the host to resolve it; the Reviewer\'s Close is still required', async ({ page }) => {
+  test('US-23.11: the notice offers NO status action — "This was resolved" is gone at every status', async ({
+    page,
+  }) => {
     await openEditor(page, DOC);
     const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
     await clearPosted(page);
     await floatThread(page);
 
-    // Both answers at identical weight, and a consequence line under each.
-    await expect(page.locator('.comment-anchor-lost-answer')).toHaveCount(2);
-    await expect(page.locator('.comment-anchor-lost-consequence').first()).toContainText(
-      'reviewer still has to close it'
-    );
+    // PO decision 2026-07-27: one answer, and it writes nothing. The old
+    // "This was resolved" answer posted `resolve`, which US-23.11 AC5's matrix
+    // allows only from Open — so on a Resolved thread (a state AC4 newly arms) it
+    // was refused by the host and re-raised by the still-armed flag, forever.
+    await expect(page.locator('.comment-anchor-lost-answer')).toHaveCount(1);
+    await expect(page.locator('.comment-anchor-lost-answer')).toHaveText('This comment lost its anchor');
+    await expect(page.locator('.comment-anchor-lost-consequence')).toHaveCount(1);
 
-    await page.locator('.comment-anchor-lost-answer', { hasText: 'This was resolved' }).click();
-    const posted = await postedOfType(page, 'changeCommentStatus');
-    expect(posted).toHaveLength(1);
-    expect(posted[0].action).toBe('resolve');
-    expect(posted[0].threadId).toBe(threadId);
+    await page.locator('.comment-anchor-lost-answer').click();
     await expect(page.locator('.comment-anchor-lost')).toBeHidden();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
+
+    // The same holds for a Resolved thread — the state that used to dead-end.
+    await hostUpdate(page, DOC);
+    await hostSyncStatus(page, threadId, 'Resolved', { actor: ME });
+    await hostUpdate(page, '# Session expiry\n');
+    await expect(page.locator('.comment-anchor-lost')).toBeVisible();
+    await expect(page.locator('.comment-anchor-lost-answer')).toHaveCount(1);
+    await page.locator('.comment-anchor-lost-answer').click();
+    await expect(page.locator('.comment-anchor-lost')).toBeHidden();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
   });
 
   test('"This comment lost its anchor" changes no resolve state and leaves it in the floating list', async ({
@@ -489,17 +653,44 @@ test.describe('AC3 — the anchor-lost confirmation', () => {
     expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
   });
 
-  test('a Reviewer is never asked — the decision is the Author\'s, and the thread is still in their panel', async ({
+  test('US-23.11 AC1: whoever is at the keyboard is asked, even about a thread recorded against someone else', async ({
     page,
   }) => {
     await openEditor(page, DOC);
+    // Under US-23.3 the dialog filtered on `sameAuthor`, so the one person
+    // looking at the broken anchor was often the one person never asked.
     await createThread(page, 0, 'Does drains mean FIFO?', SOMEONE_ELSE);
     await clearPosted(page);
     await hostUpdate(page, '# Session expiry\n');
 
+    await expect(page.locator('.comment-anchor-lost')).toBeVisible();
+    await expect(page.locator('.comment-anchor-lost-body')).toHaveText('Does drains mean FIFO?');
+  });
+
+  test('US-23.11 AC4: a thread that floats while RESOLVED is still asked; a Closed one never is', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
+    await openPopover(page);
+    await action(page, 'resolve').click();
+    await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
+
+    // AC4 widens the arming state from Open to Open-or-Resolved: a Resolved
+    // thread whose text is then deleted still owes the same answer.
+    await clearPosted(page);
+    await hostUpdate(page, '# Session expiry\n');
+    await expect(page.locator('.comment-anchor-lost')).toBeVisible();
+    await page.locator('.comment-anchor-lost-later').click();
     await expect(page.locator('.comment-anchor-lost')).toBeHidden();
-    await openCommentTab(page);
-    await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(1);
+
+    // Closed is the exit: the question is never raised again.
+    await hostUpdate(page, DOC);
+    await hostSyncStatus(page, threadId, 'Closed', { actor: SOMEONE_ELSE });
+    await hostUpdate(page, '# Session expiry\n');
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator('.comment-anchor-lost')).toBeHidden();
+    expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
   });
 
   test('a Reopen of an already-anchorless thread asks the question, even though it never re-enters floating', async ({
@@ -511,8 +702,9 @@ test.describe('AC3 — the anchor-lost confirmation', () => {
     await action(page, 'resolve').click();
     await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
 
-    // The anchored text is deleted while the thread is RESOLVED: nothing to decide
-    // yet, so no dialog — the question only applies to an Open thread.
+    // Closed first (US-23.11 AC4's one exit), so the anchored text can be deleted
+    // without the question being raised at all.
+    await hostSyncStatus(page, threadId, 'Closed', { commentAuthor: ME, actor: ME });
     await clearPosted(page);
     await hostUpdate(page, '# Session expiry\n');
     await expect(page.locator('.comment-anchor-lost')).toBeHidden();
@@ -584,27 +776,29 @@ test.describe('AC3 — the anchor-lost confirmation', () => {
     expect(await postedOfType(page, 'changeCommentStatus')).toHaveLength(0);
   });
 
-  test('a refused "This was resolved" is reported and the question is asked again', async ({ page }) => {
+  test('US-23.11 AC4: resolving a floating thread from the popover does not re-raise its own notice', async ({
+    page,
+  }) => {
     await openEditor(page, DOC);
-    await createThread(page, 0, 'Does drains mean FIFO?');
+    const { threadId } = await createThread(page, 0, 'Does drains mean FIFO?');
     await clearPosted(page);
     await floatThread(page);
-
-    await page.locator('.comment-anchor-lost-answer', { hasText: 'This was resolved' }).click();
+    await page.locator('.comment-anchor-lost-later').click();
     await expect(page.locator('.comment-anchor-lost')).toBeHidden();
-    const request = (await postedOfType(page, 'changeCommentStatus')).at(-1)!;
 
-    // The sidecar refused the append (read-only file, disk full, already resolved
-    // elsewhere). The Author's decision must not vanish with the dialog.
-    await simulate(page, {
-      type: 'changeCommentStatusResult',
-      requestId: request.requestId,
-      ok: false,
-      error: 'Disk full',
-    });
-    await expect(page.locator('#wysiwyg-toast')).toHaveText('Disk full');
-    // Still Open, still anchorless — so the question genuinely still stands.
+    // The thread is Open, floating and Resolved from the Comment tab. AC4 re-arms
+    // on a REOPEN and on nothing else: re-arming on any status change put the
+    // notice back up on the snapshot that carried the user's own answer.
+    await openCommentTab(page);
+    await page.locator('.comment-row[data-group="floating"]').first().click();
+    await expect(page.locator('.comment-popover')).toBeVisible();
+    await action(page, 'resolve').click();
+    await hostAppliedStatus(page, threadId, 'Resolved', { actor: ME, commentAuthor: ME });
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator('.comment-anchor-lost')).toBeHidden();
+
+    // ...but a Reopen of a still-anchorless thread genuinely does re-raise it.
+    await hostSyncStatus(page, threadId, 'Open', { actor: SOMEONE_ELSE });
     await expect(page.locator('.comment-anchor-lost')).toBeVisible();
-    await expect(page.locator('.comment-anchor-lost-body')).toHaveText('Does drains mean FIFO?');
   });
 });

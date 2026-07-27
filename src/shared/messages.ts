@@ -278,6 +278,18 @@ export type CommentStatus = 'Open' | 'Resolved' | 'Closed';
  */
 export type CommentStatusAction = 'resolve' | 'close' | 'reopen';
 
+/**
+ * Req 23 US-23.11 AC2: one applied status transition, as carried in a
+ * `commentThreadsSync` snapshot. `toStatus` alone identifies the move — the
+ * source status is whatever the previous entry in the list left behind, and the
+ * loader has already dropped any line whose recorded origin disagreed with it.
+ */
+export interface CommentTransition {
+  toStatus: CommentStatus;
+  author: string;
+  timestamp: string;
+}
+
 /** Req 23 US-23.2: one reply, as carried in a `commentThreadsSync` snapshot. */
 export interface CommentSyncReply {
   /** Durable sidecar id — what a later `deleteComment.targetReplyId` names to remove just this reply. */
@@ -314,14 +326,16 @@ export interface CommentSyncThread {
   nearestHeading: string;
   replies: CommentSyncReply[];
   /**
-   * US-23.3 AC4: who made the most recent Resolved/Closed/Reopen transition and
-   * when. Carried on the snapshot rather than derived webview-side because the
-   * webview never sees the `status-change` lines — and it has to survive a
-   * reload, not just the session that performed the transition. Both absent
-   * while the thread has never left Open.
+   * US-23.11 AC2: every applied Resolved/Closed/Reopen transition, oldest first.
+   * Carried on the snapshot rather than derived webview-side because the webview
+   * never sees the `status-change` lines — and it has to survive a reload, not
+   * just the session that performed the transition. Empty while the thread has
+   * never left Open.
+   *
+   * The popover lists the whole trail; the Comment tab row shows only the last
+   * entry (design handoff), so no separate last-transition pair is carried.
    */
-  lastTransitionAuthor?: string;
-  lastTransitionTimestamp?: string;
+  statusChanges: CommentTransition[];
 }
 
 /**
@@ -550,9 +564,9 @@ export type WebviewToHost =
    * Req 23 US-23.3: move a thread along the Open → Resolved → Closed axis, or
    * Reopen it back to Open in one step. Appends a `status-change` sidecar line
    * (US-23.5) — never rewrites a prior line, and never edits the `.md`
-   * (US-23.6). The host validates the whole request: only it knows the thread's
-   * live status (which action is legal from it) and the configured author name
-   * (the non-authenticated Author/Reviewer nudge).
+   * (US-23.6). The host validates the whole request against the thread's live
+   * status, which only it knows — and against nothing else: US-23.11 AC1 removed
+   * the identity gate, so availability is a function of the status alone.
    */
   | {
       type: 'changeCommentStatus';
@@ -709,8 +723,9 @@ export type HostToWebview =
   | { type: 'deleteCommentResult'; requestId: number; ok: boolean; error?: string }
   /**
    * Req 23 US-23.3: reply to `changeCommentStatus`. `ok: false` carries the
-   * refusal reason (illegal transition from the thread's live status, or the
-   * Author/Reviewer nudge); `ok: true` carries nothing else on purpose — the new
+   * refusal reason: an illegal transition from the thread's live status, or a
+   * transition already in flight for it (US-23.11 AC7). `ok: true` carries
+   * nothing else on purpose — the new
    * status, actor and timestamp all reach every surface through the
    * `commentThreadsSync` push that follows, so echoing them here would be a
    * second source of truth for the same three values.

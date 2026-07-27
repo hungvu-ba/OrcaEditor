@@ -1,15 +1,21 @@
 /**
- * Req 23 US-23.3 AC3: the anchor-lost confirmation.
+ * Req 23 US-23.3 AC3, revised by US-23.11 AC4: the anchor-lost notice.
  *
  * When all four of US-23.4's tiers fail to relocate a thread, the text it was
- * written against is gone, and there are two very different reasons for that —
- * the Author fixed the thing the comment asked about, or the comment simply lost
- * its place. The system must not guess between them, so the Author is asked
- * once per floating episode:
+ * written against is gone. Whoever is at the keyboard is told once per floating
+ * episode, so a comment does not silently drop out of the document:
  *
- *   "This was resolved"      -> Resolved (the Reviewer's Close is still required)
  *   "This comment lost its anchor" -> stays in the Unresolved-location list,
  *                                     resolve status untouched
+ *
+ * **No status action is offered (PO decision, 2026-07-27).** US-23.3 AC5 paired
+ * the notice with a "This was resolved" answer, on the theory that a vanished
+ * anchor usually means the Author fixed the thing. It is removed at every status:
+ * from a Resolved thread the transition it posted is illegal (US-23.11 AC5's
+ * matrix allows `resolve` only from Open), so the answer looped — refused by the
+ * host, re-raised by the still-armed flag. The user re-attaches the thread from
+ * the Comment tab or drops the anchor, whichever they meant; the dialog does not
+ * guess for them.
  *
  * Three equivalent ways out without deciding (x, "Decide later", Escape/scrim) —
  * not deciding is a real answer. Nothing about the answer is persisted: the frozen
@@ -18,25 +24,19 @@
  * re-offered on the next open. Never auto-decides, never times out, and never
  * offers "apply to all" (design handoff).
  *
- * Only the thread's own Author is asked. A Reviewer is not blocked by a modal for
- * a decision that is not theirs — the floating thread is still visible to them in
- * the Unresolved-location panel (US-23.4 AC4), which is where a Reviewer acts.
+ * US-23.11 AC1: no identity filter. Whoever is at the keyboard is told, whatever
+ * name the thread was filed under — the free-text author setting was never a
+ * reason to hide a broken anchor from the one person looking at it.
  *
  * Mounted on `document.body` with its own scrim, like every other dialog here:
  * nothing this module creates may land inside `#content`, where turndown.ts's
  * raw-HTML path could carry a session-only class into the `.md` (US-23.6).
  */
-import type { CommentPopoverController } from './comment-popover';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
 import { COMMENT_ANCHOR_LOST_CLASS, COMMENT_PANEL_SNIPPET_CHARS } from './constants';
-import { el, showToast } from './dom-utils';
+import { el } from './dom-utils';
 import { ESCAPE_PRIORITY, registerEscapeHandler, type Disposable } from './escape-stack';
 import { truncateDisplay } from './trigger-popup';
-import { sameAuthor } from '../../src/comments/sidecar-format';
-
-export interface CommentAnchorDialogController {
-  setAuthorName(name: string): void;
-}
 
 /**
  * One line of the recorded text, so the Author can tell WHICH comment is being
@@ -48,15 +48,9 @@ function snippet(text: string): string {
   return truncateDisplay(text.replace(/\s+/g, ' ').trim(), COMMENT_PANEL_SNIPPET_CHARS);
 }
 
-export function initCommentAnchorDialog(
-  resolve: CommentResolveController,
-  popover: CommentPopoverController
-): CommentAnchorDialogController {
-  let authorName = '';
-  /** The thread the open dialog is asking about — undefined while it is hidden. */
+export function initCommentAnchorDialog(resolve: CommentResolveController): void {
+  /** The thread the open dialog is telling the user about — undefined while hidden. */
   let askingAbout: string | undefined;
-  /** The thread whose "This was resolved" answer is still with the host. */
-  let resolving: string | undefined;
   let escDisposable: Disposable | undefined;
 
   const scrim = el('div', `${COMMENT_ANCHOR_LOST_CLASS}-scrim`);
@@ -96,39 +90,11 @@ export function initCommentAnchorDialog(
     }
   }
 
-  /** "This was resolved": Resolved now, the Reviewer's Close still required (AC1). */
-  function answerResolved(threadId: string): void {
-    // `hide()`, NOT `dismiss()`: the pending flag stays armed until the host says
-    // the line is durable. Clearing it here — before the answer — silently loses
-    // the decision whenever the append is refused (read-only sidecar, disk full,
-    // the thread already resolved from another surface), because the flag is the
-    // only thing that would ever raise the question again.
-    hide();
-    resolving = threadId;
-    const sent = popover.requestStatusChange(threadId, 'resolve', (ok, error) => {
-      resolving = undefined;
-      if (!ok) {
-        showToast(error ?? 'That comment could not be marked resolved.');
-      }
-      // On success the host's snapshot carries a non-Open status, and THAT is what
-      // clears the flag (`refreshFromSeed`). On failure it is still armed, so the
-      // question is re-raised rather than quietly dropped.
-      checkPending();
-    });
-    if (!sent) {
-      // Another comment action holds the single in-flight slot, so nothing was
-      // posted and no outcome will ever arrive for this click.
-      resolving = undefined;
-      showToast('Another comment action is still saving — try again in a moment.');
-      checkPending();
-    }
-  }
-
   /**
    * "This comment lost its anchor": AC3 is explicit that this moves it to the
    * Unresolved-location list "instead of changing its resolve state" — and it is
    * already there, since being floating is what raised this dialog. So the answer
-   * writes nothing; it only records that the Author has seen it.
+   * writes nothing; it only records that the user has seen it.
    */
   function answerLost(): void {
     dismiss();
@@ -136,8 +102,8 @@ export function initCommentAnchorDialog(
 
   function choice(label: string, consequence: string, onPick: () => void): HTMLElement {
     const wrap = el('div', 'comment-anchor-lost-choice');
-    // Both answers at identical weight, with no autofocus and no Enter default:
-    // the whole point is that the system must not lean either way (design handoff).
+    // No autofocus and no Enter default: the notice must not push the user toward
+    // acknowledging it rather than going and re-attaching the thread.
     const button = el('button', 'comment-anchor-lost-answer', label);
     button.type = 'button';
     button.addEventListener('click', onPick);
@@ -174,11 +140,6 @@ export function initCommentAnchorDialog(
 
     const answers = el('div', 'comment-anchor-lost-answers');
     answers.appendChild(
-      choice('This was resolved', 'Marks the thread Resolved. The reviewer still has to close it.', () =>
-        answerResolved(anchor.threadId)
-      )
-    );
-    answers.appendChild(
       choice(
         'This comment lost its anchor',
         'Keeps it in the Unresolved location list, with its status unchanged.',
@@ -193,8 +154,7 @@ export function initCommentAnchorDialog(
     card.appendChild(later);
 
     scrim.hidden = false;
-    // The CARD, never an answer button: the two answers must stay at identical
-    // weight, so autofocusing either would nudge the decision (design handoff).
+    // The CARD, never the answer button — see `choice`.
     card.focus();
     escDisposable?.dispose();
     escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.MODAL, () => {
@@ -207,20 +167,19 @@ export function initCommentAnchorDialog(
   }
 
   /**
-   * Raise the dialog for the next thread that owes an answer, one at a time
-   * (design handoff: no "apply to all", so a mass delete that floats several
-   * threads asks about each in turn rather than deciding for the rest).
+   * Raise the dialog for the next thread that owes an acknowledgement, one at a
+   * time (design handoff: no "apply to all", so a mass delete that floats several
+   * threads reports each in turn rather than collapsing them into one notice).
    */
   function checkPending(): void {
-    // `resolving` keeps the dialog down while an answer is with the host: the flag
-    // is deliberately still armed then, so without this the very next change
-    // notification would re-raise the same question mid-round-trip.
-    if (askingAbout !== undefined || resolving !== undefined || authorName === '') {
+    if (askingAbout !== undefined) {
       return;
     }
-    const next = resolve
-      .floatingThreads()
-      .find((anchor) => anchor.awaitingAnchorDecision && sameAuthor(authorName, anchor.author));
+    // US-23.11 AC1 (PO decision, planning 2026-07-27): no identity filter. The
+    // question is asked of whoever is at the keyboard — filtering it by a
+    // free-text author name meant the one person looking at the broken anchor
+    // was often the one person never asked about it.
+    const next = resolve.floatingThreads().find((anchor) => anchor.awaitingAnchorDecision);
     if (next) {
       open(next);
     }
@@ -243,12 +202,4 @@ export function initCommentAnchorDialog(
     checkPending();
   });
 
-  return {
-    setAuthorName(name): void {
-      authorName = name;
-      // The name arrives with `init`, potentially after a reload already floated a
-      // thread — re-check rather than waiting for the next settled change.
-      checkPending();
-    },
-  };
 }

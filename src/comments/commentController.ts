@@ -45,7 +45,7 @@ import {
   type SidecarThread,
 } from './sidecar-format';
 import type { SidecarStore } from './sidecar-store';
-import type { CommentSidecarState, CommentSyncThread } from '../shared/messages';
+import type { CommentSidecarState, CommentSyncThread, CommentTransition } from '../shared/messages';
 
 /** The structural anchor a thread was created against (US-23.1; re-resolved by US-23.4). */
 export interface CommentAnchor {
@@ -123,10 +123,10 @@ export interface CommentSupport extends vscode.Disposable {
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * US-23.3: move a thread along Open → Resolved → Closed, or Reopen it back to
-   * Open in one step. Validated against the thread's LIVE status and recorded
-   * author (which action is legal, and the Author/Reviewer nudge) — both of
-   * which only this registry knows. Appends a `status-change` line and never
-   * rewrites a prior one (US-23.5), never edits the `.md` (US-23.6).
+   * Open in one step. Validated against the thread's LIVE status alone (US-23.11
+   * AC1 removed the identity gate) — only this registry knows it. Appends a
+   * `status-change` line and never rewrites a prior one (US-23.5), never edits
+   * the `.md` (US-23.6).
    */
   changeStatus(
     msg: StatusChangeMessage,
@@ -254,9 +254,13 @@ interface ThreadEntry {
   commentTimestamp: string;
   /** US-23.3's axis, folded from status-change lines. */
   status: CommentStatus;
-  /** US-23.3 AC4: actor + time of the most recent transition; both absent while never left Open. */
-  lastTransitionAuthor?: string;
-  lastTransitionTimestamp?: string;
+  /**
+   * US-23.11 AC2: every applied transition, in fold order — the thread's audit
+   * trail, so a reader can tell whether Resolve and Close came from two people.
+   * Empty while the thread has never left Open. Lines the loader skipped as
+   * illegal (AC6) are not here: they never took effect.
+   */
+  statusChanges: CommentTransition[];
   /** US-23.2: live reply list — each reply's own durable id is what a later single-reply delete names. */
   replies: Array<{ id: string; author: string; timestamp: string; body: string }>;
 }
@@ -291,6 +295,11 @@ export function createCommentSupport(
   // below runs before an await, so without this two racing creates for one
   // threadId could both pass it.
   const creating = new Set<string>();
+  // US-23.11 AC7: threadIds whose status transition is in flight. Same reason as
+  // `creating` — the status check runs before an await, so without this a
+  // double-click, or the popover and the native menu fired back to back, would
+  // both pass it and append two lines for one intended transition.
+  const changingStatus = new Set<string>();
   // Documents whose sidecar has already been loaded, so a second panel on the
   // same file doesn't duplicate every thread.
   const loaded = new Set<string>();
@@ -409,6 +418,7 @@ export function createCommentSupport(
         commentBody: msg.body,
         commentTimestamp: timestamp,
         status: 'Open',
+        statusChanges: [],
         replies: [],
         anchor: {
           anchorId: msg.anchorId,
@@ -516,10 +526,6 @@ export function createCommentSupport(
         if (known.has(persisted.id)) {
           continue;
         }
-        // US-23.3 AC4: the transition's actor/time have to survive the reload, so
-        // they come off the last (timestamp-sorted) status-change line rather than
-        // being remembered only by the session that performed it.
-        const lastTransition = persisted.statusChanges[persisted.statusChanges.length - 1];
         try {
           register(docKey, persisted.id, {
             thread: buildLoadedThread(controller, document, persisted, loadedState),
@@ -528,8 +534,14 @@ export function createCommentSupport(
             commentBody: persisted.comment.body,
             commentTimestamp: persisted.comment.timestamp,
             status: persisted.status,
-            lastTransitionAuthor: lastTransition?.author,
-            lastTransitionTimestamp: lastTransition?.timestamp,
+            // US-23.11 AC2: the whole trail has to survive the reload, so it comes
+            // off the (timestamp-sorted, illegal-lines-already-skipped) status-change
+            // lines rather than being remembered only by the session that wrote them.
+            statusChanges: persisted.statusChanges.map((line) => ({
+              toStatus: line.to_status,
+              author: line.author,
+              timestamp: line.timestamp,
+            })),
             replies: persisted.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
             anchor: {
               // A fresh parse mints fresh structural ids, so a reloaded thread has
@@ -704,15 +716,20 @@ export function createCommentSupport(
     async changeStatus(msg, document) {
       const entry = threads.get(msg.threadId);
       const currentAuthor = authorFor(document);
-      const rejection = statusChangeRejection(
-        msg,
-        document.uri.toString(),
-        entry?.status,
-        currentAuthor,
-        entry?.commentAuthor
-      );
+      // US-23.11 AC5: validated against `entry.status` — the freshly-folded status
+      // this registry holds — never against the `contextValue` the native menu was
+      // built from, which may be several transitions stale by the time it is
+      // clicked.
+      const rejection = statusChangeRejection(msg, document.uri.toString(), entry?.status);
       if (rejection !== null || !entry) {
         return { ok: false, error: rejection ?? 'This comment thread no longer exists.' };
+      }
+      if (changingStatus.has(msg.threadId)) {
+        // US-23.11 AC7: a transition for this thread is already between its append
+        // and the `entry.status` update below, so the status check above read a
+        // value that is about to change. Mirrors the `creating` guard: the second
+        // request is a no-op, not a second sidecar line.
+        return { ok: false, error: 'This comment is already being updated.' };
       }
       if (!ownedBy(document, msg.threadId)) {
         // Same guard `reply`/`deleteComment` carry: `threads` is one global map,
@@ -728,33 +745,50 @@ export function createCommentSupport(
       const fromStatus = entry.status;
       const toStatus = STATUS_CHANGE_TARGET[msg.action];
       const timestamp = new Date().toISOString();
-      const writeError = await store.append(
-        document,
-        buildStatusChangeLine({
-          id: crypto.randomUUID(),
-          parentCommentId: entry.commentId,
-          author: currentAuthor,
-          timestamp,
-          fromStatus,
-          toStatus,
-        })
-      );
-      if (writeError !== null) {
-        // Persist-then-apply, like every other action: a transition the sidecar
-        // never accepted must not be shown as taken, since it would vanish on
-        // the next reopen.
-        return { ok: false, error: writeError };
-      }
-      entry.status = toStatus;
-      entry.lastTransitionAuthor = currentAuthor;
-      entry.lastTransitionTimestamp = timestamp;
+      // Held across the append AND the registry update, so the window a second
+      // request could read a stale `entry.status` in is closed at both ends.
+      changingStatus.add(msg.threadId);
       try {
-        applyThreadFacets(entry.thread, entry.anchor.state, toStatus);
-      } catch {
-        // Disposed concurrently (deleted from the native UI mid-transition) — the
-        // sidecar line is already durable and folds correctly on the next reload.
+        const writeError = await store.append(
+          document,
+          buildStatusChangeLine({
+            id: crypto.randomUUID(),
+            parentCommentId: entry.commentId,
+            author: currentAuthor,
+            timestamp,
+            fromStatus,
+            toStatus,
+          })
+        );
+        if (writeError !== null) {
+          // Persist-then-apply, like every other action: a transition the sidecar
+          // never accepted must not be shown as taken, since it would vanish on
+          // the next reopen. US-23.11 AC8: the reason travels back through the same
+          // `changeCommentStatusResult` channel create/reply use, and the thread
+          // stays at `fromStatus` so the control is live again for a retry.
+          return { ok: false, error: writeError };
+        }
+        entry.status = toStatus;
+        entry.statusChanges.push({ toStatus, author: currentAuthor, timestamp });
+        try {
+          applyThreadFacets(entry.thread, entry.anchor.state, toStatus);
+        } catch {
+          // Disposed concurrently (deleted from the native UI mid-transition) — the
+          // sidecar line is already durable and folds correctly on the next reload.
+        }
+        return { ok: true, status: toStatus, author: currentAuthor, timestamp };
+      } catch (err) {
+        // US-23.8 AC8 forbids "a silent no-op that leaves the user clicking a
+        // live-looking button". `store.append` catches its own I/O errors, but the
+        // scheme/guard checks around it run outside that catch — letting one throw
+        // past here would skip `changeCommentStatusResult` entirely, and the
+        // webview's single in-flight slot would never be released, silently
+        // deadening every later status action for the session.
+        log('changeStatus failed', err);
+        return { ok: false, error: 'That comment could not be updated.' };
+      } finally {
+        changingStatus.delete(msg.threadId);
       }
-      return { ok: true, status: toStatus, author: currentAuthor, timestamp };
     },
 
     sidecarStateFor(document): CommentSidecarState | undefined {
@@ -781,8 +815,7 @@ export function createCommentSupport(
           lastKnownLine: entry.anchor.lastKnownLine,
           nearestHeading: entry.anchor.nearestHeading,
           replies: entry.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
-          lastTransitionAuthor: entry.lastTransitionAuthor,
-          lastTransitionTimestamp: entry.lastTransitionTimestamp,
+          statusChanges: entry.statusChanges.map((t) => ({ ...t })),
         });
       }
       // Oldest-created first — the same order `foldSidecarRecords` reassembles threads in.
@@ -808,6 +841,7 @@ export function createCommentSupport(
       loaded.clear();
       sidecarState.clear();
       creating.clear();
+      changingStatus.clear();
       // Disposing the controller disposes every thread it created.
       controller.dispose();
     },

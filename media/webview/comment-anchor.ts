@@ -11,6 +11,10 @@ import {
   ANCHOR_SHORT_TEXT_LEN,
   ANCHOR_SHORT_TEXT_THRESHOLD,
   ANCHOR_SIMILARITY_THRESHOLD,
+  DRIFT_RETENTION_ENTER,
+  DRIFT_RETENTION_EXIT,
+  DRIFT_SHORT_RETENTION_ENTER,
+  DRIFT_SHORT_RETENTION_EXIT,
 } from './constants';
 
 /** One node offered to tier 2, described by everything the match needs to know about it. */
@@ -123,31 +127,98 @@ export function anchorThresholdFor(recordedText: string): number {
 }
 
 /**
- * Req 23 US-23.3 AC2: does the text a thread is anchored to RIGHT NOW still
- * match what was recorded when the comment was written?
+ * Req 23 US-23.3 AC2, revised by US-23.11 AC3: how much of what the comment
+ * recorded at creation time is still present in the text it is anchored to right
+ * now, as a 0-1 ratio (1 = every recorded character survives, in order).
  *
  * Separate from `pickAnchorCandidate` on purpose. Tier 2 answers "which node is
  * this comment's?", and it only runs when tier 1 has already failed — so an
  * Author editing the anchored paragraph in place keeps the structural id, gets
- * resolved by tier 1, and tier 2 never runs at all. That is the very case AC2
- * exists for ("the anchored text changes substantially after creation"), so the
- * indicator has to ask this question directly against the resolved node instead
- * of reading which tier fired.
+ * resolved by tier 1, and tier 2 never runs at all. That is the very case the
+ * drift strip exists for, so the indicator has to ask this question directly
+ * against the resolved node instead of reading which tier fired.
  *
- * Uses the same normalization and the same per-length threshold as tier 2, so
- * "no longer matches" means exactly what it means there — and the threshold is
- * passed into the score so a candidate whose length alone rules it out costs no
- * Levenshtein pass (this runs once per thread on every settled change).
+ * ONE-DIRECTIONAL, which is the whole point of AC3. Tier 2's `scoreNormalized`
+ * is symmetric — it divides by the LONGER of the two strings — so appending a
+ * sentence to the commented paragraph read as drift even though nothing the
+ * comment referred to had changed. The longest common subsequence divided by the
+ * RECORDED length can only be lowered by removing or rewriting recorded text;
+ * text typed around it is text outside the comment and never counts.
  *
- * An empty recorded text has nothing to drift from and always reads as matching.
+ * The snapshot is the whole containing paragraph as it stood at creation
+ * (`comment-menu.ts` records `node.textContent`), so this measures exactly what
+ * AC3 states it measures.
+ *
+ * An empty recorded text has nothing to drift from and always reads as fully
+ * retained.
  */
-export function anchorTextMatches(recordedText: string, currentText: string): boolean {
-  const recorded = normalizeAnchorText(recordedText);
-  if (recorded === '') {
-    return true;
+export function anchorTextRetention(
+  recordedText: string,
+  currentText: string,
+  /** The band edge the caller is about to compare against — see the early bail below. */
+  threshold: number
+): number {
+  const normalizedRecorded = normalizeAnchorText(recordedText);
+  if (normalizedRecorded === '') {
+    return 1;
   }
-  const threshold = anchorThresholdFor(recorded);
-  return scoreNormalized(recorded, normalizeAnchorText(currentText), threshold) >= threshold;
+  const normalizedCurrent = normalizeAnchorText(currentText);
+  if (normalizedRecorded === normalizedCurrent) {
+    // Overwhelmingly the common case on a settled pass — nothing in this
+    // paragraph changed. Answered before any O(n·m) work, the same way tier 2's
+    // `scoreNormalized` short-circuits an exact hit.
+    return 1;
+  }
+  const recorded = normalizedRecorded.slice(0, ANCHOR_MAX_COMPARE_CHARS);
+  // The current text is capped RELATIVE to the recorded length, not to the same
+  // absolute prefix. Slicing both at 512 let text inserted BEFORE the snapshot
+  // push the snapshot's own tail out of the comparison window, which reported
+  // drift for an edit that removed nothing — the exact false positive US-23.11
+  // AC3 exists to remove. The extra room is one full cap, so an insertion has to
+  // be longer than the whole snapshot before any of it falls off the end.
+  const current = normalizedCurrent.slice(0, recorded.length + ANCHOR_MAX_COMPARE_CHARS);
+  // The LCS can never exceed the shorter string, so a current text already too
+  // short to clear the threshold is answered by that bound alone — no DP pass.
+  // The bound is itself a valid retention (it is an upper one, and it is below
+  // the threshold), so the caller's comparison stays correct.
+  const bound = current.length / recorded.length;
+  if (bound < threshold) {
+    return bound;
+  }
+  return longestCommonSubsequence(recorded, current) / recorded.length;
+}
+
+/**
+ * Length of the longest common subsequence of two ALREADY-normalized, already-
+ * capped strings (two-row DP, O(min) memory — the same shape as `levenshtein`
+ * above, but keeping the MAXIMUM match rather than the minimum edit count).
+ *
+ * Bounded by ANCHOR_MAX_COMPARE_CHARS at both call sites for the same reason the
+ * edit distance is: this runs once per thread on every settled change.
+ */
+function longestCommonSubsequence(a: string, b: string): number {
+  let previous = new Array<number>(b.length + 1).fill(0);
+  let current = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = 0;
+    for (let j = 1; j <= b.length; j++) {
+      current[j] =
+        a[i - 1] === b[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], current[j - 1]);
+    }
+    [previous, current] = [current, previous];
+  }
+  return previous[b.length];
+}
+
+/**
+ * US-23.11 AC3: the retention band the drift strip is armed and disarmed at, for
+ * one thread's recorded text. Two values, not one, so the suggestion cannot
+ * flicker across single keystrokes at the boundary — see the constants.
+ */
+export function driftBandFor(recordedText: string): { enter: number; exit: number } {
+  return normalizeAnchorText(recordedText).length < ANCHOR_SHORT_TEXT_LEN
+    ? { enter: DRIFT_SHORT_RETENTION_ENTER, exit: DRIFT_SHORT_RETENTION_EXIT }
+    : { enter: DRIFT_RETENTION_ENTER, exit: DRIFT_RETENTION_EXIT };
 }
 
 /** One row of the "Re-attach…" picker: a candidate, its index, and how close it reads. */

@@ -245,9 +245,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // `vscode.comments` UI. No confirmation dialog on any of the three — every
       // transition is reversible by the Reviewer's Reopen (the PO decision's own
       // correction path), unlike a delete. Which of the three is even offered is
-      // gated per thread by the `status-*` half of `contextValue` in package.json;
-      // the Author/Reviewer rule stays host-side in `statusChangeRejection`, so a
-      // disallowed invocation surfaces its reason as a warning here.
+      // gated per thread by the `status-*` half of `contextValue` in package.json,
+      // and re-validated host-side against the freshly-folded status in
+      // `statusChangeRejection` (US-23.11 AC5) — a stale menu surfaces its reason
+      // as a warning here. No identity is consulted anywhere (US-23.11 AC1).
       ...(['resolve', 'close', 'reopen'] as const).map((action) =>
         vscode.commands.registerCommand(
           `orcaEditor.${action}Comment`,
@@ -1347,9 +1348,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         }
         case 'changeCommentStatus': {
           // Req 23 US-23.3: changeStatus() validates the whole payload (document
-          // identity, known action, legality from the thread's live status, and
-          // the Author/Reviewer nudge). Appends a `status-change` sidecar line;
-          // nothing here edits the document (US-23.6).
+          // identity, known action, and legality from the thread's live status —
+          // US-23.11 AC1 removed the identity check). Appends a `status-change`
+          // sidecar line; nothing here edits the document (US-23.6).
           const outcome = this.comments
             ? await this.comments.changeStatus(msg, document)
             : ({ ok: false, error: 'Comments are not available in this window.' } as const);

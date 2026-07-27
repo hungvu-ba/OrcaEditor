@@ -464,3 +464,4 @@
 | 0.10.0 | 2026-07-27 | Feature (US-23.7): the right TOC panel becomes a shared tab container — 32px tab strip with the TOC as its first tab, an overflow-menu shell, and Escape-to-close ordering. |
 | 0.10.0 | 2026-07-27 | Feature (US-10.8): TOC header restacked — ring and stat lines become a 3px bar plus one 28px meta row; depth pills move into the keyboard-operable `⋯` menu. |
 | 0.10.0 | 2026-07-27 | Feature (US-23.9): Comment tab beside the TOC lists every thread grouped by status, absorbing the Unresolved-location panel; fixes reloaded threads collapsing onto one anchor. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.11): resolve state machine revised — no author gate on Resolve/Close/Reopen, full transition trail, one-directional drift, illegal status lines skipped at load, anchor-lost dialog becomes a notice. |

@@ -124,10 +124,13 @@ function groupOf(thread: ThreadAnchor): GroupKey {
 /** AC5: the row's stamp is the LAST TRANSITION, falling back to creation for a
  *  thread that has never left Open (the schema's derived-status rule). */
 function lastTransitionAt(thread: ThreadAnchor): string {
+  // US-23.11 AC2 kept the full trail on the thread; the row shows only its LAST
+  // entry (design handoff) — the popover is where the whole history is listed.
+  //
   // `??` is not enough: the sidecar validator accepts `timestamp: ''` and the
   // host forwards it verbatim, and an empty string would print a blank stamp and
   // sort to one end of its group instead of falling back to creation.
-  const transition = thread.lastTransitionTimestamp;
+  const transition = thread.statusChanges[thread.statusChanges.length - 1]?.timestamp;
   return transition === undefined || transition === '' ? thread.createdAt : transition;
 }
 
@@ -710,8 +713,8 @@ export function initCommentPanel(
     // The popover reveals a connected carrier itself and re-measures against it,
     // which is AC8's "scroll first, then position". A floating thread has no
     // carrier and nowhere to scroll to, so it opens against the row's own box.
-    // Neither path can raise US-23.3's anchor-lost dialog: that is armed only on
-    // the transition INTO floating, and is Author-only.
+    // Neither path can raise US-23.3's anchor-lost notice: that is armed only on
+    // the transition INTO floating, which opening a row is not.
     openThread(thread.threadId, row.getBoundingClientRect(), row);
   }
 

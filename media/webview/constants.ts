@@ -150,6 +150,31 @@ export const ANCHOR_MAX_COMPARE_CHARS = 512;
 export const ANCHOR_SHORT_TEXT_THRESHOLD = 0.95;
 
 /**
+ * Req 23 US-23.11 AC3: the drift check's OWN retention bands, deliberately
+ * independent of tier 2's relocation thresholds above.
+ *
+ * Retention is one-directional — how much of the recorded snapshot is still
+ * present — so text typed into the paragraph after the comment was written never
+ * lowers it. Drift should be suggested well before relocation would fail, hence
+ * a band far stricter than tier 2's 0.8.
+ *
+ * The pair is a hysteresis band, not a single line: drift is entered below
+ * ENTER and only left again at or above EXIT, so a retention hovering at the
+ * boundary cannot flicker the strip on and off across single keystrokes.
+ */
+export const DRIFT_RETENTION_ENTER = 0.9;
+export const DRIFT_RETENTION_EXIT = 0.95;
+
+/**
+ * The same band for short recorded text (below `ANCHOR_SHORT_TEXT_LEN`), where
+ * tier 2's stricter 0.95 would be backwards: one character edited in a ten-
+ * character heading is not the "text may have changed" case the strip exists
+ * for, while half a short heading rewritten is.
+ */
+export const DRIFT_SHORT_RETENTION_ENTER = 0.6;
+export const DRIFT_SHORT_RETENTION_EXIT = 0.75;
+
+/**
  * Current anchor-resolution state of a node (`exact` | `approximate` |
  * `floating`). US-23.2 reads it to draw the pin/highlight, and it is how AC3's
  * "visibly marked as approximate" exists in the DOM. Session-only, stripped

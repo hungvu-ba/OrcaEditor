@@ -20,7 +20,7 @@
  * names match the frozen `.orca-comments.jsonl` anchor schema so that story can
  * persist it verbatim.
  */
-import { anchorTextMatches, pickAnchorCandidate } from './comment-anchor';
+import { anchorTextRetention, driftBandFor, pickAnchorCandidate } from './comment-anchor';
 import {
   anchorCandidates,
   commentAnchorLine,
@@ -33,7 +33,7 @@ import {
 } from './block-map';
 import { ANCHOR_REEVAL_DEBOUNCE_MS, COMMENT_ANCHOR_STATE_ATTR } from './constants';
 import type { VsCodeApi } from './vscode-api';
-import type { CommentStatus, CommentSyncReply } from '../../src/shared/messages';
+import type { CommentStatus, CommentSyncReply, CommentTransition } from '../../src/shared/messages';
 
 /**
  * Where a thread currently sits. Runtime-derived and orthogonal to the
@@ -64,25 +64,32 @@ export interface ThreadAnchor {
    * conflated: a thread can be floating AND Resolved, or exact AND Closed.
    */
   status: CommentStatus;
-  /** US-23.3 AC4: who made the last Resolved/Closed/Reopen transition, and when. Absent while never left Open. */
-  lastTransitionAuthor?: string;
-  lastTransitionTimestamp?: string;
+  /**
+   * US-23.11 AC2: every applied Resolved/Closed/Reopen transition, oldest first —
+   * the trail the popover lists so a reader can tell whether Resolve and Close
+   * came from two different people. Empty while the thread has never left Open.
+   */
+  statusChanges: CommentTransition[];
   /** US-23.2: replies under this thread, in append order — what the popover renders. */
   replies: CommentSyncReply[];
   state: AnchorState;
   /**
-   * US-23.3 AC2: whether the text this thread currently sits on has drifted out
-   * of match with `recordedText`. Recomputed every settled pass — a live derived
-   * indicator, never a stored/dismissible flag, so it disappears on its own once
-   * the text matches again (e.g. an undo) and comes back if it drifts later.
+   * US-23.3 AC2, revised by US-23.11 AC3: whether enough of `recordedText` has
+   * been removed or rewritten for the "text may have changed" strip. Recomputed
+   * every settled pass — a live derived indicator, never a stored/dismissible
+   * flag, so it disappears on its own once the text is restored (e.g. an undo)
+   * and comes back if it drifts later.
+   *
+   * Latched through a hysteresis band rather than a single threshold, which is
+   * why it is read as well as written by `applyStatusIndicators`.
    */
   contentDrifted: boolean;
   /**
-   * US-23.3 AC3: this thread just lost its anchor entirely (all four tiers
-   * failed) while still Open, so its Author owes an explicit answer —
-   * "this was resolved" vs "this comment lost its anchor". Set on the transition
-   * INTO floating, not on every pass, so the dialog is raised once per episode
-   * rather than re-raised on every keystroke that settles.
+   * US-23.3 AC3, widened by US-23.11 AC4: this thread just lost its anchor
+   * entirely (all four tiers failed) while still Open or Resolved, so whoever is
+   * at the keyboard has not yet been told. Set on the transition INTO floating,
+   * not on every pass, so the notice is raised once per episode rather than
+   * re-raised on every keystroke that settles.
    */
   awaitingAnchorDecision: boolean;
   /**
@@ -328,16 +335,32 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
    * answer them) and neither moves the native thread's Range.
    */
   function applyStatusIndicators(anchor: ThreadAnchor, previousState: AnchorState): void {
-    // A floating thread has nothing holding it, so the recorded text certainly
-    // does not match — AC2's condition is "the content-match check currently
-    // fails", which that satisfies.
-    anchor.contentDrifted =
-      anchor.carrier === undefined ||
-      !anchorTextMatches(anchor.recordedText, anchor.carrier.textContent ?? '');
-    if (anchor.state !== 'floating' || anchor.status !== 'Open') {
-      // Promoted back out (an undo restored the text) or already past Open —
-      // nothing left to decide. Clearing here is also what re-arms the dialog
-      // for a genuine later episode.
+    if (anchor.carrier === undefined) {
+      // US-23.11 AC3: a floating thread's drift suggestion is SUPPRESSED, not
+      // forced true. The anchor-lost confirmation below owns that question, and
+      // asking it twice in two surfaces with two different answer sets is the
+      // duplication AC3 removes.
+      anchor.contentDrifted = false;
+    } else {
+      // Hysteresis (AC3): enter drift below the band's floor, leave it only at or
+      // above the ceiling, so a retention hovering at the boundary cannot flicker
+      // the strip across single keystrokes. The edge in play is passed down so the
+      // retention pass can bail out cheaply when the answer is already decided.
+      const band = driftBandFor(anchor.recordedText);
+      const threshold = anchor.contentDrifted ? band.exit : band.enter;
+      const retention = anchorTextRetention(
+        anchor.recordedText,
+        anchor.carrier.textContent ?? '',
+        threshold
+      );
+      anchor.contentDrifted = retention < threshold;
+    }
+    if (anchor.state !== 'floating' || anchor.status === 'Closed') {
+      // Promoted back out (an undo restored the text), or Closed — nothing left
+      // to decide. Clearing here is also what re-arms the dialog for a genuine
+      // later episode. US-23.11 AC4: the arming state is Open OR Resolved, so a
+      // thread that floats after being resolved is still asked about; only a
+      // Closed thread is never asked again.
       anchor.awaitingAnchorDecision = false;
     } else if (previousState !== 'floating') {
       anchor.awaitingAnchorDecision = true;
@@ -423,26 +446,43 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
    * only ever refreshes the mutable, host-owned metadata.
    */
   function refreshFromSeed(existing: ThreadAnchor, seed: ThreadAnchorSeed): void {
+    const statusChanged = existing.status !== seed.status;
     existing.status = seed.status;
     existing.replies = seed.replies;
     existing.body = seed.body;
     existing.author = seed.author;
     existing.createdAt = seed.createdAt;
-    existing.lastTransitionAuthor = seed.lastTransitionAuthor;
-    existing.lastTransitionTimestamp = seed.lastTransitionTimestamp;
-    if (seed.status !== 'Open') {
-      // US-23.3 AC3: a thread that left Open (from this popover, from a second
-      // panel, or from the native UI) has nothing left to decide about its lost
-      // anchor. Cleared on the sync rather than waiting for the next resolution
-      // pass, which a metadata-only sync does not run.
+    existing.statusChanges = seed.statusChanges;
+    if (seed.status === 'Closed') {
+      // US-23.3 AC3, widened by US-23.11 AC4: only a Closed thread (from this
+      // popover, from a second panel, or from the native UI) has nothing left to
+      // decide about its lost anchor — an Open or Resolved one is still asked.
+      // Cleared on the sync rather than waiting for the next resolution pass,
+      // which a metadata-only sync does not run.
       existing.awaitingAnchorDecision = false;
-    } else if (existing.state === 'floating') {
-      // ...and a Reopen can put a thread back into Open while it is ALREADY
+    } else if (statusChanged && seed.status === 'Open' && existing.state === 'floating') {
+      // ...and a REOPEN can put a thread back into Open while it is ALREADY
       // anchorless, which is exactly AC3's condition. `applyStatusIndicators`
       // arms only on the transition INTO floating, and this thread is past that,
       // so without arming here the question would never be asked again for the
       // rest of the session.
+      //
+      // A Reopen and nothing else. US-23.11 AC4 arms on crossing into floating
+      // and re-arms on Reopen; it never asks for a re-arm on Resolve. Arming on
+      // any status change re-armed the flag on the very snapshot that carries
+      // the dialog's own "This was resolved" answer — the answer left the flag
+      // deliberately armed for the host to clear, so the thread the user had
+      // just answered was asked about again, and the second answer is refused
+      // ("A Resolved thread cannot be resolved"). Arming on every SYNC, rather
+      // than on a change, was worse still: the host re-pushes the whole snapshot
+      // after each anchor update and reply, so "Decide later" came back seconds
+      // later.
       existing.awaitingAnchorDecision = true;
+    } else if (statusChanged) {
+      // Any other transition out of Open answers the question by itself — this
+      // is the self-heal `answerResolved` relies on, and what takes the dialog
+      // down through the `onChange` guard once the host confirms.
+      existing.awaitingAnchorDecision = false;
     }
   }
 
@@ -527,6 +567,22 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       if (!anchor || !content.contains(el)) {
         return false;
       }
+      // US-23.11 AC3: the snapshot follows the anchor. A thread the user
+      // deliberately re-anchored would otherwise read as permanently drifted
+      // against the text of a paragraph that no longer exists. Rewritten BEFORE
+      // `place`, so the offsets are clamped against the same node's length the
+      // snapshot was just taken from. Registry-only — US-23.13's `anchor-update`
+      // line is what makes it survive a reload.
+      anchor.recordedText = el.textContent ?? '';
+      // The offsets described a range inside the OLD node, so they name nothing in
+      // the new one — left as they were, the popover's quote row would show an
+      // arbitrary mid-word fragment of the newly chosen paragraph and present it
+      // as "the text this comment refers to". A manual re-attach picks a NODE, not
+      // a phrase, so the thread becomes a bare-node anchor (US-23.1 already allows
+      // an empty range) and no quote is shown.
+      anchor.offsetStart = 0;
+      anchor.offsetEnd = 0;
+      anchor.contentDrifted = false;
       // A manual re-attachment is the user's own answer to "where does this
       // belong", so it counts as exact — and the node now carries the id, which
       // makes tier 1 keep it there on every later pass.

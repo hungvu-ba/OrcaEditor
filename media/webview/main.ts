@@ -274,10 +274,11 @@ const commentPanel = initCommentPanel(content, commentResolve, (threadId, rect, 
   commentPopover.open(threadId, rect, returnFocusTo)
 );
 toc.dock.registerTab(commentPanel.tab);
-// Req 23 US-23.3 AC3: asks the Author "was this resolved, or did it lose its
-// anchor?" once per floating episode. Self-driven off commentResolve's change
-// notifications — no other module opens it.
-const commentAnchorDialog = initCommentAnchorDialog(commentResolve, commentPopover);
+// Req 23 US-23.3 AC3, revised by US-23.11 AC4: tells whoever is at the keyboard
+// that a thread lost its anchor, once per floating episode. Self-driven off
+// commentResolve's change notifications — no other module opens it and nothing
+// configures it, so it is constructed for its side effect alone.
+initCommentAnchorDialog(commentResolve);
 // Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
@@ -552,7 +553,6 @@ window.addEventListener('message', (event) => {
       currentDocUri = msg.docUri;
       commentPopover.setDocUri(msg.docUri);
       commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
-      commentAnchorDialog.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 23 US-23.2: per-file persisted "Show Comments" state.
       commentHighlight.setToggle(cfg.commentHighlightOn === true);
       syncCommentHighlightButton();
@@ -653,8 +653,10 @@ window.addEventListener('message', (event) => {
           createdAt: t.timestamp,
           status: t.status,
           replies: t.replies,
-          lastTransitionAuthor: t.lastTransitionAuthor,
-          lastTransitionTimestamp: t.lastTransitionTimestamp,
+          // `?? []`: the field is required on the wire, but this is the untrusted
+          // boundary and every consumer reads `.length` — a producer that misses it
+          // would take the whole Comment tab down rather than one blank cell.
+          statusChanges: t.statusChanges ?? [],
         }))
       );
       commentPopover.forgetThreads(pruned);
@@ -750,11 +752,12 @@ window.addEventListener('message', (event) => {
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
-      // Req 23 US-23.3 AC6: the identity the Resolve/Close/Reopen gating (and the
-      // anchor-lost dialog) reads must track the setting live — the host re-reads
-      // it per action, so a stale copy here disagrees with what the host allows.
+      // Req 23 US-23.2: the identity the delete-ownership nudge reads must track
+      // the setting live — the host re-reads it per action, so a stale copy here
+      // disagrees with what the host allows. US-23.11 AC1 removed the identity
+      // gate from the status actions and from the anchor-lost dialog, so neither
+      // needs the name any more.
       commentPopover.setAuthorName(msg.commentAuthorName ?? '');
-      commentAnchorDialog.setAuthorName(msg.commentAuthorName ?? '');
       commentMenu.setAuthorName(msg.commentAuthorName ?? '');
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
