@@ -1717,14 +1717,167 @@ body.toc-resizing #toolbar {
   transition: none;
 }
 
+/*---------------------------------------------------------------------------
+ * US-23.7 — shared right-dock tab strip. Owns the panel's top edge, so it is
+ * what now clears the toolbar band (see #toc-header below, which used to).
+ *--------------------------------------------------------------------------*/
+
+/* A tab body carries its own author `display` (see #toc-tabpanel below), and an
+ * author declaration outranks the UA stylesheet's [hidden] { display: none }
+ * whatever the specificity — so without this the dock's `hidden` toggle would be
+ * inert and every registered tab would render at once. */
+.right-dock-tabpanel[hidden] {
+  display: none;
+}
+
+.right-dock-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  /* Clears the #toolbar band (position:sticky, full-width, higher z-index than
+   * the panel) that overlaps the panel's top edge. Margin rather than padding so
+   * the strip itself stays exactly 32px. */
+  margin-top: var(--toolbar-height, 48px);
+  background: var(--toc-chrome-bg);
+  border-bottom: 1px solid var(--toc-border);
+}
+
+.right-dock-tab {
+  flex: none;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--toc-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* Active tab takes the panel body's own background — not a tint — plus a 2px
+ * inset accent bar, so nothing but the bar moves when tabs switch. */
+.right-dock-tab.active {
+  background: var(--toc-bg);
+  color: var(--toc-fg);
+  box-shadow: inset 0 -2px 0 var(--toc-accent);
+}
+
+.right-dock-tab:hover:not(.active) {
+  color: var(--toc-fg);
+}
+
+.right-dock-menu-btn {
+  flex: none;
+  margin-left: auto;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--toc-muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.right-dock-menu-btn:hover,
+.right-dock-menu-btn.open {
+  background: var(--toc-accent-soft);
+  color: var(--toc-fg);
+}
+
+.right-dock-tab:focus-visible,
+.right-dock-menu-btn:focus-visible {
+  outline: 1px solid var(--toc-accent);
+  outline-offset: -2px;
+}
+
+/* Rendered as a document.body child (right-dock.ts explains why), positioned
+ * against the panel's box — so it needs its own stacking above #toc-panel's 150
+ * and to sit under #toolbar's 160, same band the panel itself lives in. */
+.right-dock-menu {
+  position: fixed;
+  width: 168px;
+  /* A long item list must scroll inside the menu rather than run off the
+   * viewport bottom — the menu is fixed-positioned with nowhere to reflow to. */
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  z-index: 151;
+  border: 1px solid var(--toc-border);
+  border-radius: 8px;
+  background: var(--toc-chrome-bg);
+  color: var(--toc-fg);
+  /* Deliberately NOT --toc-shadow: that token is `transparent` in Standard
+   * because the docked panel sits flush against the edge and needs no shadow. A
+   * menu floating over the panel always does — its background is the same
+   * --toc-chrome-bg, so the shadow plus the 1px border is all that separates
+   * them. Handoff alpha per mode is .10–.40; one neutral value covers the range. */
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.right-dock-menu-title {
+  padding: 4px 8px;
+  color: var(--toc-muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.right-dock-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.right-dock-menu-item:hover {
+  background: var(--toc-accent-soft);
+}
+
+.right-dock-menu-check {
+  flex: none;
+  width: 12px;
+  color: var(--toc-accent);
+}
+
+#toc-tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Paired [hidden] rule at matching specificity, same reason and same shape as
+ * `#toolbar button[hidden]` above: the ID rule's `display: flex` outranks both
+ * the UA sheet and `.right-dock-tabpanel[hidden]`, so without this the dock's
+ * `hidden` toggle is inert and a second tab (US-23.9) would paint on top of the
+ * TOC instead of replacing it. */
+#toc-tabpanel[hidden] {
+  display: none;
+}
+
 #toc-header {
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  /* padding-top chừa dải toolbar (position:sticky, full-width, z-index cao
-   * hơn #toc-panel — xem #toolbar) đè lên đỉnh panel, tránh title bị che. */
-  padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
+  /* Toolbar clearance moved to .right-dock-tabs (US-23.7) — the strip, not this
+   * header, is the panel's top edge now. */
+  padding: 8px 14px;
   /* Must resolve to the SAME value as #toc-panel's own background (--toc-bg
    * === --toc-chrome-bg, see :root above) — otherwise a lighter/darker band
    * shows behind the progress ring. */
@@ -2437,7 +2590,10 @@ body.reading-mode .toc-item {
  * reached it. readability.ts now also hoists --reading-font-override onto
  * <body>; --reading-ui-font-family (markdown.css) covers the per-preset stack. */
 body.reading-mode #toc-panel,
-body.reading-mode .toc-item {
+body.reading-mode .toc-item,
+/* US-23.7: the `⋯` menu is a document.body child (see right-dock.ts), so it is
+ * outside #toc-panel's subtree and needs the rail font stack named explicitly. */
+body.reading-mode .right-dock-menu {
   font-family: var(--reading-font-override, var(--reading-ui-font-family));
 }
 body.reading-mode #toc-progress-ring .toc-progress-value {
@@ -2519,6 +2675,16 @@ body.reading-mode .cross-file-search-more {
   font-size: var(--reading-ui-fs-11);
 }
 body.reading-mode #wysiwyg-toast {
+  font-size: var(--reading-ui-fs-12);
+}
+/* US-23.7: the tab strip and its overflow menu are rail chrome like .toc-depth-btn
+ * above — scale them with Reading Mode too, or the strip stays at OS-chrome size
+ * beside outline rows that grew. */
+body.reading-mode .right-dock-tab,
+body.reading-mode .right-dock-menu-title {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .right-dock-menu-item {
   font-size: var(--reading-ui-fs-12);
 }
 

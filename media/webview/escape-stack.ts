@@ -33,8 +33,24 @@ export const ESCAPE_PRIORITY = {
    * draft — and which one won silently flipped as handlers were re-armed.
    */
   NESTED_POPUP: 25,
+  /**
+   * The right-dock's `⋯` overflow menu (Req 23 US-23.7). Its own tier rather
+   * than POPUP or NESTED_POPUP because it can be armed at the same time as
+   * either — a comment popover or a trigger popup lives in #content, the menu in
+   * the dock — and a shared priority would let registration order decide which
+   * one an Escape closes. Above DOCK so a surface opened from inside a tab always
+   * closes before the container itself.
+   */
+  DOCK_MENU: 22,
   POPUP: 20,
   CROSS_FILE: 15,
+  /**
+   * The right-dock container itself (Req 23 US-23.7) — the last thing Escape
+   * closes among the dock's surfaces. Above ZEN so Escape dismisses a
+   * just-opened dock before leaving Zen: a transient surface goes before a
+   * persistent mode.
+   */
+  DOCK: 12,
   ZEN: 10,
 } as const;
 

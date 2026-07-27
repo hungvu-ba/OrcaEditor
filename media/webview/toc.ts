@@ -12,6 +12,7 @@
 
 import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
+import { createTabDock, type RightDockTab } from './right-dock';
 import { showTooltip, hideTooltip } from './tooltip';
 import { getDocHeight } from './match-utils';
 import { extractReadableText, countWords, estimateReadMinutes, formatCount } from './reading-stats';
@@ -207,8 +208,23 @@ export function initToc(
   list.id = 'toc-list';
   list.setAttribute('aria-label', 'Table of Contents');
 
-  panel.append(resizer, header, filterBar, list);
+  // US-23.7: the panel is now a shared right-dock tab container. Everything the
+  // TOC used to append directly moves inside one tabpanel so a second tab
+  // (US-23.9's comment list) can share the dock; the resizer stays a direct child
+  // because it is absolutely positioned against the panel, not tab content.
+  const tocTabPanel = document.createElement('div');
+  tocTabPanel.id = 'toc-tabpanel';
+  tocTabPanel.appendChild(header);
+  tocTabPanel.appendChild(filterBar);
+  tocTabPanel.appendChild(list);
+
+  panel.appendChild(resizer);
   document.body.appendChild(panel);
+
+  // createTabDock appends the strip, so it runs before any tab body is added.
+  const dock = createTabDock(panel, vscode);
+  const tocTab: RightDockTab = { id: 'toc', label: 'TOC', body: tocTabPanel };
+  dock.registerTab(tocTab);
 
   // --- Bề rộng: khôi phục width đã lưu, cho kéo đổi rộng ---
 
@@ -723,9 +739,17 @@ export function initToc(
     open = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {
+      // US-23.7: #toc-toggle always opens the container on the TOC tab.
+      dock.activate('toc');
       build();
       // padding của body vừa đổi → tính lại vị trí active ở frame kế tiếp
       requestAnimationFrame(updateActive);
+    } else {
+      // The `⋯` menu is a document.body child, so it does not disappear with the
+      // panel. Every close path funnels through here — the toolbar button, the
+      // `openToc` host command, the `/toc` slash command, the narrow-viewport
+      // auto-hide — so this is the one place that can guarantee no orphan menu.
+      dock.closeMenu();
     }
   }
 

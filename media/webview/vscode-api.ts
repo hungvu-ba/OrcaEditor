@@ -6,6 +6,8 @@ export interface WebviewState {
   tocWidth?: number;
   /** US-10.6: heading-level filter slider (1=H1, 2=H1–H2, 3=H1–H2–H3) — per-tab, nhớ giữa các lần mở tab. */
   tocMaxLevel?: 1 | 2 | 3;
+  /** US-23.7: id of the selected right-dock tab — same scope as tocWidth (per webview panel). */
+  rightDockTab?: string;
 }
 
 /** Kiểu API webview VS Code cấp cho script (acquireVsCodeApi chỉ được gọi một lần). */

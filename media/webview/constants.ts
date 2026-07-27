@@ -207,6 +207,26 @@ export const COMMENT_REPLY_INPUT_CLASS = 'comment-popover-reply-input';
 /** DOM class for a delete-confirmation dialog, mounted on `document.body`. */
 export const COMMENT_DELETE_CONFIRM_CLASS = 'comment-delete-confirm';
 
+// --- Req 23 US-23.7: shared right-dock tab container (media/webview/right-dock.ts) ---
+
+/** DOM class for the 32px strip that owns the dock's top edge. */
+export const RIGHT_DOCK_STRIP_CLASS = 'right-dock-tabs';
+/** DOM class for the `role="tablist"` inside the strip — the `⋯` button is its sibling, not its child. */
+export const RIGHT_DOCK_TABLIST_CLASS = 'right-dock-tablist';
+/** DOM class for one tab header. */
+export const RIGHT_DOCK_TAB_CLASS = 'right-dock-tab';
+/**
+ * DOM class stamped on every registered tab body. Its paired
+ * `.right-dock-tabpanel[hidden]` rule is what makes the dock's `hidden` toggle
+ * stick — a tab body carrying its own author `display` needs its own paired rule
+ * at matching specificity too (see `#toc-tabpanel[hidden]` in editor.css).
+ */
+export const RIGHT_DOCK_TABPANEL_CLASS = 'right-dock-tabpanel';
+/** DOM class for the `⋯` overflow button at the strip's right end. */
+export const RIGHT_DOCK_MENU_BTN_CLASS = 'right-dock-menu-btn';
+/** DOM class for the overflow menu, mounted on `document.body` (comment-popover.ts convention). */
+export const RIGHT_DOCK_MENU_CLASS = 'right-dock-menu';
+
 // --- Req 23 US-23.3: two-step resolve (Open -> Resolved -> Closed) ---
 
 /** DOM class for the popover's Resolve/Close/Reopen action bar. */

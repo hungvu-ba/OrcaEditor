@@ -461,3 +461,4 @@
 | 0.10.0 | 2026-07-26 | Feature (US-23.6): comment actions can no longer touch the `.md` — the session-only anchor marker class is stripped before serialize, and undo/redo inside a comment text field never reaches the document stack. |
 | 0.10.0 | 2026-07-26 | Feature (US-23.2): comment gutter pins (with clustering), a "Show Comments" inline highlight toggle, and a thread popover for reply/delete — reachable from both the webview and the native `vscode.comments` UI. |
 | 0.10.0 | 2026-07-27 | Feature (US-23.3): two-step comment resolve — Author marks Resolved, Reviewer Closes, one-step Reopen, a live "text may have changed" hint, and an anchor-lost confirmation. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.7): the right TOC panel becomes a shared tab container — 32px tab strip with the TOC as its first tab, an overflow-menu shell, and Escape-to-close ordering. |

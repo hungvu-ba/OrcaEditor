@@ -35,6 +35,7 @@ import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
+import { ESCAPE_PRIORITY, registerEscapeHandler } from './escape-stack';
 import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
@@ -109,6 +110,28 @@ const dom = createDomHelpers(content);
 // initToc needs placeCaretIn to set the caret at a heading on TOC-link click
 // (so closing the panel reveals that heading, not the stale document-top caret).
 const toc = initToc(content, vscode, dom.placeCaretIn);
+// US-23.7 AC6: Escape closes the right-dock container — but only "when the
+// container has focus", which the AC states as its own precondition and which is
+// what keeps this handler out of everyone else's way. The escape stack's listener
+// is capture-phase on `document` and calls stopPropagation the moment a handler
+// consumes, so an unconditional "the panel is open" handler would swallow Escape
+// from every listener not yet migrated to the stack (the Ctrl+F box, the TeX
+// editor, toolbar popovers, the drag-handle menu) — and the panel auto-opens on
+// most documents, so that would be the default state, not an edge case.
+// Registered here rather than in toc.ts so the close pairs with syncTocButton(),
+// exactly like every other toc.toggle() call site in this file.
+registerEscapeHandler(ESCAPE_PRIORITY.DOCK, () => {
+  const panel = document.getElementById('toc-panel');
+  if (!toc.isOpen() || panel === null || !panel.contains(document.activeElement)) {
+    return false;
+  }
+  // Focus lives inside a panel that is about to collapse and then go
+  // visibility:hidden — hand it back before it is orphaned there.
+  content.focus();
+  toc.toggle();
+  syncTocButton();
+  return true;
+});
 const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
