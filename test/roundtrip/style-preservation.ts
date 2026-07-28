@@ -676,6 +676,11 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
     { name: 'dd-source-muted (Req 17)', cls: 'dd-source-muted', attrEl: 'td' },
     { name: 'md-code-wrapped (Req 04)', cls: 'md-code-wrapped', attrEl: 'td' },
     { name: 'md-table-fit (US-19.25, folded from stripTablePresentation)', cls: 'md-table-fit', attrEl: 'table' },
+    // US-23.22: three more leaks the registration scan found after this story
+    // shipped — same shape as the seven above, registered for the same reason.
+    { name: 'broken-ref (Req 20 US-20.9, found by US-23.22)', cls: 'broken-ref', attrEl: 'td' },
+    { name: 'entity-reveal-flash (Req 21, found by US-23.22)', cls: 'entity-reveal-flash', attrEl: 'td' },
+    { name: 'dd-drop-target-cell (Req 17, found by US-23.22)', cls: 'dd-drop-target-cell', attrEl: 'td' },
   ];
   for (const { name, cls, attrEl } of NAMED_CLASSES) {
     const withClass =
@@ -869,6 +874,10 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
     'dd-hover-outline-cell',
     'dd-source-muted',
     'md-code-wrapped',
+    // US-23.22 additions (see the named strip cases above).
+    'broken-ref',
+    'entity-reveal-flash',
+    'dd-drop-target-cell',
   ];
   for (const cls of CELL_CLASSES) {
     const doc = domino.createDocument(
@@ -924,6 +933,17 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
  *  - md-table-fit: REPORTED BACK — same shape as the four above. Set by a
  *    user-triggered fit-mode toggle (table.ts, US-19.25), not by a render
  *    pass; nothing to re-stamp on render.
+ *
+ * US-23.22 additions, same determination:
+ *
+ *  - broken-ref: re-stamped by broken-ref.ts's post-render recompute pass
+ *    (BROKEN_REF_RECOMPUTE_DEBOUNCE_MS), so it returns on its own after a
+ *    render — the entity-ref/code-wrapped category, not the one-shot one.
+ *  - entity-reveal-flash, dd-drop-target-cell: REPORTED BACK — one-shot,
+ *    event-driven interaction states (a reveal-flash timeout, an external
+ *    drag's hover highlight) applied outside any render pass, exactly like
+ *    ref-nav-flash and the dd-* states above. The clone-only safety cases are
+ *    what keep registering them from breaking their handlers.
  */
 
 runner.finish('style-preservation');

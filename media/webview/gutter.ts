@@ -41,11 +41,10 @@ import {
 } from './pipeline';
 import { collectHaystack, rangeAt, findMatches } from './match-utils';
 import { CAPTION_CLASS } from './render';
+import { ENTITY_REVEAL_FLASH_CLASS } from './constants';
 import { ownOrNestedAttr } from './block-info';
 import { scrollBehavior } from './dom-utils';
 
-/** Transient highlight class flashed on a revealed caption badge (see markdown.css). */
-const REVEAL_FLASH_CLASS = 'entity-reveal-flash';
 /** How long the reveal flash stays on, ms (mirrors ref-nav-flash's ~1.2s window). */
 const REVEAL_FLASH_MS = 1200;
 
@@ -409,8 +408,8 @@ export function initLineGutter(
     window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
     const badge = (r.startContainer.parentElement?.closest(`.${CAPTION_CLASS}`) as HTMLElement | null) ?? undefined;
     if (badge) {
-      badge.classList.add(REVEAL_FLASH_CLASS);
-      setTimeout(() => badge.classList.remove(REVEAL_FLASH_CLASS), REVEAL_FLASH_MS);
+      badge.classList.add(ENTITY_REVEAL_FLASH_CLASS);
+      setTimeout(() => badge.classList.remove(ENTITY_REVEAL_FLASH_CLASS), REVEAL_FLASH_MS);
     }
     return true;
   }

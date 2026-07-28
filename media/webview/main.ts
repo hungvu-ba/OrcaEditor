@@ -29,7 +29,6 @@ import {
   MD_CODE_COPY_CLASS,
   MD_CODE_LANG_CLASS,
   MD_CODE_WRAP_CLASS,
-  MD_CODE_WRAPPED_CLASS,
   initFrontMatterToggle,
   applyFrontMatterViewState,
 } from './pipeline';
@@ -88,7 +87,12 @@ import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, REF_NAV_FLASH_CLASS } from './constants';
+import {
+  SYNC_DEBOUNCE_MS,
+  SCROLL_SAVE_DEBOUNCE_MS,
+  REF_NAV_FLASH_CLASS,
+  MD_CODE_WRAPPED_CLASS,
+} from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 

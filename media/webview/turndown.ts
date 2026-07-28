@@ -15,8 +15,6 @@ import {
   PLANTUML_CLASS,
   AUTOLINK_PATH_ATTR,
   EMPTY_LINK_ATTR,
-  ENTITY_REF_CLASS,
-  MD_CODE_WRAPPED_CLASS,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { hasUrlScheme } from '../../src/shared/link-scheme';
@@ -39,7 +37,12 @@ import {
   DD_HOVER_OUTLINE_CLASS,
   DD_HOVER_OUTLINE_CELL_CLASS,
   DD_SOURCE_MUTED_CLASS,
+  DD_DROP_TARGET_CELL_CLASS,
   MD_TABLE_FIT_CLASS,
+  MD_CODE_WRAPPED_CLASS,
+  ENTITY_REF_CLASS,
+  ENTITY_REVEAL_FLASH_CLASS,
+  BROKEN_REF_CLASS,
   MD_CHROME_MARKER_ATTR,
 } from './constants';
 
@@ -757,14 +760,24 @@ const TRANSIENT_ATTRS = [
  * on every render, so a user's own `class="md-entity-ref"` is indistinguishable
  * from the editor's). A class NOT in this list, whatever its name, always
  * survives serialization untouched.
+ *
+ * US-23.22: forgetting to add a name here is a test failure, not a silent leak
+ * — `test/transient-class-scan.ts` (driven from `test/unit.ts`) scans every
+ * class stamped in `media/webview/*.ts` and fails on any name that is neither
+ * registered below nor listed in that file's `OUTSIDE_CONTENT_CLASSES`. Adding
+ * a name here also requires an exported constant in `constants.ts` and a strip
+ * case in `test/roundtrip/style-preservation.ts`.
  */
 const TRANSIENT_CLASSES = [
   COMMENT_ANCHOR_ACTIVE_CLASS,
   ENTITY_REF_CLASS,
   REF_NAV_FLASH_CLASS,
+  ENTITY_REVEAL_FLASH_CLASS,
   DD_HOVER_OUTLINE_CLASS,
   DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_DROP_TARGET_CELL_CLASS,
   DD_SOURCE_MUTED_CLASS,
+  BROKEN_REF_CLASS,
   MD_CODE_WRAPPED_CLASS,
   MD_TABLE_FIT_CLASS,
 ];

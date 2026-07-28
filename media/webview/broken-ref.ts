@@ -19,16 +19,17 @@
  * caret is currently inside is skipped for that pass; `http(s)`/other
  * absolute-scheme hrefs are never sent to the host.
  */
-import { BROKEN_REF_RECOMPUTE_DEBOUNCE_MS, BROKEN_REF_TOOLTIP_HIDE_GRACE_MS } from './constants';
+import {
+  BROKEN_REF_CLASS,
+  BROKEN_REF_RECOMPUTE_DEBOUNCE_MS,
+  BROKEN_REF_TOOLTIP_HIDE_GRACE_MS,
+  ENTITY_REF_CLASS,
+} from './constants';
 import { el, positionNear, warningTriangleIcon } from './dom-utils';
-import { ENTITY_REF_CLASS } from './render';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';
 import { hasUrlScheme } from '../../src/shared/link-scheme';
 import type { VsCodeApi } from './vscode-api';
 import type { EntityExistResult, TargetExistsResult } from '../../src/shared/messages';
-
-/** Class stamped on a broken file/heading link's `<a>` — see `.broken-ref` (editor.css) for the marker treatment. */
-export const BROKEN_REF_CLASS = 'broken-ref';
 
 const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6';
 

@@ -355,6 +355,49 @@ export const DD_HOVER_OUTLINE_CELL_CLASS = 'dd-hover-outline-cell';
 export const DD_SOURCE_MUTED_CLASS = 'dd-source-muted';
 /** DOM class marking a table fit to its column widths by `fitTableColumns` (US-19.25). */
 export const MD_TABLE_FIT_CLASS = 'md-table-fit';
+/**
+ * State class on a code-block `<pre>` whose lines are word-wrapped (default ON,
+ * Req 04). Removing it → horizontal scroll.
+ *
+ * Declared here rather than beside its `md-code-*` siblings in `render.ts`
+ * (US-23.22 AC2): it is a REGISTERED transient class, and the registration
+ * check requires every registered name to resolve to this one file.
+ */
+export const MD_CODE_WRAPPED_CLASS = 'md-code-wrapped';
+/**
+ * Req 20 US-20.9: stamped on a broken file/heading link's `<a>` inside
+ * `#content` — see `.broken-ref` (editor.css) for the marker treatment.
+ * Registered as transient (US-23.22): the marker is derived state recomputed
+ * from the live document after every render, never authored in the `.md`.
+ */
+export const BROKEN_REF_CLASS = 'broken-ref';
+/**
+ * Req 21: transient highlight flashed on a revealed caption badge inside
+ * `#content` for `ENTITY_REVEAL_FLASH_MS` (gutter.ts) — the same one-shot,
+ * timeout-removed shape as `REF_NAV_FLASH_CLASS` above, registered for the same
+ * reason (US-23.22).
+ */
+export const ENTITY_REVEAL_FLASH_CLASS = 'entity-reveal-flash';
+/**
+ * Req 17: drop-target highlight drawn on the table cell under the pointer while
+ * an EXTERNAL file drag is in flight (external-drop.ts) — a live `#content`
+ * cell, the same surface as `DD_HOVER_OUTLINE_CELL_CLASS` above (US-23.22).
+ */
+export const DD_DROP_TARGET_CELL_CLASS = 'dd-drop-target-cell';
+
+/**
+ * Req 21 US-21.3: stamped on an `<a>` whose href resolves to an entity
+ * declaration (postProcessEntityRefs in dom-postprocess.ts) — a REFERENCE to an
+ * entity, not its declaration site. bug_General Mention Declare #2 (PO decision
+ * 2026-07-22): a reference renders as a NORMAL hyperlink (no pill), so this
+ * class carries no base style — it is only a JS/selector hook (entity-scope
+ * hover + `.` drill, broken-ref detection) and the anchor for the broken-state
+ * rule in markdown.css.
+ *
+ * Declared here rather than in `render.ts`, for the same US-23.22 AC2 reason as
+ * `MD_CODE_WRAPPED_CLASS` above.
+ */
+export const ENTITY_REF_CLASS = 'md-entity-ref';
 
 /**
  * Positive ownership marker `turndown.ts`'s `stripInjectedChrome` matches on to

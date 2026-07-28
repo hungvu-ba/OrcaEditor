@@ -18,7 +18,6 @@ import {
   MD_CODE_LANG_CLASS,
   MD_CODE_COPY_CLASS,
   MD_CODE_WRAP_CLASS,
-  MD_CODE_WRAPPED_CLASS,
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   AUTOLINK_PATH_ATTR,
@@ -27,9 +26,8 @@ import {
   CAPTION_PREFIX_CLASS,
   CAPTION_NS_CLASS,
   CAPTION_ID_CLASS,
-  ENTITY_REF_CLASS,
 } from './render';
-import { MD_CHROME_MARKER_ATTR } from './constants';
+import { ENTITY_REF_CLASS, MD_CHROME_MARKER_ATTR, MD_CODE_WRAPPED_CLASS } from './constants';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';

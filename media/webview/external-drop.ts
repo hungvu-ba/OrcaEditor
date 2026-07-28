@@ -22,6 +22,7 @@
  * isn't guaranteed to match drop order. Single-file drop (the common case)
  * is unaffected.
  */
+import { DD_DROP_TARGET_CELL_CLASS } from './constants';
 import { dataUrlToBase64, encodeLinkPath, readAsDataUrl, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, registerEscapeHandler } from './escape-stack';
 import type { PasteImageController } from './paste-image';
@@ -94,7 +95,7 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
   }
 
   function clearCellHighlight(): void {
-    dropTargetCell?.classList.remove('dd-drop-target-cell');
+    dropTargetCell?.classList.remove(DD_DROP_TARGET_CELL_CLASS);
     dropTargetCell = null;
   }
 
@@ -175,7 +176,7 @@ export function initExternalDrop(content: HTMLElement, deps: ExternalDropDeps): 
       hideDropCaret();
       if (cell !== dropTargetCell) {
         clearCellHighlight();
-        cell.classList.add('dd-drop-target-cell');
+        cell.classList.add(DD_DROP_TARGET_CELL_CLASS);
         dropTargetCell = cell;
       }
     } else {

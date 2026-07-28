@@ -120,12 +120,14 @@ import { countWords, estimateReadMinutes, formatCount } from '../media/webview/r
 import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
 import {
   collectClassConstants,
-  declaredConstants,
+  exportedConstants,
+  findAmbiguousConstants,
   readTransientClassIdentifiers,
   scanStampedClasses,
   OUTSIDE_CONTENT_CLASSES,
   UNRESOLVED_STAMP_EXEMPTIONS,
   type SourceFile,
+  type StampSite,
 } from './transient-class-scan';
 
 let pass = 0;
@@ -3028,8 +3030,10 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
 // scan is not silently vacuous.
 {
   const WEBVIEW_DIR = path.join(process.cwd(), 'media/webview');
+  // Recursive: a module moved into a subdirectory must not fall out of the scan
+  // without anything saying so.
   const webviewFiles: SourceFile[] = fs
-    .readdirSync(WEBVIEW_DIR)
+    .readdirSync(WEBVIEW_DIR, { recursive: true, encoding: 'utf8' })
     .filter((name) => name.endsWith('.ts'))
     .map((name) => ({
       file: name,
@@ -3038,6 +3042,16 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   const scopes = collectClassConstants(webviewFiles);
   const sourceOf = (name: string): string =>
     webviewFiles.find((f) => f.file === name)?.source ?? '';
+
+  // A floor, so a botched glob or a relocated directory reports itself instead
+  // of yielding a triumphantly empty scan. The tree held 62 modules when this
+  // landed; the floor is deliberately loose — it guards against collapse, not
+  // against ordinary deletion.
+  check(
+    'transient-classes: the scan actually reached the webview modules',
+    webviewFiles.length >= 50,
+    `  files scanned = ${webviewFiles.length}`
+  );
 
   const identifiers = readTransientClassIdentifiers(sourceOf('turndown.ts'));
   const turndownScope = scopes.get('turndown.ts') ?? new Map<string, string>();
@@ -3058,38 +3072,61 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     `  entries = ${identifiers.length}, unresolved = ${JSON.stringify(unresolvedIdentifiers)}`
   );
 
-  // AC2 — one declaration site: every registered name is an exported constant
-  // in constants.ts, so a rename cannot desynchronize the strip list from the
-  // place the class is stamped.
-  const constantsDeclared = declaredConstants(sourceOf('constants.ts'));
-  const notInConstants = identifiers.filter((id) => !constantsDeclared.has(id));
+  // A file that declares one identifier twice with different values makes every
+  // resolution in it a coin flip, so refuse to resolve rather than guess.
+  const ambiguous = findAmbiguousConstants(webviewFiles);
   check(
-    'transient-classes (AC2): every registered name is declared in constants.ts',
+    'transient-classes: no file declares one class constant twice with different values',
+    ambiguous.length === 0,
+    `  ambiguous: ${JSON.stringify(ambiguous)}`
+  );
+
+  // AC2 — one declaration site: every registered name is an EXPORTED constant in
+  // constants.ts, holding the same value the strip list resolved. Matching the
+  // identifier alone would pass a `FOO_CLASS` imported from elsewhere while
+  // constants.ts happens to declare a different `FOO_CLASS`.
+  const constantsExported = exportedConstants(sourceOf('constants.ts'));
+  const notInConstants = identifiers.filter(
+    (id) => constantsExported.get(id) === undefined || constantsExported.get(id) !== turndownScope.get(id)
+  );
+  check(
+    'transient-classes (AC2): every registered name is an exported constant in constants.ts',
     notInConstants.length === 0,
-    `  declared elsewhere: ${JSON.stringify(notInConstants)}`
+    `  missing or mismatched: ${JSON.stringify(notInConstants)}`
   );
 
   const scan = scanStampedClasses(webviewFiles, scopes);
 
   // AC1 — the actual gate: a class stamped anywhere in media/webview must be
-  // registered for strip or listed as out-of-#content.
-  const allowed = new Set<string>([...registered, ...OUTSIDE_CONTENT_CLASSES]);
-  const unregistered = [...scan.names.entries()].filter(([name]) => !allowed.has(name));
+  // registered for strip, or exempted for the specific file that stamps it.
+  const exemptSites = new Set(OUTSIDE_CONTENT_CLASSES);
+  const unregistered: Array<{ name: string; site: StampSite }> = [];
+  for (const [name, sites] of scan.names) {
+    if (registered.has(name)) {
+      continue;
+    }
+    for (const site of sites) {
+      if (!exemptSites.has(`${site.file} | ${name}`)) {
+        unregistered.push({ name, site });
+      }
+    }
+  }
   check(
     'transient-classes (AC1): no unregistered class is stamped in media/webview',
     unregistered.length === 0,
     unregistered
       .map(
-        ([name, sites]) =>
-          `  "${name}" added at ${sites[0].file}:${sites[0].line}` +
+        ({ name, site }) =>
+          `  "${name}" added at ${site.file}:${site.line}` +
           ` — register it in turndown.ts's TRANSIENT_CLASSES if it lands inside #content,` +
-          ` else add it to OUTSIDE_CONTENT_CLASSES in test/transient-class-scan.ts`
+          ` else add "${site.file} | ${name}" to OUTSIDE_CONTENT_CLASSES in test/transient-class-scan.ts`
       )
       .join('\n')
   );
 
-  // AC1 — "cannot resolve = fail": a computed class expression is a failure
-  // until someone parks it on the exemption array with a reason.
+  // AC1 — "cannot resolve = fail": a computed class expression, and anything the
+  // scan could not parse at all, is a failure until someone parks it on the
+  // exemption array with a reason.
   const exemptExpressions = new Set(UNRESOLVED_STAMP_EXEMPTIONS);
   const rogueExpressions = scan.unresolved.filter(
     (u) => !exemptExpressions.has(`${u.file} | ${u.expr}`)
@@ -3101,8 +3138,8 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       .map(
         (u) =>
           `  ${u.file}:${u.line} stamps \`${u.expr}\`` +
-          ` — resolve it to a constants.ts constant, or add "${u.file} | ${u.expr}"` +
-          ` to UNRESOLVED_STAMP_EXEMPTIONS in test/transient-class-scan.ts`
+          ` — resolve it to a constants.ts constant if it names a #content class,` +
+          ` else add "${u.file} | ${u.expr}" to UNRESOLVED_STAMP_EXEMPTIONS in test/transient-class-scan.ts`
       )
       .join('\n')
   );
@@ -3120,10 +3157,16 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       .join('\n')
   );
 
-  // Both exemption arrays are grandfather lists, not permanent policy — an
-  // entry whose stamp site is gone must be deleted, or the list quietly grows
-  // into a place where a real leak can hide.
-  const staleClassExemptions = OUTSIDE_CONTENT_CLASSES.filter((name) => !scan.names.has(name));
+  // Both exemption arrays are grandfather lists, not permanent policy — an entry
+  // whose stamp site is gone must be deleted, or the list quietly grows into a
+  // place where a real leak can hide.
+  const liveSites = new Set<string>();
+  for (const [name, sites] of scan.names) {
+    for (const site of sites) {
+      liveSites.add(`${site.file} | ${name}`);
+    }
+  }
+  const staleClassExemptions = OUTSIDE_CONTENT_CLASSES.filter((key) => !liveSites.has(key));
   check(
     'transient-classes: OUTSIDE_CONTENT_CLASSES has no stale entry',
     staleClassExemptions.length === 0,
@@ -3135,6 +3178,21 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     'transient-classes: UNRESOLVED_STAMP_EXEMPTIONS has no stale entry',
     staleExprExemptions.length === 0,
     `  no longer stamped anywhere: ${JSON.stringify(staleExprExemptions)}`
+  );
+
+  // The third obligation `turndown.ts`'s own comment states: registering a class
+  // without a strip case leaves the registration itself unproven. Named-case and
+  // clone-safety arrays there are hand-written string lists, so pin them against
+  // the live strip list rather than trusting them to stay in sync.
+  const stripTestSource = fs.readFileSync(
+    path.join(process.cwd(), 'test/roundtrip/style-preservation.ts'),
+    'utf8'
+  );
+  const withoutStripCase = [...registered].filter((name) => !stripTestSource.includes(`'${name}'`));
+  check(
+    'transient-classes: every registered class has a strip case in style-preservation.ts',
+    withoutStripCase.length === 0,
+    `  no roundtrip case names: ${JSON.stringify(withoutStripCase)}`
   );
 
   // --- Positive controls: the scan must actually see each shape it claims to.
@@ -3157,8 +3215,14 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
 
   const viaAttr = probe(`svg.setAttribute('class', 'attr-stamped-class');`);
   check(
-    'transient-classes (control): setAttribute(\'class\', …) is reported',
+    "transient-classes (control): setAttribute('class', …) is reported",
     viaAttr.names.has('attr-stamped-class')
+  );
+
+  const otherAttr = probe(`svg.setAttribute('viewBox', '0 0 16 16');`);
+  check(
+    'transient-classes (control): a non-class setAttribute is not mistaken for a stamp',
+    otherAttr.names.size === 0 && otherAttr.unresolved.length === 0
   );
 
   const computed = probe('node.className = `mode-${current}`;');
@@ -3186,7 +3250,90 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     'transient-classes (control): a className comparison is not mistaken for a stamp',
     compared.names.size === 0 && compared.unresolved.length === 0
   );
+
+  // --- Controls for the shapes a 2026-07-28 review found silently unscanned.
+  // Every one of these returned BOTH an empty name set and an empty unresolved
+  // list before the fix, i.e. the gate reported success on a stamp it never read.
+  const wrappedAdd = probe(`node.classList.add(\n  'wrapped-class',\n);`);
+  check(
+    'transient-classes (control): a classList.add whose arguments start on the next line is still read',
+    wrappedAdd.names.has('wrapped-class') && wrappedAdd.unresolved.length === 0
+  );
+
+  const wrappedTwoArgs = probe(`node.classList.add(\n  'first-wrapped',\n  'second-wrapped'\n);`);
+  check(
+    'transient-classes (control): a wrapped multi-argument classList.add drops neither name',
+    wrappedTwoArgs.names.has('first-wrapped') && wrappedTwoArgs.names.has('second-wrapped')
+  );
+
+  const wrappedToggle = probe(`node.classList.toggle(\n  'wrapped-toggle',\n  on\n);`);
+  check(
+    'transient-classes (control): a wrapped classList.toggle is still read',
+    wrappedToggle.names.has('wrapped-toggle') && wrappedToggle.unresolved.length === 0
+  );
+
+  const wrappedTernary = probe(`node.className = isEnd\n  ? 'ternary-a'\n  : 'ternary-b';`);
+  check(
+    'transient-classes (control): a wrapped ternary assignment reports one whole expression, not a truncated one',
+    wrappedTernary.unresolved.length === 1 &&
+      wrappedTernary.unresolved[0].expr === "isEnd ? 'ternary-a' : 'ternary-b'"
+  );
+
+  const appended = probe(`node.className += ' appended-class';`);
+  check(
+    'transient-classes (control): `className +=` is scanned like an assignment',
+    appended.names.has('appended-class')
+  );
+
+  const replaced = probe(`node.classList.replace('replace-old', 'replace-new');`);
+  check(
+    'transient-classes (control): classList.replace reports both class names',
+    replaced.names.has('replace-old') && replaced.names.has('replace-new')
+  );
+
+  const optionalChain = probe(`node.classList?.add('optional-chain-class');`);
+  check(
+    'transient-classes (control): the optional-chain spelling is scanned',
+    optionalChain.names.has('optional-chain-class')
+  );
+
+  const inComment = probe(`// node.classList.add('ghost-from-comment')\nconst x = 1;`);
+  check(
+    'transient-classes (control): a stamp shown inside a comment is not treated as real',
+    inComment.names.size === 0 && inComment.unresolved.length === 0
+  );
+
+  const inBlockComment = probe(`/* node.classList.add('ghost-from-block') */\nconst x = 1;`);
+  check(
+    'transient-classes (control): a stamp shown inside a block comment is not treated as real',
+    inBlockComment.names.size === 0 && inBlockComment.unresolved.length === 0
+  );
+
+  const urlInString = probe(`const u = 'https://x';\nnode.classList.add('after-url-class');`);
+  check(
+    'transient-classes (control): a // inside a string literal does not blind the rest of the line',
+    urlInString.names.has('after-url-class')
+  );
+
+  const parenInLiteral = probe(`node.classList.add('has)paren');`);
+  check(
+    'transient-classes (control): a parenthesis inside a class literal does not truncate the argument',
+    parenInLiteral.names.has('has)paren') && parenInLiteral.unresolved.length === 0
+  );
+
+  const emptyLiteral = probe(`node.classList.add('');`);
+  check(
+    'transient-classes (control): an empty class literal is reported, not silently dropped',
+    emptyLiteral.names.size === 0 && emptyLiteral.unresolved.length === 1
+  );
+
+  const unclosed = probe(`node.classList.add('never-closed'`);
+  check(
+    'transient-classes (control): an unparsable stamp is reported, not silently dropped',
+    unclosed.unresolved.length === 1
+  );
 }
+
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {

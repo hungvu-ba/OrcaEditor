@@ -53,8 +53,6 @@ export const MD_CODE_LANG_CLASS = 'md-code-lang';
 export const MD_CODE_COPY_CLASS = 'md-code-copy';
 /** "Wrap" toggle button inside the code-block header — targeted by the delegated click listener in main.ts. */
 export const MD_CODE_WRAP_CLASS = 'md-code-wrap';
-/** State class on a code-block <pre> whose lines are word-wrapped (default ON). Removing it → horizontal scroll. */
-export const MD_CODE_WRAPPED_CLASS = 'md-code-wrapped';
 /** Attribute gắn lên mỗi block cấp cao nhất, giá trị = số dòng bắt đầu (1-based) trong Markdown gốc. */
 export const LINE_NUMBER_ATTR = 'data-line';
 /** Attribute gắn kèm data-line, giá trị = số dòng kết thúc (1-based, bao gồm) của block trong Markdown gốc. */
@@ -97,17 +95,6 @@ export const CAPTION_CLASS = 'md-caption';
 export const CAPTION_PREFIX_CLASS = 'md-caption-prefix';
 export const CAPTION_NS_CLASS = 'md-caption-ns';
 export const CAPTION_ID_CLASS = 'md-caption-id';
-
-/**
- * Req 21 US-21.3: stamped on an `<a>` whose href resolves to an entity
- * declaration (postProcessEntityRefs in dom-postprocess.ts) — a REFERENCE to an
- * entity, not its declaration site. bug_General Mention Declare #2 (PO decision
- * 2026-07-22): a reference renders as a NORMAL hyperlink (no pill), so this
- * class carries no base style — it is only a JS/selector hook (entity-scope
- * hover + `.` drill, broken-ref detection) and the anchor for the broken-state
- * rule in markdown.css.
- */
-export const ENTITY_REF_CLASS = 'md-entity-ref';
 
 /** [dòng bắt đầu, dòng kết thúc] (1-based, bao gồm) của một block trong Markdown gốc. */
 export interface LineRange {
