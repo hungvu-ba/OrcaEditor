@@ -40,6 +40,19 @@ import {
  */
 export type SidecarWriteGuard = (docUri: vscode.Uri, target: vscode.Uri) => Promise<boolean>;
 
+/**
+ * Injectable seams for behaviour a host test needs to control without a real
+ * modal or a real filesystem permission error (US-23.17 AC6/AC9): both default
+ * to the real implementation, so the one production call site never has to pass
+ * this at all.
+ */
+export interface SidecarStoreDeps {
+  /** Defaults to a real `vscode.window.showWarningMessage` modal (AC6). */
+  confirmOverwrite?: (message: string) => Promise<boolean>;
+  /** Defaults to `fs.promises` (AC9). */
+  fsOps?: Pick<typeof fs.promises, 'appendFile' | 'rename'>;
+}
+
 export interface SidecarStore {
   /** The sidecar's location for a document — its 1:1 sibling (AC1). */
   uriFor(document: vscode.TextDocument): vscode.Uri;
@@ -93,8 +106,17 @@ export function createSidecarStore(
    * provider owns that flag (`CASE_INSENSITIVE_FS`), and every `text-utils`
    * helper in this codebase takes it as a trailing argument the same way.
    */
-  caseInsensitive: boolean
+  caseInsensitive: boolean,
+  deps: SidecarStoreDeps = {}
 ): SidecarStore {
+  const fsOps = deps.fsOps ?? fs.promises;
+  const confirmOverwrite =
+    deps.confirmOverwrite ??
+    (async (message: string): Promise<boolean> => {
+      const overwrite = 'Overwrite comments';
+      return (await vscode.window.showWarningMessage(message, { modal: true }, overwrite)) === overwrite;
+    });
+
   /** The sidecar file name for any `.md` uri (not just an open document's). */
   const nameForUri = (mdUri: vscode.Uri): string => sidecarNameFor(mdUri.path.split('/').pop() ?? '');
 
@@ -164,8 +186,7 @@ export function createSidecarStore(
         // A stray leading blank line costs nothing: `parseSidecarText` already
         // skips it, and the earlier "does the file already end with a newline"
         // read was the one real check-then-act race in this write path.
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        await fs.promises.appendFile(target.fsPath, '\n' + serializeSidecarLine(line), 'utf8');
+        await fsOps.appendFile(target.fsPath, '\n' + serializeSidecarLine(line), 'utf8');
       } catch (err) {
         log(`Failed to append to comment sidecar ${target.toString()}`, err);
         return 'Failed to save the comment.';
@@ -246,13 +267,10 @@ export function createSidecarStore(
         const stamp = new Date().toISOString().replace(/:/g, '-');
         const backupName = sidecarBackupNameFor(nameForUri(newUri), stamp);
         const backup = vscode.Uri.joinPath(destination, '..', backupName);
-        const overwrite = 'Overwrite comments';
-        const answer = await vscode.window.showWarningMessage(
-          `${nameForUri(newUri)} already has comments. Overwrite them with the comments from ${nameForUri(oldUri)}? The existing comments will be kept as ${backupName}.`,
-          { modal: true },
-          overwrite
+        const accepted = await confirmOverwrite(
+          `${nameForUri(newUri)} already has comments. Overwrite them with the comments from ${nameForUri(oldUri)}? The existing comments will be kept as ${backupName}.`
         );
-        if (answer !== overwrite) {
+        if (!accepted) {
           // Declining must not destroy either side. The `.md` rename is the
           // user's own gesture and proceeds; this contributes no file operation,
           // so the destination's comments survive untouched and the source's stay
@@ -338,8 +356,7 @@ export function createSidecarStore(
         return;
       }
       try {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        await fs.promises.rename(source.fsPath, target.fsPath);
+        await fsOps.rename(source.fsPath, target.fsPath);
         log(`Comment sidecar: adopted ${drifted[0]} as ${expectedName} (name drift)`);
       } catch (err) {
         // Not fatal — `load` simply finds no sidecar and the file opens with no

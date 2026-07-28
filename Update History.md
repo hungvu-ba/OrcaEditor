@@ -477,3 +477,4 @@
 | 0.10.0 | 2026-07-28 | Feature (US-23.13 AC1/AC2): a manual re-attach or an automatic floating-recovery now persists via a new sidecar line, so it survives a document reload instead of floating again. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.12): "Copy all as Markdown" — a Comment-tab menu item and Command Palette command export the file's review to the clipboard as Markdown. |
 | 0.10.0 | 2026-07-28 | Fix (US-23.13 AC3/AC6): a floating-thread delete re-validates at confirm time; two panels on one document share one authoritative anchor resolver now. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.17): new `@vscode/test-electron` host test track covers the sidecar's rename/adopt/append filesystem paths via an injectable seam — no real modal or permission errors needed. |

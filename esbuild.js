@@ -147,6 +147,29 @@ const unitTestConfig = {
   sourcemap: true,
 };
 
+/**
+ * US-23.17: `test/host/*.ts` (except `_harness.ts`, shared infra, not an entry
+ * point) each build to their own `dist/test/host/<name>.js`, same convention as
+ * `roundtripFeatureFiles` above. `external: ['vscode']` because these run inside
+ * a real Extension Host launched by `@vscode/test-electron`, which provides the
+ * module at runtime — same as `extensionConfig`.
+ */
+const hostTestFiles = fs
+  .readdirSync('test/host')
+  .filter((f) => f.endsWith('.ts') && !f.startsWith('_'));
+
+/** @type {import('esbuild').BuildOptions} */
+const hostTestConfig = {
+  entryPoints: hostTestFiles.map((f) => `test/host/${f}`),
+  bundle: true,
+  outdir: 'dist/test/host',
+  external: ['vscode'],
+  format: 'cjs',
+  platform: 'node',
+  target: 'node18',
+  sourcemap: true,
+};
+
 function copyAssets() {
   fs.mkdirSync('dist/webview', { recursive: true });
   for (const f of ['markdown.css', 'editor.css']) {
@@ -197,6 +220,7 @@ async function main() {
     configs.push(
       testConfig,
       unitTestConfig,
+      hostTestConfig,
       listOpsDebugConfig,
       escapeStackDebugConfig,
       triggerPopupDebugConfig

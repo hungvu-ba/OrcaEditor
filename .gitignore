@@ -20,5 +20,6 @@ Wireframe Handoff/
 # Added by code-review-graph
 .code-review-graph/
 .vscode/
+.vscode-test/
 .github/
 .images/
