@@ -35,6 +35,7 @@ import {
   sameDocumentUri,
   sanitizeDroppedFileName,
 } from './text-utils';
+import { pathSegmentsContainSymlink } from './fs-guard';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
@@ -425,7 +426,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // `createComment` payload can steer it. The gate is what keeps that true if the
     // derivation ever grows a payload-dependent part.
     const sidecarStore = createSidecarStore(
-      (docUri, target) => provider.isUriInsideAllowedRoots(docUri, target),
+      (docUri, target) => provider.isUriInsideAllowedRoots(docUri, target, { forWrite: true }),
       (message, err) => MarkdownWysiwygProvider.log(message, err),
       CASE_INSENSITIVE_FS
     );
@@ -2595,7 +2596,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    */
   private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
     const dir = this.resolveAssetsDir(document);
-    return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+    return (await this.isInsideAllowedRoots(document, dir, { forWrite: true })) ? dir : undefined;
   }
 
   /**
@@ -2962,12 +2963,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
-   * S4: chống thoát khỏi allowed roots qua symlink. Trước khi so path, phân
-   * giải symlink bằng fs.promises.realpath cho cả target và root. File không
-   * tồn tại (broken link) → realpath ném lỗi → fallback về path đã chuẩn hóa
-   * (vẫn chặn được traversal qua ../..).
-   */
-  /**
    * Req 20 US-20.9: existence check for a batch of broken-reference candidate
    * targets (file/heading links only — same-document `#heading`-only anchors
    * never reach here, resolved by the webview's own TOC heading index). Each
@@ -3139,16 +3134,31 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return missing;
   }
 
-  private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
-    return this.isUriInsideAllowedRoots(document.uri, target);
+  private async isInsideAllowedRoots(
+    document: vscode.TextDocument,
+    target: vscode.Uri,
+    opts?: { forWrite?: boolean }
+  ): Promise<boolean> {
+    return this.isUriInsideAllowedRoots(document.uri, target, opts);
   }
 
   /**
    * Same guard keyed on a document's uri alone — Req 23 US-23.5's rename path
    * runs while the `.md` is only about to move, so there is no TextDocument for
    * the destination to hand in.
+   *
+   * `forWrite` (Security Audit S-1): mutating callers (asset write, orphan
+   * hard-delete, sidecar append/rename/adopt) additionally refuse when any
+   * path segment below the matched root is a symlink — a repo-committed
+   * `assets` → outside-dir link passes the lexical check, and without this a
+   * write/delete would follow it out of the workspace. Read-only callers keep
+   * lexical-only acceptance (see the OneDrive rationale below).
    */
-  private async isUriInsideAllowedRoots(docUri: vscode.Uri, target: vscode.Uri): Promise<boolean> {
+  private async isUriInsideAllowedRoots(
+    docUri: vscode.Uri,
+    target: vscode.Uri,
+    opts?: { forWrite?: boolean }
+  ): Promise<boolean> {
     const roots = [
       vscode.Uri.joinPath(docUri, '..'),
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
@@ -3164,23 +3174,41 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return CASE_INSENSITIVE_FS ? withForwardSlashes.toLowerCase() : withForwardSlashes;
     };
 
-    // Kiểm tra lexical (không đụng filesystem): candidate luôn được dựng qua
-    // vscode.Uri.joinPath (xem relativeTargetCandidates), nên các đoạn `..`
-    // đã được chuẩn hóa ở tầng Uri — đây là hàng rào chính chặn traversal ra
-    // ngoài workspace, và không bị ảnh hưởng bởi reparse point/junction
-    // (OneDrive Files On-Demand, Known Folder Move...) làm fs.realpath()
-    // trả về một path khác cấu trúc so với root dù file vẫn nằm trong cây
-    // workspace thật.
+    // Symlink walk for mutating callers only. The root itself is never
+    // lstat-checked (OneDrive/junction tolerance); non-file schemes cannot be
+    // lstat'ed, and lexical containment already passed for them.
+    const writeSafe = (root: vscode.Uri): boolean => {
+      if (!opts?.forWrite || root.scheme !== 'file' || target.scheme !== 'file') {
+        return true;
+      }
+      // Same case policy as the lexical compare below: a folded match followed
+      // by a case-sensitive walk would abstain and let the write through.
+      return !pathSegmentsContainSymlink(root.fsPath, target.fsPath, CASE_INSENSITIVE_FS);
+    };
+
+    // Lexical check (no filesystem access): candidates are always built via
+    // vscode.Uri.joinPath (see relativeTargetCandidates), so `..` segments are
+    // already normalized at the Uri layer — this is the main fence against
+    // traversal out of the workspace, and it is unaffected by reparse
+    // points/junctions (OneDrive Files On-Demand, Known Folder Move...) that
+    // make fs.realpath() return a structurally different path even though the
+    // file still sits inside the real workspace tree.
     const lexicalPath = (uri: vscode.Uri): string => forCompare(uri.fsPath.replace(/[/\\]+$/, '') + '/');
     const targetLexical = lexicalPath(target);
-    if (roots.some((root) => targetLexical.startsWith(lexicalPath(root)))) {
+    // Every matching root gets its own walk: a workspace folder that is itself
+    // a symlink is tolerated when it is the root being measured from, so
+    // refusing on the first match (always the document's own dir) would reject
+    // a write the workspace-folder root allows. A refusal here is not final —
+    // the realpath fallback below can still prove genuine containment.
+    const matchedRoots = roots.filter((root) => targetLexical.startsWith(lexicalPath(root)));
+    if (matchedRoots.some((root) => writeSafe(root))) {
       return true;
     }
 
-    // Fallback: symlink thật sự có thể khiến path lexical rơi ra ngoài root
-    // dù sau khi resolve vẫn nằm trong workspace (hoặc ngược lại) — thử
-    // realpath() như một kiểm tra bổ sung, best-effort (không bắt buộc phải
-    // thành công, vì OneDrive/junction có thể khiến nó lệch hoặc lỗi).
+    // Fallback: a genuine symlink can make the lexical path fall outside a
+    // root while resolving inside the workspace (or vice versa) — try
+    // realpath() as a best-effort extra check (allowed to fail, since
+    // OneDrive/junctions can skew it or error out).
     const canonical = async (uri: vscode.Uri): Promise<string | null> => {
       if (uri.scheme !== 'file') {
         return null;
@@ -3200,6 +3228,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     for (const root of roots) {
       const rootReal = await canonical(root);
       if (rootReal !== null && targetReal.startsWith(rootReal)) {
+        // No symlink walk here, for writes either: realpath has just proved
+        // the target resolves inside the root, so a symlink on the way is one
+        // that stays within the workspace. Reaching this line after a refused
+        // walk is exactly that case; an escaping link fails the compare above.
         return true;
       }
     }
