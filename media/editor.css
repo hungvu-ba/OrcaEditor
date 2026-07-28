@@ -624,7 +624,13 @@ body.reading-mode:not(.reading-zen) #content {
  * popover mở tại một thời điểm, đóng khi click ra ngoài/Escape. --- */
 .toolbar-popover {
   position: fixed;
-  z-index: 300;
+  /* Above #search-box (500): openPopover() anchors the menu at the trigger's
+   * `rect.bottom + 4` (toolbar.ts), which is the exact band the Ctrl/Cmd+F box
+   * now occupies, and the two rightmost triggers (••• overflow, ⋮ more options)
+   * share its right edge. A mouse click on a trigger closes the box first, but
+   * the keyboard route (Tab to the trigger, Enter) does not — so the menu, not
+   * the box, has to win the overlap. */
+  z-index: 501;
   display: none;
   flex-direction: column;
   min-width: 180px;
@@ -1774,7 +1780,17 @@ th:empty::after {
 
 #search-box {
   position: fixed;
-  top: 6px;
+  /* Sit BELOW the sticky #toolbar (top: 0, z-index 160) instead of on top of it:
+   * the box is fixed + z-index 500, so at top: 6px it covered the toolbar's own
+   * controls (bug report screenshot). --toolbar-height is measured at runtime by
+   * syncToolbarHeightVar() (main.ts) so this tracks font/width-driven height
+   * changes; the fallback matches the other consumers of the var. */
+  /* clamp(): a pane shorter than the toolbar + the box (a horizontal editor
+   * split, or a high webview zoom, which shrinks the viewport in CSS px while
+   * the toolbar keeps its authored height) would otherwise push the box
+   * entirely below the fold — Ctrl/Cmd+F would look like it did nothing while
+   * the hidden input holds focus. */
+  top: clamp(6px, calc(var(--toolbar-height, 48px) + 6px), calc(100vh - 44px));
   right: 20px;
   z-index: 500;
   display: flex;

@@ -480,3 +480,5 @@
 | 0.10.0 | 2026-07-28 | Feature (US-23.17): new `@vscode/test-electron` host test track covers the sidecar's rename/adopt/append filesystem paths via an injectable seam — no real modal or permission errors needed. |
 | 0.10.0 | 2026-07-28 | Fix (US-9.3): select-highlight's cached text map now invalidates on any local edit (MutationObserver), not just a full re-render — stops painting the match on unrelated text. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.21): 7 leaking presentation classes and injected UI chrome now strip from raw-HTML `.md` output on every serialize path, not just some. |
+| 0.10.0 | 2026-07-28 | Fix: the Ctrl/Cmd+F find box now sits below the sticky toolbar (offset by the measured `--toolbar-height`) instead of painting over its buttons. |
+| 0.10.0 | 2026-07-28 | Fix: follow-ups to the find-box move — toolbar dropdowns and the image-zoom button now win the band under the toolbar, and a short pane keeps the box on screen. |
