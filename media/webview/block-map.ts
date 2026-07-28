@@ -17,7 +17,7 @@ import {
   PLANTUML_CLASS,
   type LineRange,
 } from './render';
-import { readSrcRange } from './block-info';
+import { readOwnSrcRange, readSrcRange } from './block-info';
 
 /** Bản chiếu tra-ngược nhanh trên DOM — mảng BlockEntry trong JS mới là bản chính. */
 export const BLOCK_ID_ATTR = 'data-block-id';
@@ -134,6 +134,47 @@ export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HT
 }
 
 /**
+ * Source range of the nearest node at or above `el` that carries one — its own
+ * first, then its closest such ancestor, ending at the top-level block.
+ *
+ * US-23.4: the node's OWN line when it carries one — list items do, and a list
+ * is a single top-level block, so falling straight through to the block would
+ * report every item in a 6-line list as the list's first line and make
+ * US-23.4's line tie-breaker pick the wrong bullet. The intermediate ancestors
+ * matter for the same reason: a LOOSE list item wraps its content in a `<p>`
+ * that carries no `data-line`, so an anchor inside one has to climb to the
+ * `<li>` — jumping straight to the block collapsed every comment in the list
+ * onto the list's first line (one gutter pin, one line in the Comment tab).
+ *
+ * Every step but the last reads the node's OWN attributes (`readOwnSrcRange`):
+ * `readSrcRange`'s descendant fallback would let an intermediate container hand
+ * back a line from INSIDE itself — a nested `<blockquote>` reporting the line of
+ * a bullet below its quoted paragraph. Only the top-level block keeps the
+ * fallback, which is where it is needed (a fence's attrs sit on its `<code>`).
+ */
+function nearestSrcRange(content: HTMLElement, el: HTMLElement): LineRange | null {
+  if (el === content) {
+    const first = content.firstElementChild;
+    return (first && readSrcRange(first)) ?? null;
+  }
+  if (!content.contains(el)) {
+    // Outside the document (a carrier detached by a re-render): "no source
+    // line", the same answer the top-level-block lookup used to give.
+    return null;
+  }
+  let node: HTMLElement | null = el;
+  while (node && node !== content) {
+    const parent = node.parentElement;
+    const own = parent === content ? readSrcRange(node) : readOwnSrcRange(node);
+    if (own) {
+      return own;
+    }
+    node = parent;
+  }
+  return null;
+}
+
+/**
  * Req 23 US-23.1: 1-based source line the anchored node starts on — the
  * best-effort document coordinate the host needs to give the native
  * `CommentThread` a `vscode.Range`. The STRUCTURAL anchor stays authoritative;
@@ -141,18 +182,7 @@ export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HT
  * multi-block selection anchored on `#content` itself).
  */
 export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number {
-  // US-23.4: the node's OWN line when it carries one — list items do, and a list
-  // is a single top-level block, so falling straight through to the block would
-  // report every item in a 6-line list as the list's first line and make
-  // US-23.4's line tie-breaker pick the wrong bullet.
-  if (el !== content) {
-    const own = readSrcRange(el)?.start;
-    if (own !== undefined) {
-      return own;
-    }
-  }
-  const block = el === content ? content.firstElementChild : topLevelBlockOf(content, el);
-  return (block && readSrcRange(block)?.start) ?? 0;
+  return nearestSrcRange(content, el)?.start ?? 0;
 }
 
 /**
@@ -164,14 +194,7 @@ export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number
  * `#content` itself).
  */
 export function commentAnchorLineRange(content: HTMLElement, el: HTMLElement): LineRange | null {
-  if (el !== content) {
-    const own = readSrcRange(el);
-    if (own !== null) {
-      return own;
-    }
-  }
-  const block = el === content ? content.firstElementChild : topLevelBlockOf(content, el);
-  return (block && readSrcRange(block)) ?? null;
+  return nearestSrcRange(content, el);
 }
 
 /**
@@ -314,7 +337,12 @@ export function anchorCandidates(content: HTMLElement): AnchorCandidateNode[] {
         ? [block, ...Array.from(block.querySelectorAll<HTMLElement>(ANCHOR_CANDIDATE_SELECTOR))]
         : Array.from(block.querySelectorAll<HTMLElement>(ANCHOR_CANDIDATE_SELECTOR));
     for (const el of nodes) {
-      const ownRange = readSrcRange(el) ?? srcRange;
+      // Same climb `commentAnchorLine` uses — a candidate's line and a recorded
+      // line are compared against each other by tier 2/3, so the two must not
+      // resolve the same node differently. The climb always reaches `block`
+      // (skipped above when it has no range), so `?? srcRange` is the non-null
+      // floor rather than a case that fires.
+      const ownRange = nearestSrcRange(content, el) ?? srcRange;
       candidates.push({
         el,
         text: el.textContent ?? '',

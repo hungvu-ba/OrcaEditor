@@ -270,14 +270,6 @@ export const COMMENT_HIGHLIGHT_NONEXACT_NAME = 'comment-anchor-nonexact';
 export const COMMENT_HIGHLIGHT_ACTIVE_NAME = 'comment-anchor-open';
 export const COMMENT_HIGHLIGHT_ACTIVE_NONEXACT_NAME = 'comment-anchor-open-nonexact';
 
-/**
- * Gutter pins on lines within this many BLANK lines of each other collapse
- * into one "+N" cluster marker (design handoff: "Ln 7/9/11 sit inside the
- * cluster window"). A blank-line gap of 1 (i.e. consecutive or one blank line
- * apart) still clusters; two or more blank lines apart does not.
- */
-export const COMMENT_GUTTER_CLUSTER_BLANK_GAP = 1;
-
 /** DOM class for one gutter pin (single thread or resolved-muted). */
 export const COMMENT_PIN_CLASS = 'comment-gutter-pin';
 /** DOM class for a collapsed "+N" cluster pin. */

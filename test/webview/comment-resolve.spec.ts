@@ -65,11 +65,13 @@ async function createThread(
   page: Page,
   pIndex: number,
   body: string,
-  author = ME
+  author = ME,
+  /** Which nodes `pIndex` counts — `td` for the same-line cluster case below. */
+  selector = 'p'
 ): Promise<{ threadId: string; anchorId: string }> {
   await page.locator('#content').evaluate(
-    (el, index) => {
-      const node = el.querySelectorAll('p')[index].firstChild!;
+    (el, { index, selector }) => {
+      const node = el.querySelectorAll(selector)[index].firstChild!;
       const range = document.createRange();
       range.setStart(node, 0);
       range.setEnd(node, 3);
@@ -77,7 +79,7 @@ async function createThread(
       sel.removeAllRanges();
       sel.addRange(range);
     },
-    pIndex
+    { index: pIndex, selector }
   );
   await page.locator('#content').dispatchEvent('contextmenu', { clientX: 120, clientY: 120 });
   await page.locator('.comment-menu-item', { hasText: 'Add Comment' }).click();
@@ -929,30 +931,32 @@ test.describe('US-23.8 AC2 — non-exact anchor state, marked on all three surfa
   });
 
   test('a cluster pin is marked non-exact only when EVERY thread in it is', async ({ page }) => {
-    await openEditor(page, DOC);
-    // Two INDEPENDENT anchors (different paragraphs), one blank line apart —
-    // COMMENT_GUTTER_CLUSTER_BLANK_GAP still clusters them into one pin, but
-    // each has its own anchor id, so their resolutions never interact.
-    await createThread(page, 0, 'First.');
-    await createThread(page, 1, 'Second.');
+    // Clustering is same-line only, and two INDEPENDENT anchors share one line
+    // exactly when they sit in one table: a `<td>` carries no `data-line`, so
+    // both cells report the table's start line while staying distinct nodes with
+    // distinct anchor ids, whose resolutions never interact. If cells are ever
+    // given per-row lines, this premise goes with them — the case then needs
+    // another shape of same-line pair, not a wider cluster rule.
+    const LEFT = 'Queue drains first';
+    const RIGHT = 'Audit trail follows';
+    const TABLE_DOC = ['# Session expiry', '', '| Left | Right |', '| --- | --- |', `| ${LEFT} | ${RIGHT} |`, ''].join(
+      '\n'
+    );
+    await openEditor(page, TABLE_DOC);
+    await createThread(page, 0, 'First.', ME, 'td');
+    await createThread(page, 1, 'Second.', ME, 'td');
     await clearPosted(page);
     const pin = page.locator('.comment-gutter-pin-cluster');
     await expect(pin).toHaveCount(1); // sanity: they did cluster
 
-    // Only the first paragraph relocates — one exact, one approximate in the
-    // cluster, so the pin must NOT read as if both are non-exact.
-    await hostUpdate(page, DOC.replace(ANCHOR_TEXT, 'Nothing like it.'));
+    // Only the left cell relocates — one exact, one approximate in the cluster,
+    // so the pin must NOT read as if both are non-exact.
+    await hostUpdate(page, TABLE_DOC.replace(LEFT, 'Nothing like it'));
     await expect(pin).not.toHaveClass(/comment-gutter-pin-nonexact/);
 
-    // The second paragraph relocates too — now every thread in the cluster is
+    // The right cell relocates too — now every thread in the cluster is
     // non-exact, and the pin must say so.
-    await hostUpdate(
-      page,
-      DOC.replace(ANCHOR_TEXT, 'Nothing like it.').replace(
-        'Identifiers are recorded for later audit.',
-        'Totally different now.'
-      )
-    );
+    await hostUpdate(page, TABLE_DOC.replace(LEFT, 'Nothing like it').replace(RIGHT, 'Totally different now'));
     await expect(pin).toHaveClass(/comment-gutter-pin-nonexact/);
   });
 });

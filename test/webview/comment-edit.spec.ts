@@ -15,9 +15,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor, clearPosted, DEFAULT_DOC_URI } from './_harness';
 
-// Alpha (Ln 3) and Beta (Ln 7) sit 4 lines apart — outside the gutter's
-// clustering window, so each keeps its own pin and `clickPin(0)`/`clickPin(1)`
-// address them individually (2 lines apart would collapse into one "+2" pin).
+// Alpha (Ln 3) and Beta (Ln 7) are two DIFFERENT lines, so each keeps its own
+// pin and `clickPin(0)`/`clickPin(1)` address them individually (only two
+// threads on the SAME line collapse into one "+2" pin).
 const DOC = [
   '# Session expiry', // line 1
   '', // 2

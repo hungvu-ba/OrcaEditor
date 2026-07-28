@@ -2620,15 +2620,19 @@ check(
 
   check('pin cluster: one thread is its own group',
     JSON.stringify(lines(buildGroups([at(3)]))) === JSON.stringify([[3]]));
-  // "within 1 blank line of each other" = a line gap of at most 2.
-  check('pin cluster: lines 2 apart (one blank line between) chain into one group',
-    JSON.stringify(lines(buildGroups([at(3), at(5), at(7)]))) === JSON.stringify([[3, 5, 7]]));
-  check('pin cluster: a 3-line gap starts a new group',
-    JSON.stringify(lines(buildGroups([at(3), at(6)]))) === JSON.stringify([[3], [6]]));
+  // One pin per gutter line: a gap of any size — including the 2 the superseded
+  // blank-line window merged — keeps the threads on separate pins.
+  check('pin cluster: lines 2 apart each keep their own group',
+    JSON.stringify(lines(buildGroups([at(3), at(5), at(7)]))) === JSON.stringify([[3], [5], [7]]));
+  check('pin cluster: adjacent lines keep their own group',
+    JSON.stringify(lines(buildGroups([at(3), at(4)]))) === JSON.stringify([[3], [4]]));
   check('pin cluster: two threads on the SAME line are one group',
     JSON.stringify(lines(buildGroups([at(4, 'a'), at(4, 'b')]))) === JSON.stringify([[4, 4]]));
-  check('pin cluster: input order does not matter',
-    JSON.stringify(lines(buildGroups([at(7), at(3), at(5)]))) === JSON.stringify([[3, 5, 7]]));
+  // Ids, not just lines: a same-line group's order IS the chooser's row order, so
+  // the sort has to stay stable over equal lines.
+  check('pin cluster: input order does not matter, and a group keeps its own order',
+    JSON.stringify(buildGroups([at(7), at(3, 'a'), at(3, 'b')]).map((g) => g.map((a) => a.threadId))) ===
+      JSON.stringify([['a', 'b'], ['t7']]));
   // Line 0 is `commentAnchorLine`'s "maps to no source line" fallback, NOT line
   // zero: grouping those by value collapsed unrelated threads from opposite ends
   // of the document onto one pin and left the others with no marker at all.

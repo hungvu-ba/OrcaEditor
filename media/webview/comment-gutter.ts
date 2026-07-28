@@ -13,13 +13,12 @@
  * A pin is scoped to the anchor's SOURCE LINE, not its horizontal position —
  * positioned from its carrier element's own `getBoundingClientRect().top`
  * (page-relative, `+ window.scrollY`), the same page-coordinate approach
- * gutter.ts's `scrollToText` already uses. Threads on nearby lines (within
- * `COMMENT_GUTTER_CLUSTER_BLANK_GAP` blank lines of each other) collapse into
- * one "+N" pin; a Closed thread renders no pin at all (design handoff).
+ * gutter.ts's `scrollToText` already uses. Threads collapse into one "+N" pin
+ * only when they share the SAME line — nearby-but-different lines each keep
+ * their own pin; a Closed thread renders no pin at all (design handoff).
  */
 import type { AnchorState, CommentResolveController, ThreadAnchor } from './comment-resolve';
 import {
-  COMMENT_GUTTER_CLUSTER_BLANK_GAP,
   COMMENT_PIN_CLASS,
   COMMENT_PIN_CLUSTER_CLASS,
   COMMENT_PIN_NONEXACT_CLASS,
@@ -76,7 +75,7 @@ function nonExactLabel(states: AnchorState[]): string {
   return 'Approximate or unresolved locations';
 }
 
-/** Consecutive-line clustering: a new group starts once the gap to the previous thread's line exceeds the blank-line window. */
+/** Same-line clustering: one pin per gutter line, so a new group starts at every line change. */
 export function buildGroups(anchors: ThreadAnchor[]): ThreadAnchor[][] {
   const sorted = anchors.slice().sort((a, b) => threadLine(a) - threadLine(b));
   const groups: ThreadAnchor[][] = [];
@@ -89,8 +88,7 @@ export function buildGroups(anchors: ThreadAnchor[]): ThreadAnchor[][] {
     const groupable =
       current !== undefined &&
       threadLine(anchor) > 0 &&
-      threadLine(current[current.length - 1]) > 0 &&
-      threadLine(anchor) - threadLine(current[current.length - 1]) <= COMMENT_GUTTER_CLUSTER_BLANK_GAP + 1;
+      threadLine(anchor) === threadLine(current[current.length - 1]);
     if (groupable) {
       current.push(anchor);
     } else {
@@ -151,11 +149,11 @@ export function initCommentGutter(
 
   function renderPin(anchors: ThreadAnchor[]): HTMLElement {
     const allResolved = anchors.every((a) => a.status === 'Resolved');
-    // Driven by THREAD count, not by distinct lines: two threads on the same line
-    // are trivially inside the cluster window, and `activate()` already opens the
-    // chooser for any multi-thread pin — gating the affordance on distinct lines
-    // made a same-line pair look like a single-thread pin but behave clustered,
-    // with a badge that conflated 2 threads × 1 reply with 1 thread × 3 replies.
+    // Driven by THREAD count: every thread in a group already shares one line,
+    // and `activate()` opens the chooser for any multi-thread pin — gating the
+    // affordance on distinct lines made a same-line pair look like a
+    // single-thread pin but behave clustered, with a badge that conflated
+    // 2 threads × 1 reply with 1 thread × 3 replies.
     const isCluster = anchors.length > 1;
     // AC2: a cluster pin is marked non-exact only when EVERY thread in it is —
     // one exact thread sharing a line with an approximate one still resolves
@@ -182,13 +180,12 @@ export function initCommentGutter(
     }
     const totalMessages = anchors.reduce((sum, a) => sum + messageCount(a), 0);
     pin.appendChild(el('span', 'comment-gutter-pin-count', isCluster ? `+${anchors.length}` : String(totalMessages)));
-    const lines = Array.from(new Set(anchors.map(threadLine))).sort((a, b) => a - b);
     // A cluster describes THREADS (that is what picking one from the chooser
-    // selects); a single pin describes the messages inside its one thread.
-    const span = lines[0] === lines[lines.length - 1] ? `line ${lines[0]}` : `lines ${lines[0]}–${lines[lines.length - 1]}`;
+    // selects); a single pin describes the messages inside its one thread. Every
+    // thread in a group shares one line, so the span is that single line.
     const nonExactSuffix = allNonExact ? ` · ${nonExactLabel(anchors.map((a) => a.state))}` : '';
     pin.title = isCluster
-      ? `${anchors.length} comment threads on ${span}${nonExactSuffix}`
+      ? `${anchors.length} comment threads on line ${threadLine(anchors[0])}${nonExactSuffix}`
       : `${totalMessages} comment${totalMessages === 1 ? '' : 's'} · ${allResolved ? 'Resolved' : 'Open'}${nonExactSuffix}`;
     const activate = (): void => {
       if (anchors.length === 1) {

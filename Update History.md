@@ -523,3 +523,4 @@
 | 0.10.0 | 2026-07-28 | Fix: the comment-group pin halo painted the VS Code theme background over Sepia/Paper pages, reading as a thick black ring; it now follows --rp-bg. |
 | 0.10.0 | 2026-07-28 | Fix: gutter comment pins read the VS Code link/description colours directly, showing blue on Sepia/Paper; they now resolve through the per-palette --comment-status-* layer. |
 | 0.10.0 | 2026-07-28 | Fix: table fit-mode measured a column floor over text glyphs only, so a one-token inline code chip broke at a hyphen inside an already-wide column, leaving dead space. |
+| 0.10.0 | 2026-07-29 | Fix: a comment in a loose list item reported the whole list's first line, and gutter pins on nearby-but-different lines merged; pins now cluster per exact line. |

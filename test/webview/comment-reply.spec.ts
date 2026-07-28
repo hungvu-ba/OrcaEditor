@@ -112,33 +112,32 @@ test.describe('gutter pins — count and clustering', () => {
     await expect(pins.first().locator('.comment-gutter-pin-count')).toHaveText('1');
   });
 
-  test('threads within 1 blank line of each other collapse into a "+N" cluster; a distant thread stays its own pin', async ({
+  test('threads on different lines never share a pin, however close those lines are', async ({
     page,
   }) => {
     await openEditor(page, DOC);
-    // Alpha (Ln 3), Beta (Ln 5), Gamma (Ln 7): each pair 2 lines apart (1 blank
-    // line between) — all three chain into one cluster. Delta (Ln 10) is 3
-    // lines past Gamma — outside the window, its own pin.
+    // Alpha (Ln 3), Beta (Ln 5), Gamma (Ln 7), Delta (Ln 10): four distinct
+    // gutter lines — one pin each, badge 1 each. The pairs 2 lines apart used to
+    // chain into one "+3" cluster under the superseded blank-line window.
     await createThread(page, 0, 'On Alpha.');
     await createThread(page, 1, 'On Beta.');
     await createThread(page, 2, 'On Gamma.');
     await createThread(page, 3, 'On Delta.');
 
     const pins = page.locator('.comment-gutter-pin');
-    await expect(pins).toHaveCount(2);
-    const cluster = page.locator('.comment-gutter-pin-cluster');
-    await expect(cluster).toHaveCount(1);
-    await expect(cluster.locator('.comment-gutter-pin-count')).toHaveText('+3');
-    // The lone Delta pin is a plain pin, badge count 1.
-    const lone = pins.filter({ hasNotText: '+' });
-    await expect(lone).toHaveCount(1);
-    await expect(lone.locator('.comment-gutter-pin-count')).toHaveText('1');
+    await expect(pins).toHaveCount(4);
+    await expect(page.locator('.comment-gutter-pin-cluster')).toHaveCount(0);
+    await expect(pins.filter({ hasText: '+' })).toHaveCount(0);
+    for (let i = 0; i < 4; i++) {
+      await expect(pins.nth(i).locator('.comment-gutter-pin-count')).toHaveText('1');
+    }
   });
 
   test('clicking a cluster opens a chooser list; picking a row opens that thread\'s popover', async ({ page }) => {
     await openEditor(page, DOC);
+    // Both threads on Alpha (Ln 3) — a cluster is a SAME-line pin.
     const alpha = await createThread(page, 0, 'On Alpha.');
-    await createThread(page, 1, 'On Beta.');
+    await createThread(page, 0, 'On Beta.');
 
     await page.locator('.comment-gutter-pin-cluster').click();
     await expect(page.locator('.comment-gutter-cluster-list')).toBeVisible();
