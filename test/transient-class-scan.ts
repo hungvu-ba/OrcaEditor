@@ -44,9 +44,16 @@
  *     `md-fm-*` names) and main.ts inserts it INSIDE `#content`; `list-ops.ts`
  *     emits `class="contains-task-list"` the same way. turndown's
  *     `FRONT_MATTER_CLASS` rule replaces that subtree with the source YAML, so
- *     nothing leaks on the rule path — but the raw-HTML paths bypass rules (see
- *     the KNOWN LEAK group in `OUTSIDE_CONTENT_CLASSES`), which is the same
- *     open serialization question, recorded as deferred work.
+ *     nothing leaks on the rule path. The raw-HTML paths bypass rules, and front
+ *     matter is NOT in `restoreWrapperSourceForms`'s wrapper set, so it would
+ *     leak the whole card plus `data-raw` if one ever landed inside a table cell
+ *     or a kept tag (measured 2026-07-28). What is verified is that no relocation
+ *     route reaches it today: `front-matter.ts` inserts it at the top of
+ *     `#content`, and neither `drag-drop.ts`'s draggable set nor `main.ts`'s
+ *     `ATOM_BLOCK_SELECTOR` includes it. Not proven impossible — add it to
+ *     `WRAPPER_SELECTOR` if a route ever appears. The wrappers that ARE reachable
+ *     are restored to their source form (see `restoreWrapperSourceForms` and the
+ *     group naming it in `OUTSIDE_CONTENT_CLASSES`).
  *
  * Catch both in code review when a new emitter appears; this scan does not.
  */
@@ -91,11 +98,10 @@ export interface ScanResult {
  *    TOC rail, right dock, popovers, drag handles and ghosts), so nothing it
  *    carries can ever reach the `.md`; or
  *  - the element **is inside `#content`** but the class is deliberately not
- *    transient — it is document markup a turndown rule reads back, or chrome
- *    another mechanism removes. Those groups say so explicitly, including the
- *    two that are KNOWN LEAKS on the raw-HTML path (see `dom-postprocess.ts`
- *    below) and are exempted here only because fixing them is a serialization
- *    change, not a registration one.
+ *    transient — it is document markup a turndown rule reads back, or it rides
+ *    on an element another mechanism removes wholesale (injected chrome via
+ *    `MD_CHROME_MARKER_ATTR`, an editor-only wrapper via
+ *    `restoreWrapperSourceForms`). Those groups say so explicitly.
  *
  * This is a grandfather list, not a menu. Adding an entry means "I opened that
  * file, read that stamp site, and it is one of the two cases above". When it is
@@ -283,18 +289,22 @@ export const OUTSIDE_CONTENT_CLASSES: readonly string[] = [
   'dom-postprocess.ts | md-code-wrap',
   'dom-postprocess.ts | md-math-toggle',
 
-  // --- INSIDE `#content`, KNOWN LEAK — exempted, not absolved. Each of these
-  //     wrappers is normally replaced by its SOURCE form (`caption::NS_ID`,
-  //     `$…$`, a fence) by a turndown RULE, and a rule does not run on the
-  //     raw-HTML paths (`complexTableAsHtml`, `outerHtmlFallback`). Measured
-  //     2026-07-28: a `caption::UC1` token or inline math inside a table that
-  //     needs HTML serialization writes the wrapper, its classes AND
-  //     `contenteditable="false"` (plus the whole rendered KaTeX subtree) into
-  //     the user's `.md`. Registering the class names would not fix it — the
-  //     wrapper element itself has to be replaced by its source text, which is a
-  //     serialization change well outside this story. Recorded as deferred work;
-  //     `md-mermaid-error` / `md-plantuml-error` are the same shape, reachable
-  //     only through a hand-authored `<table>` around a fence. ---
+  // --- INSIDE `#content`, wrapper removed by a DIFFERENT mechanism: each of
+  //     these belongs to an editor-only WRAPPER built around a piece of markdown
+  //     source, so `turndown.ts`'s `restoreWrapperSourceForms` (inside
+  //     `cloneAndStrip`) replaces the whole wrapper element with that source form
+  //     — the `caption::NS_ID` token, `$…$`/`$$…$$` from `data-tex`, a diagram's
+  //     source `<pre>` — before any raw-HTML path takes its outerHTML. The class
+  //     goes with the element it is on. Registering the names instead would be
+  //     the wrong tool for two reasons: dropping the class alone still leaks the
+  //     wrapper element, its `contenteditable="false"` and (for math) the whole
+  //     KaTeX subtree; and R2/AC2 requires a registered name to be an
+  //     `export const` in `constants.ts`, while these are declared in
+  //     `render.ts` (deferred item 5 of the US-23.22 entry).
+  //     `md-caption-*`, `md-math-render` and the diagram `md-*-error` chart class
+  //     sit inside one of those wrappers and go with it. Closes the US-23.22
+  //     KNOWN LEAK group (fixed 2026-07-28) — covered by
+  //     `test/roundtrip/{caption-insert,math-edit,plantuml,style-preservation}.ts`. ---
   'dom-postprocess.ts | md-caption',
   'dom-postprocess.ts | md-caption-id',
   'dom-postprocess.ts | md-caption-ns',

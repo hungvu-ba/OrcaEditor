@@ -496,3 +496,7 @@
 | 0.10.0 | 2026-07-28 | Fix: the native comment reply and thread-create paths now strip bidi/control characters and normalize line endings before writing to the sidecar. |
 | 0.10.0 | 2026-07-28 | Fix: a status change now answers its refusals before the author-name prompt instead of after, and claims its dedup guard ahead of every await. |
 | 0.10.0 | 2026-07-28 | Fix: exclude playwright.shots.config.ts and scripts/ from eslint so npm run lint reports zero errors again. |
+| 0.10.0 | 2026-07-28 | Fix: caption badges, math wrappers and diagram frames inside a raw-HTML-serialized table now write their markdown source instead of editor markup into the .md. |
+| 0.10.0 | 2026-07-28 | Fix: webview test workers no longer share one harness HTML file — the truncate race that made four specs time out waiting for #content is gone. |
+| 0.10.0 | 2026-07-28 | Feature: a unit guard now fails when a webview-posted message type has no case in provider.ts, the gap that hid the editComment bug. |
+| 0.10.0 | 2026-07-28 | Fix: symlinks below the workspace root no longer let asset writes, orphan hard-deletes or sidecar mutations escape the allowed roots (Security Audit S-1). |

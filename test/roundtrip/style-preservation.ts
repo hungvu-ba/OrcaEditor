@@ -26,7 +26,7 @@ import {
 } from '../../media/webview/pipeline';
 import { buildBlockMap, BLOCK_ID_ATTR } from '../../media/webview/block-map';
 import { detectBlockStyle, stampStyleOverride } from '../../media/webview/block-style';
-import { Runner, serializeHtml } from './_lib';
+import { Runner, serializeHtml, COMPLEX_CELL } from './_lib';
 
 const renderer = new MarkdownRenderer({ breaks: false, linkify: true });
 const turndown = createTurndown();
@@ -590,7 +590,6 @@ runner.check(
 // the raw-HTML path (complex table / kept tag) needs its own strip. A marker
 // reaching the `.md` would be a real document edit — the undo-stack slot the US
 // forbids. A complex table (nested list in a cell) is the reliable way in.
-const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
 
 {
   const out = serializeHtml(
@@ -791,10 +790,29 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
 }
 
 {
-  // AC1b regression guard (caught in review 2026-07-28): Req 21's `.md-caption`
-  // declaration badge also carries contenteditable="false" (blocks inline
-  // editing of the token) but holds REAL user content, no chrome marker. It
-  // must survive the raw-HTML path unlike the two chrome cases above.
+  // AC1b regression guard (caught in review 2026-07-28): a contenteditable="false"
+  // node with no chrome marker holds REAL user content, so stripInjectedChrome
+  // must keep matching the marker and never the bare attribute. Req 21's
+  // `.md-caption` badge used to be this case's subject; US-23.22 gave it its own
+  // source-form restoration (below), so the principle is pinned here on a plain
+  // user-authored node instead — a node nothing else in the pipeline touches.
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td>a <span contenteditable="false">real content</span></td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC1b: a contenteditable="false" node with no chrome marker survives — not blanket-matched',
+    out.includes('real content'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // US-23.22 deferred item 1 (fixed 2026-07-28): Req 21's `.md-caption` badge is
+  // an editor-only WRAPPER around a `caption::NS_ID` token, normally undone by
+  // turndown's SPAN default — which does not run on the raw-HTML path. So
+  // cloneAndStrip restores the source token itself: the text must survive (it is
+  // user content, not chrome) with no wrapper, class or contenteditable left.
   const badge =
     '<span class="md-caption" contenteditable="false">' +
     '<span class="md-caption-prefix">caption::</span>' +
@@ -804,13 +822,63 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
       `<td>a ${badge}</td>${COMPLEX_CELL}</tr></tbody></table>`
   );
   runner.check(
-    'US-23.21 AC1b: a contenteditable="false" node with no chrome marker (Req 21 .md-caption badge) survives — not blanket-matched',
-    // The token's text is split across 3 child spans (prefix/ns/id) by design
-    // (fillCaptionBadge), so check the structure survived, not a contiguous string.
-    out.includes('class="md-caption"') &&
-      out.includes('>caption::<') &&
-      out.includes('>UC<') &&
-      out.includes('>02<'),
+    'US-23.22: a .md-caption badge is restored to its `caption::NS_ID` source token on the raw-HTML path',
+    out.includes('a caption::UC02') && !out.includes('md-caption') && !out.includes('contenteditable'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // US-23.22 deferred item 1: `cloneAndStrip` is shared by THREE raw-HTML
+  // emitters, and every other case here exercises only `complexTableAsHtml`. Pin
+  // the other two, or a future change narrowing restoration to the table path
+  // passes the whole suite:
+  //  - `outerHtmlFallback`, reached from turndown's keep list (`<details>`);
+  //  - `alignedBlock`, which uses cloneAndStrip(el).innerHTML, not outerHTML.
+  const viaKeep = serializeHtml(
+    '<details><summary>s</summary><p>see <span class="md-caption" contenteditable="false">' +
+      '<span class="md-caption-prefix">caption::</span><span class="md-caption-ns">UC</span>' +
+      '<span class="md-caption-id">02</span></span></p></details>'
+  );
+  runner.check(
+    'US-23.22: outerHtmlFallback (a kept <details>) restores a wrapper too, not just complexTableAsHtml',
+    viaKeep.includes('<details>') &&
+      viaKeep.includes('see caption::UC02') &&
+      !viaKeep.includes('md-caption') &&
+      !viaKeep.includes('contenteditable'),
+    `  out = ${JSON.stringify(viaKeep)}`
+  );
+  const viaAligned = serializeHtml(
+    '<p align="center">a <span class="md-math-inline" data-tex="x^2">' +
+      '<span class="md-math-render" contenteditable="false"><span class="katex">K</span></span></span> b</p>'
+  );
+  runner.check(
+    'US-23.22: alignedBlock restores a wrapper too (it reads innerHTML, a separate route)',
+    viaAligned.includes('align="center"') &&
+      viaAligned.includes('a $x^2$ b') &&
+      !viaAligned.includes('md-math') &&
+      !viaAligned.includes('katex') &&
+      !viaAligned.includes('contenteditable'),
+    `  out = ${JSON.stringify(viaAligned)}`
+  );
+}
+
+{
+  // US-23.22 deferred item 1: same for a diagram frame dragged into a table cell
+  // (drag-drop.ts treats a Mermaid frame as a draggable block). The frame — its
+  // toolbar, its chart container, the `md-mermaid-error` stamped there when a
+  // render fails, and the rendered SVG — collapses back to the source `<pre>`
+  // markdown-it emitted for the fence, which is the `mermaidDiagram` rule's job
+  // and the raw-HTML path used to skip entirely. An element, not fence text:
+  // turndown's whitespace collapse would eat a text node's newlines on the next
+  // save and destroy the diagram source.
+  const CELL = '<td><pre><code class="language-mermaid">graph TD; A---B;</code></pre></td>';
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>${CELL}${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.22: a Mermaid frame in a raw-HTML table collapses back to its source <pre>, byte-identical',
+    out.includes(CELL) && !out.includes('md-mermaid') && !out.includes('contenteditable'),
     `  out = ${JSON.stringify(out)}`
   );
 }

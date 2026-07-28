@@ -35,7 +35,7 @@
  *
  * Chạy riêng: npm run test:roundtrip:math-edit
  */
-import { Runner, serializeHtml, renderer, domino } from './_lib';
+import { Runner, serializeHtml, renderer, domino, COMPLEX_CELL } from './_lib';
 import { postProcessMathDom } from '../../media/webview/pipeline';
 
 const runner = new Runner();
@@ -120,6 +120,123 @@ runner.roundtrip(
   'block: markdown sau Apply ($$y^3$$) ổn định qua round-trip render→serialize',
   serializeHtml(applyEdit(buildWrapperHtml('$$x^2$$'), 'y^3'))
 );
+
+// ---------------------------------------------------------------------------
+// RAW-HTML serialize path (US-23.22 deferred item 1, fixed 2026-07-28): the
+// mathInline/mathBlock RULES above are what turn a wrapper back into `$…$` /
+// `$$…$$`, and a rule never runs inside complexTableAsHtml — a table with a
+// `td li li` cell is emitted through outerHTML. So math in such a table used to
+// write the wrapper, its `md-math-*` classes, `data-tex`, `contenteditable` AND
+// the whole rendered KaTeX subtree into the user's `.md`. The wrapper element
+// itself must be back to its source form before outerHTML is taken.
+// ---------------------------------------------------------------------------
+{
+  /** A complex (raw-HTML-serialized) table whose first cell holds real rendered math. */
+  function tableWithMath(mathMd: string): string {
+    const cell = renderer.render(mathMd).html.trim();
+    const doc = domino.createDocument(
+      '<div id="content"><table><thead><tr><th>A</th></tr></thead><tbody><tr>' +
+        `<td>${cell}</td>${COMPLEX_CELL}</tr></tbody></table></div>`,
+      true
+    );
+    const root = doc.getElementById('content');
+    if (!root) {
+      throw new Error('could not parse HTML');
+    }
+    postProcessMathDom(root, doc);
+    return root.innerHTML;
+  }
+
+  for (const [kind, mathMd, expect] of [
+    ['inline', '$x^2$', /\$x\^2\$/],
+    ['block', '$$x^2$$', /\$\$\s*x\^2\s*\$\$/],
+  ] as const) {
+    const fixture = tableWithMath(mathMd);
+    runner.check(
+      `raw-HTML ${kind}: fixture really carries a math wrapper in the cell`,
+      fixture.includes('data-tex="x^2'),
+      fixture.slice(0, 300)
+    );
+    const md = serializeHtml(fixture);
+    runner.check(
+      `raw-HTML ${kind}: the table really took the raw-HTML path (complexTableAsHtml)`,
+      md.trimStart().startsWith('<table'),
+      JSON.stringify(md)
+    );
+    runner.check(`raw-HTML ${kind}: the .md carries the formula's SOURCE form`, expect.test(md), md);
+    runner.check(`raw-HTML ${kind}: no md-math-* class leaks`, !md.includes('md-math'), md);
+    runner.check(`raw-HTML ${kind}: no data-tex leaks`, !md.includes('data-tex'), md);
+    runner.check(`raw-HTML ${kind}: no rendered KaTeX subtree leaks`, !md.includes('katex'), md);
+    runner.check(`raw-HTML ${kind}: no contenteditable leaks`, !md.includes('contenteditable'), md);
+    runner.check(
+      `raw-HTML ${kind}: stable on a 2nd render->serialize pass`,
+      serializeHtml(renderer.render(md).html) === md,
+      `\n  md2: ${JSON.stringify(serializeHtml(renderer.render(md).html))}\n  md1: ${JSON.stringify(md)}`
+    );
+  }
+
+  // TeX `%` comments to end of line, so folding a MULTI-LINE formula onto one
+  // line moves everything after the comment INTO it and deletes it silently.
+  // Measured before the guard: `a % first term\n+ b` serialized as
+  // `$$a % first term + b$$` — `+ b` gone from the user's file, unrecoverable.
+  // Found by the US-23.22 review's blind hunter, 2026-07-28.
+  {
+    const md = serializeHtml(tableWithMath('$$\na % first term\n+ b\n$$'));
+    runner.check(
+      'raw-HTML block: a formula with a `%` comment is NOT folded onto one line, losing what follows it',
+      md.includes('a % first term\n+ b'),
+      md
+    );
+    runner.check('raw-HTML block (`%` comment): no md-math-* class leaks', !md.includes('md-math'), md);
+    runner.check(
+      'raw-HTML block (`%` comment): stable on a 2nd pass',
+      serializeHtml(renderer.render(md).html) === md,
+      `\n  md2: ${JSON.stringify(serializeHtml(renderer.render(md).html))}\n  md1: ${JSON.stringify(md)}`
+    );
+  }
+
+  // An empty formula must write NOTHING, not a bare `$`/`$$` — that would be an
+  // unterminated math opener the day the cell stops needing HTML serialization.
+  {
+    const empty = serializeHtml(
+      '<table><thead><tr><th>A</th></tr></thead><tbody><tr>' +
+        `<td>a <span class="md-math-inline" data-tex=" ">x</span> b</td>${COMPLEX_CELL}</tr></tbody></table>`
+    );
+    runner.check(
+      'raw-HTML: an empty data-tex writes nothing, not a bare `$`',
+      empty.includes('<td>a  b</td>') && !empty.includes('$'),
+      empty
+    );
+  }
+
+  // KNOWN LIMITATION, pinned deliberately — NOT an assertion that this is
+  // desirable. `postProcessMathDom` finds math only by querying `.katex` /
+  // `.katex-display`, which only @vscode/markdown-it-katex produces, and
+  // markdown-it never runs inline rules inside an html_block. So `$…$` written
+  // back into a raw-HTML region can never become math again: the cell shows the
+  // literal source after a save (the same thing GitHub and VS Code preview show
+  // there). Measured 2026-07-28: before US-23.22 the leaked KaTeX subtree DID
+  // revive, so the leak was functional — this fix trades that for a clean `.md`.
+  // The caption and diagram branches both revive (postProcessCaptions walks text
+  // nodes; postProcessDiagramDom queries `pre > code.language-*`); math is the one
+  // family with no equivalent, recorded as deferred work.
+  // WHEN A REVIVAL PASS SHIPS: this case goes red — delete it and assert the
+  // wrapper comes back with its original data-tex instead.
+  {
+    const md = serializeHtml(tableWithMath('$x^2$'));
+    const doc = domino.createDocument(`<div id="content">${renderer.render(md).html}</div>`, true);
+    const root = doc.getElementById('content');
+    if (!root) {
+      throw new Error('could not parse HTML');
+    }
+    postProcessMathDom(root, doc);
+    runner.check(
+      'raw-HTML inline: KNOWN LIMITATION — the restored `$…$` does not revive as math on reopen',
+      root.querySelectorAll('.md-math-inline').length === 0 && md.includes('$x^2$'),
+      root.innerHTML.slice(0, 300)
+    );
+  }
+}
 
 // Ghi chú: nhánh "TeX rỗng sau trim → giữ nguyên currentTex"
 // (`textarea.value.trim() || currentTex`, math-edit.ts commit()) là logic

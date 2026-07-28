@@ -8,6 +8,7 @@
 import TurndownService from 'turndown';
 import { tables, taskListItems } from 'turndown-plugin-gfm';
 import {
+  CAPTION_CLASS,
   FRONT_MATTER_CLASS,
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
@@ -783,14 +784,15 @@ const TRANSIENT_CLASSES = [
 ];
 
 /**
- * Clones `el` and strips every TRANSIENT_ATTRS/TRANSIENT_CLASSES token, the
- * table-fit presentation and any editor-injected UI chrome — shared by every
- * raw-HTML emitter (US-23.21 AC1/AC1b) so a strip fix lands once instead of
- * per call site. Operates on the clone only; the live #content DOM is never
- * touched.
+ * Clones `el`, restores every editor-only wrapper to its `.md` source form and
+ * strips every TRANSIENT_ATTRS/TRANSIENT_CLASSES token, the table-fit
+ * presentation and any editor-injected UI chrome — shared by every raw-HTML
+ * emitter (US-23.21 AC1/AC1b) so a strip fix lands once instead of per call
+ * site. Operates on the clone only; the live #content DOM is never touched.
  */
 function cloneAndStrip(el: HTMLElement): HTMLElement {
   const copy = el.cloneNode(true) as HTMLElement;
+  restoreWrapperSourceForms(copy);
   for (const attr of TRANSIENT_ATTRS) {
     copy.removeAttribute(attr);
     for (const child of Array.from(copy.querySelectorAll(`[${attr}]`))) {
@@ -804,6 +806,128 @@ function cloneAndStrip(el: HTMLElement): HTMLElement {
 }
 
 /**
+ * Editor-only WRAPPERS: DOM the post-process passes build around a piece of
+ * markdown source, which therefore has a source form to be restored to. Each is
+ * owned by a turndown RULE on the normal path (`mathBlock`/`mathInline`/
+ * `mermaidDiagram`/`plantumlDiagram`, and turndown's SPAN default for
+ * `.md-caption`); `restoreWrapperSourceForms` is the raw-HTML path's equivalent.
+ */
+const WRAPPER_SELECTOR = [
+  CAPTION_CLASS,
+  MATH_INLINE_CLASS,
+  MATH_BLOCK_CLASS,
+  MERMAID_CLASS,
+  PLANTUML_CLASS,
+]
+  .map((cls) => `.${cls}`)
+  .join(', ');
+
+/**
+ * Replaces every editor-only wrapper in the clone with the `.md` source form it
+ * was built from, BEFORE the clone is serialized as raw HTML.
+ *
+ * On the normal path a turndown RULE does this, but a rule never runs inside
+ * `complexTableAsHtml` / `outerHtmlFallback` / `alignedBlock` — those emit the
+ * DOM verbatim. Without this, a `caption::NS_ID` badge or a formula inside a
+ * table that needs HTML serialization wrote the wrapper, its `md-*` classes,
+ * its `contenteditable="false"` and (for math) the entire rendered KaTeX
+ * subtree straight into the user's file (US-23.22 deferred item 1, measured
+ * 2026-07-28). Registering the class names would not have helped: the wrapper
+ * ELEMENT is what has to go, not just its class attribute. It also removes
+ * `.md-math-render` and the diagram `md-*-error` chart container by ownership —
+ * both carry `contenteditable="false"` with no `MD_CHROME_MARKER_ATTR`, so
+ * `stripInjectedChrome` never reached them and must not be widened to the bare
+ * attribute (see its doc comment).
+ *
+ * `querySelector` returns document order, so the first match is always the
+ * OUTERMOST wrapper and any nested one goes with it — that is what makes the
+ * loop terminate: every pass replaces one matching element with a replacement
+ * that never matches. `copy` itself is never a wrapper: turndown consults the
+ * dedicated rules before `keepReplacement`/`defaultReplacement`, and
+ * `.md-caption` is a SPAN, which `defaultReplacement` unwraps to its content.
+ */
+function restoreWrapperSourceForms(copy: HTMLElement): void {
+  const doc = copy.ownerDocument;
+  if (!doc) {
+    return;
+  }
+  for (let wrapper = copy.querySelector(WRAPPER_SELECTOR); wrapper; wrapper = copy.querySelector(WRAPPER_SELECTOR)) {
+    const parent = wrapper.parentNode;
+    if (!parent) {
+      return; // detached mid-walk — nothing left to replace it in.
+    }
+    parent.replaceChild(wrapperSourceForm(wrapper, doc), wrapper);
+  }
+}
+
+/**
+ * The `.md` source form `wrapper` was built from — see WRAPPER_SELECTOR.
+ *
+ * Everything here must survive turndown's own whitespace collapse, because the
+ * emitted HTML is re-parsed and re-serialized on the NEXT save: a newline in a
+ * plain text node comes back as a space, so a source form that needs newlines
+ * would churn the user's bytes on every pass. `<pre>` is the one element that
+ * collapse leaves alone, so anything whose newlines are load-bearing is carried
+ * in one: a diagram's source `<pre>` ELEMENT (which the next render also re-wraps
+ * into a working frame) instead of fence text, and a `%`-commented multi-line
+ * formula. Every other formula folds to the one-line `$…$` / `$$…$$` spelling,
+ * where whitespace is insignificant.
+ */
+function wrapperSourceForm(wrapper: Element, doc: Document): Node {
+  const cl = wrapper.classList;
+  if (cl.contains(CAPTION_CLASS)) {
+    // fillCaptionBadge deliberately keeps textContent === the literal
+    // `caption::NS_ID` token, split across hidden-prefix/ns/id child spans
+    // purely for display (dom-postprocess.ts).
+    return doc.createTextNode(wrapper.textContent ?? '');
+  }
+  if (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS)) {
+    const delimiter = cl.contains(MATH_BLOCK_CLASS) ? '$$' : '$';
+    const tex = (wrapper.getAttribute('data-tex') ?? '').trim();
+    if (!tex) {
+      // Nothing to write. A bare `$$`/`$` would be an unterminated math opener
+      // the day this cell stops needing HTML serialization.
+      return doc.createTextNode('');
+    }
+    // A `%` comments to end of line in TeX, so folding a MULTI-LINE formula onto
+    // one line moves everything after the comment INTO it and deletes it: `a %
+    // first term\n+ b` folded to `$$a % first term + b$$` loses `+ b` from the
+    // user's file, unrecoverably (measured 2026-07-28, US-23.22 review). Only
+    // that combination needs the `<pre>` carrier — folding preserves meaning for
+    // every other formula, and a `<pre>` would break an inline one out of its
+    // sentence. Chained appendChild: domino has no ParentNode.append.
+    if (tex.includes('%') && tex.includes('\n')) {
+      const carrier = doc.createElement('pre');
+      carrier.appendChild(doc.createTextNode(`${delimiter}\n${tex}\n${delimiter}`));
+      return carrier;
+    }
+    return doc.createTextNode(`${delimiter}${tex.replace(/\s+/g, ' ')}${delimiter}`);
+  }
+  const spec = cl.contains(MERMAID_CLASS) ? MERMAID_FRAME : PLANTUML_FRAME;
+  const source = wrapper.querySelector(`.${spec.sourceClass}`);
+  if (!source) {
+    // Never happens for a frame postProcessDiagramDom built, and with no source
+    // <pre> there is nothing to preserve — only the rendered chart, which is
+    // presentation. Emits NOTHING, not a fence: `diagramSource` reads the source
+    // <pre> too, so it could only ever produce an EMPTY fence here, and a fence
+    // in a text node is exactly what this function must not write (its newlines
+    // would collapse on the next save).
+    return doc.createTextNode('');
+  }
+  source.parentNode?.removeChild(source);
+  source.classList.remove(spec.sourceClass);
+  // Also the frame class, for the hand-authored `<pre class="md-mermaid
+  // md-mermaid-source">` shape: without this the restored element still matches
+  // WRAPPER_SELECTOR, re-enters the loop, finds no source and is dropped.
+  // Two calls, not `remove(a, b)` — domino's DOMTokenList is the narrow one.
+  source.classList.remove(spec.wrapperClass);
+  if (source.getAttribute('class') === '') {
+    source.removeAttribute('class');
+  }
+  return source;
+}
+
+/**
  * Removes every editor-injected UI control from the clone — the code-block
  * header (language label, Copy/Wrap buttons) and the diagram/math toolbar
  * toggles, all stamped with `MD_CHROME_MARKER_ATTR` in `dom-postprocess.ts`.
@@ -811,10 +935,11 @@ function cloneAndStrip(el: HTMLElement): HTMLElement {
  * TRANSIENT_CLASSES entry, so a future injected control is covered by
  * stamping the one shared marker rather than a per-control registration.
  * Matches the marker, not the bare `contenteditable="false"` attribute those
- * controls also carry: that attribute alone is not ownership — Req 21's
- * `.md-caption` badge carries it too (to block inline editing of the token)
- * while holding real user content, which a blanket match would delete
- * (US-23.21 AC1b, caught in review 2026-07-28).
+ * controls also carry: that attribute alone is not ownership — a user's own
+ * `<span contenteditable="false">` holds real content, and Req 21's
+ * `.md-caption` badge carried the attribute for the same reason before
+ * `restoreWrapperSourceForms` started restoring it by source form. A blanket
+ * match would delete both (US-23.21 AC1b, caught in review 2026-07-28).
  */
 function stripInjectedChrome(copy: HTMLElement): void {
   for (const chrome of Array.from(copy.querySelectorAll(`[${MD_CHROME_MARKER_ATTR}]`))) {
@@ -1006,10 +1131,15 @@ function outerHtmlFallback(el: HTMLElement, content: string): string {
  * container are presentation, never part of the `.md`.
  */
 function diagramFence(node: HTMLElement, spec: DiagramFrameSpec): string {
+  return `\n\n${diagramSource(node, spec)}\n\n`;
+}
+
+/** The frame's fenced block on its own — also the raw-HTML path's source form. */
+function diagramSource(node: HTMLElement, spec: DiagramFrameSpec): string {
   const code = node.querySelector(`.${spec.sourceClass} code`);
   const text = (code?.textContent ?? '').replace(/\n$/, '');
   const fence = pickFence(text);
-  return `\n\n${fence}${spec.language}\n${text}\n${fence}\n\n`;
+  return `${fence}${spec.language}\n${text}\n${fence}`;
 }
 
 // Pick a code fence long enough that `text` cannot close it early.

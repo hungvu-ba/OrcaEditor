@@ -404,10 +404,12 @@ export const ENTITY_REF_CLASS = 'md-entity-ref';
  * remove editor-injected UI controls (code-block header/Copy/Wrap, diagram/math
  * toolbars and toggles) from the raw-HTML serialize clone (US-23.21 AC1b).
  * Stamped in `dom-postprocess.ts` alongside `contenteditable="false"` — the bare
- * attribute alone is not a safe match: Req 21's `.md-caption` badge also carries
- * `contenteditable="false"` (to block inline editing of the token) while holding
- * real user content, which a blanket `[contenteditable="false"]` selector would
- * silently delete on that same raw-HTML path.
+ * attribute alone is not a safe match: a user's own
+ * `<span contenteditable="false">` holds real content, which a blanket
+ * `[contenteditable="false"]` selector would silently delete on that same
+ * raw-HTML path (pinned by a case in `test/roundtrip/style-preservation.ts`).
+ * Req 21's `.md-caption` badge was this counter-example until US-23.22 gave it
+ * its own source-form restoration, which now runs before `stripInjectedChrome`.
  */
 export const MD_CHROME_MARKER_ATTR = 'data-md-chrome';
 
