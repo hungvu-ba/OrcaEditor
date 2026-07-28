@@ -4,82 +4,87 @@
  * points, same convention as `test/webview/_harness.ts`).
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { SidecarWriteGuard } from '../../src/comments/sidecar-store';
-import { normalizeAssetName } from '../../src/text-utils';
 
 /** Every host test allows any write target — none of these tests exercise the outside-allowed-roots refusal, already covered by `test/unit.ts`'s `modelRefusalFor`. */
 export const allowAllGuard: SidecarWriteGuard = async () => true;
 
 export const noopLog = (_message: string, _err?: unknown): void => {};
 
-const WORKSPACE_FOLDER_CHANGE_TIMEOUT_MS = 5000;
-
 /**
- * Resolves once `vscode.workspace.onDidChangeWorkspaceFolders` fires, or after
- * `timeoutMs` — the API's own doc comment forbids a second `updateWorkspaceFolders`
- * call before the previous one's change event has fired, so a blind `setTimeout(0)`
- * (the pre-review version of this harness) races that contract instead of
- * honouring it. Bounded rather than awaited forever: a lost event must surface as
- * a slow/failed test, never a silently hung one.
+ * The one workspace folder VS Code was launched on, provided by `runTest.ts` via
+ * `extensionTestsEnv`. Read at call time rather than module scope so a missing value
+ * names the fix instead of producing a confusing `undefined` path.
  */
-function waitForWorkspaceFoldersChange(timeoutMs = WORKSPACE_FOLDER_CHANGE_TIMEOUT_MS): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      sub.dispose();
-      resolve();
-    }, timeoutMs);
-    const sub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      clearTimeout(timer);
-      sub.dispose();
-      resolve();
-    });
-  });
+function hostTestWorkspaceRoot(): string {
+  const dir = process.env.ORCA_HOST_TEST_WORKSPACE;
+  if (dir === undefined || dir === '') {
+    throw new Error(
+      'ORCA_HOST_TEST_WORKSPACE is not set — runTest.ts must create the workspace folder, pass it as ' +
+        'the last launch arg, and forward it through extensionTestsEnv'
+    );
+  }
+  return dir;
 }
 
 /**
- * AC2: a fresh temp workspace directory outside the repo tree, added as a real
- * VS Code workspace folder for the duration of `fn`, with `orcaEditor.*`
- * settings seeded up front (never the developer's own `settings.json`), and
- * removed + deleted unconditionally afterwards — pass, fail, or throw.
+ * AC2: a fresh directory outside the repo tree for the duration of `fn`, deleted
+ * unconditionally afterwards — pass, fail, or throw.
+ *
+ * It is a **subdirectory of the single workspace folder VS Code was launched on**,
+ * and deliberately does not call `updateWorkspaceFolders`. The earlier version added
+ * each temp directory as its own workspace folder, which does not work here and
+ * failed silently: `updateWorkspaceFolders` will not add the first folder to an empty
+ * workspace (it returns false, which was not checked), and the bounded wait for the
+ * change event then timed out and returned as though it had. A 2026-07-28 diagnostic
+ * probe printed `vscode.workspace.workspaceFolders` as EMPTY inside this function —
+ * so every case on this track had been running against a workspace containing none
+ * of its own files. Most did not notice, but `sidecar-reload`'s AC1/AC2 case did: a
+ * plain string glob given to `createFileSystemWatcher` matches only inside a
+ * workspace folder, so its sidecar's create event never arrived. Nesting inside the
+ * launched folder fixes that, and because the folder list now never changes there is
+ * also nothing left to trigger the Extension Host restart the old version fought.
+ *
+ * `settings` overrides go to the workspace root's own `.vscode/settings.json` — the
+ * only place a folder-scoped settings file now takes effect — merged over the base
+ * `runTest.ts` seeded and restored afterwards. The per-directory copy the old version
+ * wrote never applied at all, because those directories were never workspace folder
+ * roots. One case relies on this (`comment-undo-routes.test.ts`'s AC9 save-participant
+ * control, which needs `files.trimTrailingWhitespace`), so it is restored rather than
+ * dropped; cases run sequentially, so mutating the shared file around one is safe.
  */
 export async function withTempWorkspace<T>(
   fn: (root: vscode.Uri) => Promise<T>,
   settings: Record<string, unknown> = {}
 ): Promise<T> {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orca-host-test-'));
-  fs.mkdirSync(path.join(dir, '.vscode'), { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, '.vscode', 'settings.json'),
-    JSON.stringify({ 'orcaEditor.comments.authorName': 'Host Test Author', ...settings }, null, 2),
-    'utf8'
-  );
-  const root = vscode.Uri.file(dir);
-  const insertAt = vscode.workspace.workspaceFolders?.length ?? 0;
-  const changed = waitForWorkspaceFoldersChange();
-  vscode.workspace.updateWorkspaceFolders(insertAt, 0, { uri: root });
-  await changed;
+  const workspaceRoot = hostTestWorkspaceRoot();
+  const dir = fs.mkdtempSync(path.join(workspaceRoot, 'case-'));
+  const settingsPath = path.join(workspaceRoot, '.vscode', 'settings.json');
+  const baseSettings = fs.readFileSync(settingsPath, 'utf8');
+  const overriding = Object.keys(settings).length > 0;
+  if (overriding) {
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ ...(JSON.parse(baseSettings) as Record<string, unknown>), ...settings }, null, 2),
+      'utf8'
+    );
+    // VS Code picks the change up asynchronously; without this the case can read the
+    // configuration before the override has landed.
+    await new Promise<void>((r) => setTimeout(r, 300));
+  }
   try {
-    return await fn(root);
+    return await fn(vscode.Uri.file(dir));
   } finally {
-    // Neither cleanup step may replace/mask whatever `fn` itself threw — each
-    // gets its own try/catch so a workspace-folder-index mismatch (e.g. a
-    // still-running case from an earlier timeout mutating the folder list
-    // concurrently) can't stop the other step or override the real failure.
-    try {
-      const folders = vscode.workspace.workspaceFolders ?? [];
-      const index = folders.findIndex(
-        (f) => normalizeAssetName(f.uri.fsPath, true) === normalizeAssetName(root.fsPath, true)
-      );
-      if (index !== -1) {
-        const removed = waitForWorkspaceFoldersChange();
-        vscode.workspace.updateWorkspaceFolders(index, 1);
-        await removed;
+    // Each cleanup step gets its own try/catch so neither can mask whatever `fn`
+    // itself threw, nor stop the other from running.
+    if (overriding) {
+      try {
+        fs.writeFileSync(settingsPath, baseSettings, 'utf8');
+      } catch (err) {
+        console.error(`[test:host] failed to restore ${settingsPath}`, err);
       }
-    } catch (err) {
-      console.error(`[test:host] failed to remove workspace folder for ${dir}`, err);
     }
     try {
       fs.rmSync(dir, { recursive: true, force: true });

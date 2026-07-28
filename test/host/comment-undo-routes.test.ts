@@ -58,17 +58,23 @@ async function undoCommand(document: vscode.TextDocument, type: 'undo' | 'redo' 
 /**
  * Does `executeCommand('undo')` actually revert a document edit in THIS harness?
  *
- * Measured, not assumed, and it has to be measured: on the 2026-07-28 run it came
- * back **false** — `undo` is a no-op here, because VS Code routes it to the
- * focused editor and a `@vscode/test-electron` window has no real focus. Every
- * "an undo did not damage X" assertion is then vacuously true, which is a worse
- * outcome than no test at all: the suite reports coverage of a route it never
- * exercised. The cases below consult this and become logged `skip`s instead,
- * using the same mechanism US-23.17 built for a platform that cannot construct a
- * scenario (`sidecar-adopt.test.ts`'s case/NFC-folding skips).
+ * Measured, not assumed, and it has to be measured: `undo` is a global command
+ * routed to the ACTIVE editor, and a `@vscode/test-electron` window's focus is
+ * not reliably real. When it comes back false every "an undo did not damage X"
+ * assertion is vacuously true, which is a worse outcome than no test at all: the
+ * suite reports coverage of a route it never exercised. The cases below consult
+ * this and become logged `skip`s instead, using the same mechanism US-23.17 built
+ * for a platform that cannot construct a scenario (`sidecar-adopt.test.ts`'s
+ * case/NFC-folding skips).
  *
- * The positive control is the whole point — if the edit cannot be reverted, the
- * negative assertions mean nothing.
+ * **The verdict is nondeterministic across runs, not a fixed property of the
+ * harness.** The 2026-07-28 `npm run test:host` log settled this: the suite
+ * re-entered 9 times (every `withTempWorkspace` that seeds the first folder of an
+ * empty workspace restarts the Extension Host, and the runner then re-loads the
+ * entry point), and this probe returned true in exactly 1 of those 9 — the run in
+ * which all three cases below ran for real and passed. So the capability is a
+ * per-run coin flip, which is precisely why it must not be asserted: see the
+ * capability log line in `run()` for how that verdict is reported instead.
  */
 async function undoActsOnDocuments(root: vscode.Uri): Promise<boolean> {
   const probe = await openTempMdFile(root, 'undo-capability-probe.md', DOC_TEXT);
@@ -107,12 +113,14 @@ export async function run(): Promise<void> {
   await withTempWorkspace(async (root) => {
     const undoWorks = await undoActsOnDocuments(root);
 
-    await runner.case('AC4 positive control: executeCommand undo reverts a document edit', async () => {
-      // Recorded as a real case rather than hidden inside the capability helper,
-      // so the log states plainly whether this track can exercise undo at all.
-      // If this is the only red case in the file, the skips below are why.
-      assert.strictEqual(undoWorks, true, UNDO_INERT_REASON);
-    });
+    // The capability verdict is LOGGED, never asserted. It used to be a real
+    // `runner.case` so the log would state plainly whether this track can
+    // exercise undo at all — but the 2026-07-28 run showed the verdict flipping
+    // between Extension Host re-entries (true in 1 of 9), so asserting it turned
+    // a nondeterministic harness property into a permanently red gate that would
+    // mask every genuine failure after it. The log line keeps the diagnostic
+    // value; the `skip`s in the else branch keep the "not silently a pass" one.
+    console.log(`[test:host] capability: executeCommand('undo') reverts a document edit here = ${undoWorks}`);
 
     if (undoWorks) {
       await runner.case(
@@ -197,6 +205,7 @@ export async function run(): Promise<void> {
         );
       });
     } else {
+      runner.skip('AC4 positive control: executeCommand undo reverts a document edit', UNDO_INERT_REASON);
       runner.skip('AC4: undo via executeCommand appends no sidecar line and changes no status', UNDO_INERT_REASON);
       runner.skip('AC4: undo reverts the .md text edit itself and nothing else', UNDO_INERT_REASON);
       runner.skip("AC5: a global undo acting on another editor leaves this document's version flat", UNDO_INERT_REASON);

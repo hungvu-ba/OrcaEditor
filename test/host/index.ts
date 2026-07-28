@@ -10,7 +10,18 @@ import * as path from 'path';
 
 export async function run(): Promise<void> {
   const dir = __dirname;
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.test.js'));
+  // `dist/` is never cleaned, so a bundle whose source was renamed or deleted — and
+  // any throwaway diagnostic someone once built here — keeps running forever and
+  // counts toward the pass total. Require a live `.ts` source, the same guard
+  // `test/roundtrip-runner.js` carries for the same reason. This bit during US-23.18:
+  // a deleted probe kept reporting PASS from a stale bundle.
+  const sourceDir = path.resolve(dir, '../../../test/host');
+  const all = fs.readdirSync(dir).filter((f) => f.endsWith('.test.js')).sort();
+  const files = all.filter((f) => fs.existsSync(path.join(sourceDir, `${path.basename(f, '.js')}.ts`)));
+  const orphans = all.filter((f) => !files.includes(f));
+  if (orphans.length > 0) {
+    console.log(`[test:host] skipping ${orphans.length} stale bundle(s) with no source: ${orphans.join(', ')}`);
+  }
   const failed: string[] = [];
   for (const file of files) {
     // eslint-disable-next-line security/detect-non-literal-require

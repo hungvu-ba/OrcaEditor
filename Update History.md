@@ -489,3 +489,4 @@
 | 0.10.0 | 2026-07-28 | Feature (US-23.15): the comment sidecar now reloads when it changes on disk — threads added, refreshed and removed — and load losses plus an unshareable sidecar are surfaced. |
 | 0.10.0 | 2026-07-28 | Fix: repo hygiene — typecheck and lint now pass clean, roundtrip skips stale bundles with no source (23/23, was a misleading 27/27), comment-popover.ts no longer binary. |
 | 0.10.0 | 2026-07-28 | Fix (US-23.18 host track): AC6's probe now proves an undo reverts US-23.5's sidecar rename — a confirmed defect; the capability positive control no longer reddens the gate. |
+| 0.10.0 | 2026-07-28 | Fix: test:host was a coin flip — restored windows ran the suite in 10 concurrent hosts, and every case ran with no workspace folder, hiding a false pass. |

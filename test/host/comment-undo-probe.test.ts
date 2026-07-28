@@ -70,8 +70,11 @@ async function activateExtensionUnderTest(): Promise<void> {
  * the AC6 case below must be able to state its own capability finding even when
  * run in isolation.
  *
- * Measured **false** on the 2026-07-28 run — `undo` is inert here because VS Code
- * routes it to the focused editor and a `@vscode/test-electron` window has none.
+ * Nondeterministic per run, not a fixed property of the harness: `undo` is routed
+ * to the ACTIVE editor and a `@vscode/test-electron` window's focus is not
+ * reliably real. On the 2026-07-28 run the suite re-entered 9 times and this came
+ * back true in 1 of them — and in that run the AC6 case below RAN and failed. Do
+ * not simplify this to a constant.
  */
 async function undoActsOnDocuments(root: vscode.Uri): Promise<boolean> {
   const probe = await openTempMdFile(root, 'undo-capability-probe.md', '# doc\n\nAlpha paragraph.\n');
@@ -129,11 +132,18 @@ export async function run(): Promise<void> {
       }
     );
 
+    // AC6 is UNANSWERED when the harness cannot revert an edit, and must say so
+    // rather than pass. Its question is "can an undo consume US-23.5's rename
+    // `WorkspaceEdit`?" — a green assertion would then only mean the undo never
+    // ran, which is exactly the false negative the story's probe-first PO
+    // decision exists to avoid.
+    //
+    // Written as `if/else` rather than an early `return`: `return` here exits
+    // only the `withTempWorkspace` callback, not `run()`, so the trailing
+    // `runner.finish()` still executed and the skip tally printed twice per run
+    // (16 tally lines across 9 Extension Host re-entries on the 2026-07-28 log —
+    // the miscount that first drew attention to it).
     if (!undoWorks) {
-      // AC6 is UNANSWERED, and must say so rather than pass. Its question is
-      // "can an undo consume US-23.5's rename `WorkspaceEdit`?" — a green
-      // assertion here would only mean the undo never ran, which is exactly the
-      // false negative the story's probe-first PO decision exists to avoid.
       runner.skip(
         "AC6 probe: an undo does not consume US-23.5's sidecar-rename WorkspaceEdit",
         "executeCommand('undo') does not revert a document edit in this Extension Host " +
@@ -141,7 +151,6 @@ export async function run(): Promise<void> {
           'only prove the undo never ran — AC6 stays unanswered and needs a manual check ' +
           'in a real VS Code window'
       );
-      runner.finish();
       return;
     }
 
@@ -185,15 +194,37 @@ export async function run(): Promise<void> {
         await vscode.commands.executeCommand('undo');
         await new Promise<void>((r) => setTimeout(r, 100));
 
-        // If either of these fails, the probe has CONFIRMED the defect AC6 was
-        // written against: an undo from this document consumed an unrelated
-        // WorkspaceEdit. Per the story's PO decision, scope that fix as its own
-        // follow-up pass against the failure mode observed here — do not add a
-        // speculative gate to make this pass.
+        // Order matters here, and it is the whole point of this block. Two very
+        // different things make "the renamed .md is no longer at its destination"
+        // true, and the 2026-07-28 run hit this assertion without being able to
+        // say which: (a) the undo really did consume the rename — the defect AC6
+        // exists to detect — or (b) a concurrent Extension Host re-entry ran
+        // `fs.rmSync` over this temp workspace while this case was still inside
+        // it (that run logged an ENOENT flood and `Watcher shutdown because
+        // watched path got deleted` for exactly these directories). So rule (b)
+        // out first, then assert on the POSITIVE fingerprint of (a) — the old
+        // paths coming back — before the destination assertions, which are the
+        // ones both causes share.
+        assert.ok(
+          fs.existsSync(root.fsPath),
+          'harness race, not an AC6 result: the temp workspace itself was deleted mid-case by a ' +
+            'concurrent Extension Host re-entry, so nothing below can be attributed to the undo'
+        );
+
+        // These two are unambiguous. Nothing but an undo of the rename moves the
+        // pair back to its source paths, so a failure here has CONFIRMED the
+        // defect AC6 was written against: an undo from this document consumed an
+        // unrelated WorkspaceEdit. Per the story's PO decision, scope that fix as
+        // its own follow-up pass against the failure mode observed here — do not
+        // add a speculative gate to make this pass.
+        assert.ok(!fs.existsSync(oldMd.fsPath), 'the undo must not have moved the .md back to its old path');
+        assert.ok(
+          !fs.existsSync(sidecarUriFor(oldMd).fsPath),
+          'the undo must not have moved the sidecar back to its old path'
+        );
+
         assert.ok(fs.existsSync(newMd.fsPath), 'the renamed .md must still be at its destination');
-        assert.ok(!fs.existsSync(oldMd.fsPath), 'the undo must not have moved the .md back');
         assert.ok(fs.existsSync(sidecarUriFor(newMd).fsPath), 'the sidecar must still be at its destination');
-        assert.ok(!fs.existsSync(sidecarUriFor(oldMd).fsPath), 'the undo must not have moved the sidecar back');
       }
     );
   });
