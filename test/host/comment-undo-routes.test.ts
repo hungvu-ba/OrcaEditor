@@ -55,6 +55,39 @@ async function undoCommand(document: vscode.TextDocument, type: 'undo' | 'redo' 
   await new Promise<void>((r) => setTimeout(r, 50));
 }
 
+/**
+ * Does `executeCommand('undo')` actually revert a document edit in THIS harness?
+ *
+ * Measured, not assumed, and it has to be measured: on the 2026-07-28 run it came
+ * back **false** — `undo` is a no-op here, because VS Code routes it to the
+ * focused editor and a `@vscode/test-electron` window has no real focus. Every
+ * "an undo did not damage X" assertion is then vacuously true, which is a worse
+ * outcome than no test at all: the suite reports coverage of a route it never
+ * exercised. The cases below consult this and become logged `skip`s instead,
+ * using the same mechanism US-23.17 built for a platform that cannot construct a
+ * scenario (`sidecar-adopt.test.ts`'s case/NFC-folding skips).
+ *
+ * The positive control is the whole point — if the edit cannot be reverted, the
+ * negative assertions mean nothing.
+ */
+async function undoActsOnDocuments(root: vscode.Uri): Promise<boolean> {
+  const probe = await openTempMdFile(root, 'undo-capability-probe.md', DOC_TEXT);
+  const editor = await vscode.window.showTextDocument(probe, { preview: false });
+  await editor.edit((b) => b.insert(new vscode.Position(0, 0), 'PROBE '));
+  if (!probe.getText().includes('PROBE ')) {
+    return false;
+  }
+  await vscode.commands.executeCommand('undo');
+  await new Promise<void>((r) => setTimeout(r, 50));
+  return !probe.getText().includes('PROBE ');
+}
+
+/** The reason attached to every case this harness cannot exercise. */
+const UNDO_INERT_REASON =
+  "executeCommand('undo') does not revert a document edit in this Extension Host " +
+  '(no focused editor in a @vscode/test-electron window), so every "the undo did not ' +
+  'damage X" assertion would pass without an undo ever having run';
+
 /** Sidecar bytes for `document`, or null when no sidecar exists yet. */
 function sidecarBytes(store: ReturnType<typeof createSidecarStore>, document: vscode.TextDocument): string | null {
   const p = store.uriFor(document).fsPath;
@@ -64,113 +97,124 @@ function sidecarBytes(store: ReturnType<typeof createSidecarStore>, document: vs
 export async function run(): Promise<void> {
   const runner = new HostTestRunner();
 
-  await runner.case(
-    'AC4: undo via executeCommand (Command Palette / Edit menu / rebound key) appends no sidecar line and changes no status',
-    async () => {
-      await withTempWorkspace(async (root) => {
-        const document = await openTempMdFile(root, 'undo-no-write.md', DOC_TEXT);
+  // ONE workspace for every case below, not one each. Each `withTempWorkspace`
+  // adds the first folder to an otherwise-empty workspace, which restarts the
+  // Extension Host — and `@vscode/test-electron` then re-loads the entry point,
+  // re-running the whole suite from the top while the previous run's `fs.rmSync`
+  // cleanup deletes temp directories a later run is still inside. That is what
+  // produced the repeated PASS lines and the flood of ENOENT warnings on the
+  // 2026-07-28 run. Sharing one workspace keeps this file to a single restart.
+  await withTempWorkspace(async (root) => {
+    const undoWorks = await undoActsOnDocuments(root);
+
+    await runner.case('AC4 positive control: executeCommand undo reverts a document edit', async () => {
+      // Recorded as a real case rather than hidden inside the capability helper,
+      // so the log states plainly whether this track can exercise undo at all.
+      // If this is the only red case in the file, the skips below are why.
+      assert.strictEqual(undoWorks, true, UNDO_INERT_REASON);
+    });
+
+    if (undoWorks) {
+      await runner.case(
+        'AC4: undo via executeCommand (Command Palette / Edit menu / rebound key) appends no sidecar line and changes no status',
+        async () => {
+          const document = await openTempMdFile(root, 'undo-no-write.md', DOC_TEXT);
+          const store = createSidecarStore(allowAllGuard, noopLog, false);
+          const comments = createCommentSupport(store, noopLog, false);
+          try {
+            const created = await comments.createThread(createMessage(document.uri.toString(), 'thread-1'), document);
+            assert.strictEqual(created.ok, true, 'precondition: the thread must exist before undo runs');
+            const sidecarBefore = sidecarBytes(store, document);
+            assert.ok(sidecarBefore !== null, 'precondition: a sidecar must exist to prove it is left alone');
+            const statusBefore = comments.listThreads(document).map((t) => t.status);
+
+            await undoCommand(document);
+
+            assert.strictEqual(
+              sidecarBytes(store, document),
+              sidecarBefore,
+              'an undo must neither append nor remove a sidecar line'
+            );
+            assert.deepStrictEqual(
+              comments.listThreads(document).map((t) => t.status),
+              statusBefore,
+              'an undo must not change any thread status'
+            );
+          } finally {
+            comments.dispose();
+          }
+        }
+      );
+
+      await runner.case('AC4: undo reverts the .md text edit itself and nothing else', async () => {
+        const document = await openTempMdFile(root, 'undo-text-only.md', DOC_TEXT);
         const store = createSidecarStore(allowAllGuard, noopLog, false);
         const comments = createCommentSupport(store, noopLog, false);
         try {
-          const created = await comments.createThread(createMessage(document.uri.toString(), 'thread-1'), document);
-          assert.strictEqual(created.ok, true, 'precondition: the thread must exist before undo runs');
+          assert.strictEqual(
+            (await comments.createThread(createMessage(document.uri.toString(), 'thread-1'), document)).ok,
+            true
+          );
           const sidecarBefore = sidecarBytes(store, document);
-          assert.ok(sidecarBefore !== null, 'precondition: a sidecar must exist to prove it is left alone');
-          const statusBefore = comments.listThreads(document).map((t) => t.status);
+
+          const editor = await vscode.window.showTextDocument(document, { preview: false });
+          await editor.edit((b) => b.insert(new vscode.Position(2, 0), 'INSERTED '));
+          assert.ok(document.getText().includes('INSERTED '), 'precondition: the edit must have applied');
 
           await undoCommand(document);
 
-          assert.strictEqual(
-            sidecarBytes(store, document),
-            sidecarBefore,
-            'an undo must neither append nor remove a sidecar line'
-          );
-          assert.deepStrictEqual(
-            comments.listThreads(document).map((t) => t.status),
-            statusBefore,
-            'an undo must not change any thread status'
-          );
+          assert.ok(!document.getText().includes('INSERTED '), 'undo must revert the document text edit');
+          assert.strictEqual(sidecarBytes(store, document), sidecarBefore, 'and must leave the sidecar untouched');
         } finally {
           comments.dispose();
         }
       });
-    }
-  );
 
-  await runner.case('AC4: undo reverts the .md text edit itself and nothing else', async () => {
-    await withTempWorkspace(async (root) => {
-      const document = await openTempMdFile(root, 'undo-text-only.md', DOC_TEXT);
-      const store = createSidecarStore(allowAllGuard, noopLog, false);
-      const comments = createCommentSupport(store, noopLog, false);
-      try {
+      // Scope boundary, stated rather than implied (same shape as
+      // `sidecar-append.test.ts`'s own header): this case exercises the PREMISE
+      // `provider.ts`'s `case 'undo':` relies on — that a global `undo` acting on
+      // another editor leaves this document's `version` flat — not the handler
+      // itself. Driving that handler needs a real webview posting a message to
+      // it, and the public API offers no way to open the custom editor's webview
+      // and intercept its `postMessage`. The handler's own logic past this
+      // premise is a single `if (document.version === versionBefore) break;`.
+      await runner.case("AC5: a global undo acting on another editor leaves this document's version flat", async () => {
+        const target = await openTempMdFile(root, 'undo-target.md', DOC_TEXT);
+        const other = await openTempMdFile(root, 'undo-other.md', DOC_TEXT);
+
+        const otherEditor = await vscode.window.showTextDocument(other, { preview: false });
+        await otherEditor.edit((b) => b.insert(new vscode.Position(2, 0), 'OTHER '));
+        assert.ok(other.getText().includes('OTHER '), 'precondition: the other document must have an undoable edit');
+
+        const targetVersionBefore = target.version;
+        await vscode.commands.executeCommand('undo');
+        await new Promise<void>((r) => setTimeout(r, 50));
+
         assert.strictEqual(
-          (await comments.createThread(createMessage(document.uri.toString(), 'thread-1'), document)).ok,
-          true
+          target.version,
+          targetVersionBefore,
+          "the target document's version must not move when the undo landed elsewhere"
         );
-        const sidecarBefore = sidecarBytes(store, document);
+      });
+    } else {
+      runner.skip('AC4: undo via executeCommand appends no sidecar line and changes no status', UNDO_INERT_REASON);
+      runner.skip('AC4: undo reverts the .md text edit itself and nothing else', UNDO_INERT_REASON);
+      runner.skip("AC5: a global undo acting on another editor leaves this document's version flat", UNDO_INERT_REASON);
+    }
 
-        // A real text edit for undo to have something of its own to revert —
-        // without one, a passing assertion below would prove only that undo did
-        // nothing at all (AC3's positive-control concern, at the host level).
-        const editor = await vscode.window.showTextDocument(document, { preview: false });
-        await editor.edit((b) => b.insert(new vscode.Position(2, 0), 'INSERTED '));
-        assert.ok(document.getText().includes('INSERTED '), 'precondition: the edit must have applied');
-
-        await undoCommand(document);
-
-        assert.ok(!document.getText().includes('INSERTED '), 'undo must revert the document text edit');
-        assert.strictEqual(sidecarBytes(store, document), sidecarBefore, 'and must leave the sidecar untouched');
-      } finally {
-        comments.dispose();
-      }
-    });
-  });
-
-  // Scope boundary, stated rather than implied (same shape as
-  // `sidecar-append.test.ts`'s own header): this case exercises the PREMISE
-  // `provider.ts`'s `case 'undo':` now relies on — that a global `undo` acting
-  // on another editor leaves this document's `version` flat — not the handler
-  // itself. Driving that handler needs a real webview posting a message to it,
-  // and the public API offers no way to open the custom editor's webview and
-  // intercept its `postMessage`. The handler's own logic past this premise is a
-  // single `if (document.version === versionBefore) break;`.
-  await runner.case('AC5: a global undo acting on another editor leaves this document\'s version flat', async () => {
-    await withTempWorkspace(async (root) => {
-      const target = await openTempMdFile(root, 'undo-target.md', DOC_TEXT);
-      const other = await openTempMdFile(root, 'undo-other.md', DOC_TEXT);
-
-      // Put a real undoable edit on `other` only, then make `other` the active
-      // editor. This is AC5's scenario: the webview panel for `target` is what
-      // the user pressed undo in, but the global command will act on `other`.
-      const otherEditor = await vscode.window.showTextDocument(other, { preview: false });
-      await otherEditor.edit((b) => b.insert(new vscode.Position(2, 0), 'OTHER '));
-      assert.ok(other.getText().includes('OTHER '), 'precondition: the other document must have an undoable edit');
-
-      const targetVersionBefore = target.version;
-      await vscode.commands.executeCommand('undo');
-      await new Promise<void>((r) => setTimeout(r, 50));
-
-      // The provider reports success off THIS document's version. `target` was
-      // never touched, so that signal must stay flat even though an undo really
-      // did happen — in the other editor.
-      assert.strictEqual(
-        target.version,
-        targetVersionBefore,
-        "the target document's version must not move when the undo landed elsewhere"
-      );
-    });
-  });
-
-  await runner.case('AC9: a document change inside the write\'s in-flight window refuses the write', async () => {
-    await withTempWorkspace(async (root) => {
+    // AC9's two cases do NOT go through `executeCommand('undo')` — they drive the
+    // concurrent change through an injected seam — so they are real assertions
+    // whatever the capability probe says, and they are the substantive host-side
+    // coverage this file delivers.
+    await runner.case("AC9: a document change inside the write's in-flight window refuses the write", async () => {
       const document = await openTempMdFile(root, 'undo-in-flight.md', DOC_TEXT);
       const editor = await vscode.window.showTextDocument(document, { preview: false });
 
       // Deterministic, not a race. `saveBeforeAppend` awaits `store.refusalFor`,
       // which awaits the write guard — an injected seam that sits INSIDE the
       // in-flight window, after the caller captured `versionAtEntry` and before
-      // the version is re-checked. Editing from inside the guard reproduces
-      // "an undo landed mid-write" exactly, every run, on any machine. A bare
+      // the version is re-checked. Editing from inside the guard reproduces "an
+      // undo landed mid-write" exactly, every run, on any machine. A bare
       // un-awaited `editor.edit()` fired alongside the call would only sometimes
       // interleave, and would pass or fail on timing rather than on behaviour.
       let editedDuringWindow = false;
@@ -201,16 +245,17 @@ export async function run(): Promise<void> {
     });
   });
 
+  // Its own workspace: this one needs `files.trimTrailingWhitespace` seeded into
+  // the workspace settings, which `withTempWorkspace` writes at creation time.
   await runner.case('AC9: a save participant editing during the save does NOT refuse the write', async () => {
     await withTempWorkspace(
       async (root) => {
-        const document = await openTempMdFile(root, 'undo-save-participant.md', '# doc\n\nAlpha paragraph.   \n');
+        const document = await openTempMdFile(root, 'undo-save-participant.md', '# doc\n\nAlpha paragraph.\n');
         const store = createSidecarStore(allowAllGuard, noopLog, false);
         const comments = createCommentSupport(store, noopLog, false);
         try {
-          // Dirty the buffer with trailing whitespace so the configured
-          // `files.trimTrailingWhitespace` participant edits during the save and
-          // bumps `document.version` legitimately.
+          // Trailing whitespace so the configured participant has something to
+          // trim during the save, bumping `document.version` legitimately.
           const editor = await vscode.window.showTextDocument(document, { preview: false });
           await editor.edit((b) => b.insert(new vscode.Position(2, 16), '   '));
           assert.ok(document.isDirty, 'precondition: the buffer must be dirty for the save to run');

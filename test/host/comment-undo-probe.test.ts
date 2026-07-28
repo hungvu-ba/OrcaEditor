@@ -63,13 +63,45 @@ async function activateExtensionUnderTest(): Promise<void> {
   }
 }
 
+/**
+ * Does `executeCommand('undo')` actually revert a document edit in THIS harness?
+ * Duplicated deliberately from `comment-undo-routes.test.ts` rather than shared
+ * via `_harness.ts`: each `*.test.ts` file on this track is self-contained, and
+ * the AC6 case below must be able to state its own capability finding even when
+ * run in isolation.
+ *
+ * Measured **false** on the 2026-07-28 run — `undo` is inert here because VS Code
+ * routes it to the focused editor and a `@vscode/test-electron` window has none.
+ */
+async function undoActsOnDocuments(root: vscode.Uri): Promise<boolean> {
+  const probe = await openTempMdFile(root, 'undo-capability-probe.md', '# doc\n\nAlpha paragraph.\n');
+  const editor = await vscode.window.showTextDocument(probe, { preview: false });
+  await editor.edit((b) => b.insert(new vscode.Position(0, 0), 'PROBE '));
+  if (!probe.getText().includes('PROBE ')) {
+    return false;
+  }
+  await vscode.commands.executeCommand('undo');
+  await new Promise<void>((r) => setTimeout(r, 50));
+  return !probe.getText().includes('PROBE ');
+}
+
 export async function run(): Promise<void> {
   const runner = new HostTestRunner();
 
-  await runner.case(
-    'AC1 probe (document-level baseline): an undo command against a document with an empty undo stack mutates nothing',
-    async () => {
-      await withTempWorkspace(async (root) => {
+  // ONE workspace for both probes. Each `withTempWorkspace` adds the first folder
+  // to an otherwise-empty workspace, which restarts the Extension Host —
+  // `@vscode/test-electron` then re-loads the entry point and re-runs the suite
+  // from the top while the previous run's `fs.rmSync` cleanup deletes temp
+  // directories a later run is still inside. On the 2026-07-28 run that produced
+  // repeated PASS lines, an ENOENT flood, and one AC6 failure indistinguishable
+  // from a genuine defect. Sharing one workspace keeps this file to one restart.
+  await withTempWorkspace(async (root) => {
+    await activateExtensionUnderTest();
+    const undoWorks = await undoActsOnDocuments(root);
+
+    await runner.case(
+      'AC1 probe (document-level baseline): an undo command against a document with an empty undo stack mutates nothing',
+      async () => {
         const document = await openTempMdFile(root, 'probe-untouched.md', '# doc\n\nAlpha paragraph.\n');
         await vscode.window.showTextDocument(document, { preview: false });
 
@@ -94,16 +126,28 @@ export async function run(): Promise<void> {
         assert.strictEqual(document.version, versionBefore, 'document.version must not move');
         assert.strictEqual(document.getText(), textBefore, 'document text must not change');
         assert.strictEqual(changeEvents, 0, 'no onDidChangeTextDocument event may fire');
-      });
+      }
+    );
+
+    if (!undoWorks) {
+      // AC6 is UNANSWERED, and must say so rather than pass. Its question is
+      // "can an undo consume US-23.5's rename `WorkspaceEdit`?" — a green
+      // assertion here would only mean the undo never ran, which is exactly the
+      // false negative the story's probe-first PO decision exists to avoid.
+      runner.skip(
+        "AC6 probe: an undo does not consume US-23.5's sidecar-rename WorkspaceEdit",
+        "executeCommand('undo') does not revert a document edit in this Extension Host " +
+          '(no focused editor in a @vscode/test-electron window), so a green result would ' +
+          'only prove the undo never ran — AC6 stays unanswered and needs a manual check ' +
+          'in a real VS Code window'
+      );
+      runner.finish();
+      return;
     }
-  );
 
-  await runner.case(
-    "AC6 probe: an undo with no text edit of its own does not consume US-23.5's sidecar-rename WorkspaceEdit",
-    async () => {
-      await withTempWorkspace(async (root) => {
-        await activateExtensionUnderTest();
-
+    await runner.case(
+      "AC6 probe: an undo with no text edit of its own does not consume US-23.5's sidecar-rename WorkspaceEdit",
+      async () => {
         // Seed a real .md + sidecar pair, then rename it the way US-23.5 AC5
         // does — through `applyEdit`, so provider.ts's live `onWillRenameFiles`
         // contributes the sidecar half and the rename lands on the undo stack as
@@ -150,9 +194,9 @@ export async function run(): Promise<void> {
         assert.ok(!fs.existsSync(oldMd.fsPath), 'the undo must not have moved the .md back');
         assert.ok(fs.existsSync(sidecarUriFor(newMd).fsPath), 'the sidecar must still be at its destination');
         assert.ok(!fs.existsSync(sidecarUriFor(oldMd).fsPath), 'the undo must not have moved the sidecar back');
-      });
-    }
-  );
+      }
+    );
+  });
 
   runner.finish();
 }
