@@ -1405,6 +1405,44 @@ function tdStartDragging(): void {
   document.body.classList.add('dd-dragging');
 }
 
+// Performance Audit P-4: rAF-coalesce the drop-line half of the live table drag.
+// `tdUpdateRowDropLine`/`tdUpdateColDropLine` read a rect per row / per header cell and then
+// write the drop-line styles, so an uncoalesced handler forces a reflow per mousemove — the
+// same approved pattern the idle hover handler below already uses. The ghost's left/top write
+// stays per-event: it forces no read, and keeping it uncoalesced keeps the ghost crisp.
+let tdDragRaf = 0;
+let tdDragX = 0;
+let tdDragY = 0;
+
+function tdCancelDragFrame(): void {
+  if (tdDragRaf !== 0) {
+    cancelAnimationFrame(tdDragRaf);
+    tdDragRaf = 0;
+  }
+}
+
+/** The coalesced per-frame drop-line update — it also resolves `tdCurrentGap`/`tdCurrentGapValid`. */
+function tdRunDragFrame(): void {
+  if (tdState !== 'dragging') {
+    return;
+  }
+  if (tdKind === 'row') {
+    tdUpdateRowDropLine(tdDragY);
+  } else {
+    tdUpdateColDropLine(tdDragX);
+  }
+}
+
+/** Runs a still-pending frame now. Called from mouseup so a release inside the same frame as
+ * the last mousemove drops at the cursor's real gap, not the previous frame's. */
+function tdFlushDragFrame(): void {
+  if (tdDragRaf === 0) {
+    return;
+  }
+  tdCancelDragFrame();
+  tdRunDragFrame();
+}
+
 function onTdMouseMove(e: MouseEvent): void {
   if (tdState === 'armed') {
     if (Math.hypot(e.clientX - tdStartX, e.clientY - tdStartY) < TD_DRAG_THRESHOLD_PX) {
@@ -1416,14 +1454,20 @@ function onTdMouseMove(e: MouseEvent): void {
     return;
   }
   tdUpdateGhostPosition(e.clientX, e.clientY);
-  if (tdKind === 'row') {
-    tdUpdateRowDropLine(e.clientY);
-  } else {
-    tdUpdateColDropLine(e.clientX);
+  tdDragX = e.clientX;
+  tdDragY = e.clientY;
+  if (tdDragRaf !== 0) {
+    return;
   }
+  tdDragRaf = requestAnimationFrame(() => {
+    tdDragRaf = 0;
+    // Re-check inside the frame: the drag can end (mouseup/Esc) between the event and here.
+    tdRunDragFrame();
+  });
 }
 
 function onTdMouseUp(): void {
+  tdFlushDragFrame();
   if (tdState === 'dragging') {
     const shouldMove = tdCurrentGapValid;
     const kind = tdKind;
@@ -1470,6 +1514,7 @@ function attachDragListeners(): void {
 }
 
 function detachDragListeners(): void {
+  tdCancelDragFrame();
   document.removeEventListener('mousemove', onTdMouseMove);
   document.removeEventListener('mouseup', onTdMouseUp);
   tdEscDisposable?.dispose();

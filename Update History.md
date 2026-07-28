@@ -508,3 +508,8 @@
 | 0.10.0 | 2026-07-28 | Fix (security): closed a control-character javascript: bypass in the PlantUML SVG sanitizer and a compound-extension gap in the reserved-device-name check, found in review of S-4/S-6. |
 | 0.10.0 | 2026-07-28 | Fix: dropped file names with whitespace before a leading dot (e.g. " .htaccess") were not stripped of the dot — fixed the step order in sanitizeDroppedFileName. |
 | 0.10.0 | 2026-07-28 | Fix (security): paste/insert now also sanitizes raw meta-refresh HTML, closing a second entry point to Security Audit S-2 (defense-in-depth). |
+| 0.10.0 | 2026-07-28 | Fix (perf): serialize no longer rescans the whole cloned document once per block — one index pass replaces the quadratic lookup (Performance Audit P-2). |
+| 0.10.0 | 2026-07-28 | Fix (perf): block, list-item and table row/column drags now compute their drop line once per frame instead of per mousemove (Performance Audit P-3/P-4). |
+| 0.10.0 | 2026-07-28 | Fix (perf): dragging a popup no longer measures it on every mouse move — the move is frame-coalesced, keeping the mid-drag resize behaviour (Performance Audit P-5). |
+| 0.10.0 | 2026-07-28 | Fix (perf): the comment re-attach picker walks the document once on open instead of on every filter keystroke (Performance Audit P-6). |
+| 0.10.0 | 2026-07-28 | Fix (perf review): the re-attach picker now re-walks when the document is rebuilt under it, and a dismissed popup no longer moves off-screen mid-drag. |

@@ -573,9 +573,19 @@ export function initCommentPanel(
 
   const pickerDismiss = initPopoverDismiss(picker, () => {
     pickerThread = undefined;
+    // Drop the cached candidate list with the picker so it never holds references to
+    // nodes a later re-render has detached.
+    pickerCandidates = [];
     clearAim();
   });
   let pickerThread: ThreadAnchor | undefined;
+  /**
+   * Performance Audit P-6: the picker's candidate set, walked once when the picker opens
+   * and reused for every filter keystroke. The document is not editable while the modal
+   * picker is up, so a full `anchorCandidates(content)` walk per keystroke only ever
+   * recomputed the same list.
+   */
+  let pickerCandidates: AnchorCandidateNode[] = [];
   let pickerRows: Array<{ row: HTMLElement; node: HTMLElement }> = [];
   let pickerIndex = 0;
   let pointerMoved = false;
@@ -615,7 +625,15 @@ export function initCommentPanel(
     }
     pickerList.textContent = '';
     pickerRows = [];
-    const candidates = attachTargets();
+    // A host 'update' rebuilds #content wholesale (renderDocument) and does NOT close this
+    // picker, which detaches every cached node — attach() would then refuse every row
+    // (`!node.isConnected`) until the user reopened the picker. Re-walk on that signal so the
+    // list heals itself the way the pre-cache per-keystroke walk did. One isConnected read
+    // per keystroke, not a document walk.
+    if (pickerCandidates.length > 0 && !pickerCandidates[0].el.isConnected) {
+      pickerCandidates = attachTargets();
+    }
+    const candidates = pickerCandidates;
     const { suggested, all } = rankReattachTargets(
       thread.recordedText,
       candidates,
@@ -702,6 +720,7 @@ export function initCommentPanel(
     pickerFilter.value = '';
     pointerMoved = false;
     picker.hidden = false;
+    pickerCandidates = attachTargets();
     buildPicker();
     positionNear(picker, anchorRect);
     pickerDismiss.arm();

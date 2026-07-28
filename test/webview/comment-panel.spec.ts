@@ -35,6 +35,10 @@ const GUTTED = '# Session expiry\n';
  */
 const SHORTER = '# Session expiry\n\n- Identifiers are recorded.\n- Something unrelated entirely.\n';
 
+/** Same shape as SHORTER (thread keeps floating) but with a node name SHORTER does not contain,
+ * so a picker row for it can only come from a walk done AFTER this document arrived. */
+const RENAMED = '# Session expiry\n\n- Identifiers are recorded.\n- Freshly minted paragraph.\n';
+
 /** Create a comment on the nth paragraph and let the host confirm it, as US-23.1 does. */
 async function addComment(
   page: Page,
@@ -261,6 +265,40 @@ test('the picker filter narrows the list', async ({ page }) => {
   await page.locator('.comment-reattach-filter').fill('zzz');
   await expect(page.locator('.comment-reattach-row')).toHaveCount(0);
   await expect(page.locator('.comment-reattach-empty')).toBeVisible();
+});
+
+/**
+ * Performance Audit P-6 follow-up: the picker's candidate list is walked once on open and
+ * reused per keystroke. A host 'update' rebuilds #content wholesale without closing the picker,
+ * so the cached nodes are all detached — every row would then be refused by attach()'s
+ * `isConnected` guard until the user reopened the picker. buildPicker re-walks on that signal.
+ */
+test('the picker heals its candidate list after the document is rebuilt underneath it (P-6)', async ({
+  page,
+}) => {
+  await floatAndOpen(page, 1, SHORTER, 1);
+
+  await page.locator('.comment-panel-more').click();
+  await expect(page.locator('.comment-reattach-picker')).toBeVisible();
+
+  // The document is replaced while the picker stays open — content.innerHTML detaches every
+  // node the picker cached on open.
+  await hostUpdate(page, RENAMED);
+  await dismissAnchorLost(page);
+  await expect(page.locator('.comment-reattach-picker')).toBeVisible();
+
+  // A node that exists only in the NEW document is offered, which the stale cache could not know.
+  await page.locator('.comment-reattach-filter').fill('Freshly');
+  await expect(page.locator('.comment-reattach-row')).toHaveCount(1);
+  await expect(page.locator('.comment-reattach-row')).toContainText('Freshly minted paragraph.');
+
+  // And it is a live node: the attach lands instead of showing "That location changed".
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#wysiwyg-toast.show')).toHaveCount(0);
+  await expect(floatingRows(page)).toHaveCount(0);
+  await expect(page.locator('#content [data-comment-anchor-state="exact"]')).toHaveText(
+    'Freshly minted paragraph.'
+  );
 });
 
 test('the keyboard route attaches exactly like a drop — Space, arrows, Enter', async ({ page }) => {

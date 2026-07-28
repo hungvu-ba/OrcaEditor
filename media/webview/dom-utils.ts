@@ -220,9 +220,9 @@ const DRAG_IGNORE_SELECTOR = 'input, textarea, select, button, a, [contenteditab
  * `target` chuyển từ vị trí do layout quyết định (vd flexbox căn giữa) sang
  * `position: fixed` với toạ độ tự do ngay ở lần kéo đầu tiên, giữ nguyên vị
  * trí hiện tại lúc đó (không giật chỗ). Vị trí luôn bị clamp trong viewport,
- * tính lại kích thước `target` ở MỖI lần di chuyển (không chỉ lúc bắt đầu) vì
- * nội dung bên trong có thể đổi cao/rộng giữa chừng (vd danh sách gợi ý file
- * hiện/ẩn). Hàm thuần, không phụ thuộc gì riêng của `.prompt-box` — dùng
+ * tính lại kích thước `target` ở MỖI frame trong lúc kéo (không chỉ lúc bắt
+ * đầu) vì nội dung bên trong có thể đổi cao/rộng giữa chừng (vd danh sách gợi
+ * ý file hiện/ẩn). Hàm thuần, không phụ thuộc gì riêng của `.prompt-box` — dùng
  * chung được cho mọi popup/popover kéo-thả khác (US-17.1).
  *
  * Không cần cờ chặn riêng cho "click ra ngoài đóng popup" trong lúc kéo: thao
@@ -251,14 +251,51 @@ export function makeDraggable(target: HTMLElement): void {
     const startTop = rect.top;
     target.classList.add('dragging');
 
-    const onMove = (ev: MouseEvent): void => {
+    // Performance Audit P-5: the rect read below used to run on every raw mousemove,
+    // right after the previous move had written left/top — a forced reflow per event.
+    // The read is NOT cached away: the size recompute is load-bearing (see the doc
+    // comment above — the popup's content can grow/shrink mid-drag). Instead the whole
+    // move body is rAF-coalesced, so the read lands once per frame after the browser
+    // has laid out anyway (the doc comment above says "MỖI frame" for this reason).
+    // Same approved pattern as drag-drop.ts's hover path.
+    let moveRaf = 0;
+    let moveX = 0;
+    let moveY = 0;
+    const applyMove = (): void => {
+      // A popup can be dismissed (Escape, a host re-render) while the button is still held.
+      // A detached or hidden target measures 0×0, which would collapse the clamp bounds to
+      // the full viewport and park the popup off-screen for its next open — so don't write.
+      if (!target.isConnected) {
+        return;
+      }
       const size = target.getBoundingClientRect();
+      if (size.width === 0 && size.height === 0) {
+        return;
+      }
       const maxLeft = Math.max(0, window.innerWidth - size.width);
       const maxTop = Math.max(0, window.innerHeight - size.height);
-      target.style.left = `${Math.min(Math.max(0, startLeft + (ev.clientX - startX)), maxLeft)}px`;
-      target.style.top = `${Math.min(Math.max(0, startTop + (ev.clientY - startY)), maxTop)}px`;
+      target.style.left = `${Math.min(Math.max(0, startLeft + (moveX - startX)), maxLeft)}px`;
+      target.style.top = `${Math.min(Math.max(0, startTop + (moveY - startY)), maxTop)}px`;
+    };
+    const onMove = (ev: MouseEvent): void => {
+      moveX = ev.clientX;
+      moveY = ev.clientY;
+      if (moveRaf !== 0) {
+        return;
+      }
+      moveRaf = requestAnimationFrame(() => {
+        moveRaf = 0;
+        applyMove();
+      });
     };
     const onUp = (): void => {
+      // Land the last move even if its frame has not fired yet, so the popup ends where
+      // the pointer was released rather than one frame behind it.
+      if (moveRaf !== 0) {
+        cancelAnimationFrame(moveRaf);
+        moveRaf = 0;
+        applyMove();
+      }
       target.classList.remove('dragging');
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);

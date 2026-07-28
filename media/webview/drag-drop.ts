@@ -1049,6 +1049,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   function maintainAutoScroll(clientY: number): void {
+    // Performance Audit P-3: this rect read is NOT cached per drag. In Zen mode the toolbar
+    // is `position: fixed` and slides in/out on its own top-edge watcher (readability.ts), so
+    // a drag-start snapshot goes stale by the bar's height and shifts the autoscroll band.
+    // The read is safe because the only caller is the coalesced drag frame — once per frame,
+    // batched with the drop-line reads, which is what the layout-thrash rule asks for.
     const toolbarBottom = document.getElementById('toolbar')?.getBoundingClientRect().bottom ?? 0;
     const nearTop = clientY < toolbarBottom + AUTOSCROLL_EDGE_PX;
     const nearBottom = clientY > window.innerHeight - AUTOSCROLL_EDGE_PX;
@@ -1422,6 +1427,48 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   }
 
+  // Performance Audit P-3: rAF-coalesce the live drag's LAYOUT-READING work. `gapAt` reads a
+  // rect per top-level block (and `updateLiDropLine` per flattened li), then the drop-line
+  // styles are written — uncoalesced, that read-after-write cycle forces one reflow per
+  // mousemove and scales with document size. Same approved pattern as this file's own hover
+  // path. Only the latest coordinates survive the event→frame boundary.
+  let dragRaf = 0;
+  let dragX = 0;
+  let dragY = 0;
+
+  function cancelDragFrame(): void {
+    if (dragRaf !== 0) {
+      cancelAnimationFrame(dragRaf);
+      dragRaf = 0;
+    }
+  }
+
+  /** The coalesced per-frame drag body: drop line (which resolves `currentGap`/
+   * `currentGapValid`) and autoscroll, from the latest coordinates. The ghost's own
+   * left/top write is deliberately NOT in here — see `onDocMouseMove`. */
+  function runDragFrame(): void {
+    if (state !== 'dragging') {
+      return;
+    }
+    if (kind === 'block') {
+      updateBlockDropLine(dragY);
+    } else {
+      updateLiDropLine(dragX, dragY);
+    }
+    maintainAutoScroll(dragY);
+  }
+
+  /** Runs a still-pending drag frame now. Called from mouseup: the drop target is decided by
+   * `updateBlockDropLine`/`updateLiDropLine`, so a release inside the same frame as the last
+   * mousemove must not drop at the previous frame's gap. */
+  function flushDragFrame(): void {
+    if (dragRaf === 0) {
+      return;
+    }
+    cancelDragFrame();
+    runDragFrame();
+  }
+
   function onDocMouseMove(e: MouseEvent): void {
     if (state === 'armed') {
       const dx = e.clientX - startX;
@@ -1434,16 +1481,26 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'dragging') {
       return;
     }
+    // Per-event, not in the frame: it is a pure style write that forces no layout read, so
+    // coalescing it would only add latency — the same call the table drag keeps per-event.
+    // It must also stay on this event: `startDragging()` above flips the ghost to
+    // `display: block`, and a ghost shown before its first left/top write would paint one
+    // frame at its stale (or unset) position.
     updateGhostPosition(e.clientX, e.clientY);
-    if (kind === 'block') {
-      updateBlockDropLine(e.clientY);
-    } else {
-      updateLiDropLine(e.clientX, e.clientY);
+    dragX = e.clientX;
+    dragY = e.clientY;
+    if (dragRaf !== 0) {
+      return;
     }
-    maintainAutoScroll(e.clientY);
+    dragRaf = requestAnimationFrame(() => {
+      dragRaf = 0;
+      // Re-check inside the frame: the drag can end (mouseup/Esc) between the event and here.
+      runDragFrame();
+    });
   }
 
   function onDocMouseUp(): void {
+    flushDragFrame();
     if (state === 'dragging') {
       const shouldMove = currentGapValid;
       const dragKind = kind;
@@ -1503,6 +1560,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   function detachDragListeners(): void {
+    cancelDragFrame();
     document.removeEventListener('mousemove', onDocMouseMove);
     document.removeEventListener('mouseup', onDocMouseUp);
     escDisposable?.dispose();

@@ -1368,11 +1368,21 @@ function serialize(): string {
  * does not rebuild this loop.
  */
 function applyBlockStyleOverrides(clone: HTMLElement): void {
+  // Performance Audit P-2: index the clone's blocks once instead of running a
+  // whole-tree querySelector per blockMap entry (that scan was O(blocks × tree)).
+  const byId = new Map<string, Element>();
+  for (const el of clone.querySelectorAll(`[${BLOCK_ID_ATTR}]`)) {
+    const id = el.getAttribute(BLOCK_ID_ATTR);
+    // First match wins, matching querySelector's document-order semantics.
+    if (id && !byId.has(id)) {
+      byId.set(id, el);
+    }
+  }
   for (const entry of blockMap) {
     if (!entry.mdSlice) {
       continue;
     }
-    const el = clone.querySelector(`[${BLOCK_ID_ATTR}="${entry.id}"]`);
+    const el = byId.get(entry.id);
     if (!el) {
       continue;
     }
