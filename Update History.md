@@ -516,3 +516,4 @@
 | 0.10.0 | 2026-07-28 | Fix: converting a loose bullet item to a task item keeps its text on the checkbox line instead of leaving an empty "- [ ]" marker. |
 | 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |
 | 0.10.0 | 2026-07-28 | Fix (security S-1 residual): asset paste/drop/undo-restore/orphan-cleanup now refuse a symlinked target file instead of writing or reading through it. |
+| 0.10.0 | 2026-07-28 | Perf: typing re-serializes only the blocks an edit touched via a per-block markdown cache, instead of turndown over the whole document (Performance Audit P-7). |

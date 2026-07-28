@@ -24,6 +24,13 @@ import {
   postProcessEntityRefs,
   postProcessEmptyLinks,
   prepareDomForSerialize,
+  hasSiblingSensitiveBlock,
+  serializeChildren,
+  serializeFull,
+  stampBlockStyle,
+  stampBlockStyles,
+  type BlockMarkdownCache,
+  type BlockSerializeOptions,
   CAPTION_CLASS,
   AUTOLINK_PATH_ATTR,
   MD_CODE_COPY_CLASS,
@@ -45,9 +52,8 @@ import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
 import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
-import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
+import { buildBlockMap, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
-import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
 import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, ownsNativeTextHistory, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
@@ -442,6 +448,16 @@ let currentDocUri = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
 /** Block Map (HLR mục 18, US-18.1) — chỉ mục block cấp cao nhất, dựng lại ở cuối mỗi renderDocument(). */
 let blockMap: BlockEntry[] = [];
+/** Performance Audit P-7: `BlockEntry` by id, so stamping ONE block's style is O(1). */
+let blockById = new Map<string, BlockEntry>();
+/**
+ * Performance Audit P-7: the document holds a block that depends on its
+ * neighbours, so no block in it may be serialized on its own (see
+ * hasSiblingSensitiveBlock). Only ever changes with blockMap in renderDocument:
+ * the "indented" style comes from mdSlice alone, so it cannot appear between two
+ * renders.
+ */
+let siblingSensitiveDocument = false;
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -922,6 +938,10 @@ function renderDocument(markdown: string): void {
     return;
   }
   currentText = markdown;
+  // Performance Audit P-7: the rebuild below replaces every node, so its records
+  // would only mark blocks that are about to be dropped from the cache anyway.
+  contentMutations.disconnect();
+  resetBlockSerializeState();
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
   content.innerHTML = stripMetaRefresh(html);
@@ -954,6 +974,11 @@ function renderDocument(markdown: string): void {
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
   blockMap = buildBlockMap(content, markdown, blockMap);
+  blockById = new Map(blockMap.map((entry) => [entry.id, entry]));
+  siblingSensitiveDocument = hasSiblingSensitiveBlock(blockMap);
+  // Watch again only now: buildBlockMap stamps data-block-id on every block, and
+  // those attribute writes are not edits.
+  observeContentMutations();
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
@@ -1339,63 +1364,127 @@ function takePendingSync(): string | undefined {
   return serializeIfChanged();
 }
 
-function serialize(): string {
-  const clone = content.cloneNode(true) as HTMLElement;
-  // cloneNode không copy property 'checked' — đồng bộ từ DOM thật sang attribute.
-  const liveInputs = content.querySelectorAll('input[type="checkbox"]');
-  const cloneInputs = clone.querySelectorAll('input[type="checkbox"]');
-  liveInputs.forEach((live, i) => {
-    const c = cloneInputs[i];
-    if (!c) {
-      return;
+/**
+ * Performance Audit P-7: the serialized markdown of each top-level block, keyed by
+ * the live node itself — a node detached by a re-render drops out of the WeakMap on
+ * its own, so nothing has to be swept.
+ */
+let blockMarkdownCache: BlockMarkdownCache = new WeakMap();
+/** Blocks changed since the last serialize — filled by the MutationObserver below. */
+const dirtyBlocks = new Set<Node>();
+
+/** The direct child of #content holding `node` (itself when already a direct child). */
+function topLevelBlockOf(node: Node): Node | null {
+  let cur: Node | null = node;
+  while (cur && cur.parentNode !== content) {
+    cur = cur.parentNode;
+  }
+  return cur;
+}
+
+function markDirtyFrom(node: Node): void {
+  const block = topLevelBlockOf(node);
+  if (block) {
+    dirtyBlocks.add(block);
+  }
+}
+
+function markDirtyFromRecord(record: MutationRecord): void {
+  markDirtyFrom(record.target);
+  if (record.type === 'childList') {
+    // A block can be BUILT while detached and only then inserted (list-ops,
+    // drag-drop, the browser's own undo): mutations made while it was detached
+    // produced no record at all, so every inserted node counts as dirty — this
+    // record's target is #content and maps to no block of its own.
+    record.addedNodes.forEach(markDirtyFrom);
+    // Removing a node changes what its former neighbours sit next to, and a few
+    // turndown rules read a sibling (indented code checks previousElementSibling).
+    // The removed node itself is simply no longer iterated.
+    if (record.previousSibling) {
+      markDirtyFrom(record.previousSibling);
     }
-    c.toggleAttribute('checked', (live as HTMLInputElement).checked);
-  });
-  prepareDomForSerialize(clone, document);
-  applyBlockStyleOverrides(clone);
-  const md = turndown.turndown(clone);
-  return normalizeMarkdown(md);
+    if (record.nextSibling) {
+      markDirtyFrom(record.nextSibling);
+    }
+  }
 }
 
 /**
- * US-18.4a: before turndown runs, stamp each block's ORIGINAL style override onto
- * the clone so serialize keeps every block's initial `.md` syntax variant instead
- * of forcing the global style. Blocks are matched via `data-block-id` (stamped on
- * the live DOM by the Block Map, preserved by cloneNode) and the variant is
- * detected from `mdSlice`. A block with no mdSlice (new content) or an axis not
- * yet supported gets nothing stamped and falls through to the default. This is
- * shared infrastructure: US-18.4b extends detectBlockStyle/stampStyleOverride, it
- * does not rebuild this loop.
+ * Performance Audit P-7: watch EVERY change inside #content to know which block
+ * needs re-serializing — the DOM-mutating call sites are spread across
+ * main.ts/table.ts/list-ops.ts/drag-drop.ts, so hooking each one is not an option
+ * (same reasoning as select-highlight.ts). `attributes` is needed too: clicking a
+ * task-list checkbox changes only an attribute (the 'click' handler below).
  */
-function applyBlockStyleOverrides(clone: HTMLElement): void {
-  // Performance Audit P-2: index the clone's blocks once instead of running a
-  // whole-tree querySelector per blockMap entry (that scan was O(blocks × tree)).
-  const byId = new Map<string, Element>();
-  for (const el of clone.querySelectorAll(`[${BLOCK_ID_ATTR}]`)) {
-    const id = el.getAttribute(BLOCK_ID_ATTR);
-    // First match wins, matching querySelector's document-order semantics.
-    if (id && !byId.has(id)) {
-      byId.set(id, el);
+const contentMutations = new MutationObserver((records) => {
+  records.forEach(markDirtyFromRecord);
+});
+
+function observeContentMutations(): void {
+  contentMutations.observe(content, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+  });
+}
+observeContentMutations();
+
+/**
+ * Performance Audit P-7: a re-render replaces every node in #content, so nothing
+ * cached or marked before it can still apply. Called from renderDocument, which
+ * also stops the observer for the duration of the rebuild — recording the
+ * innerHTML assignment and all eight postprocess passes would be pure cost for a
+ * cache that is empty afterwards anyway.
+ */
+function resetBlockSerializeState(): void {
+  blockMarkdownCache = new WeakMap();
+  dirtyBlocks.clear();
+}
+
+const serializeOptions: BlockSerializeOptions = {
+  doc: document,
+  turndown,
+  // US-18.4a/b: reproduce each block's ORIGINAL `.md` syntax variant — whole
+  // document for the full pass, a single Block Map entry for one block.
+  stampAll: (clone) => stampBlockStyles(clone, blockMap),
+  stampBlock: (clone, id) => {
+    const entry = blockById.get(id);
+    if (entry) {
+      stampBlockStyle(clone, entry);
     }
+  },
+};
+
+/**
+ * A checkbox toggled through its `checked` PROPERTY produces no MutationRecord, and
+ * with a cache "picked up by the next serialize" no longer holds — the block would
+ * keep serving stale markdown for the rest of the session. Reconcile against the
+ * attribute (the same query the whole-document pass has always run) and mark any
+ * block that drifted. Today's click handler writes the attribute itself, so this is
+ * a guard for every other path that could set the property.
+ */
+function markCheckboxDrift(): void {
+  content.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    if ((box as HTMLInputElement).checked !== box.hasAttribute('checked')) {
+      markDirtyFrom(box);
+    }
+  });
+}
+
+function serialize(): string {
+  // The MutationObserver callback runs in a microtask, while syncNow() is called
+  // RIGHT IN the same task as execCommand (invokeAction in toolbar.ts) — take the
+  // pending records here, or the block just edited still counts as clean.
+  contentMutations.takeRecords().forEach(markDirtyFromRecord);
+  markCheckboxDrift();
+  if (siblingSensitiveDocument) {
+    // Keep the dirty marks, like serializeChildren's own fallback: the full pass
+    // fills no cache, so dropping them could serve stale markdown if the document
+    // ever returned to the per-block path.
+    return serializeFull(content, serializeOptions);
   }
-  for (const entry of blockMap) {
-    if (!entry.mdSlice) {
-      continue;
-    }
-    const el = byId.get(entry.id);
-    if (!el) {
-      continue;
-    }
-    const style = detectBlockStyle(entry.mdSlice, entry.type);
-    // US-4.28: a block whose language the user switched in place must not be
-    // re-forced back to its ORIGINAL indented syntax — indented code can't carry
-    // a language, so turndown would drop the pick. Drop the code axis so it
-    // serializes as a fence (only indented needs this; tilde fences keep a lang).
-    if (el.hasAttribute(LANG_SWITCHED_ATTR) && (style.code === 'indented' || style.code === 'indented-tab')) {
-      style.code = null;
-    }
-    stampStyleOverride(el, style);
-  }
+  return serializeChildren(content, serializeOptions, blockMarkdownCache, dirtyBlocks);
 }
 
 // ---------------------------------------------------------------------------

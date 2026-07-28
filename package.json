@@ -394,6 +394,7 @@
     "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
     "test:roundtrip:paste-text": "node esbuild.js --test && node dist/test/roundtrip/paste-text.js",
     "test:roundtrip:links": "node esbuild.js --test && node dist/test/roundtrip/links.js",
+    "test:roundtrip:incremental-serialize": "node esbuild.js --test && node dist/test/roundtrip/incremental-serialize.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test:host": "node esbuild.js --test && node dist/test/host/runTest.js",
