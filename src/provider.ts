@@ -30,6 +30,7 @@ import {
   normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
+  rebuildFromEditDiff,
   referencedAssetBasenames,
   relativePath,
   sameDocumentUri,
@@ -1234,6 +1235,31 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+    /**
+     * Performance Audit P-8: the host's mirror of the webview's `currentText` —
+     * the base a diff-shaped 'edit' indexes into. It models the WEBVIEW's text,
+     * not the document's: an `applyEdit` that fails leaves the document behind
+     * but the webview still holding what it sent, so the mirror is right to
+     * follow the webview. `mirrorRev` is the push rev that mirror text is
+     * anchored to; an incoming diff whose `baseRev` disagrees is refused rather
+     * than applied at guessed offsets.
+     */
+    let mirrorText = '';
+    let mirrorRev = 0;
+    /** Monotonic push counter — bumped by `pushDocumentText` for every 'init'/'update'. */
+    let pushRev = 0;
+    /**
+     * The single place a document text is pushed to the webview: stamps the next
+     * rev and re-anchors the mirror onto it. Every 'update'/'init' post MUST go
+     * through here — a push that skips it leaves the mirror describing text the
+     * webview no longer holds, which is precisely what `baseRev` exists to catch.
+     */
+    const pushDocumentText = (text: string): number => {
+      pushRev++;
+      mirrorText = text;
+      mirrorRev = pushRev;
+      return pushRev;
+    };
     /** Serializes webview-originated document mutations — see case 'edit'. */
     let editChain: Promise<void> = Promise.resolve();
     /**
@@ -1308,7 +1334,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       updateTimer = setTimeout(() => {
         updateTimer = undefined;
-        void postToWebview({ type: 'update', text: document.getText() });
+        const pushed = document.getText();
+        void postToWebview({ type: 'update', text: pushed, rev: pushDocumentText(pushed) });
       }, UPDATE_DEBOUNCE_MS);
     });
 
@@ -1389,9 +1416,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           if (reveal) {
             this.pendingReveal.delete(docUriStr);
           }
+          const initialText = document.getText();
           void postToWebview({
             type: 'init',
-            text: document.getText(),
+            text: initialText,
+            rev: pushDocumentText(initialText),
             docUri: docUriStr,
             ...(reveal ? { reveal } : {}),
             config: {
@@ -1451,7 +1480,33 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           break;
         }
         case 'edit': {
-          const text = msg.text;
+          // Performance Audit P-8: two wire shapes, one behaviour — resolve both
+          // to the webview's full new text HERE, synchronously, so that two
+          // 'edit's arriving in the same frame reconstruct in arrival order
+          // (the second diff's base is the first's result). Everything below
+          // this block is untouched by P-8 and still works on a full text.
+          let text: string;
+          if ('text' in msg) {
+            // Full-text variant (a resync reply): authoritative on its own, and
+            // it re-anchors the mirror onto the rev the webview is really on —
+            // without that the two sides could never agree again and every
+            // subsequent edit would resync forever.
+            text = msg.text;
+            mirrorText = text;
+            mirrorRev = msg.baseRev;
+          } else {
+            // A diff is only sound against the exact base it was computed from.
+            const rebuilt =
+              msg.baseRev === mirrorRev ? rebuildFromEditDiff(mirrorText, msg) : null;
+            if (rebuilt === null) {
+              // Refuse wholesale — never a partial or best-effort application.
+              // The webview answers with the full-text variant above.
+              void postToWebview({ type: 'requestFullSync' });
+              break;
+            }
+            text = rebuilt;
+            mirrorText = text;
+          }
           // Chain, don't apply directly: the webview can post two 'edit's in
           // the SAME frame (invokeAction: flush of pending typing + the
           // action's own sync — two deliberate undo units, bug 0717), and
@@ -1499,6 +1554,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         }
         case 'undo':
         case 'redo': {
+          // P-8 INVARIANT: every mirror mutation happens SYNCHRONOUSLY at
+          // message-receipt time, in arrival order — never after an `await`.
+          // `takePendingSync` already advanced the webview's currentText to this
+          // text without sending an 'edit', so the mirror must follow it now: an
+          // 'edit' delivered while this handler is suspended below would
+          // otherwise rebuild against the pre-flush text, and the rev gate is
+          // blind to it (rev is unchanged — this is webview-authored, not a host
+          // push), leaving only `baseLength` — which passes whenever the pending
+          // serialize was length-preserving, e.g. overtyping a selection with
+          // equal-length text. That splices at wrong offsets into the user's file.
+          if (msg.pendingText !== undefined) {
+            mirrorText = msg.pendingText;
+          }
           // Any in-flight chained 'edit' must commit first — its undo unit
           // precedes this undo/redo chronologically (bug 0717).
           await editChain;
@@ -1574,7 +1642,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           lastTextFromWebview = undefined;
           const diff = computeMinimalEdit(before, after);
           const caret = diff ? sourceLineCol(after, diff.start + diff.newText.length) : undefined;
-          void postToWebview({ type: 'update', text: after, caretLine: caret?.line, caretCol: caret?.col });
+          void postToWebview({
+            type: 'update',
+            text: after,
+            caretLine: caret?.line,
+            caretCol: caret?.col,
+            rev: pushDocumentText(after),
+          });
           break;
         }
         case 'openLink': {

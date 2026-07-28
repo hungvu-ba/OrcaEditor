@@ -94,6 +94,7 @@ import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
+import { computeMinimalEdit } from '../../src/text-utils';
 import {
   SYNC_DEBOUNCE_MS,
   SCROLL_SAVE_DEBOUNCE_MS,
@@ -443,6 +444,16 @@ syncToolbarHeightVar();
 
 /** Markdown hiện tại mà webview đã biết (đã render hoặc đã gửi lên). */
 let currentText = '';
+/**
+ * Performance Audit P-8: the `rev` of the last host push whose text this webview
+ * ACTUALLY adopted into `currentText`. Echoed on every 'edit' as `baseRev` so the
+ * host can tell whether its mirror of `currentText` — the base a diff-shaped edit
+ * indexes into — is still the same document. A push that was deferred (a trigger
+ * popup owning the keyboard) or dropped as stale must NOT bump this: saying "I am
+ * on rev N" while holding rev N-1's text is exactly the lie that would let a diff
+ * apply at the wrong offsets.
+ */
+let appliedRev = 0;
 /** Req 23 US-23.2: `document.uri.toString()` echoed back on `commentHighlightToggled`/`replyToComment`/`deleteComment`. */
 let currentDocUri = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -616,6 +627,8 @@ window.addEventListener('message', (event) => {
         );
       }
       renderDocument(msg.text ?? '');
+      // P-8: this text IS now currentText — adopt its rev as the diff base.
+      appliedRev = msg.rev ?? 0;
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
       // lưu — chỉ fallback về restoreScroll() cho luồng mở file bình thường.
@@ -637,6 +650,20 @@ window.addEventListener('message', (event) => {
     }
     case 'update': {
       if (msg.text === currentText) {
+        // P-8: nothing to render, but this rev's text IS what we hold — adopting
+        // it keeps the host's mirror and ours on the same rev, so the next edit
+        // stays a diff instead of forcing a pointless full resync. Same `?? 0`
+        // fallback as the two sibling adoption sites below; they must not
+        // disagree, or a rev-less push leaves the two branches on different revs.
+        appliedRev = msg.rev ?? 0;
+        // A queued deferred update is now STALE: this newer rev's text is what
+        // we already hold, so rendering the older pending text on release would
+        // put back content the document has moved past — and drag `appliedRev`
+        // BACKWARDS to that older rev. The flush's own guard only compares
+        // `baseText`, which is unchanged here, so it cannot catch this.
+        if (pendingUpdate && pendingUpdate.rev <= appliedRev) {
+          pendingUpdate = undefined;
+        }
         break;
       }
       // Bug #3 (filter leak): while a trigger popup (`/`/`@`) owns the editor
@@ -646,10 +673,35 @@ window.addEventListener('message', (event) => {
       // text typed next then leaks into the editor (+ a stray newline on Enter).
       // Defer the render until the popup releases input ownership (commit/cancel).
       if (hasInputOwner()) {
-        pendingUpdate = { text: msg.text ?? '', caretLine: msg.caretLine, caretCol: msg.caretCol, baseText: currentText };
+        // P-8: deliberately NOT adopting msg.rev — the text is only stashed, not
+        // rendered, so currentText still belongs to `appliedRev`. The host's
+        // mirror is now ahead of us and every edit until this flushes (or is
+        // dropped) resyncs in full; that is the safe direction.
+        pendingUpdate = {
+          text: msg.text ?? '',
+          caretLine: msg.caretLine,
+          caretCol: msg.caretCol,
+          baseText: currentText,
+          rev: msg.rev ?? 0,
+        };
         break;
       }
       applyDocumentUpdate(msg.text ?? '', msg.caretLine, msg.caretCol);
+      appliedRev = msg.rev ?? 0;
+      break;
+    }
+    case 'requestFullSync': {
+      // Performance Audit P-8: the host dropped a diff-shaped 'edit' because its
+      // mirror of currentText no longer describes the same document — resend the
+      // whole state so it can re-anchor on what we actually hold.
+      //
+      // This restores AGREEMENT, not the dropped edit: if the divergence came
+      // from a host push we had already rendered by the time this arrives, the
+      // refused keystroke is gone from currentText and is not resent. Pre-P-8
+      // that keystroke reached the document for an instant — and then lost to
+      // the next sync anyway, while leaving document and webview divergent. The
+      // race is documented in deferred-work.md; converging is the better half.
+      postToHost({ type: 'edit', text: currentText, baseRev: appliedRev });
       break;
     }
     case 'fileSearchResult': {
@@ -1036,6 +1088,8 @@ interface PendingUpdate {
   caretLine?: number;
   caretCol?: number;
   baseText: string;
+  /** P-8: the push's rev — adopted into `appliedRev` only if this update is actually rendered. */
+  rev: number;
 }
 let pendingUpdate: PendingUpdate | undefined;
 
@@ -1065,6 +1119,8 @@ onInputOwnerRelease(() => {
     return;
   }
   applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  // P-8: rendered at last — only now does currentText belong to that push's rev.
+  appliedRev = u.rev;
 });
 
 /**
@@ -1342,10 +1398,28 @@ function syncNow(): void {
     clearTimeout(syncTimer);
   }
   syncTimer = undefined;
+  // Performance Audit P-8: capture the PRE-edit text before serializeIfChanged
+  // overwrites currentText — that is the base the host mirrors and the offsets
+  // below index into.
+  const prevText = currentText;
   const markdown = serializeIfChanged();
-  if (markdown !== undefined) {
-    postToHost({ type: 'edit', text: markdown });
+  if (markdown === undefined) {
+    return;
   }
+  // serializeIfChanged only returns non-undefined when markdown !== prevText,
+  // so computeMinimalEdit never returns its equal-strings null here.
+  const diff = computeMinimalEdit(prevText, markdown);
+  if (!diff) {
+    return;
+  }
+  postToHost({
+    type: 'edit',
+    start: diff.start,
+    oldEnd: diff.oldEnd,
+    newText: diff.newText,
+    baseLength: prevText.length,
+    baseRev: appliedRev,
+  });
 }
 
 /**

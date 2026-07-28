@@ -84,12 +84,63 @@ function harnessHtml(readability: InitConfig['readability']): string {
 <title>webview test harness</title>
 <script>
   window.__posted = [];
+  // Performance Audit P-8: an 'edit' now carries only the CHANGED REGION, so the
+  // full serialized markdown every spec asserts on only exists once someone
+  // reconstructs it. Model the host's half here — mirror of the webview's
+  // currentText, re-anchored by each push — and record the reconstruction as
+  // 'text' on the message, which is what waitForEdit / __posted readers expect.
+  // Registered before main.js loads, so it sees every push the webview does.
+  window.__mirror = '';
+  window.__mirrorRev = 0;
+  window.__mirrorDesync = 0;
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m && (m.type === 'init' || m.type === 'update')) {
+      // Same '?? 0' the webview's own appliedRev uses, so a spec that posts a
+      // rev-less update (most of them) keeps both sides on one consistent rev.
+      window.__mirror = m.text ?? '';
+      window.__mirrorRev = m.rev ?? 0;
+    }
+  });
   // Seeded by presetWebviewState() through addInitScript, which runs before this
   // stub — the only way a spec can reach code that reads persisted webview state
   // (rightDockTab, tocWidth, tocMaxLevel) on the very first boot.
   let __state = window.__presetState ?? {};
   window.acquireVsCodeApi = () => ({
-    postMessage: (msg) => { window.__posted.push(msg); },
+    postMessage: (msg) => {
+      if (msg && msg.type === 'edit') {
+        if ('text' in msg) {
+          window.__mirror = msg.text;
+          window.__mirrorRev = msg.baseRev;
+        } else if (
+          // Must refuse on EXACTLY what src/text-utils.ts rebuildFromEditDiff
+          // refuses on. A looser stub is worse than none: JS slice() clamps
+          // out-of-range and truncates fractional indices, so a webview
+          // regression emitting bad offsets would still reconstruct plausible
+          // text here and keep the suite green, while the real host refused
+          // every edit and resync-looped.
+          msg.baseRev === window.__mirrorRev &&
+          typeof msg.newText === 'string' &&
+          msg.baseLength === window.__mirror.length &&
+          Number.isInteger(msg.start) && Number.isInteger(msg.oldEnd) &&
+          msg.start >= 0 && msg.oldEnd >= msg.start && msg.oldEnd <= window.__mirror.length
+        ) {
+          window.__mirror = window.__mirror.slice(0, msg.start) + msg.newText + window.__mirror.slice(msg.oldEnd);
+        } else {
+          // Record the refusal, leave 'text' off so a spec reading a stale
+          // mirror fails loudly, and then do what the real host does next —
+          // ask for a resync. Without this the webview's own 'requestFullSync'
+          // handler is unreachable from any spec.
+          window.__mirrorDesync++;
+          window.__posted.push(msg);
+          window.postMessage({ type: 'requestFullSync' }, '*');
+          return;
+        }
+        window.__posted.push({ ...msg, text: window.__mirror });
+        return;
+      }
+      window.__posted.push(msg);
+    },
     getState: () => __state,
     setState: (s) => { __state = s; },
   });
@@ -273,14 +324,26 @@ export async function clearPosted(page: Page): Promise<void> {
   });
 }
 
-/** Wait for the next 'edit' message posted to the host (scheduleSync debounces ~250ms) and return its markdown text. */
+/**
+ * Wait for the next 'edit' message posted to the host (scheduleSync debounces
+ * ~250ms) and return its markdown text — the harness stub's reconstruction of
+ * the P-8 diff, i.e. exactly the full document the host would have applied.
+ */
 export async function waitForEdit(page: Page, timeoutMs = 2000): Promise<string> {
   const handle = await page.waitForFunction(
     () => (window as unknown as { __posted: Array<{ type: string; text: string }> }).__posted.filter((m) => m.type === 'edit').at(-1),
     undefined,
     { timeout: timeoutMs }
   );
-  const msg = (await handle.jsonValue()) as { text: string };
+  const msg = (await handle.jsonValue()) as { text?: string };
+  if (typeof msg.text !== 'string') {
+    // P-8: the stub could not rebuild this diff (the base it mirrors no longer
+    // matches) — the real host would answer 'requestFullSync'. Never let this
+    // surface as a confusing `undefined` in the spec's own assertion.
+    throw new Error(
+      `waitForEdit: the harness could not reconstruct the edit — its mirror desynced from the webview. Got: ${JSON.stringify(msg)}`
+    );
+  }
   return msg.text;
 }
 

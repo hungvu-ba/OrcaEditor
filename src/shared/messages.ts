@@ -422,7 +422,36 @@ export type ReadingModeChangedMessage = {
 /** Message webview → host (discriminated theo `type`). */
 export type WebviewToHost =
   | { type: 'ready' }
-  | { type: 'edit'; text: string }
+  /**
+   * Performance Audit P-8: steady-state typing sends only the CHANGED REGION of
+   * the document, not the whole text. Two variants, discriminated by whether
+   * `text` is present; both carry `baseRev`, and the host applies both by
+   * arriving at ONE full text and running it through the same
+   * `applyMinimalEdit`/undo-coalescing path as before P-8 — the wire payload
+   * shrinks, nothing downstream changes.
+   *
+   * The host mirrors what it believes the webview's `currentText` to be, and
+   * the diff is only sound against an exact mirror, so `baseRev` names the
+   * frame of reference: it is the `rev` of the last host push the webview
+   * ACTUALLY adopted (see `HostToWebview`'s 'update'). A push the webview
+   * deferred instead of adopting (a trigger popup owning the keyboard — see
+   * `pendingUpdate` in main.ts) leaves the two sides on different revs, which is
+   * exactly the case a length check alone cannot see. On `baseRev` ≠ the mirror's
+   * rev — or a failed `baseLength`/bounds check, which catch a mirror bug rather
+   * than a legitimate divergence — the host drops the diff untouched and asks
+   * for a resync; no partial application is ever attempted.
+   *
+   * `baseLength` is the mirror's expected length (the webview's `currentText`
+   * length before this edit); `start`/`oldEnd` index that same base text.
+   */
+  | { type: 'edit'; start: number; oldEnd: number; newText: string; baseLength: number; baseRev: number }
+  /**
+   * The full-text, self-healing variant — every 'edit' had this shape before
+   * P-8. Sent in reply to `requestFullSync`, and it re-anchors the host's mirror
+   * onto `baseRev` (the rev the WEBVIEW is actually on), so the two sides
+   * converge after one round trip instead of resyncing forever.
+   */
+  | { type: 'edit'; text: string; baseRev: number }
   /**
    * Uỷ quyền undo/redo cho TextDocument (một undo stack duy nhất, đúng mô hình
    * CustomTextEditor): webview chặn Ctrl/Cmd+Z·Y rồi gửi message này, host gọi
@@ -664,6 +693,8 @@ export type HostToWebview =
   | {
       type: 'init';
       text: string;
+      /** Performance Audit P-8: the rev this initial `text` is stamped with — the webview's first `baseRev`. Same counter as 'update' below. */
+      rev: number;
       /** Req 20 US-20.3: `document.uri.toString()` — echoed back on `executeCommand` so the host can verify this document is still the target. */
       docUri: string;
       config: InitConfig;
@@ -684,8 +715,21 @@ export type HostToWebview =
    * block đơn dòng (đoạn văn/heading) caret về đúng cột; block đa dòng lùi về đầu
    * block. Update từ external edit (git/formatter/tab khác) không kèm field này →
    * giữ nguyên hành vi cũ (không đụng caret).
+   *
+   * Performance Audit P-8: `rev` is a monotonic counter the host bumps on every
+   * push (this message and 'init'). The webview echoes back, as `baseRev`, the
+   * rev of the push it last ACTUALLY adopted into `currentText` — a push it
+   * deferred or dropped does not count — which is how the host knows whether its
+   * mirror of the webview's text still describes the same document.
    */
-  | { type: 'update'; text: string; caretLine?: number; caretCol?: number }
+  | { type: 'update'; text: string; caretLine?: number; caretCol?: number; rev: number }
+  /**
+   * Performance Audit P-8: a diff-shaped 'edit' arrived against a base the host
+   * does not hold (see `baseRev` on `WebviewToHost`'s 'edit') — it was DROPPED,
+   * not partially applied. Resend the current state as a full-text 'edit', which
+   * self-heals the document regardless of what diverged.
+   */
+  | { type: 'requestFullSync' }
   | { type: 'fileSearchResult'; requestId: number; files: FileSuggestion[] }
   /**
    * `orcaEditor.*` changed in Settings. `commentAuthorName` rides along (Req 23

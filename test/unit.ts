@@ -26,6 +26,7 @@ import {
   normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
+  rebuildFromEditDiff,
   referencedAssetBasenames,
   relativePath,
   sameDocumentUri,
@@ -335,6 +336,272 @@ eq('eol: mixed \\r\\n + \\n -> all CRLF', normalizeEol('a\r\nb\nc', true), 'a\r\
   const ext = makeCrlfHost(true);
   ext.external('# A\r\n\r\nC\r\n');
   check('eol[X-2 caret]: real external edit still posts update (no over-suppress)', ext.updates === 1);
+}
+
+// ---------------------------------------------------------------------------
+// P-8 (Plan/Performance — Audit.md): webview→host 'edit' ships only the CHANGED
+// REGION. provider.ts imports 'vscode' so it can't load here — MODEL both ends
+// of the protocol (webview `appliedRev` + syncNow; host mirror + case 'edit')
+// around the REAL rebuildFromEditDiff/computeMinimalEdit/normalizeEol, and hold
+// it to one bar: the document must land byte-identical to what the pre-P-8
+// full-text send produced, in every divergence case too.
+// ---------------------------------------------------------------------------
+
+/** Both ends of the P-8 protocol, wired to each other. `useCrlf` = a Windows/tool-generated document. */
+function makeP8Pair(initialDoc: string, useCrlf = false) {
+  // ---- host (src/provider.ts) ----
+  // Seeded as the 'init' push leaves things: pushDocumentText stamped rev 1 onto
+  // the initial text and the webview rendered it, so both sides open on rev 1.
+  let doc = initialDoc;
+  let mirrorText = initialDoc;
+  let mirrorRev = 1;
+  let pushRev = 1;
+  let resyncsRequested = 0;
+  let diffPayload = 0; // wire chars spent on diff-shaped edits
+  let fullPayload = 0; // wire chars spent on full-text edits
+
+  /** case 'edit' — resolves BOTH wire shapes to one full text, then applies it as before. */
+  function hostOnEdit(msg: WebviewToHost & { type: 'edit' }): void {
+    let text: string;
+    if ('text' in msg) {
+      fullPayload += msg.text.length;
+      text = msg.text;
+      mirrorText = text;
+      mirrorRev = msg.baseRev; // re-anchor onto the rev the webview is really on
+    } else {
+      diffPayload += msg.newText.length;
+      const rebuilt = msg.baseRev === mirrorRev ? rebuildFromEditDiff(mirrorText, msg) : null;
+      if (rebuilt === null) {
+        resyncsRequested++;
+        wv.onRequestFullSync(); // host → webview 'requestFullSync', answered synchronously here
+        return;
+      }
+      text = rebuilt;
+      mirrorText = text;
+    }
+    // applyMinimalEdit — unchanged by P-8: always a full text in, minimal edit out.
+    const reconciled = normalizeEol(text, useCrlf);
+    const d = computeMinimalEdit(doc, reconciled);
+    doc = d ? applyEdit(doc, d) : doc;
+  }
+
+  /** Every host push goes through here (pushDocumentText): stamps a rev, re-anchors the mirror. */
+  function hostPush(text: string, defer = false): void {
+    pushRev++;
+    mirrorText = text;
+    mirrorRev = pushRev;
+    wv.onUpdate(text, pushRev, defer);
+  }
+
+  // ---- webview (media/webview/main.ts) ----
+  const wv = {
+    currentText: initialDoc,
+    appliedRev: 1,
+    pending: undefined as { text: string; rev: number; baseText: string } | undefined,
+    /** syncNow(): serialize, diff against the PRE-edit text, post the changed region. */
+    type(newFullText: string): void {
+      const prevText = wv.currentText;
+      if (newFullText === prevText) {
+        return;
+      }
+      wv.currentText = newFullText;
+      const d = computeMinimalEdit(prevText, newFullText)!;
+      hostOnEdit({
+        type: 'edit',
+        start: d.start,
+        oldEnd: d.oldEnd,
+        newText: d.newText,
+        baseLength: prevText.length,
+        baseRev: wv.appliedRev,
+      });
+    },
+    onUpdate(text: string, rev: number, defer: boolean): void {
+      if (text === wv.currentText) {
+        wv.appliedRev = rev; // same text — adopting keeps both sides on one rev
+        // A queued deferred update older than this rev is stale: rendering it on
+        // release would put back content the document moved past AND drag
+        // appliedRev backwards. The flush guard only compares baseText.
+        if (wv.pending && wv.pending.rev <= wv.appliedRev) {
+          wv.pending = undefined;
+        }
+        return;
+      }
+      if (defer) {
+        // A trigger popup owns the keyboard: stash WITHOUT adopting the rev.
+        wv.pending = { text, rev, baseText: wv.currentText };
+        return;
+      }
+      wv.currentText = text;
+      wv.appliedRev = rev;
+    },
+    flushPending(): void {
+      const u = wv.pending;
+      wv.pending = undefined;
+      if (!u || wv.currentText !== u.baseText || u.text === wv.currentText) {
+        return; // stale — the local DOM wins, and the rev is NOT adopted
+      }
+      wv.currentText = u.text;
+      wv.appliedRev = u.rev;
+    },
+    onRequestFullSync(): void {
+      hostOnEdit({ type: 'edit', text: wv.currentText, baseRev: wv.appliedRev });
+    },
+  };
+
+  return {
+    wv,
+    hostPush,
+    get docText() { return doc; },
+    get resyncs() { return resyncsRequested; },
+    get diffPayload() { return diffPayload; },
+    get fullPayload() { return fullPayload; },
+  };
+}
+
+// rebuildFromEditDiff — every refusal is TOTAL: a questionable diff must never
+// be spliced in at guessed offsets.
+{
+  const base = 'hello world';
+  eq('p8: clean splice', rebuildFromEditDiff(base, { start: 6, oldEnd: 11, newText: 'there', baseLength: 11 }), 'hello there');
+  eq('p8: pure insert', rebuildFromEditDiff(base, { start: 5, oldEnd: 5, newText: ',', baseLength: 11 }), 'hello, world');
+  eq('p8: pure delete', rebuildFromEditDiff(base, { start: 5, oldEnd: 11, newText: '', baseLength: 11 }), 'hello');
+  eq('p8: refuse on baseLength mismatch (mirror describes another document)', rebuildFromEditDiff(base, { start: 0, oldEnd: 1, newText: 'H', baseLength: 10 }), null);
+  eq('p8: refuse when oldEnd runs past the base', rebuildFromEditDiff(base, { start: 0, oldEnd: 99, newText: 'x', baseLength: 11 }), null);
+  eq('p8: refuse inverted offsets', rebuildFromEditDiff(base, { start: 5, oldEnd: 2, newText: 'x', baseLength: 11 }), null);
+  eq('p8: refuse negative start', rebuildFromEditDiff(base, { start: -1, oldEnd: 3, newText: 'x', baseLength: 11 }), null);
+  eq('p8: refuse non-integer offsets', rebuildFromEditDiff(base, { start: 1.5, oldEnd: 3, newText: 'x', baseLength: 11 }), null);
+  eq('p8: empty base, pure insert', rebuildFromEditDiff('', { start: 0, oldEnd: 0, newText: 'new', baseLength: 0 }), 'new');
+  // A message boundary: a dropped/malformed newText must be refused, never
+  // concatenated — otherwise the literal "undefined" lands in the user's file.
+  eq(
+    'p8: refuse a non-string newText instead of splicing "undefined"',
+    rebuildFromEditDiff(base, { start: 0, oldEnd: 0, newText: undefined as unknown as string, baseLength: 11 }),
+    null
+  );
+}
+
+// Steady-state typing: the document tracks every keystroke, and the wire carries
+// the edit rather than the document.
+{
+  const big = '# Title\n\n' + 'lorem ipsum dolor sit amet. '.repeat(200);
+  const p = makeP8Pair(big);
+  p.wv.type(big + 'a');
+  p.wv.type(big + 'ab');
+  p.wv.type(big + 'abc');
+  eq('p8: typing lands byte-identical in the document', p.docText, big + 'abc');
+  check('p8: zero resyncs on the happy path', p.resyncs === 0, `  resyncs=${p.resyncs}`);
+  // The whole point of the finding: payload is O(edit), not O(document).
+  check(
+    'p8: 3 keystrokes cost 3 wire chars, not 3 documents',
+    p.diffPayload === 3 && p.fullPayload === 0,
+    `  diff=${p.diffPayload} full=${p.fullPayload} doc=${big.length}`
+  );
+}
+
+// The divergence the rev check exists for: a push the webview DEFERRED (trigger
+// popup owns the keyboard). Length alone cannot see it — here the deferred text
+// is exactly as long as what the webview holds, so a baseLength-only guard would
+// have spliced into the wrong base and corrupted the file.
+{
+  const p = makeP8Pair('AAA\n');
+  p.hostPush('BBB\n', /* defer */ true); // same length, different content
+  check('p8[defer]: webview did NOT adopt the deferred rev', p.wv.appliedRev === 1 && p.wv.pending !== undefined);
+  p.wv.type('AAAX\n'); // local edit on the pre-push text
+  check('p8[defer]: stale-base diff is refused → one resync', p.resyncs === 1, `  resyncs=${p.resyncs}`);
+  eq('p8[defer]: resync heals the document to what the webview holds', p.docText, 'AAAX\n');
+  // Converged: the full-text reply re-anchored the mirror, so typing is diffs again.
+  p.wv.type('AAAXY\n');
+  check('p8[defer]: back to diffs after the resync', p.resyncs === 1, `  resyncs=${p.resyncs}`);
+  eq('p8[defer]: still byte-exact', p.docText, 'AAAXY\n');
+}
+
+// The deferred update finally renders → the webview jumps to that rev, which the
+// host has since re-anchored away from. One resync, then converged again.
+{
+  const p = makeP8Pair('AAA\n');
+  p.hostPush('BBB\n', true);
+  p.wv.flushPending(); // popup released, nothing local happened → render it
+  check('p8[defer-flush]: rev adopted only once actually rendered', p.wv.appliedRev === 2);
+  p.wv.type('BBBZ\n');
+  eq('p8[defer-flush]: document follows the webview', p.docText, 'BBBZ\n');
+}
+
+// The equal-text push. This is the branch that keeps steady-state typing on
+// diffs: without adopting the rev, the webview sits behind the host's mirror
+// forever and every keystroke costs a full resync — P-8's own benefit reverting
+// silently, with no test failing.
+{
+  const p = makeP8Pair('SAME\n');
+  p.hostPush('SAME\n'); // host echoes text the webview already holds
+  check('p8[echo]: an identical-text push is still adopted as the new rev', p.wv.appliedRev === 2);
+  p.wv.type('SAME!\n');
+  check('p8[echo]: so the next keystroke stays a diff, no resync', p.resyncs === 0, `  resyncs=${p.resyncs}`);
+  eq('p8[echo]: and lands byte-exact', p.docText, 'SAME!\n');
+}
+
+// A deferred update that a LATER equal-text push has made stale. Dropping it is
+// what stops `appliedRev` from moving backwards on release.
+{
+  const p = makeP8Pair('X\n');
+  p.hostPush('A\n', /* defer */ true); // rev 2, queued behind the popup
+  p.hostPush('X\n'); // rev 3, equal to what the webview holds → adopted
+  check('p8[stale-pending]: the newer equal-text push adopts rev 3', p.wv.appliedRev === 3);
+  check('p8[stale-pending]: and discards the queued older update', p.wv.pending === undefined);
+  p.wv.flushPending(); // popup releases — nothing left to render
+  check('p8[stale-pending]: appliedRev never regresses to the stale rev', p.wv.appliedRev === 3);
+  eq('p8[stale-pending]: the stale text is never rendered', p.wv.currentText, 'X\n');
+  p.wv.type('XY\n');
+  check('p8[stale-pending]: typing continues as a diff', p.resyncs === 0, `  resyncs=${p.resyncs}`);
+  eq('p8[stale-pending]: document follows the webview', p.docText, 'XY\n');
+}
+
+// A CRLF document: the webview diffs in its own all-LF space, the host still
+// writes CRLF (applyMinimalEdit's normalizeEol is downstream of P-8).
+{
+  const p = makeP8Pair('# A\r\n\r\nB\r\n', true);
+  p.wv.type('# A\n\nB!\n'); // serialize() is always LF
+  eq('p8[crlf]: document stays CRLF through a diff-shaped edit', p.docText, '# A\r\n\r\nB!\r\n');
+}
+
+// Two 'edit's in the SAME frame (invokeAction: flush of pending typing + the
+// action's own sync) — the second diff's base is the first's result, so they
+// must reconstruct in arrival order.
+{
+  const p = makeP8Pair('one\n');
+  p.wv.type('one two\n');
+  p.wv.type('one two three\n');
+  eq('p8: same-frame edits reconstruct in order', p.docText, 'one two three\n');
+  check('p8: same-frame edits need no resync', p.resyncs === 0);
+}
+
+// Fuzz: against a sequence of arbitrary rewrites, the diff protocol must land
+// exactly where a pre-P-8 full-text send would have.
+{
+  const alphabet = 'ab😀ữ\n #-';
+  const rnd = (n: number) => Math.floor(Math.random() * n);
+  const randDoc = () => {
+    let s = '';
+    const len = rnd(40);
+    for (let i = 0; i < len; i++) {
+      s += alphabet[rnd(alphabet.length)];
+    }
+    return s;
+  };
+  let mismatches = 0;
+  for (let i = 0; i < 400; i++) {
+    const start = randDoc();
+    const p = makeP8Pair(start);
+    let expected = start;
+    for (let step = 0; step < 4; step++) {
+      const next = randDoc();
+      expected = next;
+      p.wv.type(next);
+    }
+    if (p.docText !== expected) {
+      mismatches++;
+    }
+  }
+  check('p8[fuzz]: 400 × 4 random rewrites all land byte-exact', mismatches === 0, `  mismatches=${mismatches}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -706,7 +973,9 @@ eq('scheme: UNC KHÔNG phải scheme', hasUrlScheme('\\\\server\\share\\x.md'), 
 
 const fromWebview: WebviewToHost[] = [
   { type: 'ready' },
-  { type: 'edit', text: 'x' },
+  // P-8: both 'edit' shapes — the steady-state diff and the full-text resync reply.
+  { type: 'edit', start: 0, oldEnd: 1, newText: 'y', baseLength: 1, baseRev: 1 },
+  { type: 'edit', text: 'x', baseRev: 1 },
   { type: 'openLink', href: 'https://x' },
   { type: 'searchFiles', query: 'q', requestId: 1 },
   { type: 'copyFileMention' },
@@ -726,7 +995,7 @@ const readabilityFixture = {
 } as const;
 const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' };
 const toWebview: HostToWebview[] = [
-  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
+  { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
@@ -734,7 +1003,7 @@ const toWebview: HostToWebview[] = [
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   } },
-  { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
+  { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
@@ -742,7 +1011,8 @@ const toWebview: HostToWebview[] = [
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
-  { type: 'update', text: 'x' },
+  { type: 'update', text: 'x', rev: 2 },
+  { type: 'requestFullSync' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
   { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced', commentAuthorName: 'hungvu' },
   { type: 'crossFileSearch:result', requestId: 1, groups: [], truncated: false, usedFallback: false },
@@ -752,8 +1022,8 @@ const toWebview: HostToWebview[] = [
   { type: 'zenChanged', zen: true },
   { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
-check('contract: WebviewToHost phủ đủ 13 biến thể', fromWebview.length === 13);
-check('contract: HostToWebview phủ đủ 11 biến thể (init có/không reveal + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 11);
+check('contract: WebviewToHost phủ đủ 14 biến thể (P-8 splits edit into diff + full-text)', fromWebview.length === 14);
+check('contract: HostToWebview phủ đủ 12 biến thể (init có/không reveal + requestFullSync + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 12);
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho

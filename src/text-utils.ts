@@ -40,6 +40,39 @@ export function computeMinimalEdit(oldText: string, newText: string): MinimalEdi
 }
 
 /**
+ * Performance Audit P-8: rebuild the webview's new full text from a diff-shaped
+ * 'edit' applied to `base` (the host's mirror of the webview's `currentText`).
+ *
+ * Returns `null` — meaning "refuse, ask for a full resync" — rather than
+ * applying anything questionable: `baseLength` disagreeing with the mirror says
+ * the two sides are describing different documents, and out-of-range or
+ * inverted offsets say the same about a message that cannot be trusted. Splicing
+ * at guessed offsets would corrupt the user's file, so every failure is total.
+ * The rev check that catches a LEGITIMATE divergence (a push the webview
+ * deferred) lives at the call site, which is the side that knows the revs.
+ */
+export function rebuildFromEditDiff(
+  base: string,
+  edit: { start: number; oldEnd: number; newText: string; baseLength: number }
+): string | null {
+  const { start, oldEnd, newText, baseLength } = edit;
+  // `newText` is typed as string, but this is a message boundary — a dropped or
+  // malformed field must be refused like every other bad input here, not
+  // concatenated. Without this, an absent `newText` splices the literal
+  // "undefined" into the user's markdown and is then stored as the new mirror.
+  if (typeof newText !== 'string') {
+    return null;
+  }
+  if (baseLength !== base.length) {
+    return null;
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(oldEnd) || start < 0 || oldEnd < start || oldEnd > base.length) {
+    return null;
+  }
+  return base.slice(0, start) + newText + base.slice(oldEnd);
+}
+
+/**
  * Normalize the line endings of `text` to the document's EOL before diffing.
  * The webview serialize() always emits LF; for a CRLF document a raw LF-vs-CRLF
  * diff mismatches at offset 0 → a whole-document edit (X-2). When `useCrlf`, turn
