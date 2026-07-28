@@ -78,8 +78,9 @@ export function initSelectHighlight(
   }
 
   // Cache haystack giữa các lần 'selectionchange' liên tiếp (nội dung tài liệu
-  // không đổi khi chỉ selection đổi). Chỉ invalidate khi content thay đổi,
-  // qua refresh() bên dưới.
+  // không đổi khi chỉ selection đổi). Invalidate khi content đổi — qua refresh()
+  // bên dưới (renderDocument()) hoặc qua MutationObserver bên dưới (mọi chỉnh
+  // sửa local khác không đi qua renderDocument()).
   let haystackCache: Haystack | undefined;
 
   function invalidateHaystack(): void {
@@ -217,6 +218,19 @@ export function initSelectHighlight(
       rafId = undefined;
       recompute();
     });
+  });
+
+  // Một chỉnh sửa local (gõ phím, paste, sửa bảng/list...) đổi text trong
+  // #content mà KHÔNG qua renderDocument() (chỉ 'update' host mới gọi refresh()
+  // bên dưới) — haystackCache cũ (node/offset) sẽ lệch khỏi DOM sống, khiến lần
+  // tô tiếp theo tính đúng match nhưng dựng Range sai chỗ (vd. chọn "US-23.22"
+  // lại tô nhầm "21"/"Nên" ở dòng khác). Theo dõi mọi mutation trong #content
+  // để invalidate cache bất kể qua đường nào — không thể dò từng call site sửa
+  // DOM rải khắp main.ts/table.ts/list-ops.ts/drag-drop.ts...
+  new MutationObserver(invalidateHaystack).observe(content, {
+    subtree: true,
+    childList: true,
+    characterData: true,
   });
 
   // Esc luôn xoá highlight + strip (rẻ, không cần điều kiện gì thêm).
