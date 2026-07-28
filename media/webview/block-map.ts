@@ -164,7 +164,7 @@ function nearestSrcRange(content: HTMLElement, el: HTMLElement): LineRange | nul
   }
   let node: HTMLElement | null = el;
   while (node && node !== content) {
-    const parent = node.parentElement;
+    const parent: HTMLElement | null = node.parentElement;
     const own = parent === content ? readSrcRange(node) : readOwnSrcRange(node);
     if (own) {
       return own;
