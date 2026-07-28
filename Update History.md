@@ -492,3 +492,7 @@
 | 0.10.0 | 2026-07-28 | Fix: test:host was a coin flip — restored windows ran the suite in 10 concurrent hosts, and every case ran with no workspace folder, hiding a false pass. |
 | 0.10.0 | 2026-07-28 | Fix (US-23.18 AC6): a webview undo no longer reverts your last file rename — the provider refuses the global undo command when the document owns no undo step. |
 | 0.10.0 | 2026-07-28 | Fix: the feature-guide screenshot generator moved out of test/webview to scripts/feature-shots — a test run no longer rewrites eight tracked PNGs. |
+| 0.10.0 | 2026-07-28 | Fix: two comments sharing one anchor no longer mask each other's approximate marking — a relocated cluster now shows as misplaced instead of exact. |
+| 0.10.0 | 2026-07-28 | Fix: the native comment reply and thread-create paths now strip bidi/control characters and normalize line endings before writing to the sidecar. |
+| 0.10.0 | 2026-07-28 | Fix: a status change now answers its refusals before the author-name prompt instead of after, and claims its dedup guard ahead of every await. |
+| 0.10.0 | 2026-07-28 | Fix: exclude playwright.shots.config.ts and scripts/ from eslint so npm run lint reports zero errors again. |

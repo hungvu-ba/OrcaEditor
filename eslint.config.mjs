@@ -24,6 +24,10 @@ export default tseslint.config(
       'test/**',
       'Local Test/**',
       'playwright.config.ts',
+      // Same reason as playwright.config.ts above: outside tsconfig, so the
+      // type-aware parser cannot resolve a project for them.
+      'playwright.shots.config.ts',
+      'scripts/**',
       '**/*.js',
       '**/*.mjs',
       '**/*.cjs',

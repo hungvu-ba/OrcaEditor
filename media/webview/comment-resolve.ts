@@ -218,6 +218,21 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
    * overwriting fresher results.
    */
   let resolveGeneration = 0;
+  /**
+   * Nodes this pass has placed a thread onto at a NON-exact state, reset in
+   * `prepareFullPass` (so it spans a chunked pass's ticks too, which share one
+   * `prepareFullPass`).
+   *
+   * US-23.1 lets several threads share one anchor id, and tier 1 resolves by
+   * looking that id up in the live DOM. Tier 3 STAMPS the id onto the block it
+   * parks on — so without this set, the second thread of a shared cluster runs
+   * its tier-1 lookup, finds the id its sibling's tier-3 guess just wrote a
+   * moment ago in this same pass, and promotes the cluster back to `exact`. The
+   * result is a cluster that can never read as approximate no matter how far its
+   * text moved. A node placed at `exact` is REMOVED again: a later exact
+   * placement is a genuine match and must not stay poisoned.
+   */
+  const placedNonExactThisPass = new Set<HTMLElement>();
 
   /**
    * Mark the node so US-23.2's pin/highlight — and AC3's "visibly marked as
@@ -298,6 +313,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     anchor.state = state;
     anchor.carrier = el;
     stampState(el, state);
+    if (state === 'exact') {
+      placedNonExactThisPass.delete(el);
+    } else {
+      placedNonExactThisPass.add(el);
+    }
   }
 
   /**
@@ -338,7 +358,13 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     // id is still on some stale node) would otherwise be "found" by tier 1 and
     // silently promoted from a guess to an exact match. Re-running tier 2
     // instead is also what lets text coming back (an undo) restore a real anchor.
-    const exact = anchor.state === 'exact' ? findCommentAnchor(content, anchor.anchorId) : null;
+    const found = anchor.state === 'exact' ? findCommentAnchor(content, anchor.anchorId) : null;
+    // A hit on a node THIS pass already parked a sibling on approximately is not
+    // evidence of anything — it is the sibling's own guess reflected back (see
+    // `placedNonExactThisPass`). Fall through to run this thread's own tiers, so a
+    // shared cluster reaches the same verdict for every member instead of the
+    // verdict of whichever member happened to resolve first.
+    const exact = found && !placedNonExactThisPass.has(found) ? found : null;
     if (exact) {
       anchor.lastKnownLine = commentAnchorLine(content, exact) || anchor.lastKnownLine;
       anchor.carrier = exact;
@@ -516,6 +542,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     }
     dedupeCommentAnchors(content, keep);
     clearStates();
+    placedNonExactThisPass.clear();
     return anchorCandidates(content);
   }
 

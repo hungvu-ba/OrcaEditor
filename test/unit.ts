@@ -3470,6 +3470,67 @@ check(
 }
 
 
+// ---------------------------------------------------------------------------
+// US-23.10 AC9 write-path tripwire (src/comments/commentController.ts) — every
+// route that persists a user-authored body must neutralize it. Read as text for
+// the same reason as the provider.ts tripwires above: the module imports
+// 'vscode'.
+//
+// This exists because the guarantee was originally applied per SURFACE (the
+// webview popover/composer normalized; the native `vscode.comments` reply widget
+// and Save did not), so `orcaEditor.replyComment` wrote an unstripped body
+// straight to the sidecar. Moving it to the write path makes one place
+// authoritative — and this check is what keeps a NEW write path from being added
+// without it.
+// ---------------------------------------------------------------------------
+{
+  const controllerSrc = fs.readFileSync(
+    path.join(process.cwd(), 'src/comments/commentController.ts'),
+    'utf8'
+  );
+
+  // Every method on the returned controller, in source order, so a body-writing
+  // path added later is sliced out and checked like the three below.
+  const methods: { name: string; body: string }[] = [];
+  const methodRe = /^ {4}(?:async )?([A-Za-z][A-Za-z0-9]*)\(/gm;
+  const starts: { name: string; at: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = methodRe.exec(controllerSrc)) !== null) {
+    starts.push({ name: m[1], at: m.index });
+  }
+  for (let i = 0; i < starts.length; i++) {
+    const end = i + 1 < starts.length ? starts[i + 1].at : controllerSrc.length;
+    methods.push({ name: starts[i].name, body: controllerSrc.slice(starts[i].at, end) });
+  }
+
+  const NEUTRALIZE = 'neutralizeCommentBody(normalizeCommentBodyEol(msg.body))';
+  // A method persists a user-authored body if it hands one to a sidecar line
+  // builder. Keyed off the builders rather than a hardcoded method list so a new
+  // write path cannot opt itself out by not being named here.
+  const BODY_LINE_BUILDERS = ['buildCommentLine(', 'buildReplyLine(', 'buildEditLine('];
+  const bodyWriters = methods.filter((f) => BODY_LINE_BUILDERS.some((b) => f.body.includes(b)));
+
+  check(
+    'AC9 tripwire: the three known body-write paths are still the ones found',
+    bodyWriters.map((f) => f.name).sort().join(',') === 'createThread,editComment,reply'
+  );
+
+  for (const f of bodyWriters) {
+    check(
+      `AC9 tripwire: ${f.name} neutralizes the body before persisting it`,
+      f.body.includes(NEUTRALIZE)
+    );
+  }
+
+  // The neutralized local must be what reaches the builder — reading `msg.body`
+  // again downstream would silently bypass the call above.
+  check(
+    'AC9 tripwire: no write path passes the raw msg.body as a line body',
+    !controllerSrc.includes('body: msg.body')
+  );
+}
+
+
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {
   console.log('\n' + failures.join('\n\n'));

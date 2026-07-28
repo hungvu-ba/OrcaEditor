@@ -1129,7 +1129,11 @@ export function createCommentSupport(
       // handed to `store.append` unchanged; this is the version it is consistent
       // with, re-checked in `saveBeforeAppend` once every await in between is done.
       const versionAtEntry = document.version;
-      const rejection = createCommentRejection(msg, document.uri.toString());
+      // US-23.10 AC9 at the WRITE path — see `reply`/`editComment`. The webview
+      // composer already normalizes, but this is the one place every create route
+      // passes through, so the guarantee belongs here rather than per surface.
+      const body = typeof msg.body === 'string' ? neutralizeCommentBody(normalizeCommentBodyEol(msg.body)) : msg.body;
+      const rejection = createCommentRejection({ ...msg, body }, document.uri.toString());
       if (rejection !== null) {
         return { ok: false, error: rejection };
       }
@@ -1165,7 +1169,7 @@ export function createCommentSupport(
               id: commentId,
               author,
               timestamp,
-              body: msg.body,
+              body,
               anchor: {
                 offset_start: msg.offsetStart,
                 offset_end: msg.offsetEnd,
@@ -1187,7 +1191,7 @@ export function createCommentSupport(
       const line = commentThreadLine(msg.line);
       const range = new vscode.Range(line, 0, line, 0);
       const thread = controller.createCommentThread(document.uri, range, [
-        asNativeComment({ author, timestamp, body: msg.body, threadId: msg.threadId, docUri: document.uri.toString() }),
+        asNativeComment({ author, timestamp, body, threadId: msg.threadId, docUri: document.uri.toString() }),
       ]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
       // A thread with no contextValue matches no `status-*` menu clause, so the
@@ -1198,7 +1202,7 @@ export function createCommentSupport(
         thread,
         commentId,
         commentAuthor: author,
-        commentBody: msg.body,
+        commentBody: body,
         commentTimestamp: timestamp,
         status: 'Open',
         statusChanges: [],
@@ -1391,8 +1395,16 @@ export function createCommentSupport(
       // handed to `store.append` unchanged; this is the version it is consistent
       // with, re-checked in `saveBeforeAppend` once every await in between is done.
       const versionAtEntry = document.version;
+      // US-23.10 AC9 at the WRITE path, same reasoning as `editComment` below:
+      // the native `vscode.comments` reply widget reaches this function through
+      // `orcaEditor.replyComment` without ever passing the popover's own
+      // neutralize/EOL step, so an unstripped bidi override from that surface
+      // would reorder the rendered thread for every reader. Applied before
+      // validation so the empty-check and length bound measure exactly what would
+      // be written. Idempotent for the webview path, which already normalized.
+      const body = typeof msg.body === 'string' ? neutralizeCommentBody(normalizeCommentBodyEol(msg.body)) : msg.body;
       const entry = threads.get(msg.threadId);
-      const rejection = replyRejection(msg, document.uri.toString(), entry?.status);
+      const rejection = replyRejection({ ...msg, body }, document.uri.toString(), entry?.status);
       if (rejection !== null) {
         return { ok: false, error: rejection };
       }
@@ -1428,12 +1440,12 @@ export function createCommentSupport(
           saveError ??
           (await appendLine(
             document,
-            buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
+            buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body })
           ));
         if (writeError !== null) {
           return { ok: false, error: writeError };
         }
-        entry.replies.push({ id: replyId, author, timestamp, body: msg.body });
+        entry.replies.push({ id: replyId, author, timestamp, body });
         try {
           entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
         } catch {
@@ -1689,18 +1701,6 @@ export function createCommentSupport(
       if (rejection !== null || !entry) {
         return { ok: false, error: rejection ?? 'This comment thread no longer exists.' };
       }
-      const currentAuthor = await authorFor(document);
-      if (currentAuthor === '') {
-        // US-23.10 AC4: cancelled prompt — cancel only this transition.
-        return { ok: false, error: 'No author name was provided — the status was not changed.' };
-      }
-      if (changingStatus.has(msg.threadId)) {
-        // US-23.11 AC7: a transition for this thread is already between its append
-        // and the `entry.status` update below, so the status check above read a
-        // value that is about to change. Mirrors the `creating` guard: the second
-        // request is a no-op, not a second sidecar line.
-        return { ok: false, error: 'This comment is already being updated.' };
-      }
       if (!ownedBy(document, msg.threadId)) {
         // Same guard `reply`/`deleteComment` carry: `threads` is one global map,
         // so a threadId from another file would append this transition to the
@@ -1712,13 +1712,43 @@ export function createCommentSupport(
         // `status-change` line could name as its parent.
         return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
       }
+      if (changingStatus.has(msg.threadId)) {
+        // US-23.11 AC7: a transition for this thread is already between its append
+        // and the `entry.status` update below, so the status check above read a
+        // value that is about to change. Mirrors the `creating` guard: the second
+        // request is a no-op, not a second sidecar line.
+        return { ok: false, error: 'This comment is already being updated.' };
+      }
       const fromStatus = entry.status;
       const toStatus = STATUS_CHANGE_TARGET[msg.action];
-      const timestamp = new Date().toISOString();
-      // Held across the append AND the registry update, so the window a second
-      // request could read a stale `entry.status` in is closed at both ends.
+      // Claimed BEFORE the first await, exactly like `creating`/`replying`.
+      //
+      // This is NOT closing a live double-append: `has` and `add` were already in
+      // one synchronous run with no await between them, so two concurrent
+      // transitions could never both pass — the second always resumed after the
+      // first had claimed. What it fixes is the ordering around `authorFor`, which
+      // can sit indefinitely on US-23.10 AC4's modal name prompt. Every refusal
+      // below it used to be reachable only AFTER that prompt, so clicking Resolve
+      // twice on a machine with no configured author name asked the user for their
+      // name and only then said "already being updated" — and the two sync
+      // refusals (wrong document, no durable id) behaved the same way. They now
+      // answer before anything can block, and the guard brackets the whole await
+      // window rather than starting after it, so a later edit that introduces an
+      // await between the check and the claim cannot silently reopen the race.
+      //
+      // Untested: driving two concurrent transitions needs a production seam in
+      // this module that does not exist (the same boundary `sidecar-append.test.ts`
+      // documents), and the prompt ordering needs `showInputBox` stubbed.
       changingStatus.add(msg.threadId);
       try {
+        const currentAuthor = await authorFor(document);
+        if (currentAuthor === '') {
+          // US-23.10 AC4: cancelled prompt — cancel only this transition.
+          return { ok: false, error: 'No author name was provided — the status was not changed.' };
+        }
+        // Sampled after the prompt so the recorded time is the moment the
+        // transition was actually committed, not when the dialog opened.
+        const timestamp = new Date().toISOString();
         const saveError = await saveBeforeAppend(document, versionAtEntry);
         const writeError =
           saveError ??
