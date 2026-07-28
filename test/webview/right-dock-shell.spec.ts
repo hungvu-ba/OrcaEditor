@@ -218,11 +218,12 @@ test('a comment popover consumes Escape and leaves the container open', async ({
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
 });
 
-test('the ⚑ and ☰ buttons switch tabs inside one dock instead of swapping panels', async ({ page }) => {
+test('the tab strip switches tabs inside one dock, and ☰ always lands on the TOC', async ({ page }) => {
   await openEditor(page, DOC);
   await addComment(page, 0, 'Why in order?');
   await hostUpdate(page, GUTTED);
-  await expect(page.locator('#comment-panel-toggle')).toBeVisible();
+  // The `⚑` entry point was retired — the strip is the only route to the tab now.
+  await expect(page.locator('#comment-panel-toggle')).toHaveCount(0);
   // US-23.11 AC1: floating raises the anchor-lost question for whoever is at the
   // keyboard, and its scrim would swallow the dock click below.
   await dismissAnchorLost(page);
@@ -231,11 +232,12 @@ test('the ⚑ and ☰ buttons switch tabs inside one dock instead of swapping pa
   await expect(page.locator('#toc-tabpanel')).toBeVisible();
 
   // US-23.9 retired the mutual exclusion: the panel never closes, the tab does.
-  await page.locator('#comment-panel-toggle').click();
+  await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
   await expect(page.locator('#comment-tabpanel')).toBeVisible();
   await expect(page.locator('#toc-tabpanel')).toBeHidden();
 
+  // US-23.7 AC4: `☰` opens the dock on the TOC tab whatever tab was last shown.
   await page.locator('#toc-toggle').click({ force: true });
   await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
   await expect(page.locator('#toc-tabpanel')).toBeVisible();

@@ -73,15 +73,6 @@ const TOC_ICON = svgIcon(
     '<path d="M3.75 6.25h3.5M3.75 8.75h3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.55"/>'
 );
 
-/**
- * Req 23 US-23.4 AC4: a speech bubble with a broken link through it — a comment
- * that has lost the place it pointed at.
- */
-const UNRESOLVED_COMMENT_ICON = svgIcon(
-  `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>` +
-    `<path d="M6.4 8.6l3.2-2.2M6.9 6.4L9.1 8.6" ${FMT_STROKE}/>`
-);
-
 /** Req 23 US-23.2: plain speech bubble — the "Show Comments" inline-highlight toggle. */
 const SHOW_COMMENTS_ICON = svgIcon(
   `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>`
@@ -312,49 +303,16 @@ interface ToolbarItem {
 }
 
 /**
- * Req 23 US-23.4 AC4: the unresolved-location button reflects the panel's open
- * state and carries the floating count; it disappears entirely at zero, since a
- * document with no lost anchor has nothing to route the user to.
- */
-function updateCommentPanelButton(): void {
-  const button = document.getElementById('comment-panel-toggle');
-  if (!button) {
-    return;
-  }
-  const floating = ctx.commentPanel.floatingCount();
-  const threads = ctx.commentPanel.threadCount();
-  // US-23.9: the button is the Comment TAB's entry point now, so "open" means
-  // the dock is showing that tab — not a panel of its own.
-  const open = ctx.toc.isOpen() && ctx.toc.dock.activeId() === 'comment';
-  button.classList.toggle('active', open);
-  // A file with no comments at all has nothing to route the user to — EXCEPT
-  // while the tab itself is showing: the list emptying (a re-attach, the last
-  // thread deleted elsewhere) must not remove the only way to close it.
-  button.hidden = threads === 0 && !open;
-  // The badge stays the UNRESOLVED count (US-23.4's contract): the strip's own
-  // badge carries the total, and two badges showing the same number would say
-  // nothing. Zero is hidden by the `[data-count='0']` CSS rule.
-  button.setAttribute('data-count', String(floating));
-  button.title =
-    floating === 0
-      ? 'Comments in this file'
-      : `${floating} comment${floating === 1 ? '' : 's'} lost their anchor — open the Comment tab`;
-  // Appearing/disappearing changes how much room the toolbar needs, and the
-  // overflow split is width-based (US-4.7) — without this, showing the button
-  // pushes another one off the edge instead of collapsing one into "•••", and
-  // hiding it leaves a gap that a collapsed button could have used.
-  recalcOverflow();
-}
-
-/** Called from main.ts whenever the floating set changes. */
-export function syncCommentPanelButton(): void {
-  updateCommentPanelButton();
-}
-
-/**
  * Req 23 US-23.2: "Show Comments" — latching toggle for the inline anchor-
  * range highlight overlay. Gutter pins are unaffected by this toggle (always
  * visible); only the CSS Custom Highlight wash is gated by it.
+ *
+ * It also HOSTS the lost-anchor count badge (US-23.4 AC4's contract, moved here
+ * when the `⚑` button that used to carry it was retired): the badge stays the
+ * UNRESOLVED count, since the dock strip's own tab badge already carries the
+ * total and two badges showing the same number would say nothing. Zero is
+ * hidden by the `[data-count='0']` CSS rule. This button is always present, so
+ * unlike `⚑` it never appears/disappears and never needs `recalcOverflow()`.
  */
 function updateCommentHighlightButton(): void {
   const button = document.getElementById('comment-highlight-toggle');
@@ -364,9 +322,24 @@ function updateCommentHighlightButton(): void {
   const on = ctx.commentHighlight.isOn();
   button.setAttribute('aria-pressed', String(on));
   button.classList.toggle('active', on);
+  const floating = ctx.commentPanel.floatingCount();
+  button.setAttribute('data-count', String(floating));
+  // The badge itself is a CSS `::after` reading data-count, which the a11y tree
+  // never sees — so the number has to travel in the accessible name too, not
+  // only in the hover text. The label is informational: it must not promise a
+  // route this button does not have (clicking toggles the wash, never a tab).
+  const label =
+    floating === 0
+      ? 'Show Comments — Alt+Shift+C'
+      : `Show Comments — Alt+Shift+C · ${floating} comment${floating === 1 ? '' : 's'} lost their anchor`;
+  // setTooltip, not `title`: this webview's native title is unreliable and every
+  // other toolbar button reads `data-tooltip` (see tooltip.ts's header).
+  setTooltip(button, label);
+  button.setAttribute('aria-label', label);
 }
 
-/** Called from main.ts once the host's persisted per-file value has been applied. */
+/** Called from main.ts once the host's persisted per-file value has been applied,
+ *  and again whenever the floating set changes — one button, one updater. */
 export function syncCommentHighlightButton(): void {
   updateCommentHighlightButton();
 }
@@ -856,7 +829,6 @@ const toolbarItems: ToolbarItem[] = [
       // the last session left selected.
       ctx.toc.toggle('toc');
       updateTocButton();
-      updateCommentPanelButton();
     },
     id: 'toc-toggle',
     // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
@@ -864,31 +836,20 @@ const toolbarItems: ToolbarItem[] = [
     collapsePriority: 21,
   },
   {
-    label: '⚑',
-    icon: UNRESOLVED_COMMENT_ICON,
-    title: 'Comments in this file',
-    action: () => {
-      // US-23.9: the `⚑` is the Comment tab's entry point — same dock, same
-      // gesture as `☰`, just a different tab pre-selected.
-      ctx.toc.toggle('comment');
-      updateTocButton();
-      updateCommentPanelButton();
-    },
-    id: 'comment-panel-toggle',
-    // Display-only — must not sync/dirty the file (see ToolbarItem.viewOnly).
-    viewOnly: true,
-    // 23, not 22: 22 is reading-toggle's, the anchor for the whole right-aligned
-    // group (see its comment) — sharing it would collapse the two together.
-    collapsePriority: 23,
-  },
-  {
     label: 'Show Comments',
     icon: SHOW_COMMENTS_ICON,
+    // updateCommentHighlightButton() rewrites this to append the lost-anchor
+    // count once there is one; this is the zero-floating form.
     title: 'Show Comments — Alt+Shift+C',
     action: () => toggleCommentHighlight(),
     id: 'comment-highlight-toggle',
     // Display-only — must not sync/dirty the file (see ToolbarItem.viewOnly).
     viewOnly: true,
+    // 24 > reading-toggle's 22, so this outlives the button that carries the
+    // group's `toolbar-push-right` anchor: at a width that collapses 22 but not
+    // 24, the right group loses its anchor and this button slides left. Known
+    // and pre-existing (it also applied to the retired `⚑` at 23) — noted here
+    // because this is now the highest-priority item in that group.
     collapsePriority: 24,
   },
 ];
@@ -2537,7 +2498,6 @@ function runTriggerBlockAction(id: TriggerDefineBlockId): void {
       // named for the outline, so it must not open whichever tab was last used.
       ctx.toc.toggle('toc');
       updateTocButton();
-      updateCommentPanelButton();
       return;
   }
 }

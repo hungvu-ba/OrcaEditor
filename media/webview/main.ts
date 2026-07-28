@@ -69,7 +69,6 @@ import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
 import {
   initToolbar,
-  syncCommentPanelButton,
   syncCommentHighlightButton,
   syncTocButton,
   syncReadingButtons,
@@ -153,7 +152,6 @@ registerEscapeHandler(ESCAPE_PRIORITY.DOCK, () => {
   // showing, and toggle() with no id would switch to TOC from the Comment tab.
   toc.close();
   syncTocButton();
-  syncCommentPanelButton();
   return true;
 });
 const mermaidView = initMermaid(content);
@@ -312,21 +310,20 @@ initCommentUndoGuard();
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
 );
-// The toolbar `⚑` button carries the floating count and the tab strip carries
-// the thread count, so both have to follow the resolver even while the dock is
-// closed. AC1: the strip badge appears only when the file has threads.
+// Two counts on two surfaces: the "Show Comments" button carries the floating
+// count (the `⚑` button that used to carry it was retired) and the tab strip
+// carries the thread count, so both have to follow the resolver even while the
+// dock is closed. AC1: the strip badge appears only when the file has threads.
 function syncCommentCounts(): void {
-  syncCommentPanelButton();
+  syncCommentHighlightButton();
   const threads = commentPanel.threadCount();
   toc.dock.setBadge('comment', threads === 0 ? undefined : String(threads));
 }
 document.addEventListener('orca-comment-floating-changed', syncCommentCounts);
-// Switching tabs from the strip (header click, ←/→) changes what `⚑` and `☰`
-// mean, and the dock cannot reach the toolbar itself.
-document.addEventListener('orca-dock-tab-changed', () => {
-  syncTocButton();
-  syncCommentPanelButton();
-});
+// No `orca-dock-tab-changed` listener: it existed to keep `⚑`'s active state
+// honest when the strip switched tabs. `☰` is all that is left, and it reflects
+// `toc.isOpen()` — which a tab switch never changes (toc.ts's `toggle` returns
+// after `dock.activate` without touching `open`).
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
@@ -345,9 +342,9 @@ initToolbar(content, toolbarEl, {
   readability,
   insertMarkdown: insertMarkdownAtCaret,
 });
-// Req 23 US-23.4 AC4: the unresolved-location button starts hidden (nothing is
-// floating yet) — sync it now so the toolbar's width-based overflow split is
-// computed without it, rather than with a button that is about to vanish.
+// Req 23 US-23.4 AC4: stamp the counts once the toolbar exists, so the lost-
+// anchor badge has a `data-count` from the first paint instead of a frame with
+// the attribute missing.
 syncCommentCounts();
 initInputRules(content, { scheduleSync, dom });
 
@@ -966,7 +963,6 @@ window.addEventListener('resize', () => {
     // tab is showing, never "switch to TOC" (US-23.9).
     toc.close();
     syncTocButton();
-    syncCommentPanelButton();
   }
   wasNarrowViewport = narrow;
 });

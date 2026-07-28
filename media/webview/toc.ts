@@ -165,9 +165,11 @@ export function initToc(
   document.body.appendChild(panel);
 
   // createTabDock appends the strip, so it runs before any tab body is added.
-  // US-23.9: the toolbar's `☰`/`⚑` states are derived from which tab is active,
-  // so a switch made from the strip itself (header click, ←/→) has to reach them.
-  // A DOM event rather than a wired callback, matching the
+  // US-23.9 introduced this event so a switch made from the strip itself (header
+  // click, ←/→) could reach the toolbar's tab-derived button states. The `⚑`
+  // button that needed it has since been retired and `☰` reads only `isOpen()`,
+  // so nothing in the toolbar listens today — the event is kept as the strip's
+  // one outward signal. A DOM event rather than a wired callback, matching the
   // `orca-comment-floating-changed` precedent — toc.ts must not know the toolbar.
   const dock = createTabDock(panel, vscode, () => {
     document.dispatchEvent(new CustomEvent('orca-dock-tab-changed'));
@@ -685,11 +687,12 @@ export function initToc(
   }
 
   /**
-   * US-23.9: one container, two entry points. `#toc-toggle` asks for `toc` and
-   * the `⚑` button for `comment`; asking for a tab the container is already
-   * showing closes it (the shipped toggle gesture), asking for the other one
-   * switches instead — closing a panel the user is trying to switch inside of
-   * would read as a dropped click.
+   * US-23.9: one container. `#toc-toggle` asks for `toc`; the Comment tab is
+   * reached from the strip header now that its `⚑` toolbar button is retired,
+   * so no caller passes `'comment'` today. Asking for a tab the container is
+   * already showing closes it (the shipped toggle gesture), asking for another
+   * one switches instead — closing a panel the user is trying to switch inside
+   * of would read as a dropped click.
    *
    * Omitting `tabId` means "no explicit target", which is what US-23.7 AC7's
    * last-tab restore needs: the auto-open paths and the toggle-closed gesture

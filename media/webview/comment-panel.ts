@@ -56,7 +56,7 @@ export interface CommentPanelController {
   tab: RightDockTab;
   /** Every non-tombstoned thread — the tab-strip count badge (absent at 0). */
   threadCount(): number;
-  /** How many threads are floating right now — the toolbar `⚑` button's badge. */
+  /** How many threads are floating right now — the "Show Comments" button's badge. */
   floatingCount(): number;
   /**
    * A `commentThreadsSync` snapshot arrived, carrying the host's report on the
@@ -162,6 +162,11 @@ function transitionTime(thread: ThreadAnchor): number {
   const parsed = Date.parse(lastTransitionAt(thread));
   return Number.isNaN(parsed) ? -Infinity : parsed;
 }
+
+/** Code points that occupy no width, so a run of only these reads as blank.
+ *  Written as escapes on purpose — the literal characters are invisible in an
+ *  editor and the next reader would not be able to tell what the class holds. */
+const ZERO_WIDTH_RE = /[\u200B-\u200F\u2060\uFEFF\u180E]/g;
 
 /** One-line form of a block of text — shared truncation, so the ellipsis rule lives in one place. */
 function snippet(text: string): string {
@@ -794,11 +799,16 @@ export function initCommentPanel(
     openThread(thread.threadId, row.getBoundingClientRect(), row);
   }
 
-  /** One line of anchored text, or the stated fallback for a textless anchor
-   *  (caret anchor, image, diagram) — never a blank cell. */
-  function anchorSnippet(thread: ThreadAnchor): { text: string; empty: boolean } {
-    const text = snippet(thread.recordedText);
-    return text === '' ? { text: 'No anchored text', empty: true } : { text: `“${text}”`, empty: false };
+  /** One line of the comment the reviewer wrote, or the stated fallback for a
+   *  bodyless thread — never a blank cell.
+   *
+   *  Zero-width code points are dropped before the emptiness test: a body is
+   *  typed and pasted by a human, and `snippet()`'s `\s+` collapse does NOT
+   *  match ZWSP/word-joiner/BOM, so a paste of only those would otherwise
+   *  render a visually blank cell that reports itself non-empty. */
+  function bodySnippet(thread: ThreadAnchor): { text: string; empty: boolean } {
+    const text = snippet(thread.body.replace(ZERO_WIDTH_RE, ''));
+    return text === '' ? { text: 'No comment text', empty: true } : { text, empty: false };
   }
 
   function row(thread: ThreadAnchor): HTMLElement {
@@ -829,14 +839,13 @@ export function initCommentPanel(
       approx.title = 'This comment was relocated by a content match — its position is a best guess.';
       top.appendChild(approx);
     }
-    if (floating) {
-      top.appendChild(el('span', 'comment-row-snippet empty', 'Unresolved location'));
-    } else {
-      const { text, empty } = anchorSnippet(thread);
-      // textContent throughout `el()` — a recorded anchor can hold raw HTML
-      // (an <img>), and this surface must render it as characters (US-23.10 AC9).
-      top.appendChild(el('span', `comment-row-snippet${empty ? ' empty' : ''}`, text));
-    }
+    // Line 1 is what the reviewer WROTE, on every row shape — a floating row
+    // included, since its "No anchor" pill and its group header already say the
+    // anchor is gone and a body is strictly more useful than repeating that.
+    const { text, empty } = bodySnippet(thread);
+    // textContent throughout `el()` — a body can hold raw HTML characters, and
+    // this surface must render them as characters (US-23.10 AC9).
+    top.appendChild(el('span', `comment-row-snippet${empty ? ' empty' : ''}`, text));
 
     const meta = el('div', 'comment-row-meta');
     // The thread's OPENER, not the last replier — the identity US-23.2 AC4 and

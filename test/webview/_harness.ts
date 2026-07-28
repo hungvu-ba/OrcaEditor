@@ -453,9 +453,8 @@ export async function dismissAnchorLost(page: Page): Promise<void> {
 
 /**
  * Open the right dock on the Comment tab and wait for the panel to finish
- * widening. Goes through the tab header rather than the `⚑` toolbar button: the
- * button is hidden while the file has no threads, which is exactly the state the
- * empty-state specs need to reach.
+ * widening. The tab header is the only route: the `⚑` toolbar button that used
+ * to open this tab has been retired.
  */
 export async function openCommentTab(page: Page): Promise<void> {
   // force: toolbar overflow math can transiently report #toc-toggle as offscreen.

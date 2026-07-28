@@ -120,6 +120,13 @@ async function floatAndOpen(page: Page, count: number, replacement = GUTTED, sta
   await expect(floatingRows(page)).toHaveCount(count);
 }
 
+/** The computed `display` of the lost-anchor count badge — `none` means hidden. */
+function badgeDisplay(page: Page): Promise<string> {
+  return page
+    .locator('#comment-highlight-toggle')
+    .evaluate((el) => getComputedStyle(el, '::after').display);
+}
+
 /** The rows of the "Unresolved location" group — what used to be the whole panel. */
 function floatingRows(page: Page) {
   return page.locator('.comment-row[data-group="floating"]');
@@ -142,30 +149,42 @@ async function dragCardOnto(page: Page, cardIndex: number, targetSelector: strin
   await page.mouse.up();
 }
 
-test('the toolbar button appears with the first comment and counts only the floating ones', async ({ page }) => {
+test('the lost-anchor badge rides on Show Comments, and the ⚑ button is gone', async ({ page }) => {
   await openEditor(page, DOC);
-  await expect(page.locator('#comment-panel-toggle')).toBeHidden();
+  // The `⚑` entry point was retired: the Comment tab is reached from the dock's
+  // own tab strip, so no toolbar button opens it any more.
+  await expect(page.locator('#comment-panel-toggle')).toHaveCount(0);
 
-  // US-23.9: the button is the Comment TAB's entry point, so it appears as soon
-  // as the file has a thread to browse — but its badge is still the UNRESOLVED
-  // count (US-23.4's contract), which is zero while every anchor holds.
+  // "Show Comments" is always present — unlike `⚑` it does not appear with the
+  // first comment. What it gains is the UNRESOLVED count (US-23.4's contract),
+  // which is zero while every anchor holds.
+  const showComments = page.locator('#comment-highlight-toggle');
+  await expect(showComments).toBeVisible();
   await addComment(page, 0, 'Does drains mean FIFO?');
-  await expect(page.locator('#comment-panel-toggle')).toBeVisible();
-  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '0');
+  await expect(showComments).toHaveAttribute('data-count', '0');
+  // The count is a CSS ::after the a11y tree never sees, so the attribute alone
+  // proves nothing — assert the badge is actually painted, and that the number
+  // also travels in the name/tooltip the drawn tooltip reads (`data-tooltip`,
+  // not the native `title` this webview cannot rely on).
+  expect(await badgeDisplay(page)).toBe('none');
+  await expect(showComments).toHaveAttribute('aria-label', 'Show Comments — Alt+Shift+C');
 
   await hostUpdate(page, GUTTED);
-  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '1');
+  await expect(showComments).toHaveAttribute('data-count', '1');
+  expect(await badgeDisplay(page)).not.toBe('none');
+  await expect(showComments).toHaveAttribute('data-tooltip', /1 comment lost their anchor/);
+  await expect(showComments).toHaveAttribute('aria-label', /1 comment lost their anchor/);
 });
 
-test('a floated thread becomes a row saying so in words, with its opener and status', async ({ page }) => {
+test('a floated thread becomes a row saying so in its pill, with its opener and status', async ({ page }) => {
   await floatAndOpen(page, 1);
 
   const row = floatingRows(page);
   await expect(row).toHaveCount(1);
   await expect(row.locator('.comment-row-pill')).toHaveText('No anchor');
-  // No snippet and no line number: there is no anchored text left to quote, and
-  // the row says that rather than showing an empty pair of quotes (AC5).
-  await expect(row.locator('.comment-row-snippet')).toHaveText('Unresolved location');
+  // No line number — nothing is left to point at — but line 1 still carries the
+  // comment, which is what makes the row identifiable at all.
+  await expect(row.locator('.comment-row-snippet')).toHaveText('Comment 1.');
   await expect(row.locator('.comment-row-author')).toHaveText('reviewer');
   // Floating is orthogonal to status, so line 2 carries the resolve status.
   await expect(row.locator('.comment-row-where')).toHaveText('Open');
@@ -175,7 +194,7 @@ test('a floated thread becomes a row saying so in words, with its opener and sta
 test('every floated thread gets a row — no cap, no "+N more"', async ({ page }) => {
   await floatAndOpen(page, 2);
   await expect(floatingRows(page)).toHaveCount(2);
-  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '2');
+  await expect(page.locator('#comment-highlight-toggle')).toHaveAttribute('data-count', '2');
 });
 
 test('rows list newest transition first', async ({ page }) => {
@@ -184,12 +203,12 @@ test('rows list newest transition first', async ({ page }) => {
   await addComment(page, 1, 'Newer comment.', new Date(2026, 6, 24, 11, 0).toISOString());
   await openCommentTab(page);
 
-  // Both anchors still hold, so both rows carry their anchored text — which is
-  // what makes the ordering observable at all (a floating row shows no snippet).
+  // Each row carries the comment that was written on it, which is what makes the
+  // ordering observable — and what a triage scan is actually reading for.
   const rows = page.locator('.comment-row .comment-row-snippet');
   await expect(rows).toHaveCount(2);
-  await expect(rows.nth(0)).toContainText('Identifiers are recorded for later audit.');
-  await expect(rows.nth(1)).toContainText('The refund queue drains in enqueue order.');
+  await expect(rows.nth(0)).toHaveText('Newer comment.');
+  await expect(rows.nth(1)).toHaveText('Older comment.');
 });
 
 test('dragging a row onto a node re-attaches it and empties the floating group', async ({ page }) => {
@@ -322,8 +341,15 @@ test('re-attaching the last floating thread retires the group, it does not empty
   await dragCardOnto(page, 0, '#content h1');
 
   // The tab lists every thread, so the file is not suddenly commentless — only
-  // the "Unresolved location" group is gone, and the ⚑ badge with it.
+  // the "Unresolved location" group is gone, and the lost-anchor badge with it.
   await expect(page.locator('.comment-group-label')).toHaveText('Open');
   await expect(page.locator('.comment-empty')).toHaveCount(0);
-  await expect(page.locator('#comment-panel-toggle')).toHaveAttribute('data-count', '0');
+  await expect(page.locator('#comment-highlight-toggle')).toHaveAttribute('data-count', '0');
+  // The badge and its wording both have to CLEAR, not just the count: a tooltip
+  // stuck on "1 comment lost their anchor" outlives the condition it describes.
+  expect(await badgeDisplay(page)).toBe('none');
+  await expect(page.locator('#comment-highlight-toggle')).toHaveAttribute(
+    'data-tooltip',
+    'Show Comments — Alt+Shift+C'
+  );
 });

@@ -157,9 +157,10 @@ function renderCommentLine(comment: ExportComment, indent: number): string {
 
 /**
  * AC4: a non-floating textless anchor (caret, image, diagram) carries US-23.9
- * AC7's fallback label — the same "No anchored text" wording that surface
- * already uses (`comment-panel.ts`'s `anchorSnippet`) — on the heading itself,
- * since its blockquote line is omitted entirely (review finding, 2026-07-28).
+ * AC7's "no anchored text" fallback label on the heading itself, since its
+ * blockquote line is omitted entirely (review finding, 2026-07-28). The export
+ * quotes the anchor, so it keeps this label even though the Comment tab's rows
+ * no longer show anchored text at all.
  */
 function renderLocation(location: ExportLocation, textless: boolean): string {
   const suffix = textless ? ' (no anchored text)' : '';

@@ -41,9 +41,12 @@ const DOC = [
   '',
 ].join('\n');
 
+/** Every fixture carries a DISTINCT body: a row's line 1 is the comment text,
+ *  so the shared `Body.` default would make every ordering assertion vacuous. */
 const OPEN_OLD: SeedThread = {
   threadId: 'open-old',
   status: 'Open',
+  body: 'Is enqueue order guaranteed under retry?',
   recordedText: 'The refund queue drains in enqueue order.',
   lastKnownLine: 3,
   timestamp: '2026-07-20T09:00:00.000Z',
@@ -52,6 +55,7 @@ const OPEN_NEW: SeedThread = {
   threadId: 'open-new',
   status: 'Open',
   author: 'mai.tran',
+  body: 'Which identifier ends up in the audit row?',
   recordedText: 'Identifiers are recorded for later audit.',
   lastKnownLine: 5,
   timestamp: '2026-07-26T09:00:00.000Z',
@@ -59,6 +63,7 @@ const OPEN_NEW: SeedThread = {
 const RESOLVED: SeedThread = {
   threadId: 'resolved-1',
   status: 'Resolved',
+  body: 'Replay needs a cap, otherwise this loops.',
   recordedText: 'Held entries replay after re-authentication.',
   lastKnownLine: 7,
   // Deliberately long past: `formatRelative` switches to an absolute stamp after
@@ -69,6 +74,7 @@ const RESOLVED: SeedThread = {
 const CLOSED: SeedThread = {
   threadId: 'closed-1',
   status: 'Closed',
+  body: 'Reason codes are documented now, closing.',
   recordedText: 'A reason code is written for every entry.',
   lastKnownLine: 9,
   timestamp: '2026-07-17T09:00:00.000Z',
@@ -81,6 +87,7 @@ const CLOSED: SeedThread = {
 const APPROX: SeedThread = {
   threadId: 'approx-1',
   status: 'Open',
+  body: 'This paragraph was rewritten, please recheck.',
   recordedText: 'Wording that no longer exists anywhere.',
   lastKnownLine: 11,
   timestamp: '2026-07-19T09:00:00.000Z',
@@ -90,6 +97,7 @@ const FLOATING: SeedThread = {
   threadId: 'float-1',
   status: 'Open',
   author: 'mai.tran',
+  body: 'Where did this section go?',
   recordedText: 'Text that was cut from a much longer document.',
   lastKnownLine: 99,
   timestamp: '2026-07-22T09:00:00.000Z',
@@ -133,9 +141,9 @@ test('groups every thread by status in the fixed order, omitting the empty group
   // Within a group: newest transition first, and an Open thread has none, so it
   // falls back to its creation stamp.
   const openSnippets = page.locator('.comment-row[data-group="open"] .comment-row-snippet');
-  await expect(openSnippets.nth(0)).toContainText('Identifiers are recorded');
-  await expect(openSnippets.nth(1)).toContainText('The refund queue drains');
-  await expect(openSnippets.nth(2)).toContainText('Wording that no longer exists');
+  await expect(openSnippets.nth(0)).toContainText('Which identifier ends up');
+  await expect(openSnippets.nth(1)).toContainText('Is enqueue order guaranteed');
+  await expect(openSnippets.nth(2)).toContainText('This paragraph was rewritten');
 });
 
 test('a file with only closed threads shows one group, not four', async ({ page }) => {
@@ -145,13 +153,15 @@ test('a file with only closed threads shows one group, not four', async ({ page 
   await expect(rows(page)).toHaveCount(1);
 });
 
-test('a row is a status pill, the anchored text, and opener · line · last transition', async ({ page }) => {
+test('a row is a status pill, the comment text, and opener · line · last transition', async ({ page }) => {
   await openWith(page, [RESOLVED]);
 
   const row = rows(page).first();
   await expect(row.locator('.comment-row-pill')).toHaveText('Resolved');
-  // The ANCHORED text, never the comment body — that is what the popover is for.
-  await expect(row.locator('.comment-row-snippet')).toContainText('Held entries replay after re-authentication.');
+  // The COMMENT the reviewer wrote — scanning the list must not read the
+  // document back at the user, which is what quoting the anchor did.
+  await expect(row.locator('.comment-row-snippet')).toHaveText('Replay needs a cap, otherwise this loops.');
+  await expect(row.locator('.comment-row-snippet')).not.toContainText('Held entries replay');
   // The thread's OPENER, not whoever made the last transition.
   await expect(row.locator('.comment-row-author')).toHaveText('reviewer');
   await expect(row.locator('.comment-row-where')).toHaveText('Ln 7');
@@ -203,8 +213,8 @@ test('the ⋯ menu holds a sort group and a toggle, and sorting is live', async 
 
   await page.locator('.right-dock-menu-item', { hasText: 'Oldest first' }).click();
   const openSnippets = page.locator('.comment-row[data-group="open"] .comment-row-snippet');
-  await expect(openSnippets.nth(0)).toContainText('Wording that no longer exists');
-  await expect(openSnippets.nth(2)).toContainText('Identifiers are recorded');
+  await expect(openSnippets.nth(0)).toContainText('This paragraph was rewritten');
+  await expect(openSnippets.nth(2)).toContainText('Which identifier ends up');
 });
 
 test('an approximate anchor is never presented silently', async ({ page }) => {
@@ -212,45 +222,73 @@ test('an approximate anchor is never presented silently', async ({ page }) => {
 
   const approx = page.locator('.comment-row', { has: page.locator('.comment-row-approx') });
   await expect(approx).toHaveCount(1);
-  // It keeps its snippet and line number — it is a guess about WHERE, not about
-  // whether the thread exists — but says so, distinct from an exact row.
-  // The snippet is the text the comment was WRITTEN against, not whatever now
-  // occupies the block it was parked on — that is the point of the marker.
-  await expect(approx.locator('.comment-row-snippet')).toContainText('Wording that no longer exists anywhere.');
+  // It keeps its comment text and line number — it is a guess about WHERE, not
+  // about whether the thread exists — but says so, distinct from an exact row.
+  await expect(approx.locator('.comment-row-snippet')).toHaveText('This paragraph was rewritten, please recheck.');
   await expect(approx.locator('.comment-row-where')).toHaveText('Ln 11');
   await expect(approx.locator('.comment-row-approx')).toHaveText('Approximate');
   await expect(page.locator('.comment-row[data-group="open"] .comment-row-approx')).toHaveCount(1);
 });
 
-test('a floating row says so in words and carries its own resolve status', async ({ page }) => {
+test('a floating row keeps its comment text and carries its own resolve status', async ({ page }) => {
   await openWith(page, ALL);
 
   const floating = page.locator('.comment-row[data-group="floating"]');
+  // The pill and the group header already say the anchor is gone, so line 1 is
+  // free to carry what the reviewer wrote — the same shape as every other row.
   await expect(floating.locator('.comment-row-pill')).toHaveText('No anchor');
-  await expect(floating.locator('.comment-row-snippet')).toHaveText('Unresolved location');
+  await expect(floating.locator('.comment-row-snippet')).toHaveText('Where did this section go?');
   // Floating is orthogonal to status and never replaces it.
   await expect(floating.locator('.comment-row-where')).toHaveText('Open');
 });
 
-test('a snippet is text, never markup, and a textless anchor is labelled', async ({ page }) => {
+test('a row is text, never markup, and a bodyless thread is labelled', async ({ page }) => {
   await openWith(page, [
-    { threadId: 'html-1', recordedText: '<img src=x onerror=alert(1)> and a caption', lastKnownLine: 3 },
-    { threadId: 'blank-1', recordedText: '', lastKnownLine: 1 },
+    { threadId: 'html-1', body: '<img src=x onerror=alert(1)> and a caption', lastKnownLine: 3 },
+    { threadId: 'blank-1', body: '', lastKnownLine: 1 },
   ]);
 
-  // A recorded anchor legitimately holds raw HTML — Req 08 stores sized/dropped
-  // images as literal `<img src>` in the `.md` — and the row must render it as
-  // characters: inserted via textContent, never innerHTML.
+  // A comment body legitimately holds raw HTML — a reviewer can paste an `<img>`
+  // tag straight out of the document — and the row must render it as characters:
+  // inserted via textContent, never innerHTML.
   const html = page.locator('.comment-row[data-thread-id="html-1"] .comment-row-snippet');
   await expect(html).toContainText('<img src=x onerror=alert(1)>');
   expect(await html.evaluate((el) => el.querySelectorAll('*').length)).toBe(0);
   await expect(page.locator('#comment-tabpanel img')).toHaveCount(0);
 
-  // A caret anchor / image / diagram has no text at all — a stated label, not a
-  // blank cell or an empty pair of quotes.
+  // A thread with no body left (an edit that emptied it) gets a stated label,
+  // not a blank cell.
   const blank = page.locator('.comment-row[data-thread-id="blank-1"] .comment-row-snippet');
-  await expect(blank).toHaveText('No anchored text');
+  await expect(blank).toHaveText('No comment text');
   await expect(blank).toHaveClass(/\bempty\b/);
+});
+
+test('a long multi-line body collapses to one ellipsised line', async ({ page }) => {
+  // 90 chars across three lines: the row must show a single line truncated at
+  // COMMENT_PANEL_SNIPPET_CHARS (60), never a three-line cell.
+  const long = `${'a'.repeat(30)}\n${'b'.repeat(30)}\n${'c'.repeat(30)}`;
+  await openWith(page, [{ threadId: 'long-1', body: long, lastKnownLine: 3 }]);
+
+  const cell = page.locator('.comment-row[data-thread-id="long-1"] .comment-row-snippet');
+  const text = (await cell.textContent()) ?? '';
+  expect(text).not.toContain('\n');
+  // 60 kept code points plus the appended ellipsis — `truncateDisplay` adds the
+  // marker after the bound rather than spending a slot on it.
+  expect(Array.from(text)).toHaveLength(61);
+  expect(text.endsWith('…')).toBe(true);
+  // The newline became a space before truncation, so the second run starts
+  // inside the visible window rather than being swallowed with it.
+  expect(text).toContain(`${'a'.repeat(30)} b`);
+});
+
+test('a body of only zero-width characters is labelled, not rendered blank', async ({ page }) => {
+  // `snippet()`'s \s+ collapse does not match ZWSP, so without an explicit strip
+  // this row would report itself non-empty and paint an invisible cell.
+  await openWith(page, [{ threadId: 'zw-1', body: '\u200B\u200B\u2060', lastKnownLine: 3 }]);
+
+  const cell = page.locator('.comment-row[data-thread-id="zw-1"] .comment-row-snippet');
+  await expect(cell).toHaveText('No comment text');
+  await expect(cell).toHaveClass(/\bempty\b/);
 });
 
 test('the tab-strip badge counts threads and disappears at zero', async ({ page }) => {

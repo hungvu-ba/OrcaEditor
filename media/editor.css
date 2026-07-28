@@ -2071,14 +2071,14 @@ body.toc-open #select-viewport-band {
  * the Unresolved-location panel is a tab inside the one right dock now, so the
  * `body.toc-open` rules above are the only offset mechanism. */
 
-/* toolbar.ts writes the live count into data-count; [data-count="0"] happens
- * while the tab is open with nothing left floating (the BLOCKER fix keeps
- * the button visible then) — the badge itself should still disappear. */
-#comment-panel-toggle {
+/* The lost-anchor count badge. It used to sit on the retired `⚑` button and now
+ * rides on "Show Comments", which is always present — so [data-count="0"] is the
+ * normal resting state and the badge itself has to disappear at zero. */
+#comment-highlight-toggle {
   position: relative;
 }
 
-#comment-panel-toggle::after {
+#comment-highlight-toggle::after {
   content: attr(data-count);
   position: absolute;
   top: 2px;
@@ -2094,7 +2094,8 @@ body.toc-open #select-viewport-band {
   border-radius: 7px;
 }
 
-#comment-panel-toggle[data-count='0']::after {
+#comment-highlight-toggle[data-count='0']::after,
+#comment-highlight-toggle:not([data-count])::after {
   display: none;
 }
 
@@ -3717,7 +3718,7 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   text-overflow: ellipsis;
 }
 
-/* "Unresolved location" / "No anchored text" — words, not an empty quote. */
+/* "No comment text" — a stated label, not a blank cell. */
 .comment-row-snippet.empty {
   color: var(--toc-muted);
   font-style: italic;
@@ -5730,8 +5731,9 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 }
 
 /* --- Req 23 US-23.2: "Show Comments" toolbar toggle -------------------------
- * Same latching-button convention as #toc-toggle/#comment-panel-toggle
- * (toolbar.ts): a plain `.active` class toggle read from `aria-pressed`. */
+ * Same latching-button convention as #toc-toggle (toolbar.ts): a plain `.active`
+ * class toggle read from `aria-pressed`. Its lost-anchor count badge is defined
+ * with the other toolbar chrome further up this file. */
 #comment-highlight-toggle.active {
   background: color-mix(in srgb, rgba(130, 110, 220, 1) 14%, transparent);
   color: rgb(130, 110, 220);
