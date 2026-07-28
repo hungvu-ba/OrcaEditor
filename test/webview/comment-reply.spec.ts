@@ -10,7 +10,7 @@
  * which a hand-built DOM snapshot (test/roundtrip/) can produce.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor, clearPosted, DEFAULT_DOC_URI } from './_harness';
+import { openEditor, clearPosted, dismissAnchorLost, openCommentTab, DEFAULT_DOC_URI } from './_harness';
 
 const DOC = [
   '# Session expiry', // line 1
@@ -82,6 +82,23 @@ const SETTLE_MS = 250;
 
 async function clickPin(page: Page, index = 0): Promise<void> {
   await page.locator('.comment-gutter-pin').nth(index).click();
+  await expect(page.locator('.comment-popover')).toBeVisible();
+}
+
+/** Re-render the document from the host, then wait out the debounced re-resolution (US-23.4 AC5). */
+async function hostUpdate(page: Page, text: string): Promise<void> {
+  await simulate(page, { type: 'update', text });
+  await page.waitForTimeout(450);
+}
+
+/** Open the given floating thread's popover from the Comment tab, the only entry
+ *  point a floating thread has (no gutter pin — US-23.4). Floating always raises
+ *  US-23.3 AC5's anchor-lost confirmation first (US-23.11 AC4 widens it to Open
+ *  or Resolved); left open it blocks the toolbar underneath it. */
+async function openFloatingRow(page: Page, index = 0): Promise<void> {
+  await dismissAnchorLost(page);
+  await openCommentTab(page);
+  await page.locator('.comment-row[data-group="floating"]').nth(index).click();
   await expect(page.locator('.comment-popover')).toBeVisible();
 }
 
@@ -402,6 +419,65 @@ test.describe('delete — confirmation, cascade, and author gating', () => {
     const other = page.locator('.comment-popover-reply[data-reply-id="reply-other"]');
     await expect(mine.locator('.comment-popover-delete')).toBeEnabled();
     await expect(other.locator('.comment-popover-delete')).toBeDisabled();
+  });
+
+  test('Req 24 US-23.13 AC3: a floating thread is deleted through the same popover path, reached via the Comment tab', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    // Everything after the heading is gone — no block covers any anchor's line,
+    // so every thread floats (US-23.4 tier 4). No gutter pin exists for it; the
+    // Comment tab's floating row is the only route to its popover (US-23.9).
+    await hostUpdate(page, '# Session expiry\n');
+    await openFloatingRow(page);
+    await expect(page.locator('.comment-popover-anchor-state')).toHaveText('Unresolved location');
+
+    await page.locator('.comment-popover-original .comment-popover-delete').click();
+    await page.locator('.comment-delete-confirm-delete').click();
+    const [del] = await postedOfType(page, 'deleteComment');
+    expect(del.threadId).toBe(threadId);
+
+    await simulate(page, { type: 'deleteCommentResult', requestId: del.requestId, ok: true });
+    await expect(page.locator('.comment-popover')).toBeHidden();
+  });
+
+  test('Req 24 US-23.13 AC3: a delete confirmed after the thread resolved elsewhere is dropped, not sent', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Original comment.');
+    await hostUpdate(page, '# Session expiry\n'); // floats it
+    await openFloatingRow(page);
+    await clearPosted(page);
+
+    await page.locator('.comment-popover-original .comment-popover-delete').click();
+    await expect(page.locator('.comment-delete-confirm')).toBeVisible();
+
+    // The thread resolves elsewhere while the confirm dialog is still open — an
+    // undo restoring the deleted text, exactly AC2's floating -> exact promotion.
+    await hostUpdate(page, DOC);
+    await expect(page.locator('.comment-popover-anchor-state')).toBeHidden(); // render() already caught up
+
+    // Confirming now must NOT delete a thread that just found its place.
+    await page.locator('.comment-delete-confirm-delete').click();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await postedOfType(page, 'deleteComment')).toHaveLength(0);
+  });
+
+  test("Req 24 US-23.13 AC3: an ordinary attached thread's delete is unaffected by the floating re-validation", async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+
+    // Never floated — the guard must only ever engage for a delete opened while
+    // the thread WAS floating, never for an ordinary attached-thread delete.
+    await page.locator('.comment-popover-original .comment-popover-delete').click();
+    await page.locator('.comment-delete-confirm-delete').click();
+    const [del] = await postedOfType(page, 'deleteComment');
+    expect(del.threadId).toBe(threadId);
   });
 });
 

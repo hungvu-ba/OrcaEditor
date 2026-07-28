@@ -346,7 +346,24 @@ export function initCommentPopover(
     if (inFlightDeleteRequest !== undefined) {
       return;
     }
+    // Req 24 US-23.13 AC3: only a delete opened against a FLOATING thread needs
+    // re-validation — an ordinary attached-thread delete is unaffected and must
+    // keep working exactly as before.
+    const wasFloating = anchor.state === 'floating';
     openConfirm('Delete this comment thread and all its replies?', anchorRect, () => {
+      // The confirm dialog can sit open across an async state push (AC2's
+      // floating→resolved auto-promotion, or a manual re-attach elsewhere) that
+      // `resolve.onChange` already re-renders the popover for — but not this
+      // dialog, whose `onConfirm` closure still holds the anchor as it was when
+      // the dialog opened. Re-read the LIVE anchor here rather than trusting it:
+      // if the thread left floating in that window, the confirmation is stale —
+      // drop it instead of deleting a thread that just found its place. The
+      // popover underneath already reflects the new state (the same onChange
+      // pass that moved it also re-rendered `render(anchor)`), so nothing further
+      // is needed to "refresh the surface".
+      if (wasFloating && resolve.anchorOf(anchor.threadId)?.state !== 'floating') {
+        return;
+      }
       const requestId = ++requestSeq;
       inFlightDeleteRequest = requestId;
       inFlightDeleteTarget = 'thread';

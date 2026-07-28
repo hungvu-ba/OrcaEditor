@@ -354,3 +354,17 @@ export function copyConfirmationMessage(threadCount: number, hiddenClosedCount: 
     ? base
     : `${base} (${hiddenClosedCount} Closed hidden)`;
 }
+
+/**
+ * Req 24 US-23.13 AC6: which panel becomes authoritative for a document when
+ * the current holder is gone — the first one still registered, in iteration
+ * (insertion) order. Generic and VS Code-API-free so it can be unit-tested
+ * against plain values; `provider.ts` calls it with its `Set<vscode.WebviewPanel>`.
+ * `undefined` when none remain (the document has no open panel left).
+ */
+export function nextAuthoritativePanel<T>(remaining: Iterable<T>): T | undefined {
+  for (const panel of remaining) {
+    return panel;
+  }
+  return undefined;
+}

@@ -40,7 +40,12 @@ import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 import { createCommentSupport, type CommentSupport } from './comments/commentController';
-import { copyConfirmationMessage, resolveCommentAuthor, safeOsUsername } from './comments/comment-utils';
+import {
+  copyConfirmationMessage,
+  nextAuthoritativePanel,
+  resolveCommentAuthor,
+  safeOsUsername,
+} from './comments/comment-utils';
 import { createSidecarStore } from './comments/sidecar-store';
 
 /**
@@ -739,6 +744,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
 
   /**
+   * Req 24 US-23.13 AC6: which panel's resolution pass is authoritative for a
+   * document, when two or more panels have it open at once. Only the
+   * authoritative panel's `commentAnchorUpdate` is applied and persisted; the
+   * other panels' own passes are dropped, so a same-document race between two
+   * DOMs/registries never lets "whichever posts last" decide the anchor.
+   * Assigned to the first panel that registers for a `docUriStr` (`case
+   * 'ready'`) and transferred to a survivor on dispose — no handling for the
+   * simultaneous-open race or a non-clean crash, both out of scope per this
+   * story's Open Questions.
+   */
+  private authoritativePanelByUri = new Map<string, vscode.WebviewPanel>();
+
+  /**
    * US-19.19: Zen/Focus mode là trạng thái GLOBAL — bật/tắt ở 1 tab lan sang
    * MỌI tab .md đang mở (cùng mô hình `globalReadingMode` bên dưới, kênh riêng).
    * `undefined` = chưa tab nào đổi trong phiên này → seed tab mới
@@ -1052,6 +1070,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             this.panelsByUri.set(docUriStr, panelsForUri);
           }
           panelsForUri.add(webviewPanel);
+          // Req 24 US-23.13 AC6: the first panel to register for this document
+          // becomes its authoritative resolver; a second/third panel opening
+          // later stays non-authoritative (see 'commentAnchorUpdate' below).
+          if (!this.authoritativePanelByUri.has(docUriStr)) {
+            this.authoritativePanelByUri.set(docUriStr, webviewPanel);
+          }
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
           const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
@@ -1411,6 +1435,40 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // reply, since the Reviewer's re-attach (or an automatic promotion)
           // would otherwise silently fail to survive a reload with no way to
           // know it needs a retry.
+          //
+          // Req 24 US-23.13 AC6: two panels open on the same document each run
+          // their own resolution pass and would each post a `commentAnchorUpdate`
+          // for the same thread handle — only the authoritative panel's is
+          // applied. `webviewPanel` is this handler's own closure (there is one
+          // `onDidReceiveMessage` per panel), so the sender's identity is already
+          // known without a client-sent field.
+          //
+          // Review fix: an in-memory-only relocation (`msg.origin === undefined`)
+          // is dropped silently, same as any other refused update below — the
+          // webview already applied its own resolution, so a refused update only
+          // leaves that ONE panel's native Range stale. But a PERSIST-worthy
+          // update (`msg.origin` set — a manual re-attach or an automatic
+          // promotion) must still reply on rejection: dropping it silently here
+          // would reintroduce exactly the bug AC1/AC2's comment above this one
+          // exists to prevent, just from the non-authoritative panel instead of a
+          // write failure — the Reviewer's re-attach looks like it worked (the
+          // webview already applied it optimistically) but never survives a
+          // reload, with no toast telling them to retry.
+          if (this.authoritativePanelByUri.get(docUriStr) !== webviewPanel) {
+            console.warn(
+              `orca-editor: comment anchor update from a non-authoritative panel dropped for ${docUriStr}`
+            );
+            if (msg.origin !== undefined) {
+              void postToWebview({
+                type: 'commentAnchorUpdateResult',
+                docUri: msg.docUri,
+                threadId: msg.threadId,
+                ok: false,
+                error: 'Another panel is the resolver of record for this document — nothing was persisted here.',
+              });
+            }
+            break;
+          }
           const error = await this.comments?.updateAnchor(msg, document);
           if (error) {
             console.warn(`orca-editor: comment anchor update refused — ${error}`);
@@ -1582,6 +1640,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         panels.delete(webviewPanel);
         if (panels.size === 0) {
           this.panelsByUri.delete(docUriStr);
+        }
+      }
+
+      // Req 24 US-23.13 AC6: authority transfers to a survivor when the
+      // authoritative panel is disposed. Only a clean dispose is handled — a
+      // hang/crash without one leaves the document unresolved until the user
+      // closes and reopens it, accepted per this story's Open Questions.
+      if (this.authoritativePanelByUri.get(docUriStr) === webviewPanel) {
+        const survivor = nextAuthoritativePanel(panels ?? []);
+        if (survivor) {
+          this.authoritativePanelByUri.set(docUriStr, survivor);
+        } else {
+          this.authoritativePanelByUri.delete(docUriStr);
         }
       }
     });

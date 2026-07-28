@@ -47,6 +47,7 @@ import {
   copyConfirmationMessage,
   createCommentRejection,
   deleteRejection,
+  nextAuthoritativePanel,
   replyRejection,
   resolveCommentAuthor,
   commentThreadContextValue,
@@ -1930,6 +1931,18 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
         (entry) => entry.command === `orcaEditor.${command}Comment` && entry.when === 'false'
       )
     ));
+}
+
+// --- Req 24 US-23.13 AC6: cross-panel resolver authority --------------------
+{
+  check('nextAuthoritativePanel: an empty set has no survivor',
+    nextAuthoritativePanel([]) === undefined);
+  check('nextAuthoritativePanel: a single remaining panel is picked',
+    nextAuthoritativePanel(['panelA']) === 'panelA');
+  check('nextAuthoritativePanel: several remaining panels pick the first in iteration order',
+    nextAuthoritativePanel(new Set(['panelA', 'panelB', 'panelC'])) === 'panelA');
+  check('nextAuthoritativePanel: does not depend on array vs Set — same order either way',
+    nextAuthoritativePanel(['panelB', 'panelA']) === 'panelB');
 }
 
 // --- Req 23 US-23.11 AC3: the one-directional content-drift measure ---------
