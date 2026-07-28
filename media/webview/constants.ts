@@ -214,6 +214,14 @@ export const ANCHOR_RESOLVE_CHUNK_SIZE = 25;
  */
 export const COMMENT_REPLY_RESULT_TIMEOUT_MS = 10_000;
 
+/**
+ * Req 24 US-23.12 AC2: how long the Comment tab waits for a
+ * `copyCommentsAsMarkdownResult`/reply before releasing the in-flight guard
+ * (host busy, panel disposed, message dropped). Same shape as the constant
+ * above.
+ */
+export const COMMENT_COPY_MARKDOWN_TIMEOUT_MS = 10_000;
+
 // --- Req 23 US-23.4 AC4: "Unresolved location" panel ---
 
 /** Pointer travel before a mousedown on a card becomes a drag rather than a click. */

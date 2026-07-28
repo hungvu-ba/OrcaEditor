@@ -342,3 +342,15 @@ export function statusChangeRejection(
 export function commentThreadLine(line: number): number {
   return line > 0 ? line - 1 : 0;
 }
+
+/**
+ * Req 24 US-23.12 AC1: `Copied {n} thread(s) as Markdown`, naming the "Hide
+ * closed" exclusion when it applies. Host-side (not `media/webview/`) because
+ * the confirmation itself is a `vscode.window.setStatusBarMessage` call.
+ */
+export function copyConfirmationMessage(threadCount: number, hiddenClosedCount: number | undefined): string {
+  const base = `Copied ${threadCount} thread${threadCount === 1 ? '' : 's'} as Markdown`;
+  return hiddenClosedCount === undefined || hiddenClosedCount === 0
+    ? base
+    : `${base} (${hiddenClosedCount} Closed hidden)`;
+}

@@ -53,6 +53,14 @@ export interface RightDockMenuItem {
   section?: string;
   /** Overrides the tab-level `menuSelection` for this row. Drives ARIA only. */
   selection?: 'single' | 'multiple' | 'none';
+  /**
+   * Req 24 US-23.12 AC8: row stays registered (never withheld) but inert, with
+   * `reason` shown as a tooltip; the native `disabled` button attribute blocks
+   * `onSelect` from firing. Read fresh on every menu open, same as the rest of
+   * the row.
+   */
+  disabled?: boolean;
+  reason?: string;
   onSelect(): void;
 }
 
@@ -272,6 +280,12 @@ export function createTabDock(
       } else {
         row.setAttribute('role', selection === 'multiple' ? 'menuitemcheckbox' : 'menuitemradio');
         row.setAttribute('aria-checked', String(item.checked));
+      }
+      if (item.disabled === true) {
+        row.disabled = true;
+        if (item.reason !== undefined) {
+          row.title = item.reason;
+        }
       }
       const check = document.createElement('span');
       check.className = 'right-dock-menu-check';

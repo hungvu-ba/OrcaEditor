@@ -93,6 +93,11 @@
         "command": "orcaEditor.reopenComment",
         "title": "Reopen Comment Thread",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.copyCommentsAsMarkdown",
+        "title": "Copy Comments as Markdown",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
@@ -130,6 +135,10 @@
         {
           "command": "orcaEditor.reopenComment",
           "when": "false"
+        },
+        {
+          "command": "orcaEditor.copyCommentsAsMarkdown",
+          "when": "activeCustomEditorId == 'orcaEditor.editor'"
         }
       ],
       "editor/title": [

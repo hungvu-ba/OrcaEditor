@@ -273,8 +273,11 @@ const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlig
 // Req 23 US-23.9: the Comment tab in the shared right dock — every thread in
 // the file, and the absorbed US-23.4 re-attach affordances for the floating
 // ones. Created AFTER the popover, which its rows hand threads to.
-const commentPanel = initCommentPanel(content, commentResolve, (threadId, rect, returnFocusTo) =>
-  commentPopover.open(threadId, rect, returnFocusTo)
+const commentPanel = initCommentPanel(
+  content,
+  commentResolve,
+  (threadId, rect, returnFocusTo) => commentPopover.open(threadId, rect, returnFocusTo),
+  vscode
 );
 toc.dock.registerTab(commentPanel.tab);
 // Req 23 US-23.3 AC3, revised by US-23.11 AC4: tells whoever is at the keyboard
@@ -538,6 +541,9 @@ window.addEventListener('message', (event) => {
       // author name the host will record.
       commentMenu.setDocUri(msg.docUri);
       commentResolve.setDocUri(msg.docUri);
+      // Req 24 US-23.12: the export header needs the workspace-relative display
+      // path — seeded once here like the rest of `InitConfig`, never round-tripped.
+      commentPanel.setDocument(msg.docUri, cfg.docRelativePath ?? '');
       commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 23 US-23.2: the popover echoes docUri back on reply/delete, and
       // needs the author name for its own-authorship delete gating.
@@ -695,6 +701,16 @@ window.addEventListener('message', (event) => {
       // Req 24 US-23.13 AC1/AC2: keyed by threadId, not requestId — the
       // `commentAnchorUpdate` this replies to carries none.
       commentResolve.notifyAnchorUpdateResult(msg.threadId, msg.ok, msg.error);
+      break;
+    }
+    case 'requestCommentsMarkdownExport': {
+      // Req 24 US-23.12: the `orcaEditor.copyCommentsAsMarkdown` command asked
+      // THIS panel for its current export — reply carries the same requestId.
+      commentPanel.handleExportRequest(msg.requestId);
+      break;
+    }
+    case 'copyCommentsAsMarkdownResult': {
+      commentPanel.notifyCopyResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'namespaceListResult': {

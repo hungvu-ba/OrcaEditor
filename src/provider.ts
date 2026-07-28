@@ -40,7 +40,7 @@ import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
 import { createCommentSupport, type CommentSupport } from './comments/commentController';
-import { resolveCommentAuthor, safeOsUsername } from './comments/comment-utils';
+import { copyConfirmationMessage, resolveCommentAuthor, safeOsUsername } from './comments/comment-utils';
 import { createSidecarStore } from './comments/sidecar-store';
 
 /**
@@ -60,6 +60,15 @@ const UNDO_SETTLE_MS = 500;
  * case-sensitive, so no fold there.
  */
 const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+/**
+ * Req 24 US-23.12 AC1: how long `copyActiveCommentsAsMarkdown` waits for the
+ * active panel's `requestCommentsMarkdownExport` reply before giving up. Same
+ * value as the webview's own `COMMENT_COPY_MARKDOWN_TIMEOUT_MS`
+ * (`media/webview/constants.ts`) — not imported across the host/webview
+ * bundle boundary, so kept as a mirrored constant instead.
+ */
+const COMMENT_COPY_MARKDOWN_HOST_TIMEOUT_MS = 10_000;
 
 /**
  * Promise resolve khi `document` đổi lần kế tiếp, hoặc sau `timeoutMs` nếu không
@@ -263,6 +272,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               (document) => provider.syncCommentThreads(document)
             )
         )
+      ),
+      // Req 24 US-23.12 AC1: Palette-visible (unlike the five commands above,
+      // all `when: false`) — targets `activePanel`, the same "focused Orca
+      // panel" `postToActivePanel` uses.
+      vscode.commands.registerCommand('orcaEditor.copyCommentsAsMarkdown', () =>
+        provider.copyActiveCommentsAsMarkdown()
       ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
@@ -565,6 +580,89 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   /** Post `message` to the focused panel only; a no-op if none is focused. */
   public postToActivePanel(message: HostToWebview): void {
     void this.activePanel?.webview.postMessage(message);
+  }
+
+  /**
+   * Req 24 US-23.12 AC1: `orcaEditor.copyCommentsAsMarkdown` from the Command
+   * Palette has no document context of its own — `activePanel` (above) is the
+   * same "focused Orca panel" target `postToActivePanel` uses, which also
+   * gives AC1's two-panel case for free (the active one is the one Palette
+   * commands run against) and its no-panel case (`undefined` → unavailable).
+   *
+   * Request ids for this host-initiated round trip are minted strictly
+   * NEGATIVE (`nextMarkdownExportRequestId` counts up, the id sent is its
+   * negation) so they can never collide with a webview panel's own
+   * independently-minted, strictly-positive `requestId` for its menu-triggered
+   * `copyCommentsAsMarkdown` (`comment-panel.ts`'s `copyRequestSeq`) — both
+   * counters otherwise start at 1 on every fresh panel/session, which without
+   * this split let one flow's reply resolve the other's pending promise
+   * (review finding, 2026-07-28). The sign alone is what the dispatch switch
+   * below uses to route a reply to the right flow, not map presence.
+   */
+  private pendingMarkdownExportRequests = new Map<
+    number,
+    (msg: Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }> | undefined) => void
+  >();
+  private nextMarkdownExportRequestId = 1;
+
+  public async copyActiveCommentsAsMarkdown(): Promise<void> {
+    const panel = this.activePanel;
+    if (panel === undefined) {
+      void vscode.window.showInformationMessage('No Orca editor is active to copy comments from.');
+      return;
+    }
+    const requestId = -(this.nextMarkdownExportRequestId++);
+    const result = await new Promise<Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }> | undefined>(
+      (resolve) => {
+        this.pendingMarkdownExportRequests.set(requestId, resolve);
+        setTimeout(() => {
+          // A late reply for this id after this fires is still unambiguously
+          // routed by the dispatch switch below (negative id, this map no
+          // longer holds it) — dropped silently, never mistaken for a fresh
+          // menu-triggered flow (review finding, 2026-07-28).
+          if (this.pendingMarkdownExportRequests.delete(requestId)) {
+            resolve(undefined);
+          }
+        }, COMMENT_COPY_MARKDOWN_HOST_TIMEOUT_MS);
+        void panel.webview.postMessage({ type: 'requestCommentsMarkdownExport', requestId } satisfies HostToWebview);
+      }
+    );
+    if (result === undefined) {
+      void vscode.window.showWarningMessage('Copying comments as Markdown timed out.');
+      return;
+    }
+    await this.finishCopyCommentsAsMarkdown(result);
+  }
+
+  /**
+   * Shared by the menu-triggered flow (`case 'copyCommentsAsMarkdown'` below,
+   * which also releases the webview's own in-flight guard) and the command
+   * path above (which has no such guard to release — `webviewPanel` omitted).
+   */
+  private async finishCopyCommentsAsMarkdown(
+    msg: Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }>,
+    webviewPanel?: vscode.WebviewPanel
+  ): Promise<void> {
+    if (!msg.exportable) {
+      // AC1: the command path's own equivalent of the disabled menu item —
+      // never a silent no-op, never an empty clipboard write.
+      void vscode.window.showInformationMessage(msg.reason);
+      return;
+    }
+    try {
+      await vscode.env.clipboard.writeText(msg.markdown);
+      vscode.window.setStatusBarMessage(copyConfirmationMessage(msg.threadCount, msg.hiddenClosedCount), 4000);
+      void webviewPanel?.webview.postMessage({ type: 'copyCommentsAsMarkdownResult', requestId: msg.requestId, ok: true });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      void vscode.window.showWarningMessage(`Could not copy comments as Markdown: ${reason}`);
+      void webviewPanel?.webview.postMessage({
+        type: 'copyCommentsAsMarkdownResult',
+        requestId: msg.requestId,
+        ok: false,
+        error: reason,
+      });
+    }
   }
 
   /**
@@ -1004,6 +1102,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 wysiwygCfg.get<string>('comments.authorName'),
                 safeOsUsername()
               ),
+              // Req 24 US-23.12 AC4: seeded once, like the rest of this config —
+              // the export builds synchronously webview-side (AC2), so it cannot
+              // round-trip to the host mid-build for the header's own path.
+              docRelativePath: vscode.workspace.asRelativePath(document.uri, false),
               // Req 23 US-23.2: per-file persisted "Show Comments" toggle —
               // defaults off until the Author first turns it on for this file.
               commentHighlightOn: this.context.workspaceState.get<boolean>(
@@ -1384,6 +1486,28 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           if (outcome.ok) {
             this.syncCommentThreads(document);
           }
+          break;
+        }
+        case 'copyCommentsAsMarkdown': {
+          // Req 24 US-23.12: a NEGATIVE requestId is always a reply to a
+          // host-initiated `requestCommentsMarkdownExport` (Command Palette
+          // path) — `copyActiveCommentsAsMarkdown` mints those, a webview
+          // panel's own menu-triggered flow mints only positive ones, so the
+          // sign alone disambiguates without relying on the map still holding
+          // the entry. A negative id arriving after its own timeout already
+          // deleted the pending resolver is dropped silently here — it must
+          // never fall through to the menu-triggered write below, which would
+          // clobber the clipboard with a stale export after the user was
+          // already told the request timed out (review finding, 2026-07-28).
+          if (msg.requestId < 0) {
+            const pending = this.pendingMarkdownExportRequests.get(msg.requestId);
+            if (pending !== undefined) {
+              this.pendingMarkdownExportRequests.delete(msg.requestId);
+              pending(msg);
+            }
+            break;
+          }
+          await this.finishCopyCommentsAsMarkdown(msg, webviewPanel);
           break;
         }
         case 'commentHighlightToggled': {

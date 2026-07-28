@@ -44,6 +44,7 @@ import {
   anchorUpdateRejection,
   authorNamePromptRejection,
   commentThreadLine,
+  copyConfirmationMessage,
   createCommentRejection,
   deleteRejection,
   replyRejection,
@@ -57,6 +58,15 @@ import {
   type ReplyMessage,
   type StatusChangeMessage,
 } from '../src/comments/comment-utils';
+import {
+  buildSnippetLine,
+  copyDisabledReason,
+  escapeMarkdownInline,
+  formatExportTimestamp,
+  renderCommentsMarkdown,
+  type ExportSnapshot,
+  type ExportThread,
+} from '../media/webview/comment-copy-markdown';
 import {
   buildAnchorUpdateLine,
   buildCommentLine,
@@ -635,14 +645,14 @@ const toWebview: HostToWebview[] = [
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
-    commentAuthorName: 'hungvu', commentHighlightOn: false,
+    commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
-    commentAuthorName: 'hungvu', commentHighlightOn: false,
+    commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
@@ -2441,6 +2451,233 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar drift: a sidecar is recognised', isSidecarName('foo.md.orca-comments.jsonl'));
   check('sidecar drift: the paired .md is not a sidecar', isSidecarName('foo.md') === false);
   check('sidecar drift: an unrelated jsonl is not a sidecar', isSidecarName('data.jsonl') === false);
+}
+
+// --- Req 24 US-23.12: "Copy all as Markdown" serializer ---------------------
+{
+  eq('copy-markdown: timestamp format, +07:00 offset', formatExportTimestamp('2026-07-26T06:42:00.000Z', 420),
+    '2026-07-26 13:42 +07:00');
+  eq('copy-markdown: timestamp format, negative offset', formatExportTimestamp('2026-07-26T06:42:00.000Z', -300),
+    '2026-07-26 01:42 -05:00');
+  eq('copy-markdown: timestamp format, UTC (zero offset)', formatExportTimestamp('2026-07-26T06:42:00.000Z', 0),
+    '2026-07-26 06:42 +00:00');
+  check('copy-markdown: an unparseable timestamp is returned as-is, never "Invalid Date"',
+    formatExportTimestamp('not-a-date', 0) === 'not-a-date');
+
+  eq('copy-markdown: escapes the CommonMark punctuation set', escapeMarkdownInline('a *b* _c_ [d](e) <f> `g` h|i ~j# k'),
+    'a \\*b\\* \\_c\\_ \\[d\\](e) \\<f\\> \\`g\\` h\\|i \\~j\\# k');
+  eq('copy-markdown: escapes a leading dash list marker', escapeMarkdownInline('- looks like a list item'),
+    '\\- looks like a list item');
+  eq('copy-markdown: escapes a leading ordered-list marker', escapeMarkdownInline('1. looks ordered'),
+    '1\\. looks ordered');
+  check('copy-markdown: a mid-string dash is untouched', escapeMarkdownInline('a - b') === 'a - b');
+
+  eq('copy-markdown: snippet collapses whitespace', buildSnippetLine('line one\n  line   two  '), '> line one line two');
+  check('copy-markdown: a textless anchor omits the snippet entirely', buildSnippetLine('   ') === undefined);
+  {
+    const longText = 'x'.repeat(310);
+    const snippet = buildSnippetLine(longText);
+    check('copy-markdown: snippet is truncated at 300 code points with an ellipsis',
+      snippet !== undefined && snippet === `> ${'x'.repeat(300)}…`);
+  }
+  {
+    // Surrogate pair (a non-BMP emoji) landing exactly on the 300-char boundary
+    // must never split into a lone surrogate.
+    const emoji = '😀'; // 2 UTF-16 code units, 1 code point
+    const longText = 'x'.repeat(299) + emoji + 'y'.repeat(10);
+    const snippet = buildSnippetLine(longText) ?? '';
+    check('copy-markdown: truncation never splits a surrogate pair',
+      !/[\uD800-\uDBFF]$/.test(snippet.replace('…', '')) && snippet.includes(emoji));
+  }
+
+  const thread = (over: Partial<ExportThread> = {}): ExportThread => ({
+    group: 'open',
+    status: 'Open',
+    location: { kind: 'line', line: 88, approximate: false },
+    lastTransitionAuthor: 'hungvu',
+    lastTransitionTimestamp: '2026-07-26T06:42:00.000Z',
+    anchorText: 'the anchored text, whitespace-collapsed and truncated',
+    comments: [{ author: 'hungvu', timestamp: '2026-07-26T06:42:00.000Z', body: 'Why does this contradict US-23.4?' }],
+    ...over,
+  });
+
+  {
+    const snapshot: ExportSnapshot = {
+      docRelativePath: 'docs/Requirement - 23.md',
+      exportedAtIso: '2026-07-27T07:03:00.000Z',
+      foreignSidecar: false,
+      threads: [thread()],
+    };
+    const md = renderCommentsMarkdown(snapshot);
+    check('copy-markdown: header names the doc path, thread count and export time',
+      md.startsWith('## Review — docs/Requirement - 23.md · 1 thread · '));
+    check('copy-markdown: singular "1 thread", not "1 threads"', md.includes('· 1 thread ·'));
+    check('copy-markdown: group heading with count', md.includes('### Open (1)'));
+    check('copy-markdown: thread heading — status, location, author, timestamp, in order',
+      md.includes('#### Open · Ln 88 · hungvu · '));
+    check('copy-markdown: blockquoted snippet present for a non-floating, non-textless anchor',
+      md.includes('> the anchored text, whitespace-collapsed and truncated'));
+    check('copy-markdown: the opening comment is a top-level bullet',
+      md.includes('- **hungvu** · ') && md.includes(' — Why does this contradict US-23.4?'));
+    check('copy-markdown: ends with a trailing newline, LF only', md.endsWith('\n') && !md.includes('\r'));
+  }
+
+  {
+    // AC4: two fields never appear — the thread id, and any status-change line
+    // other than the last (no "trail").
+    const t = thread({
+      lastTransitionAuthor: 'otheruser',
+      lastTransitionTimestamp: '2026-07-26T07:03:00.000Z',
+      comments: [
+        { author: 'hungvu', timestamp: '2026-07-26T06:42:00.000Z', body: 'Original comment.' },
+        { author: 'otheruser', timestamp: '2026-07-26T07:03:00.000Z', body: 'Fixed, please re-check.' },
+      ],
+    });
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [t],
+    });
+    check('copy-markdown: a reply is indented under the opening comment',
+      md.includes('  - **otheruser** · ') && md.includes(' — Fixed, please re-check.'));
+    check('copy-markdown: no thread id anywhere in the output (AC4 exclusion)', !/\bthreadId\b|\bid:\s*['"]/.test(md));
+  }
+
+  {
+    // AC4: a floating thread — no blockquote, its own location wording, status kept independent of "floating".
+    const t = thread({ group: 'floating', status: 'Resolved', location: { kind: 'floating' }, anchorText: 'unused' });
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [t],
+    });
+    check('copy-markdown: floating group label is "Unresolved location"', md.includes('### Unresolved location (1)'));
+    check('copy-markdown: floating thread heading reads "No anchor — Unresolved location", status kept',
+      md.includes('#### Resolved · No anchor — Unresolved location · '));
+    check('copy-markdown: no blockquote line for a floating thread', !md.includes('> unused'));
+  }
+
+  {
+    // AC4: whole-document and approximate-range locations.
+    const wholeDoc = thread({ location: { kind: 'wholeDocument', approximate: true } });
+    const range = thread({ location: { kind: 'range', start: 12, end: 18, approximate: true } });
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false,
+      threads: [wholeDoc, range],
+    });
+    check('copy-markdown: whole-document location with approximate marker',
+      md.includes('Whole document (approximate)'));
+    check('copy-markdown: multi-line range location with approximate marker', md.includes('Ln 12–18 (approximate)'));
+  }
+
+  {
+    // AC3: empty groups omitted, fixed order Open -> Unresolved -> Resolved -> Closed.
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false,
+      threads: [thread({ group: 'closed', status: 'Closed' }), thread({ group: 'open' })],
+    });
+    const openIdx = md.indexOf('### Open');
+    const closedIdx = md.indexOf('### Closed');
+    check('copy-markdown: Open group precedes Closed group', openIdx >= 0 && closedIdx > openIdx);
+    check('copy-markdown: no empty group headings for absent groups',
+      !md.includes('### Unresolved location') && !md.includes('### Resolved'));
+  }
+
+  {
+    // AC4: the foreign-sidecar cause line sits directly under the document header.
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: true, threads: [thread()],
+    });
+    const lines = md.split('\n\n');
+    check('copy-markdown: foreign-sidecar banner is the segment right after the header',
+      lines[0].startsWith('## Review') && lines[1].includes('may describe a different document'));
+  }
+
+  {
+    // AC4: an absent/blank author renders the literal "Unknown author".
+    const t = thread({
+      lastTransitionAuthor: '  ',
+      comments: [{ author: '', timestamp: '2026-07-26T06:42:00.000Z', body: 'x' }],
+    });
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [t],
+    });
+    check('copy-markdown: blank thread-heading author renders "Unknown author"', md.includes('· Unknown author ·'));
+    check('copy-markdown: blank comment author renders "Unknown author"', md.includes('**Unknown author** · '));
+  }
+
+  {
+    // AC6: escaping must never alter the export's own structure — same heading
+    // and top-level list-item counts whether or not the body/snippet carry
+    // Markdown-significant characters.
+    const headingCount = (s: string): number => (s.match(/^#{2,4} /gm) ?? []).length;
+    const listItemCount = (s: string): number => (s.match(/^-\s|^  - /gm) ?? []).length;
+    const plain = thread();
+    const hostile = thread({
+      anchorText: '# not a heading\n- not a list item',
+      comments: [
+        // Single-line on purpose — a multi-line body is fenced (verbatim), not
+        // escaped; the fenced case is covered by its own test below.
+        { author: '*bold* author', timestamp: '2026-07-26T06:42:00.000Z', body: '# fake heading - fake list `code`' },
+      ],
+    });
+    const mdPlain = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [plain],
+    });
+    const mdHostile = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [hostile],
+    });
+    eq('copy-markdown round-trip: heading count unchanged by hostile body/snippet content',
+      headingCount(mdHostile), headingCount(mdPlain));
+    eq('copy-markdown round-trip: top-level list-item count unchanged by hostile body/snippet content',
+      listItemCount(mdHostile), listItemCount(mdPlain));
+    check('copy-markdown round-trip: the hostile snippet\'s "#"/"-" survive literally inside the blockquote',
+      mdHostile.includes('> # not a heading - not a list item'));
+    check('copy-markdown round-trip: the hostile body\'s leading "#" and its backticks are escaped',
+      mdHostile.includes('\\# fake heading - fake list \\`code\\`'));
+  }
+
+  {
+    // AC6: a multi-line body is fenced, never inlined — with a fence longer
+    // than any backtick run already inside the body.
+    const t = thread({ comments: [{ author: 'hungvu', timestamp: '2026-07-26T06:42:00.000Z', body: 'line one\n\nline two ``` still inside' }] });
+    const md = renderCommentsMarkdown({
+      docRelativePath: 'a.md', exportedAtIso: '2026-07-27T07:03:00.000Z', foreignSidecar: false, threads: [t],
+    });
+    check('copy-markdown: multi-line body is wrapped in a fence at least 4 backticks long',
+      /````+\n/.test(md));
+    check('copy-markdown: the fenced body text is verbatim (not escaped)',
+      md.includes('line two ``` still inside'));
+  }
+
+  // AC8: the six disabled-reason causes, in priority order.
+  const enabledInput = {
+    sidecarProblem: undefined, loading: false, sidecarForeign: false,
+    totalThreadCount: 3, exportableThreadCount: 3, hideClosed: false,
+  };
+  check('copy-disabled: nothing disables an ordinary exportable file',
+    copyDisabledReason(enabledInput) === undefined);
+  check('copy-disabled: a sidecar problem always wins first',
+    copyDisabledReason({ ...enabledInput, sidecarProblem: 'The comment sidecar could not be read.' })
+      === 'The comment sidecar could not be read.');
+  check('copy-disabled: loading beats an empty-looking thread list',
+    copyDisabledReason({ ...enabledInput, loading: true, totalThreadCount: 0, exportableThreadCount: 0 }) !== undefined);
+  check('copy-disabled: foreign sidecar with zero threads names that cause',
+    (copyDisabledReason({ ...enabledInput, sidecarForeign: true, totalThreadCount: 0, exportableThreadCount: 0 }) ?? '')
+      .includes('may describe a different document'));
+  check('copy-disabled: foreign sidecar with real threads present does NOT disable',
+    copyDisabledReason({ ...enabledInput, sidecarForeign: true }) === undefined);
+  check('copy-disabled: "Hide closed" hiding everything gets its own reason',
+    copyDisabledReason({ ...enabledInput, exportableThreadCount: 0, hideClosed: true, totalThreadCount: 3 })
+      !== undefined);
+  check('copy-disabled: genuinely zero threads gets the generic no-comments reason',
+    copyDisabledReason({ ...enabledInput, totalThreadCount: 0, exportableThreadCount: 0 })
+      === 'No comments in this file to copy.');
+
+  // AC1: the status-bar confirmation wording (host-side, comment-utils.ts).
+  eq('copy-confirmation: singular, no hidden-closed suffix', copyConfirmationMessage(1, undefined),
+    'Copied 1 thread as Markdown');
+  eq('copy-confirmation: plural', copyConfirmationMessage(9, undefined), 'Copied 9 threads as Markdown');
+  eq('copy-confirmation: names the excluded "Hide closed" count', copyConfirmationMessage(9, 3),
+    'Copied 9 threads as Markdown (3 Closed hidden)');
+  eq('copy-confirmation: a zero hidden-closed count is not named', copyConfirmationMessage(9, 0),
+    'Copied 9 threads as Markdown');
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

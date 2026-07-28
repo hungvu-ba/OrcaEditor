@@ -31,6 +31,7 @@ const DEFAULT_CONFIG: InitConfig = {
   readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
   trigger: { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' },
   commentAuthorName: 'harness-user',
+  docRelativePath: 'harness.md',
   commentHighlightOn: false,
   // US-2.8: the harness serves dist/webview over file://, so the engine bundle
   // sits right beside main.js; no nonce is enforced here (no CSP meta).

@@ -117,6 +117,14 @@ export interface InitConfig {
    */
   commentAuthorName: string;
   /**
+   * Req 24 US-23.12 AC4: workspace-relative path (`vscode.workspace.asRelativePath`,
+   * forward slashes) for the exported Markdown's `## Review — <path> ...`
+   * header. Seeded once at `init` like the rest of this config — the export
+   * builds synchronously webview-side (AC2), so it cannot round-trip to the
+   * host for this mid-build.
+   */
+  docRelativePath: string;
+  /**
    * Req 23 US-23.2: the "Show Comments" toolbar toggle's persisted state for
    * THIS file, read from `context.workspaceState` (keyed by docUri) — the
    * first user of `workspaceState` in this codebase. Defaults to off until the
@@ -597,7 +605,26 @@ export type WebviewToHost =
    * a per-file UI preference; unlike `zenChanged`/`readingModeChanged` it is
    * NOT broadcast to other panels (a per-file setting, not a global one).
    */
-  | { type: 'commentHighlightToggled'; docUri: string; on: boolean };
+  | { type: 'commentHighlightToggled'; docUri: string; on: boolean }
+  /**
+   * Req 24 US-23.12: reply to a menu click ("Copy all as Markdown", self-minted
+   * `requestId`) or to a `requestCommentsMarkdownExport` (host-minted
+   * `requestId` echoed back). `exportable: true` carries the built Markdown for
+   * the host to write to the clipboard; `threadCount`/`hiddenClosedCount` feed
+   * AC1's confirmation wording. `exportable: false` is the nothing-to-export
+   * case, reachable only via the host-initiated round trip — the menu item is
+   * disabled instead of sending this variant (AC8).
+   */
+  | {
+      type: 'copyCommentsAsMarkdown';
+      requestId: number;
+      docUri: string;
+      exportable: true;
+      markdown: string;
+      threadCount: number;
+      hiddenClosedCount?: number;
+    }
+  | { type: 'copyCommentsAsMarkdown'; requestId: number; docUri: string; exportable: false; reason: string };
 
 /** Message host → webview (discriminated theo `type`). */
 export type HostToWebview =
@@ -754,4 +781,17 @@ export type HostToWebview =
    * a successful persist has already been applied in the webview's own
    * registry, so there is nothing left to reconcile.
    */
-  | { type: 'commentAnchorUpdateResult'; docUri: string; threadId: string; ok: boolean; error?: string };
+  | { type: 'commentAnchorUpdateResult'; docUri: string; threadId: string; ok: boolean; error?: string }
+  /**
+   * Req 24 US-23.12: the `orcaEditor.copyCommentsAsMarkdown` command asks this
+   * panel — the one resolved as the active document's Orca editor — to build
+   * its current export using this panel's own live sort/"Hide closed" state,
+   * and reply with `copyCommentsAsMarkdown` under the same `requestId`.
+   */
+  | { type: 'requestCommentsMarkdownExport'; requestId: number }
+  /**
+   * Req 24 US-23.12: reply to `copyCommentsAsMarkdown`. `ok: false` carries the
+   * clipboard-write rejection reason (AC1); `ok: true` carries nothing else —
+   * the confirmation/`showInformationMessage` was already shown host-side.
+   */
+  | { type: 'copyCommentsAsMarkdownResult'; requestId: number; ok: boolean; error?: string };

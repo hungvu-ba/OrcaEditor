@@ -194,11 +194,12 @@ test('the ⋯ menu holds a sort group and a toggle, and sorting is live', async 
   await openWith(page, ALL);
   await openTabMenu(page);
 
-  // Two sections in one menu — the per-item selection mode US-23.9 added to the
-  // dock. US-23.12's "Copy all as Markdown" slots in beside them.
-  await expect(page.locator('.right-dock-menu-title')).toHaveText(['Sort', 'Show']);
+  // Three sections in one menu — the per-item selection mode US-23.9 added to
+  // the dock, plus US-23.12's plain "Copy all as Markdown" command row.
+  await expect(page.locator('.right-dock-menu-title')).toHaveText(['Sort', 'Show', 'Export']);
   await expect(page.locator('.right-dock-menu-item[role="menuitemradio"]')).toHaveCount(2);
   await expect(page.locator('.right-dock-menu-item[role="menuitemcheckbox"]')).toHaveCount(1);
+  await expect(page.locator('.right-dock-menu-item[role="menuitem"]')).toHaveCount(1);
 
   await page.locator('.right-dock-menu-item', { hasText: 'Oldest first' }).click();
   const openSnippets = page.locator('.comment-row[data-group="open"] .comment-row-snippet');

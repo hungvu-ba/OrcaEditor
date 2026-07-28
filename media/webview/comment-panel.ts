@@ -23,20 +23,30 @@
  * thread's Range (US-23.6), and never touches the Open/Resolved/Closed axis
  * (US-23.3), because floating is orthogonal to it.
  */
-import { anchorCandidates, type AnchorCandidateNode } from './block-map';
+import { anchorCandidates, commentAnchorLineRange, type AnchorCandidateNode } from './block-map';
 import { normalizeAnchorText, rankReattachTargets, type ReattachTarget } from './comment-anchor';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
 import {
   ANCHOR_REEVAL_DEBOUNCE_MS,
+  COMMENT_COPY_MARKDOWN_TIMEOUT_MS,
   COMMENT_PANEL_DRAG_THRESHOLD_PX,
   COMMENT_PANEL_REATTACH_SUGGESTIONS,
   COMMENT_PANEL_SNIPPET_CHARS,
 } from './constants';
+import {
+  copyDisabledReason,
+  renderCommentsMarkdown,
+  type ExportComment,
+  type ExportLocation,
+  type ExportSnapshot,
+  type ExportThread,
+} from './comment-copy-markdown';
 import { el, positionNear, showToast } from './dom-utils';
 import type { RightDockTab } from './right-dock';
 import { truncateDisplay } from './trigger-popup';
 import { initPopoverDismiss, registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { CommentSidecarState } from '../../src/shared/messages';
+import type { VsCodeApi } from './vscode-api';
 
 export interface CommentPanelController {
   /** The dock tab descriptor — registered by main.ts on the shared container. */
@@ -55,6 +65,15 @@ export interface CommentPanelController {
   beginLoad(): void;
   /** Rebuild now (coalesced). Safe to call while the tab is hidden. */
   refresh(): void;
+  /** Req 24 US-23.12: the doc uri/relative path the export header and its `docUri` guard need. */
+  setDocument(uri: string, relativePath: string): void;
+  /**
+   * Req 24 US-23.12 AC1: the `orcaEditor.copyCommentsAsMarkdown` command asked
+   * THIS panel to build its export using its own live sort/"Hide closed" state.
+   */
+  handleExportRequest(requestId: number): void;
+  /** Req 24 US-23.12 AC2: reply to this panel's own menu-triggered `copyCommentsAsMarkdown`. */
+  notifyCopyResult(requestId: number, ok: boolean, error?: string): void;
 }
 
 /** The drop target currently under the pointer/selection, plus the overlay marking it. */
@@ -181,7 +200,9 @@ export function initCommentPanel(
    * focus to `returnFocusTo` when it closes. Injected rather than imported so the
    * list never reaches into the popover's internals.
    */
-  openThread: (threadId: string, rect: DOMRect, returnFocusTo?: HTMLElement) => void
+  openThread: (threadId: string, rect: DOMRect, returnFocusTo?: HTMLElement) => void,
+  /** Req 24 US-23.12: posts `copyCommentsAsMarkdown`/its reply — this tab owns the export's own trigger. */
+  vscode: VsCodeApi
 ): CommentPanelController {
   // The tab BODY, not a panel: the dock owns the panel, the strip and visibility.
   // It carries an author `display: flex`, so editor.css owes it a paired
@@ -698,6 +719,14 @@ export function initCommentPanel(
   /** The host's report on the sidecar; `undefined` until the first snapshot. */
   let sidecar: CommentSidecarState | undefined;
   let loading = true;
+  /** Req 24 US-23.12: echoed on `copyCommentsAsMarkdown`/`copyCommentsAsMarkdownResult`. */
+  let docUri = '';
+  let docRelativePath = '';
+  let copyRequestSeq = 0;
+  /** In-flight guard for THIS tab's own menu-triggered export only (AC2) — a
+   *  host-triggered `requestCommentsMarkdownExport` replies once and needs none. */
+  let inFlightCopyRequest: number | undefined;
+  let copyTimeoutHandle: number | undefined;
 
   function activateRow(thread: ThreadAnchor, row: HTMLElement): void {
     // Anything still in hand belongs to the row the user just left: a walk armed
@@ -907,6 +936,207 @@ export function initCommentPanel(
     return item;
   }
 
+  /** The tab's current group/"Hide closed" filter, shared by the row list and the export. */
+  function groupedThreads(): Map<GroupKey, ThreadAnchor[]> {
+    const grouped = new Map<GroupKey, ThreadAnchor[]>();
+    for (const thread of resolve.allThreads()) {
+      const key = groupOf(thread);
+      if (key === 'closed' && hideClosed) {
+        continue;
+      }
+      const bucket = grouped.get(key);
+      if (bucket === undefined) {
+        grouped.set(key, [thread]);
+      } else {
+        bucket.push(thread);
+      }
+    }
+    return grouped;
+  }
+
+  /** The tab's current sort — shared by the row list and the export (AC3). */
+  function compareByCurrentSort(a: ThreadAnchor, b: ThreadAnchor): number {
+    // Parsed, not lexicographic: the sidecar is a plain JSONL file a merge or a
+    // hand edit can leave holding `+07:00` offsets and millisecond-less stamps,
+    // which string-compare in the wrong order. Same rule as sidecar-format.ts's
+    // own `byTimestamp`.
+    const delta = transitionTime(b) - transitionTime(a);
+    // Ties broken by thread id, so the order is total and a re-render with
+    // identical data can never reshuffle rows under the reader.
+    return (newestFirst ? delta : -delta) || a.threadId.localeCompare(b.threadId);
+  }
+
+  function exportableThreadCount(): number {
+    let n = 0;
+    for (const bucket of groupedThreads().values()) {
+      n += bucket.length;
+    }
+    return n;
+  }
+
+  function closedThreadCount(): number {
+    let n = 0;
+    for (const thread of resolve.allThreads()) {
+      if (groupOf(thread) === 'closed') {
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /** AC8: read fresh on every menu open AND on invoke (the last thread can be deleted while the menu stays open). */
+  function currentCopyDisabledReason(): string | undefined {
+    return copyDisabledReason({
+      sidecarProblem: sidecar?.problem,
+      loading,
+      sidecarForeign: sidecar?.foreign === true,
+      totalThreadCount: resolve.allThreads().length,
+      exportableThreadCount: exportableThreadCount(),
+      hideClosed,
+    });
+  }
+
+  /** AC3: this group's threads in the tab's own current sort — never a hardcoded default. */
+  function exportableThreadsSorted(): ThreadAnchor[] {
+    const grouped = groupedThreads();
+    const ordered: ThreadAnchor[] = [];
+    for (const key of GROUP_ORDER) {
+      const bucket = grouped.get(key);
+      if (bucket === undefined) {
+        continue;
+      }
+      ordered.push(...[...bucket].sort(compareByCurrentSort));
+    }
+    return ordered;
+  }
+
+  /** AC4: `Whole document` for a missing/unmappable carrier — never `Ln 0`. */
+  function resolveExportLocation(thread: ThreadAnchor): ExportLocation {
+    if (thread.state === 'floating') {
+      return { kind: 'floating' };
+    }
+    const approximate = thread.state === 'approximate';
+    const carrier = thread.carrier;
+    // A re-render (main.ts) leaves every carrier stale until the debounced
+    // re-resolution pass runs (ANCHOR_REEVAL_DEBOUNCE_MS later) — the same
+    // window comment-gutter.ts/comment-highlight.ts guard with `isConnected`
+    // before trusting a carrier (review finding, 2026-07-28).
+    if (carrier !== undefined && carrier !== content && carrier.isConnected) {
+      const range = commentAnchorLineRange(content, carrier);
+      if (range !== null) {
+        return range.start === range.end
+          ? { kind: 'line', line: range.start, approximate }
+          : { kind: 'range', start: range.start, end: range.end, approximate };
+      }
+    }
+    // Carrier missing, detached, or unmappable — fall back to the last
+    // resolved single line rather than dropping straight to "Whole document",
+    // which loses more information than this plain number still carries.
+    return thread.lastKnownLine > 0
+      ? { kind: 'line', line: thread.lastKnownLine, approximate }
+      : { kind: 'wholeDocument', approximate };
+  }
+
+  function toExportThread(thread: ThreadAnchor): ExportThread {
+    // AC4: the LAST transition's author/time, not the row's own (the opener) —
+    // falls back to the opener only for a thread that has never left Open.
+    const lastTransition = thread.statusChanges[thread.statusChanges.length - 1];
+    const comments: ExportComment[] = [
+      { author: thread.author, timestamp: thread.createdAt, body: thread.body },
+      ...thread.replies.map((reply) => ({ author: reply.author, timestamp: reply.timestamp, body: reply.body })),
+    ];
+    // `??` alone is not enough: the sidecar validator accepts `timestamp: ''`
+    // and the host forwards it verbatim (same trap `lastTransitionAt` above
+    // already guards against) — an empty string would export a heading with a
+    // dangling trailing separator instead of falling back to creation
+    // (review finding, 2026-07-28).
+    const lastTransitionTimestamp =
+      lastTransition?.timestamp === undefined || lastTransition.timestamp === ''
+        ? thread.createdAt
+        : lastTransition.timestamp;
+    return {
+      group: groupOf(thread),
+      status: thread.status,
+      location: resolveExportLocation(thread),
+      lastTransitionAuthor: lastTransition?.author ?? thread.author,
+      lastTransitionTimestamp,
+      anchorText: thread.recordedText,
+      comments,
+    };
+  }
+
+  type CopyExportPayload =
+    | { exportable: true; markdown: string; threadCount: number; hiddenClosedCount?: number }
+    | { exportable: false; reason: string };
+
+  /** AC2/AC3/AC7: one synchronous pass — grouped/sorted/filtered, rendered, and
+   *  returned in one call, so nothing landing mid-build can split the output. */
+  function buildExportPayload(): CopyExportPayload {
+    const reason = currentCopyDisabledReason();
+    if (reason !== undefined) {
+      return { exportable: false, reason };
+    }
+    const exportable = exportableThreadsSorted();
+    const snapshot: ExportSnapshot = {
+      docRelativePath,
+      exportedAtIso: new Date().toISOString(),
+      foreignSidecar: sidecar?.foreign === true,
+      threads: exportable.map(toExportThread),
+    };
+    const closed = closedThreadCount();
+    return {
+      exportable: true,
+      markdown: renderCommentsMarkdown(snapshot),
+      threadCount: exportable.length,
+      hiddenClosedCount: hideClosed && closed > 0 ? closed : undefined,
+    };
+  }
+
+  function postCopyPayload(requestId: number, payload: CopyExportPayload): void {
+    if (payload.exportable) {
+      vscode.postMessage({
+        type: 'copyCommentsAsMarkdown',
+        requestId,
+        docUri,
+        exportable: true,
+        markdown: payload.markdown,
+        threadCount: payload.threadCount,
+        hiddenClosedCount: payload.hiddenClosedCount,
+      });
+    } else {
+      vscode.postMessage({
+        type: 'copyCommentsAsMarkdown',
+        requestId,
+        docUri,
+        exportable: false,
+        reason: payload.reason,
+      });
+    }
+  }
+
+  /** AC1/AC2: the menu row's own trigger — self-mints a requestId and guards
+   *  against a second click while the first is still in flight. */
+  function triggerMenuCopy(): void {
+    if (inFlightCopyRequest !== undefined) {
+      return;
+    }
+    const payload = buildExportPayload();
+    if (!payload.exportable) {
+      // The row is disabled for exactly this reason — nothing to send.
+      return;
+    }
+    const requestId = ++copyRequestSeq;
+    inFlightCopyRequest = requestId;
+    copyTimeoutHandle = window.setTimeout(() => {
+      if (inFlightCopyRequest === requestId) {
+        inFlightCopyRequest = undefined;
+        copyTimeoutHandle = undefined;
+        showToast('Copying as Markdown timed out — try again.');
+      }
+    }, COMMENT_COPY_MARKDOWN_TIMEOUT_MS);
+    postCopyPayload(requestId, payload);
+  }
+
   function build(): void {
     // Scroll and focus have to survive a re-render triggered by someone else's
     // reply landing (AC10) — the user did not ask to be moved.
@@ -937,19 +1167,7 @@ export function initCommentPanel(
         ? 'None of the text these comments were written against is still in this file — the sidecar may describe a different document.'
         : '';
 
-    const grouped = new Map<GroupKey, ThreadAnchor[]>();
-    for (const thread of resolve.allThreads()) {
-      const key = groupOf(thread);
-      if (key === 'closed' && hideClosed) {
-        continue;
-      }
-      const bucket = grouped.get(key);
-      if (bucket === undefined) {
-        grouped.set(key, [thread]);
-      } else {
-        bucket.push(thread);
-      }
-    }
+    const grouped = groupedThreads();
 
     const orphans = sidecar?.orphans ?? [];
     let rendered = 0;
@@ -960,16 +1178,7 @@ export function initCommentPanel(
       if (bucket === undefined || bucket.length === 0) {
         continue;
       }
-      bucket.sort((a, b) => {
-        // Parsed, not lexicographic: the sidecar is a plain JSONL file a merge or
-        // a hand edit can leave holding `+07:00` offsets and millisecond-less
-        // stamps, which string-compare in the wrong order. Same rule as
-        // sidecar-format.ts's own `byTimestamp`.
-        const delta = transitionTime(b) - transitionTime(a);
-        // Ties broken by thread id, so the order is total and a re-render with
-        // identical data can never reshuffle rows under the reader.
-        return (newestFirst ? delta : -delta) || a.threadId.localeCompare(b.threadId);
-      });
+      bucket.sort(compareByCurrentSort);
       list.appendChild(
         groupHeader(GROUP_LABEL[key], bucket.length, key === 'closed' ? 'no gutter pin' : undefined)
       );
@@ -1078,6 +1287,18 @@ export function initCommentPanel(
           flush();
         },
       },
+      (() => {
+        // AC8: registered and disabled, never withheld — the row stays in the
+        // menu even with nothing exportable, reason shown as a tooltip.
+        const reason = currentCopyDisabledReason();
+        return {
+          label: 'Copy all as Markdown',
+          section: 'Export',
+          disabled: reason !== undefined,
+          reason,
+          onSelect: triggerMenuCopy,
+        };
+      })(),
     ],
   };
 
@@ -1113,5 +1334,25 @@ export function initCommentPanel(
       flush();
     },
     refresh,
+    setDocument(uri, relativePath): void {
+      docUri = uri;
+      docRelativePath = relativePath;
+    },
+    handleExportRequest(requestId): void {
+      postCopyPayload(requestId, buildExportPayload());
+    },
+    notifyCopyResult(requestId, ok, error): void {
+      if (requestId !== inFlightCopyRequest) {
+        return;
+      }
+      inFlightCopyRequest = undefined;
+      if (copyTimeoutHandle !== undefined) {
+        clearTimeout(copyTimeoutHandle);
+        copyTimeoutHandle = undefined;
+      }
+      if (!ok) {
+        showToast(error ?? 'Could not copy comments as Markdown.');
+      }
+    },
   };
 }

@@ -156,6 +156,25 @@ export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number
 }
 
 /**
+ * Req 24 US-23.12 AC4: same node resolution as `commentAnchorLine` above, but
+ * returns the full `[start, end]` range instead of `start` alone — the
+ * exported Markdown's `Ln <a>-<b>` needs the anchored node's whole extent, not
+ * just where it begins. `null` for the same "no source line" case
+ * `commentAnchorLine` reports as `0` (a multi-block selection anchored on
+ * `#content` itself).
+ */
+export function commentAnchorLineRange(content: HTMLElement, el: HTMLElement): LineRange | null {
+  if (el !== content) {
+    const own = readSrcRange(el);
+    if (own !== null) {
+      return own;
+    }
+  }
+  const block = el === content ? content.firstElementChild : topLevelBlockOf(content, el);
+  return (block && readSrcRange(block)) ?? null;
+}
+
+/**
  * Req 23 US-23.4 AC6: after a render, make every comment-anchor id address ONE
  * node again.
  *

@@ -475,3 +475,4 @@
 | 0.10.0 | 2026-07-27 | Fix (US-23.19): a comment/reply/status-change/delete now saves the dirty document first, so its recorded text can never outlive an unsaved buffer. |
 | 0.10.0 | 2026-07-27 | Fix (US-23.13 AC4/AC5): merging two commented paragraphs no longer floats the second thread; verified empty-text anchors already skip tier 2; fixes a stale gutter/highlight refresh after a same-state re-resolve. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.13 AC1/AC2): a manual re-attach or an automatic floating-recovery now persists via a new sidecar line, so it survives a document reload instead of floating again. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.12): "Copy all as Markdown" — a Comment-tab menu item and Command Palette command export the file's review to the clipboard as Markdown. |

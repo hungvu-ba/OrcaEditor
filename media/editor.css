@@ -2415,8 +2415,13 @@ body.toc-resizing #toolbar {
   cursor: pointer;
 }
 
-.right-dock-menu-item:hover {
+.right-dock-menu-item:hover:not(:disabled) {
   background: var(--toc-accent-soft);
+}
+
+.right-dock-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .right-dock-menu-check {
