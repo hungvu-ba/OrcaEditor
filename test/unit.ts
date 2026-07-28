@@ -10,7 +10,9 @@
  * Chạy: npm run test:unit
  */
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { pathSegmentsContainSymlink } from '../src/fs-guard';
 import {
   classifyLink,
   computeMinimalEdit,
@@ -962,6 +964,103 @@ const cleanupBody = providerSrc.match(/private async cleanupOrphanImages\([\s\S]
 check('bug1: cleanupOrphanImages gộp file kéo-thả đã theo dõi', /droppedAssetsByDoc/.test(cleanupBody));
 const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
 check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /trackDroppedAsset/.test(restoreBody));
+
+// Security Audit S-1 (2026-07-28): a repo-committed symlink below the workspace
+// root passes the guard's lexical prefix check, so mutating flows could write
+// or hard-delete through it outside the workspace. Fix = mutating call sites
+// pass `forWrite: true` and the guard walks the segments below the matched
+// root with the real-FS helper below. Lock both the wiring (source tripwires,
+// same style as S-1/S-2 above) and the helper's behavior (real temp symlinks).
+const resolveAllowedBody =
+  providerSrc.match(/private async resolveAllowedAssetsDir\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
+  'security S-1(audit): resolveAllowedAssetsDir uses the write-mode guard',
+  /isInsideAllowedRoots\([^)]*\{ forWrite: true \}/.test(resolveAllowedBody)
+);
+check(
+  'security S-1(audit): sidecar write guard closure uses the write-mode guard',
+  /createSidecarStore\(\s*\(docUri, target\) => provider\.isUriInsideAllowedRoots\(docUri, target, \{ forWrite: true \}\)/.test(
+    providerSrc
+  )
+);
+const allowedRootsBody = providerSrc.match(/private async isUriInsideAllowedRoots\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
+  'security S-1(audit): the guard consults pathSegmentsContainSymlink for writes',
+  /pathSegmentsContainSymlink\(/.test(allowedRootsBody)
+);
+// Review finding (High): the lexical compare folds case on macOS/Windows, so a
+// case-sensitive walk would abstain on a case-divergent pair and wave the write
+// through — the walk must be told the same case policy.
+check(
+  'security S-1(audit): the symlink walk uses the same case policy as the lexical compare',
+  /pathSegmentsContainSymlink\([^)]*CASE_INSENSITIVE_FS\)/.test(allowedRootsBody)
+);
+// Review finding (Medium): refusing on the first matching root (always the
+// document's own dir) would reject writes a workspace-folder root allows, and
+// would make the realpath fallback unreachable.
+check(
+  'security S-1(audit): every matching root is walked, refusal is not final',
+  /matchedRoots\b/.test(allowedRootsBody) && !/roots\.find\(/.test(allowedRootsBody)
+);
+
+// The helper itself, against a real filesystem (Node-only module, no vscode).
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-guard-root-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-guard-outside-'));
+  try {
+    fs.mkdirSync(path.join(root, 'docs', 'assets'), { recursive: true });
+    check(
+      'fs-guard: plain nested dir below the root is symlink-free',
+      pathSegmentsContainSymlink(root, path.join(root, 'docs', 'assets')) === false
+    );
+    check(
+      'fs-guard: target equal to the root is safe (root itself never checked)',
+      pathSegmentsContainSymlink(root, root) === false
+    );
+    check(
+      'fs-guard: not-yet-created assets dir is safe (first paste creates it)',
+      pathSegmentsContainSymlink(root, path.join(root, 'docs', 'new', 'assets')) === false
+    );
+    check(
+      'fs-guard: target outside the root abstains (containment is the caller\'s check)',
+      pathSegmentsContainSymlink(root, outside) === false
+    );
+    // Symlink creation can be privilege-gated on Windows; skip only those cases there.
+    let symlinkOk = true;
+    try {
+      fs.symlinkSync(outside, path.join(root, 'docs', 'evil'), 'dir');
+    } catch {
+      symlinkOk = false;
+      console.log('  (skip) fs-guard symlink cases: symlink creation not permitted on this host');
+    }
+    if (symlinkOk) {
+      check(
+        'fs-guard: symlinked leaf dir below the root is detected',
+        pathSegmentsContainSymlink(root, path.join(root, 'docs', 'evil')) === true
+      );
+      check(
+        'fs-guard: symlink mid-path below the root is detected',
+        pathSegmentsContainSymlink(root, path.join(root, 'docs', 'evil', 'assets')) === true
+      );
+      // Review finding (High): on a case-insensitive filesystem the caller's
+      // lexical check accepts a case-divergent prefix, so the walk must too —
+      // `path.relative` would have answered `../..` here and abstained, letting
+      // the write follow the symlink out of the workspace unchecked.
+      const caseVaried = path.join(root.toUpperCase(), 'docs', 'evil');
+      check(
+        'fs-guard: case-divergent prefix is still walked when the caller folds case',
+        pathSegmentsContainSymlink(root, caseVaried, true) === true
+      );
+      check(
+        'fs-guard: the same pair abstains on a case-sensitive filesystem',
+        pathSegmentsContainSymlink(root, caseVaried, false) === false
+      );
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+}
 
 // Req 24 US-23.18 AC6: the undo ledger's state machine is proven directly further down,
 // but that proves nothing unless the handler actually CONSULTS it — and the handler is
@@ -3528,6 +3627,288 @@ check(
     'AC9 tripwire: no write path passes the raw msg.body as a line body',
     !controllerSrc.includes('body: msg.body')
   );
+}
+
+
+// ---------------------------------------------------------------------------
+// US-23.14 webview→host ROUTE GUARD — every message type the webview posts must
+// have a matching `case` in src/provider.ts's `onDidReceiveMessage` switch.
+//
+// This exists because a CRITICAL bug survived a green 668-test suite: the switch
+// had no `case 'editComment'`, so every Save from the comment popover posted a
+// message nothing consumed, and the popover sat there until its own 10s timeout
+// reported "No response from the host".
+//
+// Nothing else in the project can catch that class of bug:
+//   - `tsc` cannot. The switch is not exhaustiveness-guarded (no `never` default),
+//     so a `WebviewToHost` member with no `case` is not a type error.
+//   - The Playwright specs cannot. `test/webview/_harness.ts` stubs
+//     `acquireVsCodeApi`, so the host end of the channel does not exist there;
+//     every spec fabricates the reply it wants. A misrouted message is invisible.
+//
+// Read as text, and against provider.ts, for the same reason as the tripwires
+// above: the module imports 'vscode' and cannot be imported here.
+//
+// DIRECTIONS. This checks posted ⊆ provider `case`s, and nothing else:
+//   - posted but no `case` → ENFORCED here. The bug above. Unreachable by tsc.
+//   - posted but not in the `WebviewToHost` union → enforced by the COMPILER, not
+//     here. `VsCodeApi.postMessage` took `msg: unknown` while the bug landed,
+//     which left the ~20 direct `vscode.postMessage({...})` call sites unchecked
+//     against the contract; it now takes `WebviewToHost`, so this direction needs
+//     no text check.
+//   - declared in the union but never posted → NOT enforced. Deliberate: the
+//     union is also the host's own vocabulary, and a type may legitimately be
+//     declared before the UI that posts it exists. Failing on it would punish
+//     ordinary work-in-progress rather than catch a broken route.
+//   - a `case` with no poster → NOT enforced, same reason in reverse: dead-looking
+//     cases are cheap, and a route that is handled but unused breaks nothing.
+// ---------------------------------------------------------------------------
+{
+  const WEBVIEW_SRC_DIR = path.join(process.cwd(), 'media/webview');
+
+  /**
+   * Blank out comments so prose mentioning a post call is not read as one, while
+   * keeping every byte offset — string literals are walked rather than skipped,
+   * so a `//` inside `'https://…'` cannot blind the rest of its line.
+   */
+  const blankComments = (src: string): string => {
+    let out = '';
+    for (let i = 0; i < src.length; ) {
+      const two = src.slice(i, i + 2);
+      if (two === '//') {
+        while (i < src.length && src[i] !== '\n') { out += ' '; i++; }
+        continue;
+      }
+      if (two === '/*') {
+        while (i < src.length && src.slice(i, i + 2) !== '*/') { out += src[i] === '\n' ? '\n' : ' '; i++; }
+        out += '  ';
+        i += 2;
+        continue;
+      }
+      const q = src[i];
+      if (q === '"' || q === "'" || q === '`') {
+        out += q;
+        i++;
+        while (i < src.length) {
+          // A `'`/`"` string cannot span a raw newline, so bail at end of line.
+          // This walker cannot recognize a regex literal, and a quote character
+          // inside one (`/['"]/`, `s.replace(/"/g, …)`) opens a phantom string;
+          // unbounded, that phantom runs to the next quote ANYWHERE in the file
+          // and every comment in between silently stops being blanked. Measured
+          // before this bail: 189 comment lines across 5 real modules were being
+          // scanned as live code. Backticks legitimately span lines, so they keep
+          // the unbounded walk.
+          if (q !== '`' && src[i] === '\n') { break; }
+          if (src[i] === '\\') { out += src.slice(i, i + 2); i += 2; continue; }
+          out += src[i];
+          i++;
+          if (src[i - 1] === q) { break; }
+        }
+        continue;
+      }
+      out += q;
+      i++;
+    }
+    return out;
+  };
+
+  /** Text of the balanced argument list starting at `open` (the `(` index). */
+  const argAt = (src: string, open: number): string | null => {
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      const c = src[i];
+      if (c === '(') { depth++; } else if (c === ')') {
+        depth--;
+        if (depth === 0) { return src.slice(open + 1, i); }
+      } else if (c === '"' || c === "'" || c === '`') {
+        i++;
+        while (i < src.length && src[i] !== c) { i += src[i] === '\\' ? 2 : 1; }
+      }
+    }
+    return null;
+  };
+
+  /**
+   * The `type` discriminant of an object-literal argument. Reads `type` only at
+   * the literal's own brace depth, so a nested object carrying its own `type`
+   * cannot be mistaken for the message's.
+   */
+  const discriminantOf = (arg: string): { type: string } | { unreadable: string } => {
+    const t = arg.trimStart();
+    if (!t.startsWith('{')) { return { unreadable: t.slice(0, 60) }; }
+    let depth = 0;
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (c === '{') { depth++; continue; }
+      if (c === '}') { depth--; continue; }
+      if (c === '"' || c === "'" || c === '`') {
+        i++;
+        while (i < t.length && t[i] !== c) { i += t[i] === '\\' ? 2 : 1; }
+        continue;
+      }
+      // The preceding-character test is what keeps a key that merely ENDS in
+      // `type` from being read as the discriminant: without it `{ subtype: 'a',
+      // type: 'realOne' }` returns `a`, which means the guard demands a case for
+      // `a` and never checks `realOne` — green on a route that does not exist,
+      // the precise failure mode this whole block is built against.
+      if (depth === 1 && /^type\s*:/.test(t.slice(i)) && !/[\w$]/.test(t[i - 1] ?? '')) {
+        // All three quote styles: a `type: "x"` or `` type: `x` `` post site is
+        // perfectly valid source, and reporting it unreadable would be a failure
+        // nobody can fix except by rewriting working code to suit this scanner.
+        const m = /^type\s*:\s*(['"`])([^'"`]+)\1/.exec(t.slice(i));
+        return m ? { type: m[2] } : { unreadable: t.slice(i, i + 60) };
+      }
+    }
+    return { unreadable: t.slice(0, 60) };
+  };
+
+  const webviewSources = fs
+    .readdirSync(WEBVIEW_SRC_DIR, { recursive: true, encoding: 'utf8' })
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => ({
+      file: name,
+      source: blankComments(fs.readFileSync(path.join(WEBVIEW_SRC_DIR, name), 'utf8')),
+    }));
+
+  // Which functions post to the host is DERIVED from the declared contract —
+  // anything whose parameter is typed `WebviewToHost` is a sink — rather than
+  // read off a list typed in here, so a new wrapper (a third `postToHost`, a
+  // renamed one) cannot opt its call sites out of this check by not being named.
+  // Same property as the AC9 tripwire above keying off the line builders.
+  //
+  // Found by walking BACKWARDS from each `WebviewToHost` annotation to the `(`
+  // that opens its parameter list and then to the name in front of it, instead of
+  // matching the whole declaration with one regex. The declaration's shape then
+  // stops mattering: `function post(msg: WebviewToHost)`, `const post = (msg:
+  // WebviewToHost) =>`, `post?: (msg: WebviewToHost) => void`, a second
+  // parameter, a union, a trailing comma and a prettier line break all resolve to
+  // the same sink. A single-regex version recognized only the first of those —
+  // measured — which would have let a wrapper written any other way silently
+  // un-scan every one of its call sites while the floors below still passed.
+  const sinkNames = new Set<string>(['postMessage']);
+  // Per FILE, not global. These names are used to recognize a wrapper forwarding
+  // its own parameter (`postMessage(msg)`) and skip it. Held globally, the single
+  // name `msg` — which every sink here happens to use — silently excused
+  // `postMessage(msg)` in ANY module, so a genuinely new route built as a local
+  // (`const msg = { type: 'newThing' }; vscode.postMessage(msg);`) was dropped
+  // with no finding at all. Verified: that exact shape passed 759/0 before this
+  // was scoped, and is reported as unreadable after.
+  const forwardedParamsByFile = new Map<string, Set<string>>();
+  for (const { file, source } of webviewSources) {
+    const params = new Set<string>();
+    forwardedParamsByFile.set(file, params);
+    const annRe = /([A-Za-z_$][\w$]*)\s*\??\s*:\s*WebviewToHost\b/g;
+    let a: RegExpExecArray | null;
+    while ((a = annRe.exec(source)) !== null) {
+      params.add(a[1]);
+      let j = a.index;
+      let depth = 0;
+      while (j >= 0 && !(source[j] === '(' && depth === 0)) {
+        if (source[j] === ')') { depth++; } else if (source[j] === '(') { depth--; }
+        j--;
+      }
+      if (j < 0) { continue; }
+      // Past the `(`, then past whatever punctuation separates the name from it
+      // (`= (`, `: (`, `?: (`), then back over the name itself.
+      j--;
+      while (j >= 0 && /[\s:=?(]/.test(source[j])) { j--; }
+      const nameEnd = j + 1;
+      while (j >= 0 && /[\w$]/.test(source[j])) { j--; }
+      const name = source.slice(j + 1, nameEnd);
+      if (name && !/^\d/.test(name)) { sinkNames.add(name); }
+    }
+  }
+
+  const postedTypes = new Map<string, Set<string>>();
+  const unreadableCalls: string[] = [];
+  for (const { file, source } of webviewSources) {
+    for (const sink of sinkNames) {
+      const callRe = new RegExp(`(?:^|[^\\w$.])((?:[\\w$.]+\\.)?)${sink}\\s*\\(`, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = callRe.exec(source)) !== null) {
+        // `window.postMessage`/`self.postMessage` is a same-page message, not a
+        // post to the host, and demanding a provider `case` for one would be a
+        // failure no route could satisfy. None exists in these modules today; the
+        // receiver is captured so that stays true if one is added.
+        if (/^(?:window|self|parent|top|globalThis)\.$/.test(m[1])) { continue; }
+        const open = m.index + m[0].length - 1;
+        const arg = argAt(source, open);
+        if (arg === null) {
+          unreadableCalls.push(`${file}: unbalanced ${sink}(`);
+          continue;
+        }
+        const trimmed = arg.trim();
+        // The sink's own declaration (`msg: WebviewToHost`), and a wrapper
+        // forwarding its parameter onward (`postMessage(msg)`) — neither names a
+        // type, and neither is a real post site.
+        if (
+          /^[\w$]+\s*:\s*[\w$<>[\]|\s]+$/.test(trimmed) ||
+          forwardedParamsByFile.get(file)?.has(trimmed)
+        ) {
+          continue;
+        }
+        const found = discriminantOf(arg);
+        if ('type' in found) {
+          if (!postedTypes.has(found.type)) { postedTypes.set(found.type, new Set()); }
+          postedTypes.get(found.type)!.add(file);
+        } else {
+          // Reported, never skipped: a post site this scan cannot read is a hole
+          // in the guard and has to be visible rather than quietly dropped.
+          unreadableCalls.push(`${file}: ${sink}(${found.unreadable}`);
+        }
+      }
+    }
+  }
+
+  // Both quote styles, and no `^` anchor, so a fall-through pair written on one
+  // line (`case 'undo': case 'redo':`) contributes both labels rather than only
+  // the first — either omission would be a false FAILURE naming a route that is
+  // in fact handled.
+  const providerCases = new Set(
+    [...providerSrc.matchAll(/\bcase\s+['"]([^'"]+)['"]\s*:/g)].map((m) => m[1])
+  );
+
+  // The `case` scan above reads the WHOLE file, which is only sound while
+  // `onDidReceiveMessage`'s switch is the only switch in it. With a second one, a
+  // `case` in some unrelated dispatch could satisfy a route that the message
+  // switch never handles — the guard would go green on exactly the bug it exists
+  // to catch. Pinned as an assumption rather than parsed: brace-matching 3300
+  // lines of template literals to isolate the switch body is its own bug surface,
+  // so this fails and asks to be tightened the day a second switch appears.
+  const providerSwitches = (providerSrc.match(/\bswitch\s*\(/g) ?? []).length;
+  check(
+    'route guard: provider.ts has exactly one switch, so the whole-file case scan is sound',
+    providerSwitches === 1,
+    `  switches = ${providerSwitches} — scope the case scan to onDidReceiveMessage's own switch body`
+  );
+
+  // Floors, so a broken regex or a moved directory reports itself instead of
+  // yielding a triumphantly empty scan that passes. 30 posted types, 30 cases and
+  // 2 sinks when this landed; loose on purpose — this guards against collapse.
+  check(
+    'route guard: the scan actually reached the webview modules and found sinks',
+    webviewSources.length >= 50 && sinkNames.size >= 2,
+    `  files = ${webviewSources.length}, sinks = ${[...sinkNames].join(',')}`
+  );
+  check(
+    'route guard: the scan found the posted message types and the provider switch',
+    postedTypes.size >= 25 && providerCases.size >= 25,
+    `  posted = ${postedTypes.size}, provider cases = ${providerCases.size}`
+  );
+  check(
+    'route guard: every post site was readable',
+    unreadableCalls.length === 0,
+    unreadableCalls.map((u) => `  ${u}`).join('\n')
+  );
+
+  for (const [type, files] of [...postedTypes].sort((a, b) => a[0].localeCompare(b[0]))) {
+    check(
+      `route guard: '${type}' has a case in provider.ts's onDidReceiveMessage`,
+      providerCases.has(type),
+      `  posted from ${[...files].sort().join(', ')} but no \`case '${type}':\` in src/provider.ts` +
+        ' — the host would receive it and do nothing (US-23.14)'
+    );
+  }
 }
 
 

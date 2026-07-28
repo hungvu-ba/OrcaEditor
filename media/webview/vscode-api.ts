@@ -1,3 +1,5 @@
+import type { WebviewToHost } from '../../src/shared/messages';
+
 /** State webview được VS Code giữ lại khi tab ẩn/hiện. setState ghi đè cả object,
  * nên mỗi lần cập nhật một trường phải merge với getState() hiện tại. */
 export interface WebviewState {
@@ -12,7 +14,16 @@ export interface WebviewState {
 
 /** Kiểu API webview VS Code cấp cho script (acquireVsCodeApi chỉ được gọi một lần). */
 export interface VsCodeApi {
-  postMessage(msg: unknown): void;
+  /**
+   * Typed as the real contract, not `unknown`: most modules call this directly
+   * rather than through a `postToHost` wrapper, and while the parameter was
+   * `unknown` none of those call sites were checked against `WebviewToHost` at
+   * all — a message could be posted with a `type` the union never declared and
+   * `tsc` would say nothing. This is the compiler half of the routing guard in
+   * `test/unit.ts` (which covers the other half: a declared, posted type with no
+   * `case` in provider.ts, something no type can express).
+   */
+  postMessage(msg: WebviewToHost): void;
   getState(): WebviewState | undefined;
   setState(state: WebviewState): void;
 }

@@ -8,13 +8,14 @@
  * Run `node esbuild.js` before these tests (see npm run test:webview) so
  * dist/webview/main.js and its CSS exist.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as url from 'url';
 import { expect, type Page } from '@playwright/test';
 import type { InitConfig } from '../../src/shared/messages';
 
 const DIST_WEBVIEW = path.join(__dirname, '..', '..', 'dist', 'webview');
-const HARNESS_FILE = path.join(DIST_WEBVIEW, '_harness.html');
 
 const DEFAULT_CONFIG: InitConfig = {
   breaks: false,
@@ -115,11 +116,60 @@ function harnessHtml(readability: InitConfig['readability']): string {
 </html>`;
 }
 
-function ensureHarnessFile(readability: InitConfig['readability']): void {
+/** Per-process counter so two temp files from this process never collide. */
+let tmpSeq = 0;
+
+/**
+ * Write the harness page and return its path.
+ *
+ * Content-addressed on purpose. This used to write one shared
+ * `dist/webview/_harness.html` on every `openBlankHarness`, which made the
+ * harness itself the flakiest thing in the suite: `fs.writeFileSync` truncates
+ * before it writes, so with the suite's parallel workers one worker could be
+ * inside `page.goto('file://.../_harness.html')` during another worker's
+ * zero-length window. Chromium then loaded an EMPTY document — `readyState`
+ * "complete", no stylesheets, no `#content`, the inline `acquireVsCodeApi` stub
+ * never run — and the next `#content` wait could only sit there until the test
+ * timeout killed it, which is why four unrelated specs all died at that one
+ * line. Raising the timeout could never have helped: `#content` was never going
+ * to appear on that page.
+ *
+ * Hashing the HTML fixes a second bug in the same code: the file's content
+ * depends on `readability` (`bakedMarkup`), so a worker that wrote a Zen/Reading
+ * variant could hand it to a worker expecting the plain shell. Distinct configs
+ * are now distinct files, and identical configs produce byte-identical ones.
+ *
+ * `rename` rather than a plain write, because two workers can still land on the
+ * same new path at once: rename(2) is atomic, so a concurrent reader sees either
+ * no file or the whole file, never a partial one.
+ */
+function ensureHarnessFile(readability: InitConfig['readability']): string {
   if (!fs.existsSync(path.join(DIST_WEBVIEW, 'main.js'))) {
     throw new Error('dist/webview/main.js not found — run `node esbuild.js` before webview tests.');
   }
-  fs.writeFileSync(HARNESS_FILE, harnessHtml(readability), 'utf8');
+  const html = harnessHtml(readability);
+  const hash = crypto.createHash('sha1').update(html).digest('hex').slice(0, 12);
+  const file = path.join(DIST_WEBVIEW, `_harness-${hash}.html`);
+  if (!fs.existsSync(file)) {
+    const tmp = `${file}.${process.pid}.${tmpSeq++}.tmp`;
+    fs.writeFileSync(tmp, html, 'utf8');
+    try {
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      // `existsSync` above is advisory, so two workers can both reach this. On
+      // POSIX the loser's rename just replaces byte-identical content; on Windows
+      // it fails with a sharing violation if another worker's Chromium already
+      // holds the destination open. Losing the race is always fine here — the
+      // name is a hash of the content — so the only thing to check is that
+      // somebody won it.
+      if (!fs.existsSync(file)) { throw err; }
+    } finally {
+      // A worker killed mid-run (Ctrl-C, --max-failures) would otherwise leave
+      // its temp behind forever; nothing else prunes dist/webview.
+      fs.rmSync(tmp, { force: true });
+    }
+  }
+  return file;
 }
 
 /**
@@ -148,8 +198,11 @@ export async function readWebviewState(page: Page): Promise<Record<string, unkno
  */
 export async function openBlankHarness(page: Page, configOverrides: Partial<InitConfig> = {}): Promise<InitConfig> {
   const config = { ...DEFAULT_CONFIG, ...configOverrides };
-  ensureHarnessFile(config.readability);
-  await page.goto('file://' + HARNESS_FILE);
+  // pathToFileURL, not `'file://' + path`: the concat is the raw path-as-text
+  // construct CLAUDE.md's cross-platform rule forbids — it leaves a Windows
+  // `C:\…` path and any `#`/`?` in the repo path to chance (a `#` would silently
+  // truncate the URL at the fragment). This repo's own path already has a space.
+  await page.goto(url.pathToFileURL(ensureHarnessFile(config.readability)).href);
   return config;
 }
 
@@ -169,10 +222,24 @@ export async function postInit(
   docUri: string = DEFAULT_DOC_URI
 ): Promise<void> {
   await page.evaluate(
-    ({ text, cfg, docUri }) => window.postMessage({ type: 'init', text, docUri, config: cfg }, '*'),
+    ({ text, cfg, docUri }) => {
+      // Re-arm the gate below: a spec may post 'init' more than once, and a
+      // marker left over from the previous one would satisfy the wait instantly.
+      delete document.body.dataset.triggerMode;
+      window.postMessage({ type: 'init', text, docUri, config: cfg }, '*');
+    },
     { text: markdown, cfg: config, docUri }
   );
-  await page.locator('#content').waitFor();
+  // Gate on a stamp the 'init' handler itself writes (`applyTriggerMode` in
+  // main.ts), so this really does wait for the message to be consumed. The old
+  // `#content` wait could not: editor.css gives `#content` `min-height: 60vh`,
+  // so it is already "visible" — measured 432px tall with zero children — on a
+  // page where no init has run at all, and the wait returned in ~9ms having
+  // asserted nothing.
+  // `attached`, not the default `visible`: presence of the stamp is the whole
+  // signal, and the default would additionally require `<body>` to have a
+  // non-empty box — an unrelated condition to hang on.
+  await page.locator('body[data-trigger-mode]').waitFor({ state: 'attached' });
 }
 
 /** Open the harness page and bootstrap it with the given markdown, like the host's 'init' message. */
