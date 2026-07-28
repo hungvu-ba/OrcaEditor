@@ -1178,12 +1178,29 @@ export function initCommentPanel(
     }
     list.textContent = '';
 
-    // AC13: one banner naming the cause.
-    banner.hidden = sidecar?.foreign !== true;
-    banner.textContent =
-      sidecar?.foreign === true
-        ? 'None of the text these comments were written against is still in this file — the sidecar may describe a different document.'
-        : '';
+    // AC13: one banner naming the cause. Req 24 US-23.15 AC3/AC4 joined it: a
+    // conflicted or partially-unreadable sidecar is the same class of fact — "the
+    // list you are looking at is not the whole truth" — so it belongs in the same
+    // one banner rather than a second competing strip.
+    const notices: string[] = [];
+    if (sidecar?.foreign === true) {
+      notices.push(
+        'None of the text these comments were written against is still in this file — the sidecar may describe a different document.'
+      );
+    }
+    if (sidecar?.conflicted === true) {
+      notices.push(
+        'The comment file is in a conflicted state from a git merge — resolve the conflict markers to see every comment.'
+      );
+    }
+    const skipped = sidecar?.skipped ?? 0;
+    if (skipped > 0) {
+      notices.push(
+        `${skipped} line(s) of the comment file could not be read and were skipped — this list may be incomplete.`
+      );
+    }
+    banner.hidden = notices.length === 0;
+    banner.textContent = notices.join(' ');
 
     const grouped = groupedThreads();
 

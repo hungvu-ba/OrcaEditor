@@ -221,7 +221,10 @@ export function createSidecarStore(
       for (const warning of warnings) {
         log(`Comment sidecar ${target.toString()}: ${warning}`);
       }
-      return { ...folded, warnings };
+      // US-23.15 AC4: `conflicted` travels with the fold — the caller has to be
+      // able to say "this sidecar is mid-merge", which is not derivable from the
+      // warning strings without re-parsing them.
+      return { ...folded, warnings, conflicted: parsed.conflicted, conflictMarkers: parsed.conflictMarkers };
     },
 
     async planRename(edit, oldUri, newUri): Promise<void> {

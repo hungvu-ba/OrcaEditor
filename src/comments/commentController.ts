@@ -48,8 +48,11 @@ import {
   buildStatusChangeLine,
   sidecarBelongsToDocument,
   type CommentStatus,
+  type FoldedSidecar,
+  type SidecarLine,
   type SidecarThread,
 } from './sidecar-format';
+import { sidecarShareState, sidecarShareWarning } from './sidecar-git';
 import type { SidecarStore } from './sidecar-store';
 import type { CommentSidecarState, CommentSyncOrphan, CommentSyncThread, CommentTransition } from '../shared/messages';
 
@@ -112,6 +115,32 @@ export interface CommentSupport extends vscode.Disposable {
    * threads.
    */
   loadThreads(document: vscode.TextDocument): Promise<void>;
+  /**
+   * Req 24 US-23.15 AC1: re-read this document's sidecar because it changed on
+   * disk outside our own writes (a second window, `git pull`, a sync client, a
+   * hand edit). Unlike `loadThreads` this is NOT idempotent-by-claim — it
+   * releases the claim and reads again — and it is the only path that REMOVES:
+   * a thread whose lines are no longer in the freshly folded sidecar is dropped
+   * from the registry, so the snapshot the caller pushes afterwards prunes it
+   * from every surface.
+   */
+  reloadThreads(document: vscode.TextDocument): Promise<void>;
+  /**
+   * Req 24 US-23.15 AC1: whether this document's sidecar has already been read
+   * this session. The provider asks so a panel opening on an already-loaded
+   * document reconciles with disk (`reloadThreads`) instead of hitting
+   * `loadThreads`'s one-shot claim and showing whatever was on disk the first
+   * time — a `git pull` while the panel was closed is exactly that case, and it
+   * reaches no watcher event because nothing was open to receive one.
+   */
+  isLoaded(document: vscode.TextDocument): boolean;
+  /**
+   * Req 24 US-23.15 AC2: where this document's sidecar lives on disk. The provider
+   * asks so a watcher DELETE event can be told apart from the rename-over an
+   * atomic save (or `adoptDrifted`) performs — the store owns every sidecar path
+   * derivation, so nothing outside it re-derives one.
+   */
+  sidecarPathFor(document: vscode.TextDocument): string;
   /**
    * US-23.10 AC7: re-check the up-front document guard (untitled / non-`file` /
    * outside-allowed-root) for a document that was previously refused, and push
@@ -193,6 +222,31 @@ export interface CommentSupport extends vscode.Disposable {
    * `deleteComment()` need — the native UI has no notion of this key at all.
    */
   threadIdFor(thread: vscode.CommentThread): string | undefined;
+}
+
+/**
+ * Req 24 US-23.15: one folded thread's replies as the registry holds them —
+ * shared by the additive load and the reload's refresh, which would otherwise
+ * carry byte-identical copies of this map (jscpd).
+ */
+function repliesFrom(persisted: SidecarThread): ThreadEntry['replies'] {
+  return persisted.replies.map((r) => ({
+    id: r.id,
+    author: r.author,
+    timestamp: r.timestamp,
+    body: r.body,
+    editedAt: r.editedAt,
+  }));
+}
+
+/**
+ * Req 24 US-23.15: the sidecar's own file name, for a message the user reads.
+ * Split off `Uri.path` (always `/`-separated) rather than `fsPath`, the same way
+ * `sidecar-store.ts` derives the name — never `path.basename`, which would split
+ * on `\` on Windows only.
+ */
+function nameForSidecarUri(sidecarUri: vscode.Uri): string {
+  return sidecarUri.path.split('/').pop() ?? sidecarUri.path;
 }
 
 /** What a non-exact anchor reads as on the native thread (US-23.4 AC3/AC4). */
@@ -460,6 +514,20 @@ export function createCommentSupport(
   // every later snapshot. Kept beside `loaded` and cleared with it, so a retry
   // after a released claim reports the retry's outcome, not the failed attempt's.
   const sidecarState = new Map<string, CommentSidecarState>();
+  // Req 24 US-23.15 AC3: the last load-loss signature reported for a document
+  // (skipped count + orphan ids + conflicted). A reload that finds the SAME
+  // damage must not notify again — AC3 asks for once per newly-discovered
+  // problem, and a `git pull` burst can reload several times over one bad line.
+  const reportedLosses = new Map<string, string>();
+  // Req 24 US-23.15 AC5: sidecar paths already warned about (gitignored /
+  // untracked). Once per path, not once per load: the answer only changes when
+  // the user acts on it, and the warning is a modeless nudge, not an alarm.
+  const shareWarned = new Set<string>();
+  // Req 24 US-23.15 AC2: bumped whenever a document's threads are dropped, so a
+  // load whose read was already in flight can tell that its result is stale and
+  // must not be applied. A counter rather than a cancellation token: the read
+  // itself is a plain `fs.readFile` with nothing to cancel.
+  const loadEpoch = new Map<string, number>();
 
   /**
    * One document's identity for the registry. Folded on a case-insensitive
@@ -629,6 +697,432 @@ export function createCommentSupport(
     return null;
   };
 
+  /**
+   * Req 24 US-23.15 AC5: `store.append`, plus the git-sharing check the AC ties to
+   * a WRITE. A pass-through wrapper rather than a call in each of the six append
+   * sites — and placed after the append, not in `saveBeforeAppend`, because before
+   * the first-ever append the sidecar does not exist yet and git would answer
+   * "untracked" about a file nobody has created (review finding, 2026-07-28).
+   */
+  const appendLine = async (document: vscode.TextDocument, line: SidecarLine): Promise<string | null> => {
+    const error = await store.append(document, line);
+    if (error === null) {
+      checkSharing(document);
+    }
+    return error;
+  };
+
+  /**
+   * Req 24 US-23.15 AC5: warn once per sidecar path when git says this sidecar
+   * cannot reach the team. Fire-and-forget by every caller — the answer changes
+   * nothing about the load or the write it follows, so no path waits on `git`.
+   */
+  const checkSharing = (document: vscode.TextDocument): void => {
+    // Keyed by the document's own registry key, not by a raw sidecar uri string:
+    // the two are 1:1, and `docKeyFor` is the folded identity every sibling map in
+    // this file uses, so the same file reached through two differently-cased paths
+    // asks once (CLAUDE.md's cross-platform trap; review finding 2026-07-28).
+    const docKey = docKeyFor(document.uri);
+    if (shareWarned.has(docKey)) {
+      return;
+    }
+    // Claimed before the await, like `loaded`: a load and a write finishing
+    // together would otherwise both pass the check and warn twice. Kept on EVERY
+    // outcome, healthy included — releasing it on `null` made every load and
+    // every append re-spawn two `git` processes for the rest of the session
+    // (review finding). The cost is that an ignore rule added mid-session is only
+    // noticed after a reopen, which `forgetDocument` already covers.
+    shareWarned.add(docKey);
+    const target = store.uriFor(document);
+    void sidecarShareState(target.fsPath)
+      .then((state) => {
+        const warning = sidecarShareWarning(state, nameForSidecarUri(target));
+        if (warning === null) {
+          return;
+        }
+        log(`Comment sidecar ${target.toString()}: ${warning}`);
+        void vscode.window.showWarningMessage(warning);
+      })
+      .catch((err: unknown) => {
+        shareWarned.delete(docKey);
+        log(`Comment sidecar: could not check git status of ${target.toString()}`, err);
+      });
+  };
+
+  /**
+   * Req 24 US-23.15 AC3: tell the user, once per newly-discovered problem, that
+   * this load did not deliver everything on disk. A log line alone cannot do
+   * this job — the user is looking at a list they believe is complete.
+   */
+  const reportLoadLosses = (docKey: string, document: vscode.TextDocument, folded: FoldedSidecar): void => {
+    // Every warning `store.load` merges corresponds to a line that was NOT
+    // applied: unparseable, unrecognised, a duplicate id the fold discarded
+    // (US-23.16), or an illegal status jump it skipped. Conflict-marker lines are
+    // subtracted: they carry no comment data, so counting them would claim "3
+    // lines could not be read" about a merge where both sides loaded intact
+    // (review finding) — `conflicted` reports that case on its own.
+    const skipped = folded.warnings.length - (folded.conflictMarkers ?? 0);
+    const conflicted = folded.conflicted === true;
+    const orphanIds = folded.orphans.map((line) => line.id);
+    const existing = sidecarState.get(docKey);
+    if (existing !== undefined) {
+      sidecarState.set(docKey, {
+        ...existing,
+        skipped: skipped > 0 ? skipped : undefined,
+        conflicted: conflicted ? true : undefined,
+      });
+    }
+    if (skipped === 0 && orphanIds.length === 0) {
+      // Clean load — forget the previous signature so a problem that comes BACK
+      // (a bad merge redone) is newly-discovered again rather than suppressed.
+      reportedLosses.delete(docKey);
+      return;
+    }
+    // Identity, not counts, on BOTH halves: one orphan replaced by a different
+    // orphan is a new problem, and so is a differently-broken file that happens
+    // to yield the same number of skipped lines (review finding) — the warnings
+    // carry their line numbers, so they are the identity for the skipped half.
+    const signature = `${folded.warnings.join('|')}|${conflicted}|${orphanIds.sort().join(',')}`;
+    if (reportedLosses.get(docKey) === signature) {
+      return;
+    }
+    reportedLosses.set(docKey, signature);
+    const name = nameForSidecarUri(store.uriFor(document));
+    const parts: string[] = [];
+    if (conflicted) {
+      // AC4: named separately from the generic skip count — "unresolved merge"
+      // is actionable in a way "3 lines could not be read" is not.
+      parts.push('it is in a conflicted state from a git merge');
+    }
+    if (skipped > 0) {
+      parts.push(`${skipped} line(s) could not be read`);
+    }
+    if (orphanIds.length > 0) {
+      parts.push(`${orphanIds.length} entr(ies) have no parent comment`);
+    }
+    void vscode.window.showWarningMessage(
+      `${name}: ${parts.join(', ')}. The comment list may be incomplete — see the Comments tab.`
+    );
+  };
+
+  /**
+   * Req 24 US-23.15 AC1: drop every thread of this document whose durable id is
+   * no longer in the sidecar. `loadThreads`'s dedup is additive-only by design
+   * (it must never remove a thread created this session before its own reload
+   * sees it), so removal is a reload-only step, keyed by the same `commentId`
+   * the additive half dedups on.
+   *
+   * `candidates` is the entry-key set as it stood BEFORE the read, so a thread
+   * created (or reloaded) while the read was in flight is never a prune target:
+   * its line IS on disk, just not in the snapshot this fold was parsed from
+   * (review finding, 2026-07-28).
+   */
+  const pruneRemoved = (docKey: string, freshIds: ReadonlySet<string>, candidates: ReadonlySet<string>): void => {
+    const keys = byDoc.get(docKey);
+    if (keys === undefined) {
+      return;
+    }
+    for (const entryKey of Array.from(keys)) {
+      if (!candidates.has(entryKey)) {
+        continue;
+      }
+      const entry = threads.get(entryKey);
+      const commentId = entry?.commentId;
+      if (commentId === null || commentId === undefined || freshIds.has(commentId)) {
+        continue;
+      }
+      try {
+        entry?.thread.dispose();
+      } catch {
+        // Already disposed by VS Code — nothing to undo.
+      }
+      threads.delete(entryKey);
+      keys.delete(entryKey);
+      log(`Comment sidecar: thread ${commentId} is no longer on disk — removed from every surface`);
+    }
+  };
+
+  /**
+   * Req 24 US-23.15 AC1: fold a teammate's new lines into a thread this session
+   * already holds. The additive pass skips a known `commentId` (it must — that is
+   * what stops a reload duplicating every thread), so without this a reply, a
+   * status change or an edit written by a second window would never appear: the
+   * thread would be present but frozen at whatever this session last saw.
+   *
+   * Reload-only. The mutation paths keep their own in-memory state authoritative
+   * for the thread they just wrote, and re-deriving it from disk on the initial
+   * load would be a no-op anyway.
+   *
+   * Scope is deliberately CONTENT ONLY — body/author/timestamps/status/replies.
+   * The anchor's live POSITION is not re-read (review finding, 2026-07-28): an
+   * ordinary in-memory relocation (`updateAnchor` with no `origin`, which is what
+   * the webview posts as text moves) is never persisted, so adopting the recorded
+   * position here would drag an `exact` thread back to a line the text no longer
+   * occupies — on every reload, our own writes included. A teammate's PERSISTED
+   * re-attachment therefore does not move our live thread until the file is
+   * reopened, which is the two-panel anchor-authority case US-23.15's Descoped
+   * list defers to US-23.13's authority model.
+   */
+  const refreshExisting = (entryKey: string, persisted: SidecarThread, document: vscode.TextDocument): void => {
+    const entry = threads.get(entryKey);
+    if (entry === undefined) {
+      return;
+    }
+    entry.commentAuthor = persisted.comment.author;
+    entry.commentBody = persisted.comment.body;
+    entry.commentTimestamp = persisted.comment.timestamp;
+    entry.commentEditedAt = persisted.comment.editedAt;
+    entry.status = persisted.status;
+    entry.statusChanges = persisted.statusChanges.map((line) => ({
+      toStatus: line.to_status,
+      author: line.author,
+      timestamp: line.timestamp,
+    }));
+    entry.replies = repliesFrom(persisted);
+    try {
+      // A native field the user has OPEN is left strictly alone: VS Code mutates
+      // that `Comment` object in place with their in-progress text, and
+      // `nativeCommentsFor` can only rebuild it in `Preview` mode — so a reload
+      // landing mid-edit would close the field and discard what they typed
+      // (review finding, 2026-07-28). AC1 requires an open draft to survive a
+      // reload; the rebuilt content lands on the next reload after they finish.
+      const editing = entry.thread.comments.some((c) => c.mode === vscode.CommentMode.Editing);
+      if (!editing) {
+        entry.thread.comments = nativeCommentsFor(entry, entryKey, document.uri.toString());
+      }
+      // Re-stamped so the native menu's `status-*` clauses follow a transition a
+      // second window performed, exactly as `changeStatus` does for our own.
+      applyThreadFacets(entry.thread, entry.anchor.state, entry.status);
+    } catch {
+      // Disposed concurrently (deleted from the native Comments UI while this
+      // reload was in flight) — the registry entry is dropped so a later pass
+      // does not keep addressing a dead object. Removed from BOTH maps: leaving
+      // the key in `byDoc` would strand it there for the session, since a rebuilt
+      // thread registers under a different key (its `commentId`).
+      threads.delete(entryKey);
+      byDoc.get(docKeyFor(document.uri))?.delete(entryKey);
+    }
+  };
+
+  /**
+   * The one sidecar load, shared by the first load and by every AC1 reload. The
+   * caller owns the `loaded` claim: `loadThreads` refuses a second load through
+   * it, `reloadThreads` re-claims it so this reads again.
+   */
+  const runLoad = async (document: vscode.TextDocument, docKey: string, prune: boolean): Promise<void> => {
+    // Req 24 US-23.15 AC2: the epoch this read belongs to. `forgetDocument`
+    // bumps it, so a delete event landing WHILE this read is in flight makes the
+    // continuation below a no-op instead of re-registering every thread from
+    // content that has since been deleted (review finding, 2026-07-28).
+    const epoch = loadEpoch.get(docKey) ?? 0;
+    // The registry as it stood before the read — `pruneRemoved`'s candidate set.
+    const candidates = new Set(byDoc.get(docKey) ?? []);
+    // Recorded BEFORE the first await, so a snapshot posted from the `ready`
+    // handler while this read is in flight says "still loading" rather than
+    // letting the webview conclude the file has no comments (US-23.9 AC12(d)).
+    sidecarState.set(docKey, { loading: true });
+    const refusal = await store.refusalFor(document);
+    if (refusal !== null) {
+      // No sidecar is possible at all. Recorded rather than logged, so the tab
+      // shows the actionable reason instead of "No comments in this file".
+      sidecarState.set(docKey, { problem: refusal });
+      return;
+    }
+    let folded;
+    try {
+      // US-23.5 AC5: a sidecar whose name drifted out of VS Code (case, or
+      // NFC vs NFD) is adopted before the read, so its comments are found
+      // rather than silently treated as "this file has none".
+      await store.adoptDrifted(document);
+      folded = await store.load(document);
+    } catch (err) {
+      // Released, so reopening the file retries rather than leaving this
+      // document permanently marked as loaded-with-nothing.
+      loaded.delete(docKey);
+      log(`Comment sidecar: loading ${document.uri.toString()} failed`, err);
+      sidecarState.set(docKey, { problem: 'The comment sidecar could not be read. Reopen the file to retry.' });
+      return;
+    }
+    if (folded.unreadable) {
+      // The sidecar exists but could not be read (permissions, a directory in
+      // the way, a transient network error). Presenting the file as having no
+      // comments would be a lie the user cannot see, and appending onto it later
+      // would mix new lines into history we never read — so release the claim so
+      // a reopen retries, and say so out loud.
+      loaded.delete(docKey);
+      void vscode.window.showWarningMessage(
+        'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.'
+      );
+      sidecarState.set(docKey, {
+        problem: 'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.',
+      });
+      return;
+    }
+    if ((loadEpoch.get(docKey) ?? 0) !== epoch) {
+      // The document was forgotten (its sidecar deleted, or it was renamed) while
+      // this read was in flight. Everything below would put its threads back.
+      log(`Comment sidecar: discarding a load of ${document.uri.toString()} that was overtaken by a delete/rename`);
+      return;
+    }
+    // AC7 clause 2: a sidecar found beside a document it does not describe (the
+    // `.md` was deleted and a new file created at the same path) must surface as
+    // unresolved/floating, never silently reattached at its old line numbers.
+    const belonging = sidecarBelongsToDocument(folded.threads, document.getText());
+    // US-23.16 AC4: anything short of a positive `belongs` floats rather
+    // than pins — pinning a stale thread in a foreign (or merely
+    // inconclusive) document is the exact outcome this check exists to
+    // prevent. `unknown` floats quietly, with no alarming banner below.
+    const loadedState = belonging === 'belongs' ? 'approximate' : 'floating';
+    if (belonging === 'foreign') {
+      log(
+        `Comment sidecar ${document.uri.toString()}: none of its ${folded.threads.length} recorded texts appear in this document — threads loaded as unresolved`
+      );
+      void vscode.window.showWarningMessage(
+        `${folded.threads.length} comment(s) were found for this file, but none of the text they were written against is still here. They are marked as unresolved rather than attached to the wrong place.`
+      );
+    }
+    if (folded.orphans.length > 0) {
+      // AC4 routes these here "instead of silently dropping"; US-23.9's tab is
+      // where they become visible, so the lines travel with the snapshot too.
+      log(
+        `Comment sidecar ${document.uri.toString()}: ${folded.orphans.length} orphaned line(s) have no parent/target (US-23.16 AC7)`
+      );
+    }
+    sidecarState.set(docKey, {
+      foreign: belonging === 'foreign' ? true : undefined,
+      orphans: folded.orphans.map((line): CommentSyncOrphan => {
+        switch (line.type) {
+          case 'reply':
+            return { id: line.id, kind: 'reply', author: line.author, timestamp: line.timestamp, detail: line.body };
+          case 'status-change':
+            return {
+              id: line.id,
+              kind: 'status-change',
+              author: line.author,
+              timestamp: line.timestamp,
+              detail: line.to_status,
+            };
+          case 'anchor-update':
+            return {
+              id: line.id,
+              kind: 'anchor-update',
+              author: line.author,
+              timestamp: line.timestamp,
+              detail: line.origin,
+            };
+          case 'delete':
+            return {
+              id: line.id,
+              kind: 'delete',
+              author: line.author,
+              timestamp: line.timestamp,
+              detail: line.target_id,
+            };
+          case 'edit':
+            return { id: line.id, kind: 'edit', author: line.author, timestamp: line.timestamp, detail: line.body };
+        }
+      }),
+    });
+    // Req 24 US-23.15 AC3/AC4: what this load did not deliver, told out loud —
+    // after `sidecarState` is written, since it amends that same record.
+    reportLoadLosses(docKey, document, folded);
+    // Req 24 US-23.15 AC5: only once the read succeeded, so a refused/unreadable
+    // sidecar does not also nag about git.
+    checkSharing(document);
+    // Dedup within THIS document only, keyed by the durable comment id, so a
+    // reload after a rename still builds the threads (a flat "seen this uuid"
+    // check would skip them all) and a thread created this session is not
+    // duplicated by the reload that follows. A Map rather than a Set so a reload
+    // can also REFRESH the entry it recognises (US-23.15 AC1) instead of only
+    // skipping it — the registry key is not derivable from the comment id (a
+    // thread created this session is keyed by its webview threadId).
+    const known = new Map<string, string>();
+    for (const entryKey of byDoc.get(docKey) ?? []) {
+      const existing = threads.get(entryKey)?.commentId;
+      if (existing !== null && existing !== undefined) {
+        known.set(existing, entryKey);
+      }
+    }
+    // A fold this read could not parse cleanly is NOT authoritative about what is
+    // gone: a truncated line from a crashed append, or a mid-merge file, would
+    // otherwise remove live threads whose data is still on disk — and a read that
+    // catches the file mid-rewrite at zero bytes would remove every one of them
+    // (review finding, 2026-07-28). Adding and refreshing still run; only the
+    // destructive half waits for a clean read.
+    const authoritative = folded.warnings.length === 0;
+    if (prune && authoritative) {
+      // Req 24 US-23.15 AC1: removal runs BEFORE the additive pass below, so a
+      // thread whose lines vanished is gone even if the same pass also adds new
+      // ones — and `known` above was read first, so pruning cannot make the
+      // additive half re-register a thread it is about to drop.
+      pruneRemoved(docKey, new Set(folded.threads.map((persisted) => persisted.id)), candidates);
+    } else if (prune) {
+      log(
+        `Comment sidecar ${document.uri.toString()}: ${folded.warnings.length} unreadable line(s), so no thread was removed on this reload`
+      );
+    }
+    for (const persisted of folded.threads) {
+      const existingKey = known.get(persisted.id);
+      if (existingKey !== undefined) {
+        // A thread whose own write is in flight owns its in-memory state until
+        // that write settles — refreshing it from a fold parsed BEFORE the append
+        // landed would drop the reply/status/edit it is about to apply.
+        const busy =
+          creating.has(existingKey) ||
+          replying.has(existingKey) ||
+          changingStatus.has(existingKey) ||
+          updatingAnchor.has(existingKey);
+        if (prune && !busy) {
+          refreshExisting(existingKey, persisted, document);
+        }
+        continue;
+      }
+      try {
+        register(docKey, persisted.id, {
+          thread: buildLoadedThread(controller, document, persisted, loadedState),
+          commentId: persisted.id,
+          commentAuthor: persisted.comment.author,
+          commentBody: persisted.comment.body,
+          commentTimestamp: persisted.comment.timestamp,
+          commentEditedAt: persisted.comment.editedAt,
+          status: persisted.status,
+          // US-23.11 AC2: the whole trail has to survive the reload, so it comes
+          // off the (timestamp-sorted, illegal-lines-already-skipped) status-change
+          // lines rather than being remembered only by the session that wrote them.
+          statusChanges: persisted.statusChanges.map((line) => ({
+            toStatus: line.to_status,
+            author: line.author,
+            timestamp: line.timestamp,
+          })),
+          replies: repliesFrom(persisted),
+          anchor: {
+            // A fresh parse mints fresh structural ids, so a reloaded thread has
+            // no tier-1 anchor to name. An empty id marks it as "not tier-1".
+            anchorId: '',
+            // US-23.13 AC1/AC2: `persisted.anchor` is the loader's folded
+            // position (the latest `anchor-update` line, if one exists) — NOT
+            // `persisted.comment.anchor`, which is the immutable creation-time
+            // snapshot. Reading the latter here would silently discard every
+            // persisted re-attachment/auto-resolution on reload.
+            offsetStart: persisted.anchor.offset_start,
+            offsetEnd: persisted.anchor.offset_end,
+            recordedText: persisted.anchor.recorded_text,
+            lastKnownLine: persisted.anchor.last_known_line,
+            nearestHeading: persisted.anchor.nearest_heading,
+            // Placed from last_known_line, not from a resolved structural id —
+            // AC3's "never silently indistinguishable from an exact anchor".
+            state: loadedState,
+          },
+        });
+      } catch (err) {
+        // Inside the loop, so one unbuildable thread costs only itself: the
+        // remaining threads still load, and the claim stays so a reopen does not
+        // duplicate the ones that succeeded.
+        log(`Comment sidecar: could not place thread ${persisted.id}`, err);
+      }
+    }
+  };
+
   return {
     async createThread(msg, document): Promise<CreateThreadOutcome> {
       // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
@@ -665,7 +1159,7 @@ export function createCommentSupport(
       try {
         writeError = await saveBeforeAppend(document, versionAtEntry);
         if (writeError === null) {
-          writeError = await store.append(
+          writeError = await appendLine(
             document,
             buildCommentLine({
               id: commentId,
@@ -729,171 +1223,29 @@ export function createCommentSupport(
       }
       // Claimed before the await so two panels opening at once can't both load.
       loaded.add(docKey);
-      // Recorded BEFORE the first await, so a snapshot posted from the `ready`
-      // handler while this read is in flight says "still loading" rather than
-      // letting the webview conclude the file has no comments (US-23.9 AC12(d)).
-      sidecarState.set(docKey, { loading: true });
-      const refusal = await store.refusalFor(document);
-      if (refusal !== null) {
-        // No sidecar is possible at all. Recorded rather than logged, so the tab
-        // shows the actionable reason instead of "No comments in this file".
-        sidecarState.set(docKey, { problem: refusal });
-        return;
-      }
-      let folded;
-      try {
-        // US-23.5 AC5: a sidecar whose name drifted out of VS Code (case, or
-        // NFC vs NFD) is adopted before the read, so its comments are found
-        // rather than silently treated as "this file has none".
-        await store.adoptDrifted(document);
-        folded = await store.load(document);
-      } catch (err) {
-        // Released, so reopening the file retries rather than leaving this
-        // document permanently marked as loaded-with-nothing.
-        loaded.delete(docKey);
-        log(`Comment sidecar: loading ${document.uri.toString()} failed`, err);
-        sidecarState.set(docKey, { problem: 'The comment sidecar could not be read. Reopen the file to retry.' });
-        return;
-      }
-      if (folded.unreadable) {
-        // The sidecar exists but could not be read (permissions, a directory in
-        // the way, a transient network error). Presenting the file as having no
-        // comments would be a lie the user cannot see, and appending onto it later
-        // would mix new lines into history we never read — so release the claim so
-        // a reopen retries, and say so out loud.
-        loaded.delete(docKey);
-        void vscode.window.showWarningMessage(
-          'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.'
-        );
-        sidecarState.set(docKey, {
-          problem: 'This file has comments, but the comment sidecar could not be read. Reopen the file to retry.',
-        });
-        return;
-      }
-      // AC7 clause 2: a sidecar found beside a document it does not describe (the
-      // `.md` was deleted and a new file created at the same path) must surface as
-      // unresolved/floating, never silently reattached at its old line numbers.
-      const belonging = sidecarBelongsToDocument(folded.threads, document.getText());
-      // US-23.16 AC4: anything short of a positive `belongs` floats rather
-      // than pins — pinning a stale thread in a foreign (or merely
-      // inconclusive) document is the exact outcome this check exists to
-      // prevent. `unknown` floats quietly, with no alarming banner below.
-      const loadedState = belonging === 'belongs' ? 'approximate' : 'floating';
-      if (belonging === 'foreign') {
-        log(
-          `Comment sidecar ${document.uri.toString()}: none of its ${folded.threads.length} recorded texts appear in this document — threads loaded as unresolved`
-        );
-        void vscode.window.showWarningMessage(
-          `${folded.threads.length} comment(s) were found for this file, but none of the text they were written against is still here. They are marked as unresolved rather than attached to the wrong place.`
-        );
-      }
-      if (folded.orphans.length > 0) {
-        // AC4 routes these here "instead of silently dropping"; US-23.9's tab is
-        // where they become visible, so the lines travel with the snapshot too.
-        log(
-          `Comment sidecar ${document.uri.toString()}: ${folded.orphans.length} orphaned line(s) have no parent/target (US-23.16 AC7)`
-        );
-      }
-      sidecarState.set(docKey, {
-        foreign: belonging === 'foreign' ? true : undefined,
-        orphans: folded.orphans.map((line): CommentSyncOrphan => {
-          switch (line.type) {
-            case 'reply':
-              return { id: line.id, kind: 'reply', author: line.author, timestamp: line.timestamp, detail: line.body };
-            case 'status-change':
-              return {
-                id: line.id,
-                kind: 'status-change',
-                author: line.author,
-                timestamp: line.timestamp,
-                detail: line.to_status,
-              };
-            case 'anchor-update':
-              return {
-                id: line.id,
-                kind: 'anchor-update',
-                author: line.author,
-                timestamp: line.timestamp,
-                detail: line.origin,
-              };
-            case 'delete':
-              return {
-                id: line.id,
-                kind: 'delete',
-                author: line.author,
-                timestamp: line.timestamp,
-                detail: line.target_id,
-              };
-            case 'edit':
-              return { id: line.id, kind: 'edit', author: line.author, timestamp: line.timestamp, detail: line.body };
-          }
-        }),
-      });
-      // Dedup within THIS document only, keyed by the durable comment id, so a
-      // reload after a rename still builds the threads (a flat "seen this uuid"
-      // check would skip them all) and a thread created this session is not
-      // duplicated by the reload that follows.
-      const known = new Set<string>();
-      for (const entryKey of byDoc.get(docKey) ?? []) {
-        const existing = threads.get(entryKey)?.commentId;
-        if (existing !== null && existing !== undefined) {
-          known.add(existing);
-        }
-      }
-      for (const persisted of folded.threads) {
-        if (known.has(persisted.id)) {
-          continue;
-        }
-        try {
-          register(docKey, persisted.id, {
-            thread: buildLoadedThread(controller, document, persisted, loadedState),
-            commentId: persisted.id,
-            commentAuthor: persisted.comment.author,
-            commentBody: persisted.comment.body,
-            commentTimestamp: persisted.comment.timestamp,
-            commentEditedAt: persisted.comment.editedAt,
-            status: persisted.status,
-            // US-23.11 AC2: the whole trail has to survive the reload, so it comes
-            // off the (timestamp-sorted, illegal-lines-already-skipped) status-change
-            // lines rather than being remembered only by the session that wrote them.
-            statusChanges: persisted.statusChanges.map((line) => ({
-              toStatus: line.to_status,
-              author: line.author,
-              timestamp: line.timestamp,
-            })),
-            replies: persisted.replies.map((r) => ({
-              id: r.id,
-              author: r.author,
-              timestamp: r.timestamp,
-              body: r.body,
-              editedAt: r.editedAt,
-            })),
-            anchor: {
-              // A fresh parse mints fresh structural ids, so a reloaded thread has
-              // no tier-1 anchor to name. An empty id marks it as "not tier-1".
-              anchorId: '',
-              // US-23.13 AC1/AC2: `persisted.anchor` is the loader's folded
-              // position (the latest `anchor-update` line, if one exists) — NOT
-              // `persisted.comment.anchor`, which is the immutable creation-time
-              // snapshot. Reading the latter here would silently discard every
-              // persisted re-attachment/auto-resolution on reload.
-              offsetStart: persisted.anchor.offset_start,
-              offsetEnd: persisted.anchor.offset_end,
-              recordedText: persisted.anchor.recorded_text,
-              lastKnownLine: persisted.anchor.last_known_line,
-              nearestHeading: persisted.anchor.nearest_heading,
-              // Placed from last_known_line, not from a resolved structural id —
-              // AC3's "never silently indistinguishable from an exact anchor".
-              state: loadedState,
-            },
-          });
-        } catch (err) {
-          // Inside the loop, so one unbuildable thread costs only itself: the
-          // remaining threads still load, and the claim stays so a reopen does not
-          // duplicate the ones that succeeded.
-          log(`Comment sidecar: could not place thread ${persisted.id}`, err);
-        }
-      }
+      await runLoad(document, docKey, false);
+    },
+
+    isLoaded(document): boolean {
+      return loaded.has(docKeyFor(document.uri));
+    },
+
+    sidecarPathFor(document): string {
+      return store.uriFor(document).fsPath;
+    },
+
+    async reloadThreads(document): Promise<void> {
+      // Req 24 US-23.15 AC1: the docKey is resolved BEFORE the claim is released,
+      // so `docKeyFor`'s case/NFC fold still finds the key this document's threads
+      // are registered under (it folds against `loaded`, which is about to lose
+      // this entry) — a raw uri key here would strand the existing threads.
+      const docKey = docKeyFor(document.uri);
+      // Claimed, never checked: the one-shot guard exists to stop two PANELS from
+      // both loading, and a reload's whole purpose is to read a file that guard
+      // would otherwise refuse. Re-claiming also covers the case where an earlier
+      // failed load released it.
+      loaded.add(docKey);
+      await runLoad(document, docKey, true);
     },
 
     async revalidateAfterSave(document): Promise<void> {
@@ -927,6 +1279,15 @@ export function createCommentSupport(
       byDoc.delete(docKey);
       loaded.delete(docKey);
       sidecarState.delete(docKey);
+      // US-23.15 AC2/AC3: this document's damage report goes with its threads, so
+      // a sidecar that is deleted and later restored with the same bad line is a
+      // newly-discovered problem again, not a suppressed one. Same for the git
+      // verdict: a sidecar restored under a NEW ignore rule must be able to say so.
+      reportedLosses.delete(docKey);
+      shareWarned.delete(docKey);
+      // A load whose read is still in flight belongs to the epoch this bump ends —
+      // without it, that continuation would re-register everything just dropped.
+      loadEpoch.set(docKey, (loadEpoch.get(docKey) ?? 0) + 1);
     },
 
     async updateAnchor(msg, document): Promise<string | null> {
@@ -996,7 +1357,7 @@ export function createCommentSupport(
         const author = await authorFor(document);
         const writeError =
           (await saveBeforeAppend(document, versionAtEntry)) ??
-          (await store.append(
+          (await appendLine(
             document,
             buildAnchorUpdateLine({
               id: crypto.randomUUID(),
@@ -1065,7 +1426,7 @@ export function createCommentSupport(
         const saveError = await saveBeforeAppend(document, versionAtEntry);
         const writeError =
           saveError ??
-          (await store.append(
+          (await appendLine(
             document,
             buildReplyLine({ id: replyId, parentCommentId: entry.commentId, author, timestamp, body: msg.body })
           ));
@@ -1116,7 +1477,7 @@ export function createCommentSupport(
       const saveError = await saveBeforeAppend(document, versionAtEntry);
       const writeError =
         saveError ??
-        (await store.append(
+        (await appendLine(
           document,
           buildDeleteLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp })
         ));
@@ -1235,7 +1596,7 @@ export function createCommentSupport(
                 : 'This comment was deleted.',
           };
         }
-        const writeError = await store.append(
+        const writeError = await appendLine(
           document,
           buildEditLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp, body })
         );
@@ -1361,7 +1722,7 @@ export function createCommentSupport(
         const saveError = await saveBeforeAppend(document, versionAtEntry);
         const writeError =
           saveError ??
-          (await store.append(
+          (await appendLine(
             document,
             buildStatusChangeLine({
               id: crypto.randomUUID(),
@@ -1462,6 +1823,9 @@ export function createCommentSupport(
       creating.clear();
       changingStatus.clear();
       editingTarget.clear();
+      reportedLosses.clear();
+      shareWarned.clear();
+      loadEpoch.clear();
       // Disposing the controller disposes every thread it created.
       controller.dispose();
     },

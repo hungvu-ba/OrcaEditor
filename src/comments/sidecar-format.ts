@@ -20,6 +20,13 @@ const SIDECAR_SCHEMA_VERSION = 1;
 /** Appended to the `.md`'s own file name — the sidecar is its 1:1 sibling (AC1). */
 const SIDECAR_SUFFIX = '.orca-comments.jsonl';
 
+/**
+ * Req 24 US-23.15 AC1/AC2: the workspace-relative glob a `FileSystemWatcher`
+ * needs to see every sidecar change. Exported from here so the suffix has one
+ * definition — a second literal in the provider would drift the day it changes.
+ */
+export const SIDECAR_WATCH_GLOB = `**/*${SIDECAR_SUFFIX}`;
+
 /** The Open → Resolved → Closed axis (US-23.3). Orthogonal to anchor state (US-23.4). */
 export type CommentStatus = 'Open' | 'Resolved' | 'Closed';
 
@@ -150,11 +157,30 @@ export interface FoldedSidecar {
    * failure silently presents the file as uncommented.
    */
   unreadable?: boolean;
+  /** US-23.15 AC4: carried through from `ParsedSidecar` — see there. */
+  conflicted?: boolean;
+  /** US-23.15 AC3: carried through from `ParsedSidecar` — see there. */
+  conflictMarkers?: number;
 }
 
 export interface ParsedSidecar {
   lines: SidecarLine[];
   warnings: string[];
+  /**
+   * US-23.15 AC4: at least one line was a git conflict marker, so this sidecar
+   * is mid-merge. Distinct from a plain unparseable line: the file is not
+   * damaged, it is *unresolved*, and the user has to be told that rather than
+   * shown a silently partial list.
+   */
+  conflicted?: boolean;
+  /**
+   * How many of `warnings` are conflict-marker lines. A marker carries no comment
+   * data, so counting it as a lost record would tell the user "3 lines could not
+   * be read" about a merge where every comment on both sides loaded fine (review
+   * finding, 2026-07-28) — the caller subtracts this from its loss count and
+   * reports `conflicted` on its own instead.
+   */
+  conflictMarkers?: number;
 }
 
 /** The sidecar file name for a `.md` file name — `foo.md` → `foo.md.orca-comments.jsonl`. */
@@ -537,6 +563,16 @@ function asSidecarLine(value: unknown): SidecarLine | null {
 }
 
 /**
+ * US-23.15 AC4: the markers a conflicted git merge leaves at the START of a
+ * line. No JSON value can begin with any of them, so a line that does is a
+ * marker, never a record. `|||||||` is diff3/zdiff3 style's base section and is
+ * listed too — it always sits under a `<<<<<<<`, so the FLAG would be set
+ * either way, but without it that line would be reported to the user as bad
+ * JSON and counted as lost data (review finding, 2026-07-28).
+ */
+const CONFLICT_MARKERS = ['<<<<<<<', '=======', '>>>>>>>', '|||||||'];
+
+/**
  * Every readable line of a sidecar's text, in on-disk order. A line that fails
  * to parse (or is not a recognised record) is skipped with a warning instead of
  * aborting the whole file's load (AC4) — one truncated final line from a crashed
@@ -546,12 +582,21 @@ function asSidecarLine(value: unknown): SidecarLine | null {
 export function parseSidecarText(text: string): ParsedSidecar {
   const lines: SidecarLine[] = [];
   const warnings: string[] = [];
+  let conflictMarkers = 0;
   // Split on LF only — the writer never emits CRLF. `trim()` below absorbs a
   // stray CR that a Windows editor or a git merge may have left behind.
   text.split('\n').forEach((raw, index) => {
     const trimmed = raw.trim();
     if (trimmed === '') {
       // The trailing newline every append writes, or a blank line from a merge.
+      return;
+    }
+    if (CONFLICT_MARKERS.some((marker) => trimmed.startsWith(marker))) {
+      // US-23.15 AC4: a marker line would be reported as "not valid JSON" by the
+      // branch below — true, but useless. Named for what it is, and flagged so
+      // the caller can say the sidecar is mid-merge rather than merely damaged.
+      warnings.push(`line ${index + 1}: git conflict marker, skipped`);
+      conflictMarkers++;
       return;
     }
     let parsed: unknown;
@@ -568,7 +613,7 @@ export function parseSidecarText(text: string): ParsedSidecar {
     }
     lines.push(line);
   });
-  return { lines, warnings };
+  return conflictMarkers > 0 ? { lines, warnings, conflicted: true, conflictMarkers } : { lines, warnings };
 }
 
 /**

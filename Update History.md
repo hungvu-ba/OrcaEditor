@@ -486,3 +486,4 @@
 | 0.10.0 | 2026-07-28 | Feature (US-23.18): undo/redo pressed in any comment surface now dies there instead of rolling back the document, and a write refuses if the document moved mid-flight. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.16 AC1-AC8): comment sidecar dedup now spans every line type, belonging uses discriminating-length thresholds, delete drops its author gate. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.22): an unregistered `#content` CSS class now fails `npm test`; the scan found and registered three more leaking classes. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.15): the comment sidecar now reloads when it changes on disk — threads added, refreshed and removed — and load losses plus an unshareable sidecar are surfaced. |

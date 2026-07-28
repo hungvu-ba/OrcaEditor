@@ -47,6 +47,7 @@ import {
   safeOsUsername,
 } from './comments/comment-utils';
 import { createSidecarStore } from './comments/sidecar-store';
+import { mdNameForSidecar, sidecarNameFor, SIDECAR_WATCH_GLOB } from './comments/sidecar-format';
 
 /**
  * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
@@ -458,6 +459,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         })()
       );
     });
+    // Req 24 US-23.15 AC1/AC2: a second window, a `git pull`, a sync client or a
+    // hand edit changes the sidecar underneath us. Its own watcher (the `.md` glob
+    // above cannot match a `.jsonl`) reloads the document's threads and re-syncs
+    // every surface; the DELETE event is separate because a change event never
+    // fires for a file that no longer exists, so a branch switch that removes the
+    // sidecar would otherwise leave every thread on screen, stale.
+    const sidecarWatcher = vscode.workspace.createFileSystemWatcher(SIDECAR_WATCH_GLOB);
+    const sidecarSubs = [
+      sidecarWatcher.onDidChange((uri) => provider.scheduleSidecarReload(uri)),
+      sidecarWatcher.onDidCreate((uri) => provider.scheduleSidecarReload(uri)),
+      sidecarWatcher.onDidDelete((uri) => provider.dropSidecarThreads(uri)),
+      sidecarWatcher,
+      // An armed reload outliving the watcher would fire against a disposed
+      // controller — rebuilding threads and spawning `git` during teardown.
+      new vscode.Disposable(() => provider.clearPendingSidecarReloads()),
+    ];
     // Req 23 US-23.5 AC5: once the rename has happened, the old uri's threads are
     // bound to a path that no longer resolves. Dropping them lets the reopened
     // document rebuild from the moved sidecar instead of showing each comment
@@ -477,6 +494,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       renameSub,
       renamedSub,
       ...watcherSubs,
+      ...sidecarSubs,
       provider.comments
     );
   }
@@ -591,6 +609,131 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
     this.entityIndex.onFileChanged(key, '');
     this.notifyEntityIndexUpdated();
+  }
+
+  /**
+   * Req 24 US-23.15 AC1: pending sidecar reloads, keyed by sidecar uri. Separate
+   * from `reindexTimers` (same debounce window, different unit of work) so a
+   * `.md` reindex and a sidecar reload for the same file never cancel each other.
+   */
+  private readonly sidecarReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Req 24 US-23.15 AC1/AC2: the OPEN document a sidecar belongs to, or undefined
+   * when nothing on screen depends on it. Everything below is a no-op for a
+   * sidecar whose `.md` has no live panel — the load already happens on open, so
+   * reloading a document nobody is looking at buys nothing.
+   *
+   * Matched through `documentStateKey`, not `sameDocumentUri` (CLAUDE.md's
+   * cross-platform trap): the sidecar's on-disk name can differ from the derived
+   * one by Unicode form as well as case, and only the former folds NFC — a
+   * teammate's NFC-named sidecar beside an NFD-named `.md` percent-encodes
+   * differently, so a case-only fold drops every event for it (review finding).
+   *
+   * The returned document is preferentially the one registered under the panel
+   * key itself: `syncCommentThreads` looks its panels up by that exact string, so
+   * handing back a differently-cased sibling document would update the host
+   * registry and post nothing (review finding).
+   */
+  private documentForSidecar(sidecarUri: vscode.Uri): vscode.TextDocument | undefined {
+    const mdName = mdNameForSidecar(sidecarUri.path.split('/').pop() ?? '');
+    if (mdName === null) {
+      return undefined;
+    }
+    const mdKey = documentStateKey(vscode.Uri.joinPath(sidecarUri, '..', mdName).toString(), CASE_INSENSITIVE_FS);
+    for (const [docUriStr, panels] of this.panelsByUri) {
+      if (panels.size === 0 || documentStateKey(docUriStr, CASE_INSENSITIVE_FS) !== mdKey) {
+        continue;
+      }
+      const documents = vscode.workspace.textDocuments;
+      return (
+        documents.find((d) => d.uri.toString() === docUriStr) ??
+        documents.find((d) => documentStateKey(d.uri.toString(), CASE_INSENSITIVE_FS) === mdKey)
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Req 24 US-23.15 AC1: debounced sidecar change/create → reload + re-sync. The
+   * debounce is what collapses a `git pull`/rebase burst (many events for one
+   * file) into ONE reload, the same per-URI coalescing `scheduleReindex` applies
+   * to the `.md` watcher.
+   *
+   * No `WATCHER_EXCLUDE_DIRS` skip, deliberately unlike `scheduleReindex`: that
+   * list stops the entity index from crawling build output, but everything here is
+   * already gated on a live panel, so the only documents it could exclude are ones
+   * the user explicitly opened and commented on (review finding) — and the delete
+   * route below has no such filter either, which would make AC1 dead and AC2 live
+   * for the very same file.
+   */
+  private scheduleSidecarReload(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const existing = this.sidecarReloadTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.sidecarReloadTimers.set(
+      key,
+      setTimeout(() => {
+        this.sidecarReloadTimers.delete(key);
+        const document = this.documentForSidecar(uri);
+        if (document === undefined || !this.comments) {
+          return;
+        }
+        void this.comments
+          .reloadThreads(document)
+          .then(() => this.syncCommentThreads(document))
+          .catch((err: unknown) => MarkdownWysiwygProvider.log(`Comment sidecar: reload of ${key} failed`, err));
+      }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
+    );
+  }
+
+  /**
+   * Req 24 US-23.15 AC2: the sidecar itself is gone (branch switch, `git rm`, or
+   * by hand). `forgetDocument` drops every thread for that document and releases
+   * the load claim, so a sidecar that comes back (switching branches again, and
+   * the create event that follows) rebuilds from disk.
+   */
+  private dropSidecarThreads(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const pending = this.sidecarReloadTimers.get(key);
+    if (pending !== undefined) {
+      // A reload armed by the change event that preceded the delete would read a
+      // file that is no longer there.
+      clearTimeout(pending);
+      this.sidecarReloadTimers.delete(key);
+    }
+    const document = this.documentForSidecar(uri);
+    if (document === undefined) {
+      return;
+    }
+    // A delete event does NOT prove the comments are gone (review finding): an
+    // atomic-save editor or a sync client writes a temp file and renames it over
+    // the sidecar, and `store.adoptDrifted` renames a case/NFC-drifted sidecar to
+    // the canonical name during the load itself — both surface as delete + create.
+    // Dropping every thread on the delete alone makes the panel flash empty in the
+    // first case and, if the paired create is coalesced away or lands first, lose
+    // them for the session. So: re-check the file the DOCUMENT derives, and treat
+    // "still there" as a change instead.
+    const live = this.comments?.sidecarPathFor(document);
+    // The path is derived from the open document's own uri by the store, never
+    // from the watcher payload — no attacker-controlled component reaches it.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    if (live !== undefined && fs.existsSync(live)) {
+      this.scheduleSidecarReload(uri);
+      return;
+    }
+    this.comments?.forgetDocument(document.uri);
+    this.syncCommentThreads(document);
+  }
+
+  /** Req 24 US-23.15 AC1: drop every armed reload — a timer that fires after teardown would rebuild threads on a disposed controller. */
+  private clearPendingSidecarReloads(): void {
+    for (const timer of this.sidecarReloadTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.sidecarReloadTimers.clear();
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
@@ -942,6 +1085,24 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // editor open does not always surface as onDidOpenTextDocument.
     this.scheduleOccurrenceScan(document);
 
+    // Req 24 US-23.15 AC1/AC2: the provider-level sidecar watcher uses a bare
+    // workspace-relative glob, which VS Code only applies INSIDE workspace
+    // folders. A file opened on its own (File → Open File, no folder) would
+    // therefore never receive a change/create/delete event at all (review
+    // finding), so it gets its own `RelativePattern` watcher scoped to exactly its
+    // sidecar, for this panel's lifetime.
+    const sidecarFallbackWatcher =
+      vscode.workspace.getWorkspaceFolder(document.uri) === undefined && document.uri.scheme === 'file'
+        ? vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(documentDir, sidecarNameFor(path.basename(document.uri.fsPath)))
+          )
+        : undefined;
+    if (sidecarFallbackWatcher !== undefined) {
+      sidecarFallbackWatcher.onDidChange((uri) => this.scheduleSidecarReload(uri));
+      sidecarFallbackWatcher.onDidCreate((uri) => this.scheduleSidecarReload(uri));
+      sidecarFallbackWatcher.onDidDelete((uri) => this.dropSidecarThreads(uri));
+    }
+
     // Req 23 US-23.5 AC4: rebuild this document's persisted comment threads from
     // its sidecar. Fire-and-forget: it only populates the native comments UI, so
     // nothing below waits on disk I/O, and loadThreads is idempotent for a second
@@ -955,7 +1116,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // caller wait for an in-flight first one, which it isn't built to do. The
     // 'ready' handler below also syncs once the webview registers, covering the
     // case where this load finishes before that registration happens.
-    void this.comments?.loadThreads(document).then(() => this.syncCommentThreads(document));
+    // Req 24 US-23.15 AC1: an already-loaded document goes through the RELOAD, not
+    // the one-shot load — a `git pull` that landed while this document had no panel
+    // open reached no watcher event (nothing was listening), so trusting the claim
+    // would show the list as it was on disk the first time (review finding).
+    void (this.comments?.isLoaded(document) === true
+      ? this.comments.reloadThreads(document)
+      : this.comments?.loadThreads(document)
+    )?.then(() => this.syncCommentThreads(document));
 
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
@@ -1737,6 +1905,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       messageSubscription.dispose();
       viewStateSubscription.dispose();
       existCheckTokenSource?.dispose();
+      // US-23.15 AC1: only this panel's no-workspace-folder fallback watcher, if
+      // it needed one — the provider-level watcher lives as long as the extension.
+      sidecarFallbackWatcher?.dispose();
       if (this.activePanel === webviewPanel) {
         this.activePanel = undefined;
       }

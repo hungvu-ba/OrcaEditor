@@ -295,6 +295,27 @@ test('a foreign sidecar gets one banner, not N unexplained floating rows', async
   await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(1);
 });
 
+// Req 24 US-23.15 AC3/AC4: the tab half of "load losses are surfaced". The host
+// notification is asserted on the `test:host` track; this is the surface a user
+// still has in front of them after the toast is gone.
+test('a conflicted or partially-unreadable sidecar states both in the same banner', async ({ page }) => {
+  await openWith(page, [FLOATING], { conflicted: true, skipped: 2 });
+
+  const banner = page.locator('.comment-tab-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('conflicted state from a git merge');
+  await expect(banner).toContainText('2 line(s)');
+  // The threads that DID load are still listed — an incomplete list is not an
+  // empty one, and the banner is what makes the difference visible.
+  await expect(page.locator('.comment-row[data-group="floating"]')).toHaveCount(1);
+});
+
+test('a clean sidecar shows no banner at all', async ({ page }) => {
+  await openWith(page, [FLOATING], { skipped: 0, conflicted: false });
+
+  await expect(page.locator('.comment-tab-banner')).toBeHidden();
+});
+
 test('orphaned reply/status lines are listed read-only after Closed', async ({ page }) => {
   await openWith(page, [CLOSED], {
     orphans: [

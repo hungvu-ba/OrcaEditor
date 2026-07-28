@@ -387,6 +387,16 @@ export interface CommentSidecarState {
   /** Why this document can hold no comments, or why its sidecar could not be read. */
   problem?: string;
   orphans?: CommentSyncOrphan[];
+  /**
+   * US-23.15 AC3: how many sidecar lines the load discarded — unparseable,
+   * unrecognised, a duplicate id the fold dropped, or an illegal status jump it
+   * skipped. Absent when nothing was lost. A count, not the lines themselves:
+   * the point is "your list is incomplete", and the Output channel already
+   * carries each line's own reason.
+   */
+  skipped?: number;
+  /** US-23.15 AC4: the sidecar holds git conflict markers — it is mid-merge, not merely damaged. */
+  conflicted?: boolean;
 }
 
 /** Zen/Focus-mode change — same shape in both directions (webview↔host). */

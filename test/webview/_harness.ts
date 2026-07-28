@@ -240,6 +240,10 @@ export interface SeedSidecar {
   foreign?: boolean;
   problem?: string;
   orphans?: Array<{ id: string; kind: 'reply' | 'status-change'; author: string; timestamp: string; detail: string }>;
+  /** Req 24 US-23.15 AC3: how many sidecar lines the load discarded. */
+  skipped?: number;
+  /** Req 24 US-23.15 AC4: the sidecar holds git conflict markers. */
+  conflicted?: boolean;
 }
 
 /**

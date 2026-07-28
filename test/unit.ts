@@ -97,6 +97,7 @@ import {
   type ReplyLine,
   type StatusChangeLine,
 } from '../src/comments/sidecar-format';
+import { sidecarShareWarning } from '../src/comments/sidecar-git';
 import {
   clipCommentBodyToLimit,
   commentBodyCodePointLength,
@@ -2210,6 +2211,63 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar: an unknown line type is skipped',
     parseSidecarText('{"schema_version":1,"type":"reaction","id":"x","author":"a","timestamp":"2026-01-01T00:00:00Z"}\n')
       .lines.length === 0);
+
+  // Req 24 US-23.15 AC4: a conflicted merge is a stated failure, not a silently
+  // partial list — the markers are skipped like any unparseable line, but the
+  // file is FLAGGED so the caller can say "unresolved merge" rather than "damaged".
+  const conflicted = parseSidecarText(
+    [
+      '<<<<<<< HEAD',
+      serializeSidecarLine(comment()).trimEnd(),
+      '=======',
+      serializeSidecarLine(comment({ id: 'c2' })).trimEnd(),
+      '>>>>>>> feature/other',
+      '',
+    ].join('\n')
+  );
+  check('sidecar: conflict markers are skipped and both sides still load', conflicted.lines.length === 2);
+  check('sidecar: a conflicted sidecar is flagged', conflicted.conflicted === true);
+  check('sidecar: each conflict marker is reported as its own loss', conflicted.warnings.length === 3);
+  // The marker count is what keeps AC3's "N line(s) could not be read" honest: a
+  // marker carries no comment data, so all three warnings here describe a merge in
+  // which nothing was actually lost.
+  check('sidecar: marker lines are counted separately from real losses', conflicted.conflictMarkers === 3);
+  const diff3 = parseSidecarText(
+    ['<<<<<<< HEAD', '||||||| base', '=======', serializeSidecarLine(comment()).trimEnd(), '>>>>>>> other', ''].join('\n')
+  );
+  check("sidecar: diff3's ||||||| base marker is a marker, not bad JSON", diff3.conflictMarkers === 4);
+  check('sidecar: diff3 style still loads the surviving record', diff3.lines.length === 1);
+  check('sidecar: a conflict marker is named as one, not as bad JSON',
+    conflicted.warnings.every((w) => w.includes('git conflict marker')));
+  check('sidecar: a clean sidecar is not flagged as conflicted',
+    parseSidecarText(serializeSidecarLine(comment())).conflicted === undefined);
+  // Only at the START of a line: `=======` inside a comment body is prose, and the
+  // body is inside a JSON string, so the line must still parse.
+  check('sidecar: a body containing a conflict marker still parses',
+    parseSidecarText(serializeSidecarLine(comment({ body: '======= not a marker' }))).lines.length === 1);
+  check('sidecar: a body containing a conflict marker does not flag the file',
+    parseSidecarText(serializeSidecarLine(comment({ body: '<<<<<<< nope' }))).conflicted === undefined);
+
+  // Req 24 US-23.15 AC5: git state → the warning the user reads. `shared` is the
+  // healthy case; outside a repository (or with no usable `git`) AC5 is a no-op.
+  check('sidecar git: an ignored sidecar warns about the ignore rule',
+    (sidecarShareWarning('ignored', 'a.md.orca-comments.jsonl') ?? '').includes('gitignore'));
+  check('sidecar git: an untracked sidecar warns to add it',
+    (sidecarShareWarning('untracked', 'a.md.orca-comments.jsonl') ?? '').includes('git add'));
+  check('sidecar git: a warning names the sidecar',
+    (sidecarShareWarning('untracked', 'a.md.orca-comments.jsonl') ?? '').includes('a.md.orca-comments.jsonl'));
+  check('sidecar git: a tracked sidecar says nothing', sidecarShareWarning('shared', 'a.jsonl') === null);
+  check('sidecar git: outside a git repository says nothing', sidecarShareWarning('no-repo', 'a.jsonl') === null);
+  check('sidecar git: an unusable git says nothing', sidecarShareWarning('unknown', 'a.jsonl') === null);
+  // The blocker this review caught: git answers "untracked" for a path that does
+  // not exist, so without its own state every never-commented document would be
+  // told to `git add` a file nobody has created.
+  check('sidecar git: a document with no sidecar yet says nothing',
+    sidecarShareWarning('no-sidecar', 'a.jsonl') === null);
+
+  // AC5's state machine itself is async, and this runner is CJS with no
+  // top-level await — it is driven (through the same injectable runner, plus a
+  // real `git init`) in `test/host/sidecar-reload.test.ts`.
 
   // AC4: timestamp order, not on-disk order — a git merge can interleave lines.
   const shuffled = foldSidecarRecords([
