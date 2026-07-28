@@ -1055,6 +1055,55 @@ check(
   /matchedRoots\b/.test(allowedRootsBody) && !/roots\.find\(/.test(allowedRootsBody)
 );
 
+// S-1 RESIDUAL (2026-07-28): the fix above guards the assets DIRECTORY only, so
+// a file-symlink at the final `assets/<name>` was still dereferenced — the leaf
+// segment is never walked, and uniqueAssetUri's `stat` cannot see it (it
+// follows the link, and a dangling link makes stat throw = "name is free").
+// Every asset flow must run isAllowedAssetLeaf on `<dir>/<name>` first. Same
+// source-tripwire style as above: the four flows are unreachable from any test
+// track (no harness vscode).
+const assetLeafGuardBody = providerSrc.match(/private isAllowedAssetLeaf\([\s\S]*?\n  \}/)?.[0] ?? '';
+check(
+  'security S-1(residual): the leaf guard measures the leaf against the already-guarded dir',
+  /pathSegmentsContainSymlink\(dir\.fsPath, target\.fsPath, CASE_INSENSITIVE_FS\)/.test(assetLeafGuardBody)
+);
+// Review finding (High): re-running the FULL containment guard on the file uri
+// instead refuses a legitimate `assets -> ../shared-assets` layout — that
+// layout is accepted only by the realpath fallback, and realpath throws ENOENT
+// on a file that does not exist yet, so every new paste/drop would be rejected.
+check(
+  'security S-1(residual): the leaf guard does not re-run the containment/realpath check',
+  assetLeafGuardBody !== '' && !/isInsideAllowedRoots/.test(assetLeafGuardBody)
+);
+const savePastedBody = providerSrc.match(/private async savePastedImage\([\s\S]*?\n  \}/)?.[0] ?? '';
+const restoreUndoneBody =
+  providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+const deleteOrphanBody = providerSrc.match(/private async deleteOrphanImage\([\s\S]*?\n  \}/)?.[0] ?? '';
+for (const [label, body, deref] of [
+  ['savePastedImage', savePastedBody, 'fs.writeFile'],
+  ['saveDroppedFile', saveDroppedBody, 'fs.writeFile'],
+  ['restoreUndoneImageDeletions', restoreUndoneBody, 'fs.writeFile'],
+  ['deleteOrphanImage', deleteOrphanBody, 'fs.readFile'],
+] as const) {
+  // Review finding (Medium): asserting only that the identifier appears before
+  // the write stays green for `void this.isAllowedAssetLeaf(...)`, a dropped
+  // `!`, or the DIRECTORY passed twice — i.e. for the exact bug being fixed.
+  // Pin the negated call with a distinct dir and leaf argument.
+  const guarded = /if \(!this\.isAllowedAssetLeaf\((\w+), (\w+)\)\)/.exec(body);
+  const derefAt = body.indexOf(deref);
+  check(
+    `security S-1(residual): ${label} refuses a symlinked leaf before dereferencing it`,
+    guarded !== null && guarded[1] !== guarded[2] && derefAt !== -1 && guarded.index < derefAt
+  );
+}
+// Review finding (High): the bytes in recentlyDeletedImages are the only copy
+// left once cleanupOrphanImages has hard-deleted the file, so a refusal must
+// not evict them — the guard has to run before the cache delete, not after.
+check(
+  'security S-1(residual): a refused restore keeps the cached bytes for a later in-bounds retry',
+  /isAllowedAssetLeaf[\s\S]*?recentlyDeletedImages\.delete\(fileName\)/.test(restoreUndoneBody)
+);
+
 // The helper itself, against a real filesystem (Node-only module, no vscode).
 {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-guard-root-'));
@@ -1076,6 +1125,13 @@ check(
     check(
       'fs-guard: target outside the root abstains (containment is the caller\'s check)',
       pathSegmentsContainSymlink(root, outside) === false
+    );
+    // Kept outside the symlink block below: a host without symlink privilege
+    // must still prove that an ordinary new asset name is allowed.
+    const assetsDir = path.join(root, 'docs', 'assets');
+    check(
+      'fs-guard: an ordinary not-yet-written leaf file stays allowed',
+      pathSegmentsContainSymlink(assetsDir, path.join(assetsDir, 'fresh.png')) === false
     );
     // Symlink creation can be privilege-gated on Windows; skip only those cases there.
     let symlinkOk = true;
@@ -1106,6 +1162,41 @@ check(
       check(
         'fs-guard: the same pair abstains on a case-sensitive filesystem',
         pathSegmentsContainSymlink(root, caseVaried, false) === false
+      );
+      // S-1 residual: the escape is a FILE symlink at the leaf, not a directory
+      // one — `assets/report.pdf` → outside file, overwritten by a dropped file
+      // carrying that original name. The dangling variant is the worse case:
+      // uniqueAssetUri's `stat` throws on it and reads the name as free.
+      // Production measures the leaf against the already-guarded ASSETS DIR
+      // (dir as root ⇒ exactly one segment below it), so mirror that here.
+      const outsideFile = path.join(outside, 'secret.txt');
+      fs.writeFileSync(outsideFile, 'x');
+      fs.symlinkSync(outsideFile, path.join(assetsDir, 'report.pdf'), 'file');
+      fs.symlinkSync(path.join(outside, 'never-created.txt'), path.join(assetsDir, 'dangling.pdf'), 'file');
+      check(
+        'fs-guard: file-symlink leaf under the assets dir is detected',
+        pathSegmentsContainSymlink(assetsDir, path.join(assetsDir, 'report.pdf')) === true
+      );
+      check(
+        'fs-guard: DANGLING file-symlink leaf is detected (lstat does not follow)',
+        pathSegmentsContainSymlink(assetsDir, path.join(assetsDir, 'dangling.pdf')) === true
+      );
+      // Review finding (High): `assets -> ../shared-assets` resolving back
+      // inside the workspace is a legitimate layout the caller's realpath
+      // fallback accepts. Measuring a not-yet-written leaf from the DIR keeps
+      // it allowed; measuring the same leaf from the workspace root refuses it
+      // (realpath cannot rescue a file that does not exist yet), which would
+      // have broken every paste/drop into such a folder.
+      fs.mkdirSync(path.join(root, 'shared-assets'));
+      const linkedDir = path.join(root, 'docs', 'linked-assets');
+      fs.symlinkSync(path.join(root, 'shared-assets'), linkedDir, 'dir');
+      check(
+        'fs-guard: a fresh leaf inside a symlinked assets dir stays allowed',
+        pathSegmentsContainSymlink(linkedDir, path.join(linkedDir, 'fresh.png')) === false
+      );
+      check(
+        'fs-guard: the same leaf measured from the workspace root is refused (why the caller measures from the dir)',
+        pathSegmentsContainSymlink(root, path.join(linkedDir, 'fresh.png')) === true
       );
     }
   } finally {

@@ -2609,6 +2609,37 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /**
+   * Security Audit S-1 residual: resolveAllowedAssetsDir guards the assets
+   * DIRECTORY, so nothing checks the FINAL segment — a file-symlink committed
+   * at `assets/<name>` is followed by writeFile/readFile and the bytes land
+   * (or are read from) outside the workspace. uniqueAssetUri does not catch it
+   * either: its `stat` follows the link, and a DANGLING link makes `stat`
+   * throw, which reads as "the name is free".
+   *
+   * Measures ONLY the leaf — passing the already-guarded dir as the root
+   * leaves exactly one segment below it. Re-running the full containment guard
+   * on the file uri instead would refuse a legitimate `assets ->
+   * ../shared-assets` layout: that layout passes only through the realpath
+   * fallback, and realpath throws ENOENT on a file that does not exist yet.
+   *
+   * A leaf symlink is refused even when it resolves back inside the workspace
+   * — writing through it would corrupt whatever it points at. The check is not
+   * atomic with the write (a link planted in the check→write window is still
+   * followed), so this is a barrier against committed repo content, which is
+   * S-1's trust boundary, not against a concurrent local process.
+   *
+   * Every asset flow that dereferences `<assetsDir>/<name>` must call this
+   * first: savePastedImage / saveDroppedFile / restoreUndoneImageDeletions
+   * (write) and deleteOrphanImage (read-then-hard-delete).
+   */
+  private isAllowedAssetLeaf(dir: vscode.Uri, target: vscode.Uri): boolean {
+    if (dir.scheme !== 'file' || target.scheme !== 'file') {
+      return true;
+    }
+    return !pathSegmentsContainSymlink(dir.fsPath, target.fsPath, CASE_INSENSITIVE_FS);
+  }
+
+  /**
    * A specific hint to append to the "outside the allowed workspace" error when
    * a custom asset folder was refused because it is on a different drive than
    * the workspace (X-8) — a relative link across drives is impossible, so the
@@ -2674,6 +2705,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const prefix = this.imagePrefixFor(document);
     const fileName = `${prefix ? prefix + '-' : ''}${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
     const targetUri = vscode.Uri.joinPath(targetDir, fileName);
+    if (!this.isAllowedAssetLeaf(targetDir, targetUri)) {
+      return { error: `Cannot save the pasted image: "${fileName}" already exists as a symbolic link.` };
+    }
 
     try {
       await vscode.workspace.fs.createDirectory(targetDir);
@@ -2717,6 +2751,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     try {
       await vscode.workspace.fs.createDirectory(targetDir);
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
+      if (!this.isAllowedAssetLeaf(targetDir, targetUri)) {
+        return { error: `Cannot save the dropped file: "${path.basename(targetUri.path)}" already exists as a symbolic link.` };
+      }
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
       this.trackDroppedAsset(document, path.basename(targetUri.path));
       return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
@@ -2918,6 +2955,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
   private async deleteOrphanImage(imagesDir: vscode.Uri, fileName: string): Promise<void> {
     const fileUri = vscode.Uri.joinPath(imagesDir, fileName);
+    // S-1 residual, read half: readFile FOLLOWS a leaf symlink, so a link at
+    // `assets/<tracked name>` would pull outside-workspace bytes into
+    // recentlyDeletedImages, from where an undo can materialize them inside
+    // the workspace. Leave the link alone entirely.
+    if (!this.isAllowedAssetLeaf(imagesDir, fileUri)) {
+      MarkdownWysiwygProvider.log(`cleanupOrphanImages: skipped ${fileName} (symbolic link)`);
+      return;
+    }
     try {
       const bytes = await vscode.workspace.fs.readFile(fileUri);
       this.rememberDeletedImage(fileName, bytes);
@@ -2955,10 +3000,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;
       }
+      // Refuse BEFORE dropping the cache entry: these bytes are the only copy
+      // left (cleanupOrphanImages already hard-deleted the file), so evicting
+      // them on a refusal would be unrecoverable loss — the same reason the
+      // dir-level refusal above returns without touching the cache.
+      const targetUri = vscode.Uri.joinPath(imagesDir, fileName);
+      if (!this.isAllowedAssetLeaf(imagesDir, targetUri)) {
+        MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: refused to restore ${fileName} (target is a symbolic link)`);
+        continue;
+      }
       this.recentlyDeletedImages.delete(fileName);
       try {
         await vscode.workspace.fs.createDirectory(imagesDir);
-        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+        await vscode.workspace.fs.writeFile(targetUri, bytes);
         // File kéo-thả (không có marker ảnh dán) vừa khôi phục qua undo → theo
         // dõi lại để lần xoá link kế tiếp vẫn dọn được; ảnh dán tự nhận diện
         // qua marker nên không cần.

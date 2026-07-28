@@ -515,3 +515,4 @@
 | 0.10.0 | 2026-07-28 | Fix (perf review): the re-attach picker now re-walks when the document is rebuilt under it, and a dismissed popup no longer moves off-screen mid-drag. |
 | 0.10.0 | 2026-07-28 | Fix: converting a loose bullet item to a task item keeps its text on the checkbox line instead of leaving an empty "- [ ]" marker. |
 | 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |
+| 0.10.0 | 2026-07-28 | Fix (security S-1 residual): asset paste/drop/undo-restore/orphan-cleanup now refuse a symlinked target file instead of writing or reading through it. |
