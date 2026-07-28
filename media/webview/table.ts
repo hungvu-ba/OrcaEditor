@@ -317,6 +317,14 @@ function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number)
  * của ô (đậm ở th...). Dùng làm SÀN cột để không cột nào hẹp hơn 1 từ → không cắt
  * giữa từ và không ngắt ngày tháng ở '-'. CSS `width:1px` (Pass 2) ngắt cả ở '-'
  * nên cho sàn quá thấp; hàm này bù lại. Trả 0 khi ô không có chữ (vd ô ảnh).
+ *
+ * A Range covers GLYPHS only — it excludes the padding/border of an inline box
+ * wrapping the word. A token sitting alone inside an inline `<code>` chip (~5px
+ * horizontal padding) therefore yields a floor short by exactly that padding: the
+ * column is pinned a few px under what the token needs, the browser breaks it at a
+ * '-' anyway, and the cell wraps inside a column already wide enough for the whole
+ * token — leaving dead space. So for an inline box whose ENTIRE content is one
+ * word, take its border box as a floor candidate too.
  */
 function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
   let widest = 0;
@@ -332,6 +340,35 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
       if (w > widest) {
         widest = w;
       }
+    }
+  }
+  // Inline boxes only: a block child (e.g. a <p>) stretches to the cell's full
+  // width, so its border box is the column width, not a word width — feeding that
+  // in would inflate the floor.
+  for (const el of Array.from(cell.querySelectorAll('*'))) {
+    const content = (el.textContent ?? '').trim();
+    if (content === '' || /\s/.test(content)) {
+      continue; // empty, or several words → the chip can wrap at its own whitespace
+    }
+    if (!getComputedStyle(el).display.startsWith('inline')) {
+      continue;
+    }
+    // Replaced content makes the box far wider than its one word (e.g. an <a>
+    // wrapping an <img> next to a short label) — the same inflation as a block
+    // child. Same selector list as isEmptyCell's embedded-content probe.
+    if (el.querySelector('img,svg,video,input')) {
+      continue;
+    }
+    // getBoundingClientRect UNIONS every line fragment of an inline box, so one
+    // split by a <br> (which breaks even under nowrap) reports the cell's whole
+    // one-line width — that floor leaves the column zero shrink slack and pushes
+    // the table into the scroll branch. Only an unbroken single fragment is a word.
+    const rects = el.getClientRects();
+    if (rects.length !== 1) {
+      continue;
+    }
+    if (rects[0].width > widest) {
+      widest = rects[0].width;
     }
   }
   return widest;

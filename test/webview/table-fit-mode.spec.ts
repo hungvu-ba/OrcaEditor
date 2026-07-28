@@ -318,6 +318,85 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(r.descLines).toBeGreaterThan(1); // the wide column absorbed the shrink
   });
 
+  test('ON: a one-token inline `code` chip stays on one line (its padding counts towards the floor)', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 800 });
+    // The per-word floor is measured with a Range over TEXT NODES, which excludes
+    // the horizontal padding of the inline <code> chip wrapping the token. The
+    // column then lands a few px under what the token needs, so the browser breaks
+    // the UUID at a '-' anyway — inside a column already sized for the whole token,
+    // leaving the dead space this test guards against.
+    const md =
+      '| # | Session | Ngày | Message Title | Tổng thời gian | Bug tìm được | Chi tiết |\n' +
+      '|---|---|---|---|---|---|---|\n' +
+      '| 1 | `0b81da2d-8790-4002-bd2f-795f848d748c` | 2026-07-27 | US-23.20 — Sidecar appends survive a second writer | 30m31s | 3 (1 patch, 2 defer) | [file](./a.md) |\n' +
+      '| 2 | `9a7f1129-c796-445e-b246-9ad1eda116de` | 2026-07-27 | US-23.19 — Save-first gate for comment writes | 22m25s | 2 (0 patch, 2 defer) | [file](./b.md) |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    // Deliberately NOT expect.poll on `.fit`: this fixture lands in the scroll
+    // branch (③), where no fit class is added, so polling it would just time out.
+    await page.locator('#content table').waitFor();
+
+    const r = await page.evaluate(() => {
+      const table = document.querySelector('#content table') as HTMLTableElement;
+      const cell = table.tBodies[0].rows[0].cells[1]; // the `Session` column
+      const code = cell.querySelector('code') as HTMLElement;
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const rects = Array.from(range.getClientRects());
+      return {
+        codeLines: rects.length,
+        widestLine: Math.max(...rects.map((x) => x.width)),
+        cellWidth: cell.getBoundingClientRect().width,
+      };
+    });
+    expect(r.codeLines).toBe(1); // the token is not broken at a '-'
+    // ...and the column is not left far wider than what it actually renders: the
+    // gap should be just the box model (cell padding 20px + chip padding ~5px),
+    // not the ~111px of dead space the bug left behind.
+    expect(r.cellWidth - r.widestLine).toBeLessThan(40);
+  });
+
+  test('ON: a multi-word inline element does not pin its column at max-content', async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 600 });
+    // The floor only takes an inline box whole when its ENTIRE content is one word.
+    // Drop that guard and every bold/linked phrase — the most common markdown in a
+    // table — pins its column at max-content, so shrinking stops and the table
+    // scrolls much further than it needs to.
+    const bold = (r: number, c: number): string => `**long cell content value for row ${r + 1} column ${c + 1}**`;
+    await openEditor(page, makeTable(3, 2, bold), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+
+    const m = await tableInfo(page);
+    const cols = await Promise.all([0, 1, 2].map((i) => bodyCellWidth(page, i)));
+    // Each column shrank well under its own one-line width (~317px unpinned).
+    for (const w of cols) {
+      expect(w).toBeLessThan(280);
+    }
+    expect(m.scrollWidth - m.clientWidth).toBeLessThan(120); // ~3x that if pinned
+  });
+
+  test('ON: an inline element split by a <br> is not measured as one word', async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 600 });
+    // getBoundingClientRect unions every line fragment of an inline box, and a <br>
+    // breaks even under the nowrap measuring class. Measuring the union would give
+    // this column a floor equal to the cell's whole one-line width — zero shrink
+    // slack — and push the table out of fit-mode into horizontal scroll.
+    const md =
+      '| Note | Wide |\n| --- | --- |\n' +
+      '| a fairly long note that should be free to wrap across several lines **Alpha<br>Beta** | a very long description that must absorb the shrink and keep this column wide enough to force overall shrinking |\n' +
+      '| another note here that is also long enough to want wrapping **Gamma<br>Delta** | another long description sentence here to keep this column wide and force the table to shrink overall |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+
+    const fragments = await page.evaluate(() => {
+      const cell = (document.querySelector('#content table') as HTMLTableElement).tBodies[0].rows[0].cells[0];
+      return (cell.querySelector('strong') as HTMLElement).getClientRects().length;
+    });
+    expect(fragments).toBeGreaterThan(1); // the <br> really did fragment the box
+    const m = await tableInfo(page);
+    expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth); // still fits, no scroll
+    expect(await bodyCellWidth(page, 0)).toBeLessThan(350); // kept slack (462 if pinned)
+  });
+
   test('ON: typing into a pinned narrow column re-fits it (debounced) so it grows with content', async ({ page }) => {
     // Narrow enough that Σmax-content > budget — genuinely pinned territory (①b/②),
     // not the US-19.26 bail (plenty of room), which is covered by the next test.
