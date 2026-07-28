@@ -143,6 +143,13 @@ export interface InitConfig {
    * `<script>` at runtime — `script-src` accepts nonced scripts only.
    */
   scriptNonce: string;
+  /**
+   * P-1 (Performance — Audit.md): webview URI of the lazily-loaded Mermaid
+   * engine bundle (`dist/webview/mermaid-engine.js`), same rationale and
+   * loading contract as `plantumlEngineUri` — resolved host-side because the
+   * webview cannot call `asWebviewUri` itself; reuses `scriptNonce` above.
+   */
+  mermaidEngineUri: string;
 }
 
 /**

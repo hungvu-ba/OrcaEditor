@@ -40,7 +40,7 @@ import { ESCAPE_PRIORITY, registerEscapeHandler } from './escape-stack';
 import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
-import { initMermaid } from './mermaid';
+import { initMermaid, setMermaidEngineConfig } from './mermaid';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
 import { initLineGutter } from './gutter';
@@ -528,6 +528,13 @@ window.addEventListener('message', (event) => {
       if (cfg.plantumlEngineUri) {
         setPlantumlEngineConfig({
           engineUri: cfg.plantumlEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      // P-1 (Performance — Audit.md): same lazy-load contract as PlantUML above.
+      if (cfg.mermaidEngineUri) {
+        setMermaidEngineConfig({
+          engineUri: cfg.mermaidEngineUri,
           scriptNonce: cfg.scriptNonce ?? '',
         });
       }

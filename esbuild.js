@@ -59,6 +59,27 @@ const plantumlEngineConfig = {
 };
 
 /**
+ * Mermaid engine (mermaid + deps) as its own bundle instead of part of
+ * main.js: same rationale as plantumlEngineConfig above — minified it is
+ * ~2.8 MB (~65% of what main.js used to weigh), so every .md preview open was
+ * paying that cost even with no ```mermaid block in the document.
+ * mermaid-engine.ts re-exports mermaid.initialize/render; mermaid.ts injects
+ * this file as a <script> only when a ```mermaid block actually needs rendering.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const mermaidEngineConfig = {
+  entryPoints: ['media/webview/mermaid-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/mermaid-engine.js',
+  format: 'iife',
+  globalName: 'OrcaMermaidEngine',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: !production,
+  minify: production,
+};
+
+/**
  * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
  * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
  * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
@@ -215,7 +236,7 @@ function copyAssets() {
 
 async function main() {
   copyAssets();
-  const configs = [extensionConfig, webviewConfig, plantumlEngineConfig];
+  const configs = [extensionConfig, webviewConfig, plantumlEngineConfig, mermaidEngineConfig];
   if (buildTest)
     configs.push(
       testConfig,

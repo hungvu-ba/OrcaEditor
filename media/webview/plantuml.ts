@@ -27,6 +27,7 @@ import {
   isDarkBackground,
   readDiagramFrame,
 } from './diagram-frame';
+import { loadNoncedEngineScript, type EngineConfig } from './engine-loader';
 
 export interface PlantumlController {
   /** Dựng lại mọi biểu đồ PlantUML hiện có trong #content — gọi sau mỗi renderDocument. */
@@ -61,47 +62,26 @@ let renderSeq = 0;
 // Cờ nền của lần dựng gần nhất, để refreshTheme biết có cần dựng lại không.
 let lastDark: boolean | undefined;
 
-let engineConfig: { engineUri: string; scriptNonce: string } | undefined;
+let engineConfig: EngineConfig | undefined;
 
-/**
- * Nạp engine đúng MỘT lần cho cả phiên webview. Trả về cùng một Promise cho mọi
- * lời gọi sau đó — kể cả khi đang nạp dở, nhiều biểu đồ cùng lúc vẫn chỉ chèn 1
- * thẻ <script>. Nếu nạp hỏng, Promise reject và lần gọi sau sẽ thử lại từ đầu
- * (xoá biến nhớ) thay vì kẹt vĩnh viễn ở trạng thái hỏng.
- */
+// Single-flight promise for the whole webview session — every caller
+// (including concurrent renders while it's still loading) gets the same
+// Promise, so only one <script> is ever injected. Reset to undefined on
+// failure (see loadEngine below) so the next render retries from scratch
+// instead of staying stuck in a broken state.
 let enginePromise: Promise<PlantumlEngine> | undefined;
 
 function loadEngine(): Promise<PlantumlEngine> {
   if (enginePromise) {
     return enginePromise;
   }
-  enginePromise = new Promise<PlantumlEngine>((resolve, reject) => {
-    if (!engineConfig) {
-      reject(new Error('PlantUML engine location was not provided by the host'));
-      return;
-    }
-    const existing = (window as unknown as { OrcaPlantumlEngine?: PlantumlEngine }).OrcaPlantumlEngine;
-    if (existing) {
-      resolve(existing);
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = engineConfig.engineUri;
-    // CSP: script-src chỉ nhận script mang đúng nonce của trang.
-    script.nonce = engineConfig.scriptNonce;
-    script.addEventListener('load', () => {
-      const engine = (window as unknown as { OrcaPlantumlEngine?: PlantumlEngine }).OrcaPlantumlEngine;
-      if (engine) {
-        resolve(engine);
-      } else {
-        reject(new Error('PlantUML engine loaded but exposed no renderer'));
-      }
-    });
-    script.addEventListener('error', () => reject(new Error('Failed to load the PlantUML engine')));
-    document.head.appendChild(script);
+  enginePromise = loadNoncedEngineScript<PlantumlEngine>('OrcaPlantumlEngine', engineConfig, {
+    notConfigured: 'PlantUML engine location was not provided by the host',
+    loadedButEmpty: 'PlantUML engine loaded but exposed no renderer',
+    failed: 'Failed to load the PlantUML engine',
   });
   enginePromise.catch(() => {
-    enginePromise = undefined; // cho phép thử lại ở lần render sau
+    enginePromise = undefined; // allow a retry on the next render
   });
   return enginePromise;
 }
@@ -163,7 +143,7 @@ export function initPlantuml(content: HTMLElement): PlantumlController {
 }
 
 /** Nhận cấu hình engine từ message 'init' của host (xem provider.ts, InitConfig). */
-export function setPlantumlEngineConfig(config: { engineUri: string; scriptNonce: string }): void {
+export function setPlantumlEngineConfig(config: EngineConfig): void {
   engineConfig = config;
 }
 

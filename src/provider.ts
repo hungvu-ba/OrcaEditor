@@ -1223,6 +1223,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'plantuml-engine.js')
       )
       .toString();
+    // P-1 (Performance — Audit.md): same lazy-engine contract as plantumlEngineUri
+    // above, reusing scriptNonce for the injected <script>.
+    const mermaidEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'mermaid-engine.js')
+      )
+      .toString();
     webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
@@ -1409,6 +1416,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
               plantumlEngineUri,
               scriptNonce,
+              // P-1: same mechanism, for mermaid.ts (see mermaidEngineUri above).
+              mermaidEngineUri,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),

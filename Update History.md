@@ -500,3 +500,4 @@
 | 0.10.0 | 2026-07-28 | Fix: webview test workers no longer share one harness HTML file — the truncate race that made four specs time out waiting for #content is gone. |
 | 0.10.0 | 2026-07-28 | Feature: a unit guard now fails when a webview-posted message type has no case in provider.ts, the gap that hid the editComment bug. |
 | 0.10.0 | 2026-07-28 | Fix: symlinks below the workspace root no longer let asset writes, orphan hard-deletes or sidecar mutations escape the allowed roots (Security Audit S-1). |
+| 0.10.0 | 2026-07-28 | Fix (perf): Mermaid engine (~2.8 MB) now lazy-loads only when a document has a mermaid block, shrinking every preview's baseline bundle (Performance Audit P-1). |

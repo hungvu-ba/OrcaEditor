@@ -681,6 +681,7 @@ const toWebview: HostToWebview[] = [
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
+    mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   } },
   { type: 'init', text: 'x', docUri: 'file:///a.md', config: {
@@ -688,6 +689,7 @@ const toWebview: HostToWebview[] = [
     lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
+    mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x' },
