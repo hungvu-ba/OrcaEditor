@@ -24,7 +24,7 @@ import {
   resolveCommentAnchorNode,
 } from './block-map';
 import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
-import { COMMENT_ANCHOR_ACTIVE_CLASS } from './constants';
+import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_COMPOSER_CLASS, COMMENT_COMPOSER_INPUT_CLASS } from './constants';
 import { el, getOffsetWithin, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
@@ -112,6 +112,13 @@ export interface CommentMenuController {
    * reads — not a new channel.
    */
   setDocumentGuard(reason: string | undefined): void;
+  /**
+   * Req 24 US-23.18 AC7: `#content` finished a render pass — re-check the open
+   * composer's anchor and refuse Submit if it no longer resolves, instead of
+   * waiting for the Reviewer to press Submit and be refused then. Called from
+   * `renderDocument`, beside every other module's `refresh()`.
+   */
+  refreshTarget(): void;
 }
 
 export function initCommentMenu(
@@ -309,7 +316,7 @@ export function initCommentMenu(
 
   // --- Composer ----------------------------------------------------------------------------
 
-  const card = el('div', 'comment-composer');
+  const card = el('div', COMMENT_COMPOSER_CLASS);
   card.hidden = true;
 
   const header = el('div', 'comment-composer-header');
@@ -326,7 +333,7 @@ export function initCommentMenu(
   authorRow.append(avatar, authorLabel, el('span', 'comment-composer-author-note', 'will be recorded as the author'));
 
   const input = document.createElement('textarea');
-  input.className = 'comment-composer-input';
+  input.className = COMMENT_COMPOSER_INPUT_CLASS;
   input.rows = 3;
   input.placeholder = 'Comment text — required';
   input.setAttribute('aria-label', 'Comment text');
@@ -386,21 +393,36 @@ export function initCommentMenu(
     input.value = '';
     clearInlineError();
     submitBusy = false;
+    targetLost = false;
     input.readOnly = false;
   });
 
   const EMPTY_HINT = 'Submit stays inactive until text is entered';
   const BUSY_HINT = 'Submitting…';
+  const TARGET_LOST_HINT = 'Re-select a target to submit · Esc to cancel';
   /** US-23.10 AC5: while a create is in flight, the input is read-only and Submit inert — never after a refusal, which re-arms both. */
   let submitBusy = false;
+  /**
+   * Req 24 US-23.18 AC7: the composer's anchor stopped resolving in the live DOM
+   * (an undo/redo, or any other host `update`, re-rendered `#content` underneath
+   * it). Submit is refused while this is set — the typed body is kept and the
+   * card stays open so the Reviewer can re-target rather than lose it.
+   */
+  let targetLost = false;
 
   function syncSubmitState(): void {
-    const ready = !submitBusy && input.value.trim() !== '';
+    const ready = !submitBusy && !targetLost && input.value.trim() !== '';
     // aria-disabled, not `disabled`: the button stays focusable so a Reviewer
     // tabbing to it still reads why it is inert (design C4 — pressing it before
     // then does nothing and the card stays open, there is no error to recover from).
     submitBtn.setAttribute('aria-disabled', String(!ready));
-    hint.textContent = submitBusy ? BUSY_HINT : ready ? `${mod}⏎ to submit · Esc to cancel` : EMPTY_HINT;
+    hint.textContent = submitBusy
+      ? BUSY_HINT
+      : targetLost
+        ? TARGET_LOST_HINT
+        : ready
+          ? `${mod}⏎ to submit · Esc to cancel`
+          : EMPTY_HINT;
   }
 
   /** The anchor for `range`/`node`, or null when the selection cannot be measured within `node` (US-23.1 AC3). */
@@ -470,6 +492,7 @@ export function initCommentMenu(
     input.value = '';
     clearInlineError();
     submitBusy = false;
+    targetLost = false;
     input.readOnly = false;
     syncSubmitState();
 
@@ -484,7 +507,10 @@ export function initCommentMenu(
     const body = input.value.trim();
     // Empty (or whitespace-only) is a no-op: the input stays open rather than
     // creating an empty thread — "refuse rather than store malformed data".
-    if (body === '' || !pending || inFlightRequestId !== undefined) {
+    // `targetLost` (US-23.18 AC7) refuses here too, not only through the anchor
+    // lookup below: the button is `aria-disabled`, never `disabled`, so it stays
+    // focusable and a keyboard/programmatic activation still reaches this.
+    if (body === '' || !pending || targetLost || inFlightRequestId !== undefined) {
       return;
     }
     // The anchored node can be gone by now (a host 'update' re-rendered the
@@ -572,10 +598,45 @@ export function initCommentMenu(
     minted.node.classList.add(COMMENT_ANCHOR_ACTIVE_CLASS);
     applyPendingToComposer(minted);
     clearInlineError();
+    // Req 24 US-23.18 AC7: a fresh anchor is exactly the recovery this state
+    // was holding Submit for — re-arm it.
+    targetLost = false;
     syncSubmitState();
   });
 
+  /**
+   * Req 24 US-23.18 AC7. The anchor id is a session-only DOM attribute, so a
+   * full re-render always drops it — which is exactly the condition `submit`'s
+   * own shipped pre-check already refuses on (US-23.10 AC5). Nothing about WHEN
+   * the create is refused changes here; this only moves the telling forward, so
+   * the Reviewer sees "target lost" and can re-target instead of typing on
+   * against a Submit that was already going to be refused.
+   *
+   * An in-flight create is left alone: its result decides, and `pending` is
+   * still the anchor that request was sent with.
+   */
+  function syncTargetState(): void {
+    if (card.hidden || submitBusy || pending === undefined) {
+      return;
+    }
+    const lost = findCommentAnchor(content, pending.anchorId) === null;
+    if (lost === targetLost) {
+      return;
+    }
+    targetLost = lost;
+    if (lost) {
+      showInlineError(
+        'Target lost — the text this comment was anchored to is no longer in the document. Use your current selection to retry.',
+        true
+      );
+    } else {
+      clearInlineError();
+    }
+    syncSubmitState();
+  }
+
   return {
+    refreshTarget: syncTargetState,
     notifyCreateResult(requestId, ok, error, author, timestamp): void {
       if (requestId !== inFlightRequestId) {
         return;
@@ -599,6 +660,12 @@ export function initCommentMenu(
         // reason shown inline — never a toast, never a silent close.
         showInlineError(message, isAnchorRefusal(message));
         syncSubmitState();
+        // Req 24 US-23.18 AC7: a render can have landed WHILE this create was in
+        // flight, and `syncTargetState` declines to act during one. Re-check now
+        // that the guard is released — otherwise the composer re-arms Submit
+        // against an anchor that is already gone, which is the "refused after
+        // pressing" behaviour AC7 exists to remove.
+        syncTargetState();
         return;
       }
       clearInlineError();

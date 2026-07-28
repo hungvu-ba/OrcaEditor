@@ -572,6 +572,10 @@ export function createCommentSupport(
     return resolved !== '' ? resolved : promptForAuthorName(document);
   };
 
+  /** Req 24 US-23.18 AC9: the one refusal for "the document moved under this write" — stated, never silent. */
+  const DOCUMENT_CHANGED_REFUSAL =
+    'The document changed while your comment was being saved — please try again.';
+
   /**
    * US-23.19: never let a comment's `recorded_text` outlive the buffer it was
    * read from. Runs `store.refusalFor` first — the existing US-23.5 untitled/
@@ -581,20 +585,56 @@ export function createCommentSupport(
    * runs after this resolves (AC1). `document.save()` writes only the user's
    * own already-pending edits, so it contributes no `TextEdit` of its own and
    * costs no extra undo step (AC4).
+   *
+   * Req 24 US-23.18 AC9: an undo/redo landing while a write is in flight changes
+   * the document out from under data the caller already captured — every caller
+   * reads its anchor, body and line off the inbound message up front and hands
+   * them to `store.append` unchanged once this resolves, so the append would
+   * record a `recorded_text` describing text the undo just removed.
+   *
+   * `versionAtEntry` is that capture point, and callers must read it at their
+   * own first statement rather than letting this function sample it: `authorFor`
+   * runs BEFORE this gate in every caller and can sit on a modal name prompt
+   * (US-23.10 AC4) indefinitely, which is by far the widest part of the window.
+   * Sampling here would leave exactly that part unguarded.
+   *
+   * The save is deliberately excluded from the comparison. A save participant
+   * (format-on-save, trim-trailing-whitespace) edits the buffer during
+   * `document.save()` and bumps `version` legitimately — treating that as a
+   * conflict would refuse the FIRST comment action on any dirty buffer in such a
+   * workspace, which is the common case, not an adversarial one. `isDirty` is
+   * what separates the two afterwards: a participant's edit lands inside the
+   * save and leaves the buffer clean, while an undo arriving during the save
+   * makes it dirty again.
    */
-  const saveBeforeAppend = async (document: vscode.TextDocument): Promise<string | null> => {
+  const saveBeforeAppend = async (
+    document: vscode.TextDocument,
+    versionAtEntry: number
+  ): Promise<string | null> => {
     const refusal = await store.refusalFor(document);
     if (refusal !== null) {
       return refusal;
     }
-    if (document.isDirty && !(await document.save())) {
-      return 'Could not save the file before recording the comment.';
+    if (document.version !== versionAtEntry) {
+      return DOCUMENT_CHANGED_REFUSAL;
+    }
+    if (document.isDirty) {
+      if (!(await document.save())) {
+        return 'Could not save the file before recording the comment.';
+      }
+      if (document.isDirty) {
+        return DOCUMENT_CHANGED_REFUSAL;
+      }
     }
     return null;
   };
 
   return {
     async createThread(msg, document): Promise<CreateThreadOutcome> {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       const rejection = createCommentRejection(msg, document.uri.toString());
       if (rejection !== null) {
         return { ok: false, error: rejection };
@@ -623,7 +663,7 @@ export function createCommentSupport(
       const commentId = crypto.randomUUID();
       let writeError: string | null;
       try {
-        writeError = await saveBeforeAppend(document);
+        writeError = await saveBeforeAppend(document, versionAtEntry);
         if (writeError === null) {
           writeError = await store.append(
             document,
@@ -861,6 +901,10 @@ export function createCommentSupport(
     },
 
     async updateAnchor(msg, document): Promise<string | null> {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       const rejection = anchorUpdateRejection(msg, document.uri.toString());
       if (rejection !== null) {
         return rejection;
@@ -922,7 +966,7 @@ export function createCommentSupport(
       try {
         const author = await authorFor(document);
         const writeError =
-          (await saveBeforeAppend(document)) ??
+          (await saveBeforeAppend(document, versionAtEntry)) ??
           (await store.append(
             document,
             buildAnchorUpdateLine({
@@ -953,6 +997,10 @@ export function createCommentSupport(
     },
 
     async reply(msg, document) {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       const entry = threads.get(msg.threadId);
       const rejection = replyRejection(msg, document.uri.toString(), entry?.status);
       if (rejection !== null) {
@@ -985,7 +1033,7 @@ export function createCommentSupport(
         const createdAt = new Date();
         const timestamp = createdAt.toISOString();
         const replyId = crypto.randomUUID();
-        const saveError = await saveBeforeAppend(document);
+        const saveError = await saveBeforeAppend(document, versionAtEntry);
         const writeError =
           saveError ??
           (await store.append(
@@ -1010,6 +1058,10 @@ export function createCommentSupport(
     },
 
     async deleteComment(msg, document) {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       const entry = threads.get(msg.threadId);
       const currentAuthor = await authorFor(document);
       if (currentAuthor === '') {
@@ -1032,7 +1084,7 @@ export function createCommentSupport(
         return { ok: false, error: 'That delete names a thread in another document.' };
       }
       const timestamp = new Date().toISOString();
-      const saveError = await saveBeforeAppend(document);
+      const saveError = await saveBeforeAppend(document, versionAtEntry);
       const writeError =
         saveError ??
         (await store.append(
@@ -1065,6 +1117,10 @@ export function createCommentSupport(
     },
 
     async editComment(msg, document) {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       // US-23.10 AC9, applied at the WRITE path rather than only in the webview:
       // the native `vscode.comments` Save reaches this function without ever
       // passing through the popover's own neutralize/EOL step, and AC8 lets any
@@ -1127,7 +1183,7 @@ export function createCommentSupport(
           return { ok: false, error: 'No author name was provided — the edit was not saved.' };
         }
         const timestamp = new Date().toISOString();
-        const saveError = await saveBeforeAppend(document);
+        const saveError = await saveBeforeAppend(document, versionAtEntry);
         if (saveError !== null) {
           return { ok: false, error: saveError };
         }
@@ -1230,6 +1286,10 @@ export function createCommentSupport(
     },
 
     async changeStatus(msg, document) {
+      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
+      // handed to `store.append` unchanged; this is the version it is consistent
+      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      const versionAtEntry = document.version;
       const entry = threads.get(msg.threadId);
       // US-23.11 AC5: validated against `entry.status` — the freshly-folded status
       // this registry holds — never against the `contextValue` the native menu was
@@ -1269,7 +1329,7 @@ export function createCommentSupport(
       // request could read a stale `entry.status` in is closed at both ends.
       changingStatus.add(msg.threadId);
       try {
-        const saveError = await saveBeforeAppend(document);
+        const saveError = await saveBeforeAppend(document, versionAtEntry);
         const writeError =
           saveError ??
           (await store.append(

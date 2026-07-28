@@ -9,6 +9,26 @@ export function closestElement(node: Node): HTMLElement | null {
   return node instanceof HTMLElement ? node : node.parentElement;
 }
 
+/** Input types carrying an undo history of their own — a task-list checkbox has none and must keep delegating. */
+const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
+
+/**
+ * Does `target` own a native text-undo history the browser (or `execCommand`)
+ * can roll back on its own?
+ *
+ * Shared by `main.ts`'s `ownsNativeUndo` (which declines to delegate a chord
+ * pressed in such a field) and `comment-undo-guard.ts` (which reissues the undo
+ * it just cancelled). Both need the same answer to the same question, so it is
+ * declared once — two copies of the type set would drift, and a drift here means
+ * one of the two guards silently stops covering a field the other still does.
+ */
+export function ownsNativeTextHistory(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+  return target instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(target.type);
+}
+
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

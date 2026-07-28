@@ -1278,6 +1278,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             await this.applyMinimalEdit(document, msg.pendingText);
           }
           const before = document.getText();
+          // Req 24 US-23.18 AC5: `executeCommand` below is a GLOBAL command — it
+          // acts on whatever editor VS Code currently considers active, which
+          // need not be this document at all when the webview panel is the
+          // active tab and no `TextEditor` for it is visible. This document's own
+          // monotonic `version` is therefore the only sound success signal;
+          // anything derived from a global "did an edit happen" would accept a
+          // bump in some other, last-active editor as our undo having worked.
+          const versionBefore = document.version;
           // executeCommand('undo') có thể resolve TRƯỚC khi edit thực sự áp vào
           // document → CHỜ đúng sự kiện đổi rồi mới đọc trạng thái cuối (không
           // đọc getText() ngay sau await, sẽ ra "before" và tưởng là no-op).
@@ -1293,9 +1301,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           } finally {
             undoRedoInProgress = false;
           }
+          // AC5: the command did not touch THIS document — either there was
+          // nothing left on its stack, or it acted on another editor entirely.
+          // Either way there is nothing of ours to report; never re-render off a
+          // change that belongs to a different uri.
+          if (document.version === versionBefore) {
+            break;
+          }
           const after = document.getText();
           if (after === before) {
-            break; // không còn gì để undo/redo
+            break; // applied to this document, but the text is unchanged — nothing to re-render
           }
           // Gửi THẲNG trạng thái cuối, bỏ debounce updateTimer: mỗi Ctrl+Z/Y =
           // đúng một lần render nên undo và redo đối xứng (không còn redo "hiện

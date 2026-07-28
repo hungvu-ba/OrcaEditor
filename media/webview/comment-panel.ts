@@ -32,6 +32,8 @@ import {
   COMMENT_PANEL_DRAG_THRESHOLD_PX,
   COMMENT_PANEL_REATTACH_SUGGESTIONS,
   COMMENT_PANEL_SNIPPET_CHARS,
+  COMMENT_REATTACH_FILTER_CLASS,
+  COMMENT_REATTACH_PICKER_CLASS,
 } from './constants';
 import {
   copyDisabledReason,
@@ -538,10 +540,10 @@ export function initCommentPanel(
 
   // --- Re-attach… picker -----------------------------------------------------
 
-  const picker = el('div', 'comment-reattach-picker');
+  const picker = el('div', COMMENT_REATTACH_PICKER_CLASS);
   picker.hidden = true;
   const pickerFilter = document.createElement('input');
-  pickerFilter.className = 'comment-reattach-filter';
+  pickerFilter.className = COMMENT_REATTACH_FILTER_CLASS;
   pickerFilter.type = 'text';
   pickerFilter.placeholder = 'Filter nodes';
   pickerFilter.setAttribute('aria-label', 'Filter nodes');

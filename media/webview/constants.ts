@@ -296,6 +296,14 @@ export const COMMENT_REPLY_INPUT_CLASS = 'comment-popover-reply-input';
 export const COMMENT_DELETE_CONFIRM_CLASS = 'comment-delete-confirm';
 /** DOM class for the popover's edit `<textarea>` (US-23.14) — native field undo, same convention as `COMMENT_REPLY_INPUT_CLASS`. */
 export const COMMENT_EDIT_INPUT_CLASS = 'comment-popover-edit-input';
+/** DOM class for the create composer's `<textarea>`, mounted on `document.body` (US-23.1). */
+export const COMMENT_COMPOSER_INPUT_CLASS = 'comment-composer-input';
+/** DOM class for the create composer's card, mounted on `document.body` (US-23.1). */
+export const COMMENT_COMPOSER_CLASS = 'comment-composer';
+/** DOM class for the re-attach picker's filter `<input>`, mounted inside the picker (US-23.4 AC4). */
+export const COMMENT_REATTACH_FILTER_CLASS = 'comment-reattach-filter';
+/** DOM class for the re-attach picker's card (US-23.4 AC4). */
+export const COMMENT_REATTACH_PICKER_CLASS = 'comment-reattach-picker';
 
 // --- Req 23 US-23.7: shared right-dock tab container (media/webview/right-dock.ts) ---
 
@@ -359,3 +367,43 @@ export const MD_TABLE_FIT_CLASS = 'md-table-fit';
  * silently delete on that same raw-HTML path.
  */
 export const MD_CHROME_MARKER_ATTR = 'data-md-chrome';
+
+// --- Req 24 US-23.18 AC2: the comment-field registry the undo/redo guard resolves against ---
+
+/**
+ * Every comment surface an undo/redo chord must die inside, as CSS selectors.
+ *
+ * US-23.18 AC2 requires the guard to cover these **by construction, not by
+ * enumeration at the call site**: `comment-undo-guard.ts` resolves a keystroke's
+ * target through this one list, and the webview spec enumerates the live DOM
+ * against it, so a comment surface added later is covered by one entry here
+ * rather than by remembering to touch the guard.
+ *
+ * All of these mount on `document.body`, **outside `#content`** — which is why
+ * `main.ts`'s `ownsNativeUndo` cannot see them: that guard only ever runs from
+ * `#content`'s own keydown listener, so a chord pressed in one of these
+ * surfaces never reaches it (AC1).
+ *
+ * **Containers, never the leaf text controls.** Listing the `<textarea>`s alone
+ * looks tighter and is wrong: the guard resolves with `closest()`, so focus on
+ * any *other* control in the same surface would miss and let the chord through
+ * to the document. The composer's own Submit button is the proof — US-23.18 AC7
+ * keeps it `aria-disabled` rather than `disabled` precisely so it stays
+ * focusable, so Tab-then-undo is a reachable route, not a hypothetical one. The
+ * two dialogs carry no text field at all and are listed for the same reason
+ * (AC8): they are modal, focus lives on their card, and the chord must not reach
+ * the document underneath the scrim. `comment-undo-guard.ts` decides separately
+ * whether the specific target owns a native history worth reissuing.
+ *
+ * Declared last in this file: the array dereferences the class constants above,
+ * so it must be evaluated after them — a `const` is in its temporal dead zone
+ * until its own declaration runs, and a forward reference here would throw at
+ * module load, not at first use.
+ */
+export const COMMENT_FIELD_SELECTORS: readonly string[] = [
+  `.${COMMENT_COMPOSER_CLASS}`,
+  `.${COMMENT_POPOVER_CLASS}`,
+  `.${COMMENT_REATTACH_PICKER_CLASS}`,
+  `.${COMMENT_DELETE_CONFIRM_CLASS}`,
+  `.${COMMENT_ANCHOR_LOST_CLASS}`,
+];

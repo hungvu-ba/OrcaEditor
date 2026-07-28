@@ -49,7 +49,7 @@ import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
 import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
-import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
+import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, ownsNativeTextHistory, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
 import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
@@ -83,6 +83,7 @@ import { initCommentPanel } from './comment-panel';
 import { initCommentHighlight } from './comment-highlight';
 import { initCommentPopover } from './comment-popover';
 import { initCommentAnchorDialog } from './comment-anchor-dialog';
+import { initCommentUndoGuard } from './comment-undo-guard';
 import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
@@ -285,6 +286,10 @@ toc.dock.registerTab(commentPanel.tab);
 // commentResolve's change notifications — no other module opens it and nothing
 // configures it, so it is constructed for its side effect alone.
 initCommentAnchorDialog(commentResolve);
+// Req 24 US-23.18 AC1/AC2/AC8: keeps an undo/redo chord pressed in any comment
+// surface out of the document's undo stack. Body-mounted fields never reach
+// `#content`'s keydown handler, so `ownsNativeUndo` below cannot cover them.
+initCommentUndoGuard();
 // Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
@@ -964,6 +969,10 @@ function renderDocument(markdown: string): void {
   // the debounced `refresh()` below so a fresh reload's deferred pass isn't
   // itself immediately stamped stale by that debounce's own later generation bump.
   commentResolve.notifyContentRendered();
+  // Req 24 US-23.18 AC7: the render just dropped every session-only anchor id, so
+  // an open composer may now be pointing at nothing — tell the Reviewer now and
+  // hold Submit, rather than refusing them after they press it.
+  commentMenu.refreshTarget();
   // Req 23 US-23.4 AC5: the document just changed (edit, undo, redo or reload) —
   // re-run every comment through the tiers once it settles, so a thread whose
   // node or text reappeared is promoted back out of the floating list.
@@ -2049,14 +2058,9 @@ function jumpHeading(dir: 1 | -1): void {
  * A field that forgets to release it would disable the editor's shortcuts for
  * the rest of the session; a target test cannot get stuck.
  */
-const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
-
 function ownsNativeUndo(target: EventTarget | null): boolean {
-  if (target instanceof HTMLTextAreaElement) {
+  if (ownsNativeTextHistory(target)) {
     return true;
-  }
-  if (target instanceof HTMLInputElement) {
-    return TEXT_ENTRY_INPUT_TYPES.has(target.type);
   }
   // A `contenteditable` nested inside `#content` never becomes
   // `document.activeElement` — the OUTER editing host keeps focus, so `e.target`
