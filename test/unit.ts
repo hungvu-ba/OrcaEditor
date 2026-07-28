@@ -99,6 +99,14 @@ import {
 } from '../src/comments/sidecar-format';
 import { sidecarShareWarning } from '../src/comments/sidecar-git';
 import {
+  canForwardUndo,
+  emptyUndoLedger,
+  recordUndoLedgerChange,
+  undoLedgerReasonOf,
+  type UndoLedger,
+  type UndoLedgerReason,
+} from '../src/undo-ledger';
+import {
   clipCommentBodyToLimit,
   commentBodyCodePointLength,
   neutralizeCommentBody,
@@ -954,6 +962,33 @@ const cleanupBody = providerSrc.match(/private async cleanupOrphanImages\([\s\S]
 check('bug1: cleanupOrphanImages gộp file kéo-thả đã theo dõi', /droppedAssetsByDoc/.test(cleanupBody));
 const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
 check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /trackDroppedAsset/.test(restoreBody));
+
+// Req 24 US-23.18 AC6: the undo ledger's state machine is proven directly further down,
+// but that proves nothing unless the handler actually CONSULTS it — and the handler is
+// unreachable from every test track (no public API opens a custom editor's webview to
+// post a message to it). So lock the wiring the same way as the guards above: the refusal
+// must appear BEFORE the unscoped `executeCommand(msg.type)`, because after it the global
+// command has already run and, with nothing on this document's stack, has already reverted
+// whatever WAS on the workspace stack — measured on 2026-07-28 to be the user's last file
+// rename. Removing the guard, or sliding it below the command, turns this red.
+const undoCaseBody = providerSrc.match(/case 'undo':[\s\S]*?executeCommand\(msg\.type\)/)?.[0] ?? '';
+check('AC6: the undo/redo case is found in provider source', undoCaseBody !== '');
+check(
+  'AC6: a webview undo/redo consults the ledger before issuing the global command',
+  /if \(!this\.mayForwardUndo\(document, msg\.type\)\) \{\s*break;/.test(undoCaseBody)
+);
+check(
+  'AC6: the ledger is fed from a provider-level change subscription, not per panel',
+  /provider\.recordUndoLedger\(e\.document, undoLedgerReasonOf\(e\.reason\)\)/.test(providerSrc)
+);
+check(
+  'AC6: only real content changes raise the depth',
+  /if \(e\.contentChanges\.length > 0\) \{\s*provider\.recordUndoLedger/.test(providerSrc)
+);
+check(
+  'AC6: closing a document forgets its undo history',
+  /onDidCloseTextDocument\([\s\S]{0,200}?forgetUndoLedger/.test(providerSrc)
+);
 
 // headingSiblingGaps (bug_General #2 follow-up): same-level/same-parent heading move scope.
 // Pure outline math on level arrays (null = non-heading block) — mirrors the I/O matrix cases.
@@ -2259,6 +2294,48 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar git: a tracked sidecar says nothing', sidecarShareWarning('shared', 'a.jsonl') === null);
   check('sidecar git: outside a git repository says nothing', sidecarShareWarning('no-repo', 'a.jsonl') === null);
   check('sidecar git: an unusable git says nothing', sidecarShareWarning('unknown', 'a.jsonl') === null);
+
+  // Req 24 US-23.18 AC6: the gate that decides whether a webview undo/redo may become a
+  // GLOBAL `executeCommand`. The handler consulting it cannot be reached from the host
+  // track (no public API opens a custom editor's webview to post to it), so this is where
+  // the decision itself is proven.
+  const ledgerAfter = (...reasons: UndoLedgerReason[]): UndoLedger =>
+    reasons.reduce(recordUndoLedgerChange, emptyUndoLedger());
+  // AC6's own precondition: a file opened and never edited owns no step, so nothing may
+  // be forwarded. This is the case that used to revert the user's last file rename.
+  check('undo ledger: an untouched document forwards neither undo nor redo',
+    !canForwardUndo(ledgerAfter(), 'undo') && !canForwardUndo(ledgerAfter(), 'redo'));
+  check('undo ledger: a document never seen at all forwards nothing',
+    !canForwardUndo(undefined, 'undo') && !canForwardUndo(undefined, 'redo'));
+  check('undo ledger: one edit makes undo forwardable but not redo',
+    canForwardUndo(ledgerAfter('edit'), 'undo') && !canForwardUndo(ledgerAfter('edit'), 'redo'));
+  check('undo ledger: undoing the only edit leaves redo forwardable and undo not',
+    !canForwardUndo(ledgerAfter('edit', 'undo'), 'undo') &&
+      canForwardUndo(ledgerAfter('edit', 'undo'), 'redo'));
+  check('undo ledger: redoing restores the undo side',
+    canForwardUndo(ledgerAfter('edit', 'undo', 'redo'), 'undo') &&
+      !canForwardUndo(ledgerAfter('edit', 'undo', 'redo'), 'redo'));
+  // VS Code discards the redone-away future once you type again; so does this.
+  check('undo ledger: a fresh edit clears the redo side',
+    !canForwardUndo(ledgerAfter('edit', 'undo', 'edit'), 'redo'));
+  check('undo ledger: depth accumulates across edits',
+    ledgerAfter('edit', 'edit', 'edit').undoable === 3);
+  check('undo ledger: two edits survive one undo',
+    canForwardUndo(ledgerAfter('edit', 'edit', 'undo'), 'undo'));
+  // An unpaired event — the document was already open before the ledger existed — must
+  // degrade to "nothing known", never to a negative count that poisons later decisions.
+  check('undo ledger: an unpaired undo floors at zero rather than going negative',
+    ledgerAfter('undo').undoable === 0 && !canForwardUndo(ledgerAfter('undo', 'redo', 'undo'), 'undo'));
+  check('undo ledger: an unpaired redo floors the redo side at zero',
+    ledgerAfter('redo').redoable === 0);
+  // The reason mapping is the seam to `vscode.TextDocumentChangeReason` (Undo = 1,
+  // Redo = 2, everything else undefined) — a wrong constant here would silently invert
+  // the whole state machine.
+  check('undo ledger: reason 1 is an undo, 2 a redo, undefined a fresh edit',
+    undoLedgerReasonOf(1) === 'undo' && undoLedgerReasonOf(2) === 'redo' &&
+      undoLedgerReasonOf(undefined) === 'edit');
+  check('undo ledger: an unknown reason code counts as a fresh edit',
+    undoLedgerReasonOf(99) === 'edit');
   // The blocker this review caught: git answers "untracked" for a path that does
   // not exist, so without its own state every never-commented document would be
   // told to `git add` a file nobody has created.

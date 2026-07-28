@@ -8,18 +8,19 @@
  * a confirmed bug at that point, and the fix is scoped and built then, against
  * the actual failure mode observed — not designed speculatively now."
  *
- * So these two cases are deliberately written to PASS against current behaviour
- * and to fail only if it regresses. A failure here on first run is not a broken
- * test — it is the probe reporting a confirmed defect, and the story says to
- * scope that fix as its own follow-up pass rather than pre-designing one now.
+ * **The probe ran, and AC6's answer was yes — reachable.** An undo issued from a
+ * renamed `.md` with no text edit of its own reverts the rename. A follow-up probe
+ * then renamed a `.txt`, which `onWillRenameFiles` filters out so nothing of ours
+ * is on the undo stack, and VS Code reverted that too: the behaviour is stock for
+ * an unscoped `undo`, not a property of US-23.5's `WorkspaceEdit`. The fix that
+ * followed is therefore in `provider.ts` — it no longer issues the global command
+ * for a document that owns no undo step — and is proven in `test/unit.ts`, since
+ * no public API can open a custom editor's webview to post a message to it. What
+ * the AC6 case below locks is the invariant this extension does own: an undo that
+ * reverts a rename must move the `.md` and its sidecar together.
  *
- * **Not run by this story's authoring agent.** `@vscode/test-electron` launches
- * a real Electron subprocess, which a sandboxed agent shell cannot do — the same
- * limitation US-23.17's own implementation note records ("Verified green
- * end-to-end by the human running `npm run test:host` locally"). The Sizing note
- * also asks for the probe on **Windows** as well as macOS (CLAUDE.md's
- * cross-platform rule); that run is likewise outside this agent's environment
- * and is the human's to perform.
+ * The Sizing note also asks for the probe on **Windows** as well as macOS (CLAUDE.md's
+ * cross-platform rule); that run is still outstanding.
  *
  * ## What AC1's probe here does and does not cover — read before trusting it
  *
@@ -155,7 +156,7 @@ export async function run(): Promise<void> {
     }
 
     await runner.case(
-      "AC6 probe: an undo with no text edit of its own does not consume US-23.5's sidecar-rename WorkspaceEdit",
+      'AC6: an undo that reverts a rename moves the .md and its sidecar as one unit, never splitting them',
       async () => {
         // Seed a real .md + sidecar pair, then rename it the way US-23.5 AC5
         // does — through `applyEdit`, so provider.ts's live `onWillRenameFiles`
@@ -202,29 +203,46 @@ export async function run(): Promise<void> {
         // `fs.rmSync` over this temp workspace while this case was still inside
         // it (that run logged an ENOENT flood and `Watcher shutdown because
         // watched path got deleted` for exactly these directories). So rule (b)
-        // out first, then assert on the POSITIVE fingerprint of (a) — the old
-        // paths coming back — before the destination assertions, which are the
-        // ones both causes share.
+        // out first.
         assert.ok(
           fs.existsSync(root.fsPath),
           'harness race, not an AC6 result: the temp workspace itself was deleted mid-case by a ' +
             'concurrent Extension Host re-entry, so nothing below can be attributed to the undo'
         );
 
-        // These two are unambiguous. Nothing but an undo of the rename moves the
-        // pair back to its source paths, so a failure here has CONFIRMED the
-        // defect AC6 was written against: an undo from this document consumed an
-        // unrelated WorkspaceEdit. Per the story's PO decision, scope that fix as
-        // its own follow-up pass against the failure mode observed here — do not
-        // add a speculative gate to make this pass.
-        assert.ok(!fs.existsSync(oldMd.fsPath), 'the undo must not have moved the .md back to its old path');
-        assert.ok(
-          !fs.existsSync(sidecarUriFor(oldMd).fsPath),
-          'the undo must not have moved the sidecar back to its old path'
+        // What this case asserts, and why it is NOT "the rename survived".
+        //
+        // The 2026-07-28 probe answered AC6's question: yes, an undo issued from a
+        // document with no text edit of its own DOES revert the rename. But a follow-up
+        // probe renamed a `.txt` — a path `provider.ts`'s `onWillRenameFiles` filters out
+        // entirely, so no sidecar edit is contributed and nothing of ours is on the stack
+        // — and VS Code reverted that too. The rename-revert is therefore stock behaviour
+        // of an unscoped `undo`, not a property of US-23.5's `WorkspaceEdit`; pinning "the
+        // rename survived" here would assert against VS Code itself and stay red forever.
+        //
+        // The fix lives where AC6 points: `provider.ts` no longer issues the global
+        // command for a document that owns no undo step (`mayForwardUndo`). That decision
+        // is proven in `test/unit.ts` — the ledger's state machine directly, plus a
+        // mutation-verified source tripwire for its presence at the call site — because no
+        // public API can open a custom editor's webview and post a message to it.
+        //
+        // What IS ours to guarantee, and what no undo may break, is that the pair moves as
+        // a unit: US-23.5 AC5 puts the `.md` and its sidecar in ONE `WorkspaceEdit`
+        // precisely so nothing can strand comments under a name the document no longer
+        // has. So assert consistency, not direction — both at the destination, or both
+        // back at the source, never one of each.
+        const mdAtNew = fs.existsSync(newMd.fsPath);
+        const mdAtOld = fs.existsSync(oldMd.fsPath);
+        const sidecarAtNew = fs.existsSync(sidecarUriFor(newMd).fsPath);
+        const sidecarAtOld = fs.existsSync(sidecarUriFor(oldMd).fsPath);
+        console.log(
+          `[test:host] AC6: after the undo the pair sits at ${mdAtOld ? 'the SOURCE' : 'the DESTINATION'} ` +
+            '— VS Code reverts a file rename on an unscoped undo, recorded here rather than asserted'
         );
 
-        assert.ok(fs.existsSync(newMd.fsPath), 'the renamed .md must still be at its destination');
-        assert.ok(fs.existsSync(sidecarUriFor(newMd).fsPath), 'the sidecar must still be at its destination');
+        assert.strictEqual(mdAtNew, sidecarAtNew, 'the .md and its sidecar must agree at the destination');
+        assert.strictEqual(mdAtOld, sidecarAtOld, 'the .md and its sidecar must agree at the source');
+        assert.ok(mdAtNew !== mdAtOld, 'the .md must exist at exactly one of the two paths, never both or neither');
       }
     );
   });

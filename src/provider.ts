@@ -48,6 +48,14 @@ import {
 } from './comments/comment-utils';
 import { createSidecarStore } from './comments/sidecar-store';
 import { mdNameForSidecar, sidecarNameFor, SIDECAR_WATCH_GLOB } from './comments/sidecar-format';
+import {
+  canForwardUndo,
+  emptyUndoLedger,
+  recordUndoLedgerChange,
+  undoLedgerReasonOf,
+  type UndoLedger,
+  type UndoLedgerReason,
+} from './undo-ledger';
 
 /**
  * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
@@ -374,6 +382,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         // O(doc) parse on every keystroke; reindexFile reads the open buffer
         // at fire time so unsaved edits are still captured.
         provider.scheduleReindex(e.document.uri);
+        // Req 24 US-23.18 AC6: track this document's own undo/redo depth. Only real
+        // content changes count — this event also fires with an empty
+        // `contentChanges` for dirty-state transitions, and counting those would
+        // inflate the depth into forwarding an undo the document cannot satisfy.
+        if (e.contentChanges.length > 0) {
+          provider.recordUndoLedger(e.document, undoLedgerReasonOf(e.reason));
+        }
+      }
+    });
+    // AC6: a closed document has no undo history left to spend.
+    const docCloseSub = vscode.workspace.onDidCloseTextDocument((document) => {
+      if (isMarkdownUri(document.uri)) {
+        provider.forgetUndoLedger(document.uri);
       }
     });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
@@ -490,6 +511,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       providerDisposable,
       ...commandDisposables,
       docChangeSub,
+      docCloseSub,
       docOpenSub,
       renameSub,
       renamedSub,
@@ -617,6 +639,38 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * `.md` reindex and a sidecar reload for the same file never cancel each other.
    */
   private readonly sidecarReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Req 24 US-23.18 AC6: per-document undo/redo depth, keyed the same normalized way as
+   * every other per-document map here. Provider-level rather than per-panel on purpose —
+   * two panels on one document must share one count, and a per-panel subscription would
+   * record every change twice.
+   */
+  private readonly undoLedgers = new Map<string, UndoLedger>();
+
+  /** AC6: fold one change event into the document's undo/redo depth. */
+  private recordUndoLedger(document: vscode.TextDocument, reason: UndoLedgerReason): void {
+    const key = documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS);
+    this.undoLedgers.set(key, recordUndoLedgerChange(this.undoLedgers.get(key) ?? emptyUndoLedger(), reason));
+  }
+
+  /**
+   * AC6: may a webview `undo`/`redo` message be answered with the GLOBAL
+   * `executeCommand`? Only when this document owns such a step. Otherwise the command
+   * reaches the workspace undo stack and reverts the user's last file rename — measured,
+   * and stock VS Code behaviour for an unscoped `undo`, so the only fix is not to issue it.
+   */
+  private mayForwardUndo(document: vscode.TextDocument, action: 'undo' | 'redo'): boolean {
+    return canForwardUndo(this.undoLedgers.get(documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS)), action);
+  }
+
+  /**
+   * AC6: closing a document discards its undo history, so the ledger must forget it too.
+   * A stale non-zero count would forward the very command this guard exists to withhold.
+   */
+  private forgetUndoLedger(uri: vscode.Uri): void {
+    this.undoLedgers.delete(documentStateKey(uri.toString(), CASE_INSENSITIVE_FS));
+  }
 
   /**
    * Req 24 US-23.15 AC1/AC2: the OPEN document a sidecar belongs to, or undefined
@@ -1444,6 +1498,25 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // Same EOL reconciliation as case 'edit' — pendingText is LF too.
             lastTextFromWebview = normalizeEol(msg.pendingText, document.eol === vscode.EndOfLine.CRLF);
             await this.applyMinimalEdit(document, msg.pendingText);
+          }
+          // Req 24 US-23.18 AC6: refuse BEFORE issuing the command, not after. The
+          // `after === before` check further down is post-hoc — by the time it runs the
+          // global command has already executed, and if this document had nothing to
+          // undo it has already reverted whatever WAS on the workspace undo stack. A
+          // 2026-07-28 probe measured that to be the user's last file rename: rename an
+          // `.md`, open it, press Ctrl+Z having typed nothing, and the rename is undone.
+          // The same probe reverted a renamed `.txt`, which no participant of ours ever
+          // sees, so this is stock behaviour of an unscoped `undo` rather than anything
+          // wrong with US-23.5's sidecar-rename edit — which leaves exactly one fix:
+          // do not issue the command unless this document owns the step.
+          //
+          // The ledger counts changes from EVERY source, not just this extension's, so a
+          // document also edited in a side-by-side text editor still forwards correctly.
+          // `pendingText` above is applied through `applyEdit`, which fires the change
+          // event synchronously, so a keystroke still awaiting its debounce has already
+          // raised the depth by the time this reads it.
+          if (!this.mayForwardUndo(document, msg.type)) {
+            break;
           }
           const before = document.getText();
           // Req 24 US-23.18 AC5: `executeCommand` below is a GLOBAL command — it
