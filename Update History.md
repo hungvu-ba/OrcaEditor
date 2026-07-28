@@ -491,3 +491,4 @@
 | 0.10.0 | 2026-07-28 | Fix (US-23.18 host track): AC6's probe now proves an undo reverts US-23.5's sidecar rename — a confirmed defect; the capability positive control no longer reddens the gate. |
 | 0.10.0 | 2026-07-28 | Fix: test:host was a coin flip — restored windows ran the suite in 10 concurrent hosts, and every case ran with no workspace folder, hiding a false pass. |
 | 0.10.0 | 2026-07-28 | Fix (US-23.18 AC6): a webview undo no longer reverts your last file rename — the provider refuses the global undo command when the document owns no undo step. |
+| 0.10.0 | 2026-07-28 | Fix: the feature-guide screenshot generator moved out of test/webview to scripts/feature-shots — a test run no longer rewrites eight tracked PNGs. |

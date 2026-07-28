@@ -1,12 +1,25 @@
 /**
- * NOT a test — a screenshot generator for the 0.9.0 feature guide. Drives the
- * real webview bundle and writes tight element-level PNGs into docs/features-0.9.0/.
- * Run: npx playwright test test/webview/zz-feature-shots.spec.ts
+ * NOT a test — a screenshot generator for the 0.9.0 feature guide. Drives the real
+ * webview bundle and writes tight element-level PNGs into `docs/features-0.9.0/`.
+ *
+ * Run: `npm run shots`
+ *
+ * It lives under `scripts/` rather than `test/webview/` precisely because it writes
+ * tracked files. `playwright.config.ts` points `testDir` at `test/webview` with no
+ * `testMatch` filter, so while this file sat there every `npm run test:webview`
+ * re-ran it and rewrote all eight PNGs — reported as 7 passing "tests". Git only
+ * noticed when the rendered bytes differed, which made it look intermittent: the
+ * two layout/timing-sensitive shots (`01-toolbar`, `04-at-mention-popup`) churned
+ * across 3 commits each while the static reading-mode shots never moved. Twice that
+ * churn was committed by feature work that had nothing to do with the docs
+ * (`0881d1d`, `72a3b7d`). A test run must not dirty the working tree.
  */
 import { test, type Page } from '@playwright/test';
 import * as path from 'path';
-import { openEditor } from './_harness';
+import { openEditor } from '../../test/webview/_harness';
 
+// scripts/feature-shots -> scripts -> repo root. Two levels up, same as when this
+// file lived in test/webview; keep the depth in mind if it ever moves again.
 const OUT = path.join(__dirname, '..', '..', 'docs', 'features-0.9.0');
 const shot = (name: string) => path.join(OUT, `${name}.png`);
 
