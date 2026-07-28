@@ -39,6 +39,7 @@ import { detectBlockStyle, type StyleOverride } from '../media/webview/block-sty
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import { buildGroups } from '../media/webview/comment-gutter';
+import { orphanKindLabel } from '../media/webview/comment-panel';
 import type { ThreadAnchor } from '../media/webview/comment-resolve';
 import {
   anchorUpdateRejection,
@@ -117,6 +118,15 @@ import {
 } from '../media/webview/comment-anchor';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
 import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
+import {
+  collectClassConstants,
+  declaredConstants,
+  readTransientClassIdentifiers,
+  scanStampedClasses,
+  OUTSIDE_CONTENT_CLASSES,
+  UNRESOLVED_STAMP_EXEMPTIONS,
+  type SourceFile,
+} from './transient-class-scan';
 
 let pass = 0;
 let fail = 0;
@@ -2208,6 +2218,20 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar: replies are ordered by timestamp, not disk order',
     shuffled.threads[0].replies.map((r) => r.body).join(',') === 'first,second');
 
+  // AC3 (third rule): a reply/status-change/anchor-update is never ordered
+  // before its own parent regardless of its timestamp — each is stored in its
+  // own per-thread array, never interleaved with the parent `comment`, so an
+  // earlier-than-parent timestamp cannot misplace it ahead of its own thread.
+  const replyBeforeParent = foldSidecarRecords([
+    comment(), // created 2026-07-26T10:00:00.000Z
+    reply({ timestamp: '2026-07-26T05:00:00.000Z', body: 'timestamped before its own parent comment' }),
+  ]);
+  check('sidecar: a reply timestamped before its own parent still folds into that parent\'s thread',
+    replyBeforeParent.threads.length === 1 &&
+      replyBeforeParent.threads[0].replies.length === 1 &&
+      replyBeforeParent.threads[0].replies[0].body === 'timestamped before its own parent comment' &&
+      replyBeforeParent.orphans.length === 0);
+
   // AC4: first-seen wins on a duplicate id, and the rest are flagged.
   const duplicated = foldSidecarRecords([comment({ body: 'first' }), comment({ body: 'second' })]);
   check('sidecar: a duplicate comment id keeps the first-seen line',
@@ -2220,6 +2244,11 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     orphaned.orphans.length === 1 && orphaned.threads[0].replies.length === 0);
   check('sidecar: a status change with no parent routes to orphans',
     foldSidecarRecords([statusChange({ parent_comment_id: 'missing' })]).orphans.length === 1);
+  // AC7's literal example: a reply whose parent_comment_id names ANOTHER
+  // reply (not a comment) — reply-to-reply nesting is exactly one level too
+  // deep, so it orphans the same way a missing/unknown parent does.
+  check('sidecar: a reply-to-reply (parent names another reply, not a comment) routes to orphans',
+    foldSidecarRecords([comment(), reply({ id: 'r1' }), reply({ id: 'r2', parent_comment_id: 'r1' })]).orphans.length === 1);
 
   // Status is derived by folding status-change lines, never stored.
   check('sidecar: a thread with no status change defaults to Open',
@@ -2286,24 +2315,15 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   ]);
   check('sidecar: deleting a comment cascades to its replies and status changes',
     threadDeleted.threads.length === 0 && threadDeleted.orphans.length === 0);
-  // Soft ownership nudge, not a security boundary: only the author of a line may
-  // tombstone it, and a mismatch is logged rather than applied.
-  check('sidecar: a delete whose author does not match the target is ignored',
-    foldSidecarRecords([comment(), reply(), tombstone({ author: 'someone-else' })]).threads[0].replies.length === 1);
-  check('sidecar: an author-mismatched delete is flagged',
-    foldSidecarRecords([comment(), reply(), tombstone({ author: 'someone-else' })]).warnings.length === 1);
-  // The same name typed on macOS (NFD) and Windows (NFC) is one person.
-  check('sidecar: author matching is NFC-normalized',
-    foldSidecarRecords([
-      comment(),
-      reply({ author: 'Nguyễn'.normalize('NFC') }),
-      tombstone({ author: 'Nguyễn'.normalize('NFD') }),
-    ]).threads[0].replies.length === 0);
+  // AC8: no authority check — a delete from a different author than its target
+  // is still applied (the same PO call US-23.11 already made for status-change).
+  check('sidecar: a delete from a different author than the target is still applied (AC8)',
+    foldSidecarRecords([comment(), reply(), tombstone({ author: 'someone-else' })]).threads[0].replies.length === 0);
 
   // US-23.11 AC9: the one author normalizer — decode, trim, NFC, case-fold — and
-  // a blank side that never matches anything. AC1 removed this comparison from
-  // the status actions, but US-23.2's delete-gating still runs on it and a
-  // trailing space left in the setting used to split one person into two.
+  // a blank side that never matches anything. Nothing in the FOLD runs this
+  // comparison any more (AC1/US-23.16 AC8 removed both gates it used to guard);
+  // it survives only for `comment-utils.ts`'s UI-level delete popover gate.
   check('US-23.11 AC9: the same name matches itself',
     sameAuthor('hungvu', 'hungvu'));
   check('US-23.11 AC9: a trailing space in the setting still matches',
@@ -2339,9 +2359,18 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('US-23.11 AC9: different names still do not match',
     !sameAuthor('hungvu', 'mai.tran'));
   // A stray delete from a race between two sessions must not error the load.
-  const strayDelete = foldSidecarRecords([comment(), tombstone({ target_id: 'nope' }), tombstone(), tombstone()]);
+  // Distinct ids: three independent stray deletes, not the same line repeated
+  // (a shared default id would be caught by AC1's cross-type dedup instead).
+  const strayDelete = foldSidecarRecords([
+    comment(),
+    tombstone({ id: 'd1', target_id: 'nope' }),
+    tombstone({ id: 'd2', target_id: 'also-nope' }),
+    tombstone({ id: 'd3', target_id: 'still-nope' }),
+  ]);
   check('sidecar: a delete naming an unknown target is a silent no-op',
     strayDelete.threads.length === 1 && strayDelete.warnings.length === 0);
+  check('sidecar: a delete naming an unknown target routes to orphans (AC7)',
+    strayDelete.orphans.length === 3);
 
   // Regression (review 2026-07-26): duplicate ids were deduped for `comment` only.
   // A merge that lands one reply twice displayed it twice — and since
@@ -2353,14 +2382,50 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar: a duplicate reply id is flagged', dupReply.warnings.length === 1);
   check('sidecar: a duplicate status-change id keeps the first-seen line',
     foldSidecarRecords([comment(), statusChange(), statusChange({ to_status: 'Closed' })]).threads[0].status === 'Resolved');
-  // A tombstone must never reach a different author's line via a shared id.
-  check('sidecar: a duplicate reply id cannot be cross-deleted by the other author',
+  // AC8: no authority check — the surviving (first-seen) duplicate is
+  // deletable by any author, not just its own.
+  check('sidecar: a duplicate reply id\'s surviving copy is deletable by any author (AC8)',
     foldSidecarRecords([
       comment(),
       reply({ author: 'A', body: "A's" }),
       reply({ author: 'B', body: "B's" }),
       tombstone({ author: 'B' }),
-    ]).threads[0].replies.length === 1);
+    ]).threads[0].replies.length === 0);
+
+  // AC1/AC2: dedup applies ACROSS types too, not just within one — a `reply`
+  // and a `status-change` sharing one `id` (a pathological merge/cherry-pick)
+  // resolve by the same lowest-timestamp rule, regardless of type. The reply's
+  // earlier timestamp wins, so the status-change never applies.
+  const crossTypeDup = foldSidecarRecords([
+    comment(),
+    reply({ id: 'x1', timestamp: '2026-07-26T09:00:00.000Z', body: 'reply wins (earlier timestamp)' }),
+    statusChange({ id: 'x1', timestamp: '2026-07-26T10:00:00.000Z' }),
+  ]);
+  check('sidecar: a cross-type id collision keeps the lowest-timestamp line regardless of type',
+    crossTypeDup.threads[0].replies.length === 1 &&
+      crossTypeDup.threads[0].replies[0].body === 'reply wins (earlier timestamp)' &&
+      crossTypeDup.threads[0].status === 'Open');
+  check('sidecar: a cross-type id collision is flagged',
+    crossTypeDup.warnings.some((w) => w.includes('x1')));
+  // An unparseable timestamp is treated as the oldest possible value in a
+  // dedup tie too (AC2), same rule `byTimestamp` already applies to ordering.
+  const garbageTimestampDup = foldSidecarRecords([
+    comment({ body: 'has a real timestamp' }),
+    reply({ id: 'r9', timestamp: 'not-a-date', body: 'garbage timestamp — treated as oldest, wins the tie' }),
+    reply({ id: 'r9', timestamp: '2026-07-26T11:00:00.000Z', body: 'real timestamp — loses to the garbage one' }),
+  ]);
+  check('sidecar: an unparseable timestamp wins a dedup tie as the oldest value',
+    garbageTimestampDup.threads[0].replies[0].body === 'garbage timestamp — treated as oldest, wins the tie');
+  // `delete` lines dedup by id too (previously the only type with none at all).
+  const dupDelete = foldSidecarRecords([
+    comment(),
+    reply(),
+    reply({ id: 'r2' }),
+    tombstone({ id: 'dup', target_id: 'r1', timestamp: '2026-07-26T13:00:00.000Z' }),
+    tombstone({ id: 'dup', target_id: 'r2', timestamp: '2026-07-26T14:00:00.000Z' }),
+  ]);
+  check('sidecar: a duplicate delete id keeps only the first-seen line\'s effect',
+    dupDelete.threads[0].replies.length === 1 && dupDelete.threads[0].replies[0].id === 'r2');
 
   // Req 24 US-23.13 AC1/AC2: `anchor-update` persists a re-attached or
   // auto-resolved anchor. Its fold is the one line type that resolves
@@ -2401,6 +2466,24 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     ]).threads[0].anchor.recorded_text === 'first');
   check('sidecar: a duplicate anchor-update id is flagged',
     foldSidecarRecords([comment(), anchorUpdate(), anchorUpdate()]).warnings.length === 1);
+  // AC7: unlike reply/status-change, an anchor-update whose parent doesn't
+  // resolve used to be a silent no-op — now it routes to orphans like every
+  // other line type.
+  check('sidecar: an anchor-update with no parent routes to orphans',
+    foldSidecarRecords([comment(), anchorUpdate({ parent_comment_id: 'missing' })]).orphans.length === 1);
+  // Review finding (2026-07-28): a dedup winner that is NOT its id's
+  // first on-disk occurrence must still take its OWN true on-disk position in
+  // the deduped stream — not the position of that id's first occurrence —
+  // or `anchor-update`'s last-one-wins fold can pick the wrong line. Here
+  // 'a1' wins dedup (lower timestamp) despite being appended LAST, after 'a2'.
+  const orderInversion = foldSidecarRecords([
+    comment(),
+    anchorUpdate({ id: 'a1', timestamp: '2026-07-28T09:00:00.000Z', anchor: { ...anchorUpdate().anchor, recorded_text: 'first-occurrence-of-a1' } }),
+    anchorUpdate({ id: 'a2', timestamp: '2026-07-28T10:00:00.000Z', anchor: { ...anchorUpdate().anchor, recorded_text: 'a2-appended-between' } }),
+    anchorUpdate({ id: 'a1', timestamp: '2026-07-28T05:00:00.000Z', anchor: { ...anchorUpdate().anchor, recorded_text: 'a1-wins-dedup-appended-last' } }),
+  ]);
+  check('sidecar: a dedup winner takes its own true on-disk position, not its id\'s first-occurrence position',
+    orderInversion.threads[0].anchor.recorded_text === 'a1-wins-dedup-appended-last');
 
   // US-23.14: an append-only correction of a comment/reply's `body`, mirroring
   // `delete`'s tombstone pattern — but UNLIKE anchor-update's pure file-order
@@ -2450,8 +2533,35 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     foldSidecarRecords([comment(), editLine({ target_id: 'no-such-id' })]).threads[0].comment.body === 'why?');
   check('sidecar: an edit naming an unknown target does not warn or error',
     foldSidecarRecords([comment(), editLine({ target_id: 'no-such-id' })]).warnings.length === 0);
+  // AC7: an unresolvable target now routes to orphans instead of vanishing —
+  // an already-tombstoned target still resolves (the maps aren't pruned by
+  // deletion), so that ordinary race stays a quiet no-op, untouched below.
+  check('sidecar: an edit naming an unknown target routes to orphans',
+    foldSidecarRecords([comment(), editLine({ target_id: 'no-such-id' })]).orphans.length === 1);
   check('sidecar: an edit naming a tombstoned target is a no-op, load does not error',
     foldSidecarRecords([comment(), tombstone({ target_id: 'c1', author: 'reviewer' }), editLine()]).threads.length === 0);
+  check('sidecar: an edit naming a tombstoned target is NOT an orphan (ordinary race, not unresolvable)',
+    foldSidecarRecords([comment(), tombstone({ target_id: 'c1', author: 'reviewer' }), editLine()]).orphans.length === 0);
+  // Review finding (2026-07-28): a delete/edit whose target is ITSELF an
+  // orphaned reply (its own parent doesn't resolve) must not be silently
+  // "applied and hidden" — both the orphaned reply and the delete/edit line
+  // must surface in `orphans`, never vanish without a trace.
+  const deleteTargetsOrphanedReply = foldSidecarRecords([
+    reply({ id: 'ghost-reply', parent_comment_id: 'no-such-comment' }),
+    tombstone({ target_id: 'ghost-reply' }),
+  ]);
+  check('sidecar: a delete naming an orphaned reply routes BOTH lines to orphans, neither vanishes',
+    deleteTargetsOrphanedReply.orphans.length === 2 &&
+      deleteTargetsOrphanedReply.orphans.some((l) => l.type === 'reply' && l.id === 'ghost-reply') &&
+      deleteTargetsOrphanedReply.orphans.some((l) => l.type === 'delete' && l.target_id === 'ghost-reply'));
+  const editTargetsOrphanedReply = foldSidecarRecords([
+    reply({ id: 'ghost-reply', parent_comment_id: 'no-such-comment' }),
+    editLine({ target_id: 'ghost-reply' }),
+  ]);
+  check('sidecar: an edit naming an orphaned reply routes BOTH lines to orphans, neither vanishes',
+    editTargetsOrphanedReply.orphans.length === 2 &&
+      editTargetsOrphanedReply.orphans.some((l) => l.type === 'reply' && l.id === 'ghost-reply') &&
+      editTargetsOrphanedReply.orphans.some((l) => l.type === 'edit' && l.target_id === 'ghost-reply'));
   // AC8: no authority check — any author's edit line is accepted for any target.
   check('sidecar: an edit is accepted regardless of whose name is on it (no authority check)',
     foldSidecarRecords([comment(), editLine({ author: 'someone-else' })]).threads[0].comment.body === 'edited body');
@@ -2461,38 +2571,85 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar: a duplicate edit id is flagged',
     foldSidecarRecords([comment(), editLine(), editLine()]).warnings.length === 1);
 
-  // AC7 clause 2: does this sidecar even describe the document it sits next to?
-  // Decided by CONTENT, never by the file's creation date — `git clone`/`git
-  // checkout` recreate the file so its birth time becomes "now" while its comments
-  // stay older, which would discard every comment after any fresh clone.
+  // AC7 clause 2 / US-23.16 AC4-AC6: does this sidecar even describe the
+  // document it sits next to? Decided by CONTENT, never by the file's
+  // creation date — `git clone`/`git checkout` recreate the file so its birth
+  // time becomes "now" while its comments stay older, which would discard
+  // every comment after any fresh clone.
   {
     const withText = (text: string, id: string): SidecarThread =>
       foldSidecarRecords([comment({ id, anchor: { ...anchor, recorded_text: text } })]).threads[0];
-    const realDoc = '# Requirement 23\n\nThis is **bold** text in a paragraph.\n\nSee [the spec](a.md).\n';
+    const realDoc =
+      '# Requirement 23\n\nThis is **bold** text in a paragraph about requirement twenty three details right here.\n\n' +
+      'See the specification document for full acceptance criteria details.\n\n' +
+      'This is bold text in a paragraph today for sure.\n\nSee [the spec](a.md).\n';
     const foreignDoc = '# Sprint retro notes\n\nWhat went well this iteration.\n';
-    const threads = [withText('This is bold text in a paragraph.', 'c1')];
-    check('belonging: the file that was commented on is recognised',
-      sidecarBelongsToDocument(threads, realDoc) === 'belongs');
-    check('belonging: a different file at the same path is foreign',
-      sidecarBelongsToDocument(threads, foreignDoc) === 'foreign');
-    // The stripped comparison is what closes the DOM-text vs raw-markdown gap:
-    // `## Title` scores only 0.625 against a recorded `Title` under US-23.4's
-    // similarity, i.e. below its 0.8 threshold, but both reduce to `title` here.
-    check('belonging: markdown syntax does not hide a match (heading)',
-      sidecarBelongsToDocument([withText('Requirement 23', 'c2')], realDoc) === 'belongs');
-    check('belonging: markdown syntax does not hide a match (inline bold)',
-      sidecarBelongsToDocument([withText('This is bold text', 'c3')], realDoc) === 'belongs');
-    // Never claim `foreign` without evidence — that would hide real comments.
-    check('belonging: a too-short recorded text is not discriminating',
-      sidecarBelongsToDocument([withText('Done', 'c4')], foreignDoc) === 'unknown');
+    // >= BELONGING_SINGLE_THREAD_MIN_CHARS (80) normalized chars, present in realDoc.
+    const single80 = 'This is bold text in a paragraph about requirement twenty three details right here';
+    // >= BELONGING_MIN_DISCRIMINATING_CHARS (40) normalized chars each, both present in realDoc.
+    const discA = 'This is bold text in a paragraph today for sure.';
+    const discB = 'See the specification document for full acceptance criteria details.';
+    // >= 40 normalized chars each, present in NEITHER doc — real evidence, just the wrong one.
+    const foreignLong1 = 'Sprint retro notes about what went well and what needs improvement this whole cycle';
+    const foreignLong2 = 'Retro notes covering what went well and what could improve next sprint cycle';
+    // < BELONGING_MIN_DISCRIMINATING_CHARS (40) normalized chars — a "Done"/"N/A"-style short match.
+    const discShort = 'nothing like this here at all';
+
+    // --- Single-thread case: the stricter 80-char floor (AC5) ---
+    check('belonging (single thread): a match clearing the 80-char floor proves belonging',
+      sidecarBelongsToDocument([withText(single80, 'c1')], realDoc) === 'belongs');
+    check('belonging (single thread): a below-80-char match is not discriminating enough on its own',
+      sidecarBelongsToDocument([withText(discA, 'c1')], realDoc) === 'unknown');
+    check('belonging (single thread): a floor-clearing text absent from the document is foreign',
+      sidecarBelongsToDocument([withText(single80, 'c1')], foreignDoc) === 'foreign');
     check('belonging: no threads at all yields no claim',
       sidecarBelongsToDocument([], foreignDoc) === 'unknown');
-    check('belonging: one match among many is enough to prove belonging',
-      sidecarBelongsToDocument([withText('nothing like this here at all', 'c5'), withText('This is bold text in a paragraph.', 'c6')], realDoc) === 'belongs');
+
+    // --- Multi-thread case: the 40-char floor, needs MORE THAN ONE match (AC5/AC6) ---
+    check('belonging (multi-thread): more than one discriminating match proves belonging',
+      sidecarBelongsToDocument([withText(discA, 'c1'), withText(discB, 'c2')], realDoc) === 'belongs');
+    // Exactly one hit is real evidence, but it is also exactly the
+    // boilerplate-recreated-file case AC5 guards against — not proof, and not
+    // evidence against belonging either, so `unknown`, never `foreign`.
+    check('belonging (multi-thread): exactly one discriminating match is not enough to prove belonging',
+      sidecarBelongsToDocument([withText(discA, 'c1'), withText(discShort, 'c2')], realDoc) === 'unknown');
+    check('belonging (multi-thread): threads below the floor contribute no evidence either way',
+      sidecarBelongsToDocument([withText(discShort, 'c1'), withText('Done', 'c2')], foreignDoc) === 'unknown');
+    check('belonging (multi-thread): zero discriminating matches is foreign',
+      sidecarBelongsToDocument([withText(foreignLong1, 'c1'), withText(foreignLong2, 'c2')], realDoc) === 'foreign');
+    // AC6: a partial rewrite (one section's anchors no longer match) is judged
+    // by the SAME discriminating-match-count rule, not a separate signal — as
+    // long as more than one thread still matches, the sidecar still belongs.
+    check('belonging (AC6, partial rewrite): >1 surviving match still proves belonging alongside a non-matching third thread',
+      sidecarBelongsToDocument(
+        [withText(discA, 'c1'), withText(discB, 'c2'), withText(foreignLong1, 'c3')],
+        realDoc
+      ) === 'belongs');
+    // Review finding (2026-07-28): two threads recording the IDENTICAL
+    // discriminating text (this repo's own template boilerplate, repeated
+    // verbatim across sections) must count as ONE piece of evidence, not
+    // two — else a single repeated phrase defeats the "more than one match"
+    // guard AC5 exists to enforce.
+    const identicalBoilerplate = 'Acceptance criteria template phrase repeated across every section of this file';
+    check('belonging (multi-thread): identical text recorded by two threads counts as ONE match, not two',
+      sidecarBelongsToDocument(
+        [withText(identicalBoilerplate, 'c1'), withText(identicalBoilerplate, 'c2')],
+        realDoc + identicalBoilerplate + '\n'
+      ) === 'unknown');
+
     check('belonging: NFD-authored recorded text still matches an NFC document',
-      sidecarBelongsToDocument([withText('Yêu cầu nghiệp vụ'.normalize('NFD'), 'c7')],
-        '## Yêu cầu nghiệp vụ'.normalize('NFC')) === 'belongs');
+      sidecarBelongsToDocument(
+        [withText('Yêu cầu nghiệp vụ chi tiết cho hệ thống quản lý bình luận và thảo luận nhóm dự án'.normalize('NFD'), 'c7')],
+        '## Yêu cầu nghiệp vụ chi tiết cho hệ thống quản lý bình luận và thảo luận nhóm dự án'.normalize('NFC')
+      ) === 'belongs');
   }
+
+  // US-23.16 AC7: the orphan-row pill label for each of the 5 orphanable line kinds.
+  check('orphanKindLabel: reply', orphanKindLabel('reply') === 'Reply');
+  check('orphanKindLabel: status-change', orphanKindLabel('status-change') === 'Status');
+  check('orphanKindLabel: anchor-update', orphanKindLabel('anchor-update') === 'Anchor');
+  check('orphanKindLabel: delete', orphanKindLabel('delete') === 'Delete');
+  check('orphanKindLabel: edit', orphanKindLabel('edit') === 'Edit');
 
   // Regression (review 2026-07-26): an unparseable timestamp sorted LAST, so one
   // malformed field outranked every valid one and froze a thread's status.
@@ -2860,6 +3017,175 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       astralClipped.endsWith('😀'));
   check('body-limit: the counter threshold sits below the hard cap',
     COMMENT_BODY_COUNTER_THRESHOLD < COMMENT_BODY_MAX_CODEPOINTS);
+}
+
+// --- Req 24 US-23.22: an unregistered #content class fails `npm test` --------
+//
+// Source-scanning check, same shape (and same `process.cwd()` convention) as
+// the `src/provider.ts` security tripwire above. The scan itself and the two
+// exemption arrays live in `test/transient-class-scan.ts`; this block is the
+// gate that runs it against the real tree, plus positive controls proving the
+// scan is not silently vacuous.
+{
+  const WEBVIEW_DIR = path.join(process.cwd(), 'media/webview');
+  const webviewFiles: SourceFile[] = fs
+    .readdirSync(WEBVIEW_DIR)
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => ({
+      file: name,
+      source: fs.readFileSync(path.join(WEBVIEW_DIR, name), 'utf8'),
+    }));
+  const scopes = collectClassConstants(webviewFiles);
+  const sourceOf = (name: string): string =>
+    webviewFiles.find((f) => f.file === name)?.source ?? '';
+
+  const identifiers = readTransientClassIdentifiers(sourceOf('turndown.ts'));
+  const turndownScope = scopes.get('turndown.ts') ?? new Map<string, string>();
+  const registered = new Set<string>();
+  const unresolvedIdentifiers: string[] = [];
+  for (const id of identifiers) {
+    const value = turndownScope.get(id);
+    if (value === undefined) {
+      unresolvedIdentifiers.push(id);
+    } else {
+      registered.add(value);
+    }
+  }
+
+  check(
+    'transient-classes: every TRANSIENT_CLASSES entry resolves to a class name',
+    identifiers.length > 0 && unresolvedIdentifiers.length === 0,
+    `  entries = ${identifiers.length}, unresolved = ${JSON.stringify(unresolvedIdentifiers)}`
+  );
+
+  // AC2 — one declaration site: every registered name is an exported constant
+  // in constants.ts, so a rename cannot desynchronize the strip list from the
+  // place the class is stamped.
+  const constantsDeclared = declaredConstants(sourceOf('constants.ts'));
+  const notInConstants = identifiers.filter((id) => !constantsDeclared.has(id));
+  check(
+    'transient-classes (AC2): every registered name is declared in constants.ts',
+    notInConstants.length === 0,
+    `  declared elsewhere: ${JSON.stringify(notInConstants)}`
+  );
+
+  const scan = scanStampedClasses(webviewFiles, scopes);
+
+  // AC1 — the actual gate: a class stamped anywhere in media/webview must be
+  // registered for strip or listed as out-of-#content.
+  const allowed = new Set<string>([...registered, ...OUTSIDE_CONTENT_CLASSES]);
+  const unregistered = [...scan.names.entries()].filter(([name]) => !allowed.has(name));
+  check(
+    'transient-classes (AC1): no unregistered class is stamped in media/webview',
+    unregistered.length === 0,
+    unregistered
+      .map(
+        ([name, sites]) =>
+          `  "${name}" added at ${sites[0].file}:${sites[0].line}` +
+          ` — register it in turndown.ts's TRANSIENT_CLASSES if it lands inside #content,` +
+          ` else add it to OUTSIDE_CONTENT_CLASSES in test/transient-class-scan.ts`
+      )
+      .join('\n')
+  );
+
+  // AC1 — "cannot resolve = fail": a computed class expression is a failure
+  // until someone parks it on the exemption array with a reason.
+  const exemptExpressions = new Set(UNRESOLVED_STAMP_EXEMPTIONS);
+  const rogueExpressions = scan.unresolved.filter(
+    (u) => !exemptExpressions.has(`${u.file} | ${u.expr}`)
+  );
+  check(
+    'transient-classes (AC1): no unreadable class expression is unaccounted for',
+    rogueExpressions.length === 0,
+    rogueExpressions
+      .map(
+        (u) =>
+          `  ${u.file}:${u.line} stamps \`${u.expr}\`` +
+          ` — resolve it to a constants.ts constant, or add "${u.file} | ${u.expr}"` +
+          ` to UNRESOLVED_STAMP_EXEMPTIONS in test/transient-class-scan.ts`
+      )
+      .join('\n')
+  );
+
+  // AC2 — a registered class must never be stamped as a bare string literal:
+  // that is the second declaration site the rule exists to prevent.
+  const literalRegistered = [...scan.literalNames.entries()].filter(([name]) =>
+    registered.has(name)
+  );
+  check(
+    'transient-classes (AC2): no registered class is stamped as a bare literal',
+    literalRegistered.length === 0,
+    literalRegistered
+      .map(([name, sites]) => `  "${name}" at ${sites[0].file}:${sites[0].line}`)
+      .join('\n')
+  );
+
+  // Both exemption arrays are grandfather lists, not permanent policy — an
+  // entry whose stamp site is gone must be deleted, or the list quietly grows
+  // into a place where a real leak can hide.
+  const staleClassExemptions = OUTSIDE_CONTENT_CLASSES.filter((name) => !scan.names.has(name));
+  check(
+    'transient-classes: OUTSIDE_CONTENT_CLASSES has no stale entry',
+    staleClassExemptions.length === 0,
+    `  no longer stamped anywhere: ${JSON.stringify(staleClassExemptions)}`
+  );
+  const liveExpressions = new Set(scan.unresolved.map((u) => `${u.file} | ${u.expr}`));
+  const staleExprExemptions = UNRESOLVED_STAMP_EXEMPTIONS.filter((k) => !liveExpressions.has(k));
+  check(
+    'transient-classes: UNRESOLVED_STAMP_EXEMPTIONS has no stale entry',
+    staleExprExemptions.length === 0,
+    `  no longer stamped anywhere: ${JSON.stringify(staleExprExemptions)}`
+  );
+
+  // --- Positive controls: the scan must actually see each shape it claims to.
+  const probe = (source: string): ReturnType<typeof scanStampedClasses> => {
+    const files: SourceFile[] = [{ file: 'probe.ts', source }];
+    return scanStampedClasses(files, collectClassConstants(files));
+  };
+
+  const added = probe(`node.classList.add('brand-new-content-class');`);
+  check(
+    'transient-classes (control): a new classList.add literal is reported',
+    added.names.has('brand-new-content-class') && added.unresolved.length === 0
+  );
+
+  const multi = probe(`node.className = 'first-class second-class';`);
+  check(
+    'transient-classes (control): a multi-name className assignment reports both names',
+    multi.names.has('first-class') && multi.names.has('second-class')
+  );
+
+  const viaAttr = probe(`svg.setAttribute('class', 'attr-stamped-class');`);
+  check(
+    'transient-classes (control): setAttribute(\'class\', …) is reported',
+    viaAttr.names.has('attr-stamped-class')
+  );
+
+  const computed = probe('node.className = `mode-${current}`;');
+  check(
+    'transient-classes (control): a template-literal class is reported as unresolved, never silently passed',
+    computed.names.size === 0 && computed.unresolved.length === 1
+  );
+
+  const viaConstant = probe(
+    `const PROBE_CLASS = 'probe-resolved';\nnode.classList.add(PROBE_CLASS);`
+  );
+  check(
+    'transient-classes (control): a constant stamp resolves to its literal, not to the identifier',
+    viaConstant.names.has('probe-resolved') && !viaConstant.names.has('PROBE_CLASS')
+  );
+
+  const toggled = probe(`node.classList.toggle('toggled-class', enabled);`);
+  check(
+    'transient-classes (control): classList.toggle reports the class but not its force argument',
+    toggled.names.has('toggled-class') && toggled.unresolved.length === 0
+  );
+
+  const compared = probe(`if (node.className === 'not-a-stamp') { return; }`);
+  check(
+    'transient-classes (control): a className comparison is not mistaken for a stamp',
+    compared.names.size === 0 && compared.unresolved.length === 0
+  );
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

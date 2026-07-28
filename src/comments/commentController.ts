@@ -51,7 +51,7 @@ import {
   type SidecarThread,
 } from './sidecar-format';
 import type { SidecarStore } from './sidecar-store';
-import type { CommentSidecarState, CommentSyncThread, CommentTransition } from '../shared/messages';
+import type { CommentSidecarState, CommentSyncOrphan, CommentSyncThread, CommentTransition } from '../shared/messages';
 
 /** The structural anchor a thread was created against (US-23.1; re-resolved by US-23.4). */
 export interface CommentAnchor {
@@ -774,7 +774,11 @@ export function createCommentSupport(
       // `.md` was deleted and a new file created at the same path) must surface as
       // unresolved/floating, never silently reattached at its old line numbers.
       const belonging = sidecarBelongsToDocument(folded.threads, document.getText());
-      const loadedState = belonging === 'foreign' ? 'floating' : 'approximate';
+      // US-23.16 AC4: anything short of a positive `belongs` floats rather
+      // than pins — pinning a stale thread in a foreign (or merely
+      // inconclusive) document is the exact outcome this check exists to
+      // prevent. `unknown` floats quietly, with no alarming banner below.
+      const loadedState = belonging === 'belongs' ? 'approximate' : 'floating';
       if (belonging === 'foreign') {
         log(
           `Comment sidecar ${document.uri.toString()}: none of its ${folded.threads.length} recorded texts appear in this document — threads loaded as unresolved`
@@ -787,18 +791,43 @@ export function createCommentSupport(
         // AC4 routes these here "instead of silently dropping"; US-23.9's tab is
         // where they become visible, so the lines travel with the snapshot too.
         log(
-          `Comment sidecar ${document.uri.toString()}: ${folded.orphans.length} orphaned reply/status line(s) have no parent comment`
+          `Comment sidecar ${document.uri.toString()}: ${folded.orphans.length} orphaned line(s) have no parent/target (US-23.16 AC7)`
         );
       }
       sidecarState.set(docKey, {
         foreign: belonging === 'foreign' ? true : undefined,
-        orphans: folded.orphans.map((line) => ({
-          id: line.id,
-          kind: line.type === 'reply' ? 'reply' : 'status-change',
-          author: line.author,
-          timestamp: line.timestamp,
-          detail: line.type === 'reply' ? line.body : line.to_status,
-        })),
+        orphans: folded.orphans.map((line): CommentSyncOrphan => {
+          switch (line.type) {
+            case 'reply':
+              return { id: line.id, kind: 'reply', author: line.author, timestamp: line.timestamp, detail: line.body };
+            case 'status-change':
+              return {
+                id: line.id,
+                kind: 'status-change',
+                author: line.author,
+                timestamp: line.timestamp,
+                detail: line.to_status,
+              };
+            case 'anchor-update':
+              return {
+                id: line.id,
+                kind: 'anchor-update',
+                author: line.author,
+                timestamp: line.timestamp,
+                detail: line.origin,
+              };
+            case 'delete':
+              return {
+                id: line.id,
+                kind: 'delete',
+                author: line.author,
+                timestamp: line.timestamp,
+                detail: line.target_id,
+              };
+            case 'edit':
+              return { id: line.id, kind: 'edit', author: line.author, timestamp: line.timestamp, detail: line.body };
+          }
+        }),
       });
       // Dedup within THIS document only, keyed by the durable comment id, so a
       // reload after a rename still builds the threads (a flat "seen this uuid"

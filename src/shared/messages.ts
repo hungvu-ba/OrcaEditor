@@ -351,17 +351,18 @@ export interface CommentSyncThread {
 }
 
 /**
- * Req 23 US-23.9: a `reply`/`status-change` sidecar line whose `parent_comment_id`
- * matched no comment — merge-orphaned content the fold cannot place. Carried so
+ * Req 23/24 US-23.9/US-23.16: a sidecar line whose `parent_comment_id`/`target_id`
+ * names no known `comment` (or, for `delete`/`edit`, no known `comment` or
+ * `reply` either) — merge-orphaned content the fold cannot place. Carried so
  * the Comment tab can list it read-only, instead of it being held invisibly in
  * host memory (US-23.5 AC4 only logged the count).
  */
 export interface CommentSyncOrphan {
   id: string;
-  kind: 'reply' | 'status-change';
+  kind: 'reply' | 'status-change' | 'anchor-update' | 'delete' | 'edit';
   author: string;
   timestamp: string;
-  /** The reply's body, or the status the line recorded. */
+  /** The reply/edit body, the status recorded, the anchor-update origin, or the delete's target id. */
   detail: string;
 }
 

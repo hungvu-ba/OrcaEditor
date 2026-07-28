@@ -134,8 +134,14 @@ export interface SidecarThread {
 export interface FoldedSidecar {
   /** Ordered by their comment's timestamp — oldest thread first. */
   threads: SidecarThread[];
-  /** Replies/status changes whose `parent_comment_id` matched no comment (AC4). */
-  orphans: (ReplyLine | StatusChangeLine)[];
+  /**
+   * A line whose `parent_comment_id`/`target_id` names no known `comment`
+   * (or, for `delete`/`edit`, no known `comment` or `reply` either) — the
+   * chain is exactly one level deep for every line type alike (US-23.16 AC7).
+   * Never a `comment` line itself — a comment is always the root, never
+   * something that points elsewhere.
+   */
+  orphans: (ReplyLine | StatusChangeLine | AnchorUpdateLine | DeleteLine | EditLine)[];
   warnings: string[];
   /**
    * A sidecar exists but could not be read (permissions, a directory in its
@@ -212,11 +218,22 @@ export function mdNameForSidecar(sidecarName: string): string | null {
 export type SidecarBelonging = 'belongs' | 'foreign' | 'unknown';
 
 /**
- * Shortest normalized recorded text still worth testing. A very short string
- * ("Done", "N/A") can appear in an unrelated document by coincidence, which would
- * turn a foreign sidecar into a false `belongs`.
+ * The discriminating floor for the MULTI-thread case (AC5): a single
+ * boilerplate-length hit (this repo's own template headings, "Acceptance
+ * Criteria", "Given / When / Then") is not accepted as proof on its own, so
+ * more than one thread must clear this floor AND match. Untuned default,
+ * clears typical boilerplate phrases.
  */
-const BELONGING_MIN_TEXT_LEN = 10;
+const BELONGING_MIN_DISCRIMINATING_CHARS = 40;
+
+/**
+ * The floor for the SINGLE-thread case (AC5): a document with exactly one
+ * comment thread has no second thread to corroborate a match, so that lone
+ * thread's match is accepted alone once it clears this stricter floor — high
+ * enough that a lone match is still strong proof, not a lowered bar in
+ * disguise.
+ */
+const BELONGING_SINGLE_THREAD_MIN_CHARS = 80;
 
 /**
  * A comparison form that survives the domain gap between the two sides: a
@@ -254,25 +271,49 @@ export function sidecarBelongsToDocument(
   documentText: string
 ): SidecarBelonging {
   const haystack = toBelongingText(documentText);
-  let considered = 0;
-  for (const thread of threads) {
-    // US-23.13 AC1/AC2: `thread.anchor` is the folded CURRENT position (a
-    // persisted re-attach/auto-resolve if one exists), not the immutable
-    // `thread.comment.anchor` creation-time snapshot — a thread deliberately
-    // re-attached away from since-deleted text must be tested against where it
-    // now points, not where it used to.
-    const needle = toBelongingText(thread.anchor.recorded_text);
-    if (needle.length < BELONGING_MIN_TEXT_LEN) {
-      continue;
+  // US-23.13 AC1/AC2: `thread.anchor` is the folded CURRENT position (a
+  // persisted re-attach/auto-resolve if one exists), not the immutable
+  // `thread.comment.anchor` creation-time snapshot — a thread deliberately
+  // re-attached away from since-deleted text must be tested against where it
+  // now points, not where it used to.
+  const needles = threads.map((thread) => toBelongingText(thread.anchor.recorded_text));
+
+  // AC5: a document with exactly one thread has no second thread to
+  // corroborate a match, so it gets its own, stricter floor.
+  if (needles.length === 1) {
+    const needle = needles[0];
+    if (needle.length < BELONGING_SINGLE_THREAD_MIN_CHARS) {
+      return 'unknown';
     }
-    considered += 1;
-    if (haystack.includes(needle)) {
-      return 'belongs';
-    }
+    return haystack.includes(needle) ? 'belongs' : 'foreign';
   }
-  // No usable evidence either way — never claim `foreign` on a guess, since that
-  // would hide real comments.
-  return considered === 0 ? 'unknown' : 'foreign';
+
+  // AC5/AC6: only texts long enough to actually discriminate are counted —
+  // this same rule, unchanged, is what makes a partial-rewrite (AC6) safe:
+  // whichever threads still match exactly keep counting normally, no separate
+  // signal needed.
+  const discriminating = needles.filter((needle) => needle.length >= BELONGING_MIN_DISCRIMINATING_CHARS);
+  if (discriminating.length === 0) {
+    // Nothing usable either way — never claim `foreign` on a guess, since that
+    // would hide real comments.
+    return 'unknown';
+  }
+  // Counted as DISTINCT matched texts, not matched threads: two threads that
+  // recorded the identical boilerplate phrase (this repo's own template text,
+  // repeated verbatim across sections) must not count as two corroborating
+  // pieces of evidence — that is exactly the single-boilerplate-hit false
+  // positive AC5 exists to prevent (review finding, 2026-07-28).
+  const matches = new Set(discriminating.filter((needle) => haystack.includes(needle))).size;
+  if (matches > 1) {
+    return 'belongs';
+  }
+  if (matches === 1) {
+    // Real evidence, but a single hit is exactly the boilerplate-recreated-file
+    // case AC5 guards against — not enough to prove belonging, but not
+    // evidence AGAINST it either, so this is `unknown`, not `foreign`.
+    return 'unknown';
+  }
+  return 'foreign';
 }
 
 /**
@@ -625,6 +666,44 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
 }
 
 /**
+ * Cross-type duplicate-`id` resolution (AC1/AC2): a double merge or a
+ * cherry-pick can produce duplicate lines of ANY type sharing one `id`, not
+ * just within one type. First-seen wins, defined as the lowest `timestamp`
+ * (`byTimestamp` already sorts unparseable as oldest and ties as on-disk
+ * order — exactly this definition), the rest are flagged as not applied.
+ * Discarded duplicates are dropped in memory only; the sidecar file itself is
+ * never rewritten (US-23.6's append-only rule stays intact).
+ *
+ * `deduped` is built with a SECOND pass over `lines`, keeping a line only when
+ * it IS (by reference) the winner computed for its id — never by pushing
+ * winners in the order their id was first grouped. A winning duplicate can be
+ * the LAST-occurring copy of its id (an earlier timestamp appended later), and
+ * grouping order would then place it ahead of an unrelated, different-id line
+ * that truly sits between the two duplicates on disk — corrupting the
+ * relative on-disk order `anchor-update`'s last-one-wins fold and `edit`'s
+ * timestamp-tie file-order tie-break both depend on (review finding, 2026-07-28).
+ */
+function dedupeById(lines: readonly SidecarLine[]): { deduped: SidecarLine[]; warnings: string[] } {
+  const byId = new Map<string, SidecarLine[]>();
+  for (const line of lines) {
+    pushInto(byId, line.id, line);
+  }
+  const winners = new Map<string, SidecarLine>();
+  const warnings: string[] = [];
+  for (const group of byId.values()) {
+    const [winner, ...rest] = group.slice().sort(byTimestamp);
+    winners.set(winner.id, winner);
+    for (const discarded of rest) {
+      warnings.push(
+        `duplicate id ${discarded.id} (${discarded.type}): kept the first-seen ${winner.type} line, this one not applied`
+      );
+    }
+  }
+  const deduped = lines.filter((line) => winners.get(line.id) === line);
+  return { deduped, warnings };
+}
+
+/**
  * Reassemble lines into threads (AC4). Ordering comes from `timestamp`, never
  * from on-disk order, so a git merge that interleaves two authors' lines still
  * displays one coherent conversation.
@@ -636,101 +715,82 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
  * between two sessions cannot error the load.
  */
 export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar {
-  const warnings: string[] = [];
+  // AC1/AC2: resolved up front, across every line type at once, so none of the
+  // per-type buckets below ever see a colliding id.
+  const { deduped, warnings } = dedupeById(lines);
   const comments = new Map<string, CommentLine>();
   const replyById = new Map<string, ReplyLine>();
   const repliesByParent = new Map<string, ReplyLine[]>();
   const statusByParent = new Map<string, StatusChangeLine[]>();
-  const statusChangeIds = new Set<string>();
   const anchorUpdatesByParent = new Map<string, AnchorUpdateLine[]>();
-  const anchorUpdateIds = new Set<string>();
   const editsByTarget = new Map<string, EditLine[]>();
-  const editIds = new Set<string>();
   const tombstones: DeleteLine[] = [];
 
-  for (const line of lines) {
+  for (const line of deduped) {
     switch (line.type) {
       case 'comment':
-        if (comments.has(line.id)) {
-          // First-seen wins rather than silently overwriting (AC4).
-          warnings.push(`duplicate comment id ${line.id}: keeping the first-seen line`);
-          break;
-        }
         comments.set(line.id, line);
         break;
       case 'reply':
-        if (replyById.has(line.id)) {
-          // Same first-seen-wins rule as a duplicate comment id. Without it a
-          // merge that lands one reply twice would display it twice, and — worse
-          // — `deletedReplies` is keyed by id, so one tombstone would remove
-          // BOTH copies even when they have different authors.
-          warnings.push(`duplicate reply id ${line.id}: keeping the first-seen line`);
-          break;
-        }
         replyById.set(line.id, line);
         pushInto(repliesByParent, line.parent_comment_id, line);
         break;
       case 'status-change':
-        if (statusChangeIds.has(line.id)) {
-          warnings.push(`duplicate status-change id ${line.id}: keeping the first-seen line`);
-          break;
-        }
-        statusChangeIds.add(line.id);
         pushInto(statusByParent, line.parent_comment_id, line);
         break;
       case 'delete':
         tombstones.push(line);
         break;
       case 'edit':
-        if (editIds.has(line.id)) {
-          warnings.push(`duplicate edit id ${line.id}: keeping the first-seen line`);
-          break;
-        }
-        editIds.add(line.id);
         // Pushed in on-disk order; resolveEdit() below sorts by timestamp and
         // relies on this order only to break an exact-timestamp tie (AC3).
         pushInto(editsByTarget, line.target_id, line);
         break;
       case 'anchor-update':
-        if (anchorUpdateIds.has(line.id)) {
-          warnings.push(`duplicate anchor-update id ${line.id}: keeping the first-seen line`);
-          break;
-        }
-        anchorUpdateIds.add(line.id);
-        // Pushed in on-disk order (the loop above walks `lines` in file order) —
-        // last-one-wins below reads the array's LAST entry, never sorts it by
-        // `timestamp` (US-23.13 AC1's own rule: a fast retry or a coarse-resolution
-        // clock must never decide the winner).
+        // Pushed in on-disk order (the loop above walks `deduped` in file
+        // order) — last-one-wins below reads the array's LAST entry, never
+        // sorts it by `timestamp` (US-23.13 AC1's own rule: a fast retry or a
+        // coarse-resolution clock must never decide the winner).
         pushInto(anchorUpdatesByParent, line.parent_comment_id, line);
         break;
     }
   }
 
+  // AC7: a reply whose OWN parent doesn't resolve to a comment is itself an
+  // orphan (the reply-to-reply case AC7 guards against). A delete/edit naming
+  // such a reply as its target must not be treated as "resolved" either — else
+  // it is silently applied-and-hidden (the reply drops out of `orphans` via
+  // `deletedReplies`, and the delete/edit itself never reaches `orphans`
+  // either, so BOTH lines vanish with no trace) instead of routing to orphans
+  // (review finding, 2026-07-28).
+  const orphanedReplyIds = new Set<string>();
+  for (const [parentId, group] of repliesByParent) {
+    if (!comments.has(parentId)) {
+      for (const orphanedReply of group) {
+        orphanedReplyIds.add(orphanedReply.id);
+      }
+    }
+  }
+  const resolvesToRealLine = (id: string): boolean =>
+    comments.has(id) || (replyById.has(id) && !orphanedReplyIds.has(id));
+
+  // AC8: no authority check — a `delete` is applied regardless of whose name
+  // is on it, per Requirement 23's "no line type carries an authority check"
+  // rule (the same call US-23.11 already made for `status-change`).
   const deletedComments = new Set<string>();
   const deletedReplies = new Set<string>();
   for (const tombstone of tombstones) {
-    const targetComment = comments.get(tombstone.target_id);
-    if (targetComment) {
-      if (!sameAuthor(tombstone.author, targetComment.author)) {
-        warnings.push(
-          `delete ${tombstone.id}: author does not match comment ${tombstone.target_id}, ignored`
-        );
-        continue;
-      }
+    if (comments.has(tombstone.target_id)) {
       deletedComments.add(tombstone.target_id);
       continue;
     }
-    const targetReply = replyById.get(tombstone.target_id);
-    if (targetReply) {
-      if (!sameAuthor(tombstone.author, targetReply.author)) {
-        warnings.push(`delete ${tombstone.id}: author does not match reply ${tombstone.target_id}, ignored`);
-        continue;
-      }
+    if (replyById.has(tombstone.target_id) && !orphanedReplyIds.has(tombstone.target_id)) {
       deletedReplies.add(tombstone.target_id);
       continue;
     }
-    // Unknown or already-tombstoned target: idempotent no-op, not a warning —
-    // two sessions racing on the same delete is legitimate.
+    // Unknown target, or a target that is itself an orphaned reply: idempotent
+    // no-op here, not a warning — two sessions racing on the same delete is
+    // legitimate. Routed to `orphans` below (AC7) instead of vanishing silently.
   }
 
   const threads: SidecarThread[] = [];
@@ -790,7 +850,15 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
   }
   threads.sort((a, b) => byTimestamp(a.comment, b.comment));
 
-  const orphans: (ReplyLine | StatusChangeLine)[] = [];
+  // AC7: every line type whose reference resolves nowhere routes here — a
+  // uniform rule instead of `reply`/`status-change` alone. `delete`/`edit`
+  // may legitimately target either a `comment` or a `reply` (both maps are
+  // checked, via `resolvesToRealLine` above); an already-tombstoned target
+  // still resolves (`comments`/`replyById` are never pruned by deletion), so
+  // that ordinary race is untouched — only a target/parent that never named a
+  // real `comment` (or, for `delete`/`edit`, a non-orphaned `reply` either)
+  // lands here.
+  const orphans: (ReplyLine | StatusChangeLine | AnchorUpdateLine | DeleteLine | EditLine)[] = [];
   for (const [parentId, group] of repliesByParent) {
     if (!comments.has(parentId)) {
       orphans.push(...group.filter((reply) => !deletedReplies.has(reply.id)));
@@ -798,6 +866,21 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
   }
   for (const [parentId, group] of statusByParent) {
     if (!comments.has(parentId)) {
+      orphans.push(...group);
+    }
+  }
+  for (const [parentId, group] of anchorUpdatesByParent) {
+    if (!comments.has(parentId)) {
+      orphans.push(...group);
+    }
+  }
+  for (const tombstone of tombstones) {
+    if (!resolvesToRealLine(tombstone.target_id)) {
+      orphans.push(tombstone);
+    }
+  }
+  for (const [targetId, group] of editsByTarget) {
+    if (!resolvesToRealLine(targetId)) {
       orphans.push(...group);
     }
   }

@@ -193,6 +193,22 @@ function nodeTypeLabel(el: HTMLElement): string {
   }
 }
 
+/** The orphan-row pill label for each sidecar line kind (US-23.16 AC7). */
+export function orphanKindLabel(kind: NonNullable<CommentSidecarState['orphans']>[number]['kind']): string {
+  switch (kind) {
+    case 'reply':
+      return 'Reply';
+    case 'status-change':
+      return 'Status';
+    case 'anchor-update':
+      return 'Anchor';
+    case 'delete':
+      return 'Delete';
+    case 'edit':
+      return 'Edit';
+  }
+}
+
 export function initCommentPanel(
   content: HTMLElement,
   resolve: CommentResolveController,
@@ -922,7 +938,7 @@ export function initCommentPanel(
   function orphanRow(orphan: NonNullable<CommentSidecarState['orphans']>[number]): HTMLElement {
     const item = el('div', 'comment-row orphan');
     const top = el('div', 'comment-row-top');
-    const pill = el('span', 'comment-row-pill', orphan.kind === 'reply' ? 'Reply' : 'Status');
+    const pill = el('span', 'comment-row-pill', orphanKindLabel(orphan.kind));
     pill.dataset.status = 'anchor';
     top.appendChild(pill);
     top.appendChild(el('span', 'comment-row-snippet', snippet(orphan.detail)));
