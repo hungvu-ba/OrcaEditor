@@ -513,3 +513,5 @@
 | 0.10.0 | 2026-07-28 | Fix (perf): dragging a popup no longer measures it on every mouse move — the move is frame-coalesced, keeping the mid-drag resize behaviour (Performance Audit P-5). |
 | 0.10.0 | 2026-07-28 | Fix (perf): the comment re-attach picker walks the document once on open instead of on every filter keystroke (Performance Audit P-6). |
 | 0.10.0 | 2026-07-28 | Fix (perf review): the re-attach picker now re-walks when the document is rebuilt under it, and a dismissed popup no longer moves off-screen mid-drag. |
+| 0.10.0 | 2026-07-28 | Fix: converting a loose bullet item to a task item keeps its text on the checkbox line instead of leaving an empty "- [ ]" marker. |
+| 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |

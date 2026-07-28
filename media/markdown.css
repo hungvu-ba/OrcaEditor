@@ -920,8 +920,15 @@ body.reading-mode #content .contains-task-list {
   padding-left: var(--reading-list-indent);
 }
 
+/* Both task-item shapes: tight (checkbox is a direct li child) and loose
+ * (li wraps its content in a p, so the checkbox sits one level deeper — see
+ * taskCheckboxHost in media/webview/dom-utils.ts). Without the p variants a
+ * loose task item loses the -1.2em pull into the hidden-marker gutter and
+ * renders misaligned against its tight siblings. */
 ul.contains-task-list li.task-list-item > input.task-list-item-checkbox,
-ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
+ol.contains-task-list li.task-list-item > input.task-list-item-checkbox,
+ul.contains-task-list li.task-list-item > p > input.task-list-item-checkbox,
+ol.contains-task-list li.task-list-item > p > input.task-list-item-checkbox {
   margin: 0 0.4em 0.25em -1.2em;
   vertical-align: middle;
 }

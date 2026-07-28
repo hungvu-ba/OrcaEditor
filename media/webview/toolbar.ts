@@ -1805,9 +1805,11 @@ function stripCheckboxFrom(li: HTMLLIElement): void {
 }
 
 function syncTaskListClass(list: HTMLElement): void {
-  const hasCheckbox = Array.from(list.children).some(
-    (c) => c.tagName === 'LI' && c.querySelector(':scope > input[type="checkbox"]')
-  );
+  // findTaskCheckbox, not a tight-only ':scope > input' query: addCheckbox puts
+  // a loose item's checkbox inside its <p>, and missing it here would strip
+  // `contains-task-list` off a list that IS a task list (bullet marker + checkbox
+  // both rendered, wrong indent).
+  const hasCheckbox = Array.from(list.children).some((c) => c.tagName === 'LI' && findTaskCheckbox(c));
   list.classList.toggle('contains-task-list', hasCheckbox);
 }
 
@@ -1851,7 +1853,10 @@ function setBulletList(): void {
     return;
   }
   const { list, items } = current;
-  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox: a loose task item carries its checkbox inside the <li>'s
+  // <p>, and a tight-only query here would skip stripCheckboxFrom and carry the
+  // raw <input> into the unwrapped <p> (raw HTML written into the .md).
+  const hasCheckbox = items.some((item) => findTaskCheckbox(item));
   // Tracks whichever <li> set is the LIVE target for the retag/unwrap below --
   // `replaceListItems` detaches the original `items` nodes once it runs, so
   // after checkbox stripping the live set is `inserted`, not `items`.
@@ -1908,7 +1913,10 @@ function setNumberedList(): void {
     return;
   }
   const { list, items } = current;
-  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox: a loose task item carries its checkbox inside the <li>'s
+  // <p>, and a tight-only query here would skip stripCheckboxFrom and carry the
+  // raw <input> into the unwrapped <p> (raw HTML written into the .md).
+  const hasCheckbox = items.some((item) => findTaskCheckbox(item));
   // Tracks the LIVE <li> set for the retag/unwrap below -- replaceListItems
   // detaches the original `items` nodes once it runs (same note as setBulletList).
   let targets = items;
@@ -2805,7 +2813,9 @@ function recomputeActiveFormatting(): void {
   // selectionchange (mỗi lần di caret) nên tránh phần dò thừa đó.
   const li = anchorEl?.closest('li') ?? null;
   const liInContent = !!li && content.contains(li);
-  setActive('fmt-task', liInContent && !!li.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox, not a tight-only query — a loose task item's checkbox
+  // sits in its <p>, and the button must not deny a state it just produced.
+  setActive('fmt-task', liInContent && !!findTaskCheckbox(li));
 
   const list = liInContent ? li.parentElement : null;
   setActive('fmt-bullet', list?.tagName === 'UL');

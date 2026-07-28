@@ -170,6 +170,37 @@ export function findTaskCheckbox(li: Element): HTMLInputElement | null {
   );
 }
 
+/**
+ * Where a task checkbox belongs inside `li`. Tight item (<li>Bravo</li>) → the
+ * `<li>` itself; LOOSE item (<li><p>Bravo</p></li>, how markdown-it renders a
+ * blank-line-separated list) → its child `<p>`. A checkbox placed before the
+ * `<p>` instead makes turndown emit an empty "- [ ]" line plus a detached
+ * indented paragraph (bug 2026-07-28: converting a loose bullet item to a task
+ * item lost its text off the item), and those two are the only shapes
+ * `findTaskCheckbox` and turndown's `taskCheckbox` rule accept.
+ *
+ * The `<p>` only qualifies when nothing but whitespace precedes it: markdown-it
+ * emits "<li>\n<p>…" (a whitespace text node is normal and must not disqualify
+ * it), but a `<li>` with REAL leading inline content (<li>ZZ<p>vo</p></li>,
+ * reachable mid-edit) would put the checkbox on the item's SECOND block — the
+ * same detached-paragraph corruption, one block further down.
+ *
+ * Shared with list-ops.ts's `computeTaskifyListRange` (the <ol>→task path) so
+ * both placements stay identical; pure and domino-safe for roundtrip tests.
+ */
+export function taskCheckboxHost(li: Element): Element {
+  const firstEl = li.firstElementChild;
+  if (!firstEl || firstEl.tagName !== 'P') {
+    return li;
+  }
+  for (let node = li.firstChild; node && node !== firstEl; node = node.nextSibling) {
+    if (node.nodeType !== 3 || (node.textContent ?? '').trim() !== '') {
+      return li;
+    }
+  }
+  return firstEl;
+}
+
 export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
   if (findTaskCheckbox(li)) {
     // Already a task item (tight or loose shape) — no-op (idempotency guard against duplicate/stacked checkboxes).
@@ -178,7 +209,8 @@ export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.className = 'task-list-item-checkbox';
-  li.insertBefore(input, li.firstChild);
+  const host = taskCheckboxHost(li);
+  host.insertBefore(input, host.firstChild);
   li.classList.add('task-list-item');
   li.parentElement?.classList.add('contains-task-list');
 }
