@@ -561,6 +561,19 @@ check(
 eq('dropFileName: dấu chấm dẫn đầu (hidden file / thư mục hiện tại) bị bỏ', sanitizeDroppedFileName('.htaccess'), 'htaccess');
 eq('dropFileName: rỗng sau khi làm sạch → fallback "file"', sanitizeDroppedFileName('...'), 'file');
 eq('dropFileName: rỗng ngay từ đầu → fallback "file"', sanitizeDroppedFileName(''), 'file');
+// Review fix (step-04, edge case hunter finding, confirmed by direct execution):
+// khoảng trắng đứng TRƯỚC dấu chấm dẫn đầu từng vô hiệu hoá bước strip (trim()
+// chạy sau bước strip leading-dot nên dấu chấm chưa ở vị trí 0 khi bước đó chạy).
+eq(
+  'dropFileName: khoảng trắng đứng trước dấu chấm dẫn đầu vẫn bị bỏ đúng',
+  sanitizeDroppedFileName(' .htaccess'),
+  'htaccess'
+);
+eq(
+  'dropFileName: nhiều khoảng trắng + nhiều dấu chấm dẫn đầu đều bị bỏ',
+  sanitizeDroppedFileName('  ..secret'),
+  'secret'
+);
 
 // X-9 — a 100+ char browser-supplied name crosses MAX_PATH under a long
 // OneDrive root; the stem is capped, the extension preserved.
@@ -583,6 +596,43 @@ eq(
   'dropFileName[X-9]: dấu chấm ở đầu (đuôi giả) vẫn được cắt như stem',
   sanitizeDroppedFileName('c'.repeat(70) + '.tar.gz'),
   'c'.repeat(60) + '.gz'
+);
+
+// S-6 — Windows reserved device names (CON/PRN/AUX/NUL/COM1-9/LPT1-9) and
+// trailing dots/spaces, which Windows silently drops from the final path
+// component.
+eq('dropFileName[S-6]: reserved stem không đuôi được prefix "_"', sanitizeDroppedFileName('CON'), '_CON');
+eq('dropFileName[S-6]: reserved stem có đuôi vẫn được prefix "_"', sanitizeDroppedFileName('CON.pdf'), '_CON.pdf');
+eq(
+  'dropFileName[S-6]: so khớp không phân biệt hoa/thường',
+  sanitizeDroppedFileName('com1.PDF'),
+  '_com1.PDF'
+);
+eq('dropFileName[S-6]: NUL/LPT9 cũng được prefix', sanitizeDroppedFileName('lpt9'), '_lpt9');
+eq(
+  'dropFileName[S-6]: chỉ khớp NGUYÊN stem, không khớp một phần ("bacon.pdf" giữ nguyên)',
+  sanitizeDroppedFileName('bacon.pdf'),
+  'bacon.pdf'
+);
+// Review fix (step-04, blind hunter finding): tên có ĐUÔI GHÉP (nhiều dấu
+// chấm) — Windows chặn theo đoạn TRƯỚC DẤU CHẤM ĐẦU TIÊN, không phải đoạn
+// trước dấu chấm cuối mà bước tách "hasExt" ở trên dùng.
+eq(
+  'dropFileName[S-6]: đuôi ghép, đoạn đầu trùng reserved name vẫn được prefix',
+  sanitizeDroppedFileName('aux.spec.ts'),
+  '_aux.spec.ts'
+);
+eq(
+  'dropFileName[S-6]: đuôi ghép khác (.tar.gz), đoạn đầu trùng reserved name vẫn được prefix',
+  sanitizeDroppedFileName('con.tar.gz'),
+  '_con.tar.gz'
+);
+eq('dropFileName[S-6]: dấu chấm ở cuối bị bỏ', sanitizeDroppedFileName('notes.'), 'notes');
+eq('dropFileName[S-6]: khoảng trắng ở cuối bị bỏ', sanitizeDroppedFileName('notes.pdf '), 'notes.pdf');
+eq(
+  'dropFileName[S-6]: chuỗi dấu chấm/khoảng trắng hỗn hợp ở cuối đều bị bỏ',
+  sanitizeDroppedFileName('notes. . '),
+  'notes'
 );
 
 // X-9 — path-length failures are recognized so a specific message can name

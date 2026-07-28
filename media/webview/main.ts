@@ -43,6 +43,7 @@ import { initCaptionEdit } from './caption-edit';
 import { initMermaid, setMermaidEngineConfig } from './mermaid';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
+import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
@@ -923,7 +924,7 @@ function renderDocument(markdown: string): void {
   currentText = markdown;
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
-  content.innerHTML = html;
+  content.innerHTML = stripMetaRefresh(html);
   // US-2.7: reapply the last known collapsed/expanded/raw state onto the
   // fresh `.md-front-matter` node this innerHTML assignment just replaced —
   // Boundaries: in-memory only (no extension-host persistence), so this must
@@ -1843,7 +1844,18 @@ function renderPasteHtml(text: string): string {
   }
   const { html } = renderer.render(text);
   const tmp = document.createElement('div');
-  tmp.innerHTML = html;
+  // Review finding (step-04 iteration 2, edge case hunter): this feeds the SAME
+  // html:true markdown-it renderer as renderDocument, and its result reaches
+  // the live, connected #content via this function's two callers' own
+  // execCommand('insertHTML', ...) — the same S-2 shape (a raw <meta
+  // http-equiv="refresh">), through paste/insert instead of opening the
+  // document. Pasted text is not necessarily the user's own. Defense-in-depth:
+  // empirically, Chromium's execCommand('insertHTML') already drops a <meta>
+  // on its own before it reaches the DOM here, so this is not a proven-active
+  // hole (no regression test exists for it — one would pass identically with
+  // or without this line) — but relying on that undocumented, legacy-API
+  // behavior as the actual security boundary is not something to build on.
+  tmp.innerHTML = stripMetaRefresh(html);
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
   postProcessPlantumlDom(tmp, document);

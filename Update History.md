@@ -500,4 +500,11 @@
 | 0.10.0 | 2026-07-28 | Fix: webview test workers no longer share one harness HTML file — the truncate race that made four specs time out waiting for #content is gone. |
 | 0.10.0 | 2026-07-28 | Feature: a unit guard now fails when a webview-posted message type has no case in provider.ts, the gap that hid the editComment bug. |
 | 0.10.0 | 2026-07-28 | Fix: symlinks below the workspace root no longer let asset writes, orphan hard-deletes or sidecar mutations escape the allowed roots (Security Audit S-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): a raw `<meta http-equiv="refresh">` tag in a document can no longer trigger a navigation attempt on open (Security Audit S-2). |
+| 0.10.0 | 2026-07-28 | Fix (security): PlantUML diagram SVGs are now sanitized (script/handler/foreignObject/javascript: stripped) before insertion, matching Mermaid's own sanitization (Security Audit S-4). |
+| 0.10.0 | 2026-07-28 | Fix (security): declared `untrustedWorkspaces` restrictions now actually restrict — customFolderPath and comments.authorName are User-scope only in a restricted workspace (Security Audit S-5). |
+| 0.10.0 | 2026-07-28 | Fix (security): dropped file names that are Windows-reserved device names or end in dots/spaces are now sanitized before saving (Security Audit S-6). |
 | 0.10.0 | 2026-07-28 | Fix (perf): Mermaid engine (~2.8 MB) now lazy-loads only when a document has a mermaid block, shrinking every preview's baseline bundle (Performance Audit P-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): closed a control-character javascript: bypass in the PlantUML SVG sanitizer and a compound-extension gap in the reserved-device-name check, found in review of S-4/S-6. |
+| 0.10.0 | 2026-07-28 | Fix: dropped file names with whitespace before a leading dot (e.g. " .htaccess") were not stripped of the dot — fixed the step order in sanitizeDroppedFileName. |
+| 0.10.0 | 2026-07-28 | Fix (security): paste/insert now also sanitizes raw meta-refresh HTML, closing a second entry point to Security Audit S-2 (defense-in-depth). |

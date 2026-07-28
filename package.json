@@ -19,7 +19,12 @@
   "capabilities": {
     "virtualWorkspaces": false,
     "untrustedWorkspaces": {
-      "supported": "limited"
+      "supported": "limited",
+      "description": "Asset writes stay contained to the workspace even in a restricted/untrusted workspace (see the containment guard in src/fs-guard.ts). The two workspace-settable values below that could otherwise be used to redirect writes or spoof an author identity are restricted to User scope.",
+      "restrictedConfigurations": [
+        "orcaEditor.assetsPaste.customFolderPath",
+        "orcaEditor.comments.authorName"
+      ]
     }
   },
   "main": "./dist/extension.js",

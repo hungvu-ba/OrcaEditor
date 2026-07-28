@@ -186,6 +186,84 @@ test('the `/PlantUML diagram` slash command inserts the default Activity templat
   await expect(page.locator('.md-plantuml-source')).toContainText('Do something');
 });
 
+// Security — Audit S-4: mermaid renders with securityLevel:'strict' (its own
+// sanitization); @plantuml/core has no such option, so plantuml.ts must run the
+// engine's SVG through sanitizeSvgMarkup itself before assigning innerHTML. A
+// fake engine (registered before main.js loads, so the real ~8.5 MB engine is
+// never fetched) stands in for @plantuml/core so the test controls the SVG
+// content directly instead of hunting for PlantUML syntax that emits it.
+/**
+ * Registers a fake engine (before main.js loads, so the real ~8.5 MB engine is
+ * never fetched) that hands back `svg` verbatim from `renderToString`.
+ */
+async function stubPlantumlEngine(page: import('@playwright/test').Page, svg: string): Promise<void> {
+  await page.addInitScript((svgArg) => {
+    (window as unknown as { OrcaPlantumlEngine: unknown }).OrcaPlantumlEngine = {
+      renderToString(_lines: string[], onSuccess: (s: string) => void) {
+        onSuccess(svgArg);
+      },
+    };
+  }, svg);
+}
+
+test('a PlantUML SVG carrying script/handler/foreignObject/xlink:href vectors is sanitized before insertion', async ({
+  page,
+}) => {
+  // review fix (step-04, blind hunter finding): a bare <rect onload> never
+  // fires (rect has no load event) and the removed <script>/<a href> tags
+  // can't execute in this innerHTML context either way — those three lines
+  // proved nothing beyond the markup-absence checks below. A NESTED <svg
+  // onload> genuinely fires synchronously on insertion (confirmed empirically
+  // against this exact harness), so it is real, executable proof the
+  // sanitizer — not just an inert assertion — is what stops it.
+  const maliciousSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">' +
+    '<script>window.__xss = true;</script>' +
+    '<svg onload="window.__xss = true"><rect width="1" height="1"/></svg>' +
+    '<foreignObject><body xmlns="http://www.w3.org/1999/xhtml">evil</body></foreignObject>' +
+    '<a href="javascript:window.__xss = true">link</a>' +
+    '<a xlink:href="javascript:window.__xss = true">xlink</a>' +
+    '</svg>';
+  await stubPlantumlEngine(page, maliciousSvg);
+
+  await openEditor(page, SIMPLE);
+  // .first(): the nested <svg onload> payload above means two <svg> elements
+  // match this selector once rendered (the outer chart root + the injected
+  // nested one) — any() would violate Playwright's strict mode.
+  await page.locator('.md-plantuml-chart svg').first().waitFor();
+
+  const chartHtml = await page.locator('.md-plantuml-chart').innerHTML();
+  expect(chartHtml).not.toContain('<script');
+  expect(chartHtml).not.toContain('onload');
+  expect(chartHtml).not.toContain('foreignObject');
+  expect(chartHtml).not.toContain('javascript:');
+  // The nested <svg onload> would have set this synchronously on insertion
+  // had the sanitizer not stripped the attribute first.
+  expect(await page.evaluate(() => (window as unknown as { __xss?: boolean }).__xss)).toBeUndefined();
+});
+
+// Review fix (step-04, blind hunter + edge case hunter finding, confirmed by
+// direct regex execution): the bare `/^\s*javascript:/i` test is bypassable —
+// browsers strip ASCII tab/newline/CR from anywhere in a URL before reading
+// its scheme, so `jav<TAB>ascript:` never matches the regex yet still
+// resolves to and executes as `javascript:` once parsed as a URL.
+test('an xlink:href with a control character embedded mid-scheme is still stripped (obfuscated javascript: bypass)', async ({
+  page,
+}) => {
+  const maliciousSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">' +
+    '<a xlink:href="jav\tascript:window.__xssObfuscated = true">link</a>' +
+    '</svg>';
+  await stubPlantumlEngine(page, maliciousSvg);
+
+  await openEditor(page, SIMPLE);
+  await page.locator('.md-plantuml-chart svg').waitFor();
+
+  const chartHtml = await page.locator('.md-plantuml-chart').innerHTML();
+  expect(chartHtml).not.toContain('javascript:');
+  expect(chartHtml).not.toContain('xlink:href');
+});
+
 test('an engine that fails to load shows an error and falls back to code view', async ({ page }) => {
   await openEditor(page, SIMPLE, { plantumlEngineUri: 'does-not-exist-plantuml-engine.js' });
 

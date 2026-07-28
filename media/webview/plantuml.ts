@@ -20,6 +20,7 @@
  */
 import { PLANTUML_CLASS } from './pipeline';
 import { openLightbox } from './lightbox';
+import { sanitizeSvgMarkup } from './svg-sanitize';
 import {
   PLANTUML_FRAME,
   hashSource,
@@ -178,8 +179,10 @@ async function renderDiagram(
     }
     // Chỉ cache SAU khi qua được cửa seq (giống mermaid.ts): một đợt đã bị đợt
     // mới hơn chiếm chỗ có thể đang mang cờ nền cũ, cache nó sẽ trả sai màu về sau.
-    svgCache.set(key, svg);
-    chart.innerHTML = svg;
+    // Sanitize before caching (S-4) so every cache hit is already clean too.
+    const safeSvg = sanitizeSvgMarkup(svg);
+    svgCache.set(key, safeSvg);
+    chart.innerHTML = safeSvg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {
     if (!wrapper.isConnected || seq !== renderSeq) {
