@@ -24,6 +24,7 @@ import {
   commentThreadLine,
   createCommentRejection,
   deleteRejection,
+  editRejection,
   replyRejection,
   resolveCommentAuthor,
   safeOsUsername,
@@ -32,14 +33,17 @@ import {
   type AnchorUpdateMessage,
   type CreateCommentMessage,
   type DeleteCommentMessage,
+  type EditCommentMessage,
   type ReplyMessage,
   type StatusChangeMessage,
 } from './comment-utils';
+import { neutralizeCommentBody, normalizeCommentBodyEol } from './comment-body-limit';
 import { sameDocumentUri } from '../text-utils';
 import {
   buildAnchorUpdateLine,
   buildCommentLine,
   buildDeleteLine,
+  buildEditLine,
   buildReplyLine,
   buildStatusChangeLine,
   sidecarBelongsToDocument,
@@ -137,6 +141,24 @@ export interface CommentSupport extends vscode.Disposable {
     document: vscode.TextDocument
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
+   * US-23.14: correct a comment's or reply's own `body` — an append-only `edit`
+   * sidecar line (US-23.5 AC2, US-23.6), never a rewrite. No authority check
+   * (AC8). An unchanged-after-trim body is `{ ok: true }` with nothing appended
+   * (AC2's sub-criterion: Save on unchanged text behaves as Cancel).
+   */
+  editComment(
+    msg: EditCommentMessage,
+    document: vscode.TextDocument
+  ): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * US-23.14 AC1: toggle ONE comment/reply's native editable field open or
+   * closed — local display state only (no sidecar write, no message round
+   * trip), the native mirror of the webview's own field open/Cancel. `replyId`
+   * absent targets the thread's opening comment. Returns false when the
+   * thread/target no longer exists, so the caller can no-op quietly.
+   */
+  setEditingMode(threadId: string, replyId: string | undefined, editing: boolean): boolean;
+  /**
    * US-23.3: move a thread along Open → Resolved → Closed, or Reopen it back to
    * Open in one step. Validated against the thread's LIVE status alone (US-23.11
    * AC1 removed the identity gate) — only this registry knows it. Appends a
@@ -208,23 +230,94 @@ function applyThreadFacets(
 }
 
 /**
- * One `comment`/`reply` line turned into a native `vscode.Comment`. Hoisted out
- * of `buildLoadedThread` (US-23.2) so `reply()`/`deleteComment()` build the
- * exact same shape when they rebuild a thread's live `comments[]`, instead of
- * a second copy of the timestamp-guard drifting from this one.
+ * US-23.14: bookkeeping the base `vscode.Comment` type carries no way to
+ * express — VS Code hands the exact same object reference back as the command
+ * argument for `comments/comment/title`/`comments/comment/context`, so
+ * stamping extra fields here (mirroring the official `vscode-extension-samples`
+ * comment-sample's `NoteComment.parent` pattern) is what lets the Edit/Save/
+ * Cancel handlers in `provider.ts` recover which thread — and, for a reply,
+ * which one — fired, with no reverse lookup needed.
  */
-function asNativeComment(source: { author: string; timestamp: string; body: string }): vscode.Comment {
+export interface EditableComment extends vscode.Comment {
+  orcaThreadId: string;
+  orcaDocUri: string;
+  /** Absent = this Comment IS the thread's opening comment; present = this reply's own durable id. */
+  orcaReplyId?: string;
+}
+
+/**
+ * One `comment`/`reply` line turned into a native `vscode.Comment`. Hoisted out
+ * of `buildLoadedThread` (US-23.2) so `reply()`/`deleteComment()`/`editComment()`
+ * build the exact same shape when they rebuild a thread's live `comments[]`,
+ * instead of a second copy of the timestamp-guard drifting from this one.
+ */
+function asNativeComment(source: {
+  author: string;
+  timestamp: string;
+  body: string;
+  /** US-23.14 AC4: the winning `edit` line's own timestamp — never the original's. */
+  editedAt?: string;
+  threadId: string;
+  docUri: string;
+  replyId?: string;
+  /** US-23.14 AC1: `Editing` only while this specific comment's native field is open — default `Preview`. */
+  mode?: vscode.CommentMode;
+}): EditableComment {
   return {
     // US-23.10 AC9: a plain string, never `vscode.MarkdownString` — a body
     // containing Markdown syntax or raw HTML (`<script>`...) must render as
     // literal text on the native surface, not be interpreted.
     body: source.body,
-    mode: vscode.CommentMode.Preview,
+    mode: source.mode ?? vscode.CommentMode.Preview,
     author: { name: source.author },
     // An unparseable timestamp would make `new Date` Invalid Date, which VS Code
-    // renders as garbage — drop it rather than show that.
+    // renders as garbage — drop it rather than show that. Always the ORIGINAL
+    // comment/reply's own timestamp: US-23.14 AC2 says an edit never overwrites it.
     timestamp: Number.isNaN(Date.parse(source.timestamp)) ? undefined : new Date(source.timestamp),
+    // AC4's marker, on this surface too. An empty/unparseable stamp (a
+    // hand-edited or merge-mangled sidecar) still marks the body as edited,
+    // just without a time — dropping the marker would make an edit silently
+    // indistinguishable from the original, which AC4 forbids.
+    label:
+      source.editedAt === undefined
+        ? undefined
+        : Number.isNaN(Date.parse(source.editedAt))
+          ? 'edited'
+          : `edited ${new Date(source.editedAt).toLocaleString()}`,
+    orcaThreadId: source.threadId,
+    orcaDocUri: source.docUri,
+    orcaReplyId: source.replyId,
   };
+}
+
+/**
+ * `entry`'s live comment+replies rebuilt as native `Comment[]` (comment-then-
+ * replies, matching every other reassembly in this file). Shared by
+ * `reply()`/`deleteComment()`/`editComment()` so the three write paths that
+ * mutate `entry.thread.comments` cannot drift into three different shapes.
+ */
+function nativeCommentsFor(entry: ThreadEntry, threadId: string, docUri: string): vscode.Comment[] {
+  return [
+    asNativeComment({
+      author: entry.commentAuthor,
+      timestamp: entry.commentTimestamp,
+      body: entry.commentBody,
+      editedAt: entry.commentEditedAt,
+      threadId,
+      docUri,
+    }),
+    ...entry.replies.map((r) =>
+      asNativeComment({
+        author: r.author,
+        timestamp: r.timestamp,
+        body: r.body,
+        editedAt: r.editedAt,
+        threadId,
+        docUri,
+        replyId: r.id,
+      })
+    ),
+  ];
 }
 
 /**
@@ -252,9 +345,27 @@ function buildLoadedThread(
     commentThreadLine(persisted.anchor.last_known_line),
     Math.max(0, document.lineCount - 1)
   );
+  const docUri = document.uri.toString();
   const thread = controller.createCommentThread(document.uri, new vscode.Range(line, 0, line, 0), [
-    asNativeComment(persisted.comment),
-    ...persisted.replies.map(asNativeComment),
+    asNativeComment({
+      author: persisted.comment.author,
+      timestamp: persisted.comment.timestamp,
+      body: persisted.comment.body,
+      editedAt: persisted.comment.editedAt,
+      threadId: persisted.id,
+      docUri,
+    }),
+    ...persisted.replies.map((r) =>
+      asNativeComment({
+        author: r.author,
+        timestamp: r.timestamp,
+        body: r.body,
+        editedAt: r.editedAt,
+        threadId: persisted.id,
+        docUri,
+        replyId: r.id,
+      })
+    ),
   ]);
   thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
   // Placed from a recorded line, not a live structural id — marked on this surface
@@ -272,6 +383,8 @@ interface ThreadEntry {
   commentAuthor: string;
   commentBody: string;
   commentTimestamp: string;
+  /** US-23.14 AC4: the winning `edit` line's timestamp, once the opening comment has been edited at least once. */
+  commentEditedAt?: string;
   /** US-23.3's axis, folded from status-change lines. */
   status: CommentStatus;
   /**
@@ -281,8 +394,8 @@ interface ThreadEntry {
    * illegal (AC6) are not here: they never took effect.
    */
   statusChanges: CommentTransition[];
-  /** US-23.2: live reply list — each reply's own durable id is what a later single-reply delete names. */
-  replies: Array<{ id: string; author: string; timestamp: string; body: string }>;
+  /** US-23.2: live reply list — each reply's own durable id is what a later single-reply delete/edit names. */
+  replies: Array<{ id: string; author: string; timestamp: string; body: string; editedAt?: string }>;
 }
 
 export function createCommentSupport(
@@ -328,6 +441,13 @@ export function createCommentSupport(
   // other two: a create or a status change in flight for a thread must never
   // block (or be released by) a reply to it, and vice versa.
   const replying = new Set<string>();
+  // US-23.14 AC6: durable ids (comment or reply) whose `edit` append is in
+  // flight. Keyed by the TARGET's own id — already a globally-unique uuid,
+  // not by threadId — so an in-flight edit on one comment/reply can never
+  // block or release a different one's edit (per-thread would be too coarse),
+  // and per AC6's own sub-criterion, can never block or release an in-flight
+  // reply either (that lives in the separate `replying` set).
+  const editingTarget = new Set<string>();
   // US-23.13 AC1: threadIds whose anchor-update append is in flight. Same shape
   // and reason as `creating`/`changingStatus`/`replying` — a second re-attach
   // for the same thread while the first's append is still pending is a no-op
@@ -533,7 +653,7 @@ export function createCommentSupport(
       const line = commentThreadLine(msg.line);
       const range = new vscode.Range(line, 0, line, 0);
       const thread = controller.createCommentThread(document.uri, range, [
-        asNativeComment({ author, timestamp, body: msg.body }),
+        asNativeComment({ author, timestamp, body: msg.body, threadId: msg.threadId, docUri: document.uri.toString() }),
       ]);
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
       // A thread with no contextValue matches no `status-*` menu clause, so the
@@ -662,6 +782,7 @@ export function createCommentSupport(
             commentAuthor: persisted.comment.author,
             commentBody: persisted.comment.body,
             commentTimestamp: persisted.comment.timestamp,
+            commentEditedAt: persisted.comment.editedAt,
             status: persisted.status,
             // US-23.11 AC2: the whole trail has to survive the reload, so it comes
             // off the (timestamp-sorted, illegal-lines-already-skipped) status-change
@@ -671,7 +792,13 @@ export function createCommentSupport(
               author: line.author,
               timestamp: line.timestamp,
             })),
-            replies: persisted.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
+            replies: persisted.replies.map((r) => ({
+              id: r.id,
+              author: r.author,
+              timestamp: r.timestamp,
+              body: r.body,
+              editedAt: r.editedAt,
+            })),
             anchor: {
               // A fresh parse mints fresh structural ids, so a reloaded thread has
               // no tier-1 anchor to name. An empty id marks it as "not tier-1".
@@ -870,10 +997,7 @@ export function createCommentSupport(
         }
         entry.replies.push({ id: replyId, author, timestamp, body: msg.body });
         try {
-          entry.thread.comments = [
-            asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
-            ...entry.replies.map(asNativeComment),
-          ];
+          entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
         } catch {
           // Thread disposed concurrently (deleted from the native UI mid-reply) —
           // the sidecar line is already durable and reassembles correctly on the
@@ -923,10 +1047,7 @@ export function createCommentSupport(
         // are untouched (US-23.2 PO decision).
         entry.replies = entry.replies.filter((r) => r.id !== msg.targetReplyId);
         try {
-          entry.thread.comments = [
-            asNativeComment({ author: entry.commentAuthor, timestamp: entry.commentTimestamp, body: entry.commentBody }),
-            ...entry.replies.map(asNativeComment),
-          ];
+          entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
         } catch {
           // Disposed concurrently — nothing left to reconcile live.
         }
@@ -941,6 +1062,171 @@ export function createCommentSupport(
         byDoc.get(docKeyFor(document.uri))?.delete(msg.threadId);
       }
       return { ok: true };
+    },
+
+    async editComment(msg, document) {
+      // US-23.10 AC9, applied at the WRITE path rather than only in the webview:
+      // the native `vscode.comments` Save reaches this function without ever
+      // passing through the popover's own neutralize/EOL step, and AC8 lets any
+      // user edit any comment — so an unstripped bidi override from that surface
+      // would reorder another user's rendered comment for every reader. Applied
+      // before validation so the length check and the unchanged-text comparison
+      // both measure exactly what would be written. Idempotent for the webview
+      // path, which already normalized.
+      const body = typeof msg.body === 'string' ? neutralizeCommentBody(normalizeCommentBodyEol(msg.body)) : msg.body;
+      const entry = threads.get(msg.threadId);
+      if (!entry) {
+        return { ok: false, error: 'This comment thread no longer exists.' };
+      }
+      if (!ownedBy(document, msg.threadId)) {
+        return { ok: false, error: 'This edit names a thread in another document.' };
+      }
+      if (entry.commentId === null) {
+        // A thread whose sidecar write is still in flight has no durable id an
+        // `edit` line could reference yet.
+        return { ok: false, error: 'This comment thread has no durable id yet — try again in a moment.' };
+      }
+      const target =
+        msg.targetReplyId !== undefined
+          ? entry.replies.find((r) => r.id === msg.targetReplyId)
+          : { id: entry.commentId, body: entry.commentBody };
+      if (!target) {
+        return { ok: false, error: 'That comment or reply no longer exists.' };
+      }
+      // Validated only once the target is known, so the length bound can be
+      // measured against the body actually being replaced (see `editRejection`'s
+      // `originalBody`).
+      const rejection = editRejection({ ...msg, body }, document.uri.toString(), entry.status, target.body);
+      if (rejection !== null) {
+        return { ok: false, error: rejection };
+      }
+      // AC2's sub-criterion: unchanged (trimmed) text is Cancel, not an edit —
+      // no line appended, no "edited" marker newly set.
+      if (body.trim() === target.body.trim()) {
+        return { ok: true };
+      }
+      if (editingTarget.has(target.id)) {
+        // AC6, keyed per TARGET (this comment or this one reply) rather than
+        // per thread: an in-flight edit on a DIFFERENT comment/reply of the
+        // same thread must never be blocked or released by this guard, and
+        // (AC6's own sub-criterion) neither must an in-flight reply — that
+        // lives in the separate `replying` set.
+        return { ok: false, error: 'An edit to this comment is already being saved.' };
+      }
+      // Claimed BEFORE the first await, exactly like `creating`/`replying`/
+      // `changingStatus`: `authorFor` can block indefinitely on US-23.10 AC4's
+      // name prompt, so a check-then-act with the claim after it would let two
+      // requests for one target (the webview path racing the native
+      // `orcaEditor.saveEditComment`, or two panels on one document) both pass
+      // the `has` check and append two `edit` lines for one intended edit.
+      editingTarget.add(target.id);
+      try {
+        const currentAuthor = await authorFor(document);
+        if (currentAuthor === '') {
+          // US-23.10 AC4: cancelled prompt — cancel only this edit.
+          return { ok: false, error: 'No author name was provided — the edit was not saved.' };
+        }
+        const timestamp = new Date().toISOString();
+        const saveError = await saveBeforeAppend(document);
+        if (saveError !== null) {
+          return { ok: false, error: saveError };
+        }
+        // AC1's sub-criterion requires that NO `edit` line be appended for a
+        // target that vanished, so the race is re-checked on the near side of
+        // the append — `authorFor` (which can sit on a name prompt) and
+        // `saveBeforeAppend` are both awaits a concurrent delete or Close can
+        // land inside. `entry` is the SAME object `deleteComment`/`changeStatus`
+        // mutate in place, so re-reading it here sees that.
+        const stillWritable =
+          threads.get(msg.threadId) === entry &&
+          entry.status !== 'Closed' &&
+          (msg.targetReplyId === undefined || entry.replies.some((r) => r.id === msg.targetReplyId));
+        if (!stillWritable) {
+          return {
+            ok: false,
+            error:
+              entry.status === 'Closed'
+                ? 'This thread is closed — reopen it before editing.'
+                : 'This comment was deleted.',
+          };
+        }
+        const writeError = await store.append(
+          document,
+          buildEditLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp, body })
+        );
+        if (writeError !== null) {
+          return { ok: false, error: writeError };
+        }
+        // Re-checked once more on the far side: the append itself is an await,
+        // and a delete landing inside it leaves a stray `edit` line that AC5's
+        // idempotent-no-op fold discards on load — but the live in-memory copy
+        // must not be updated as though the edit had taken.
+        const targetStillLive =
+          threads.get(msg.threadId) === entry &&
+          (msg.targetReplyId === undefined || entry.replies.some((r) => r.id === msg.targetReplyId));
+        if (!targetStillLive) {
+          return { ok: false, error: 'This comment was deleted.' };
+        }
+        if (msg.targetReplyId !== undefined) {
+          const reply = entry.replies.find((r) => r.id === msg.targetReplyId);
+          if (reply) {
+            reply.body = body;
+            reply.editedAt = timestamp;
+          }
+        } else {
+          entry.commentBody = body;
+          entry.commentEditedAt = timestamp;
+        }
+        try {
+          entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
+        } catch {
+          // Disposed concurrently — the sidecar line is already durable and
+          // folds correctly on the next reload; nothing more to reconcile live.
+        }
+        return { ok: true };
+      } catch (err) {
+        // Same "report, don't swallow" contract as `changeStatus`: a throw here
+        // must not skip `editCommentResult` and leave the caller's guard armed
+        // for the rest of the session.
+        log('editComment failed', err);
+        return { ok: false, error: 'That edit could not be saved.' };
+      } finally {
+        editingTarget.delete(target.id);
+      }
+    },
+
+    setEditingMode(threadId, replyId, editing): boolean {
+      const entry = threads.get(threadId);
+      if (!entry) {
+        return false;
+      }
+      const reply = replyId !== undefined ? entry.replies.find((r) => r.id === replyId) : undefined;
+      if (replyId !== undefined && reply === undefined) {
+        return false;
+      }
+      // The registry's body, never the `Comment` object's own — VS Code mutates
+      // that in place with the user's in-progress text while the native field is
+      // open, so spreading it forward would leave Cancel rendering the abandoned
+      // text in Preview mode over a sidecar that never received it. Re-stamping
+      // the authoritative body is what makes Cancel a real discard (AC1).
+      const authoritativeBody = reply !== undefined ? reply.body : entry.commentBody;
+      try {
+        entry.thread.comments = entry.thread.comments.map((c) => {
+          const oc = c as EditableComment;
+          if (oc.orcaThreadId !== threadId || oc.orcaReplyId !== replyId) {
+            return c;
+          }
+          return {
+            ...oc,
+            body: authoritativeBody,
+            mode: editing ? vscode.CommentMode.Editing : vscode.CommentMode.Preview,
+          };
+        });
+        return true;
+      } catch {
+        // Disposed concurrently — nothing left to toggle live.
+        return false;
+      }
     },
 
     async changeStatus(msg, document) {
@@ -1046,12 +1332,19 @@ export function createCommentSupport(
           author: entry.commentAuthor,
           timestamp: entry.commentTimestamp,
           body: entry.commentBody,
+          editedAt: entry.commentEditedAt,
           recordedText: entry.anchor.recordedText,
           offsetStart: entry.anchor.offsetStart,
           offsetEnd: entry.anchor.offsetEnd,
           lastKnownLine: entry.anchor.lastKnownLine,
           nearestHeading: entry.anchor.nearestHeading,
-          replies: entry.replies.map((r) => ({ id: r.id, author: r.author, timestamp: r.timestamp, body: r.body })),
+          replies: entry.replies.map((r) => ({
+            id: r.id,
+            author: r.author,
+            timestamp: r.timestamp,
+            body: r.body,
+            editedAt: r.editedAt,
+          })),
           statusChanges: entry.statusChanges.map((t) => ({ ...t })),
         });
       }
@@ -1079,6 +1372,7 @@ export function createCommentSupport(
       sidecarState.clear();
       creating.clear();
       changingStatus.clear();
+      editingTarget.clear();
       // Disposing the controller disposes every thread it created.
       controller.dispose();
     },

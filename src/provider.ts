@@ -39,7 +39,7 @@ import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
-import { createCommentSupport, type CommentSupport } from './comments/commentController';
+import { createCommentSupport, type CommentSupport, type EditableComment } from './comments/commentController';
 import {
   copyConfirmationMessage,
   nextAuthoritativePanel,
@@ -254,6 +254,79 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           { message: 'Delete this comment thread and all its replies?', confirmLabel: 'Delete' }
         )
       ),
+      // US-23.14 AC1: Edit reachable from the NATIVE `vscode.comments` UI too.
+      // Argument is the specific `EditableComment` VS Code hands back verbatim
+      // (not a `vscode.CommentReply` — `comments/comment/title` is a
+      // per-comment contribution point, unlike `comments/commentThread/context`),
+      // carrying the `orcaThreadId`/`orcaReplyId`/`orcaDocUri` bookkeeping
+      // `asNativeComment` stamped on it (mirrors the official `comments-sample`
+      // extension's `NoteComment.parent` pattern — the base `Comment` type has
+      // no thread backreference). No sidecar write here — flips ONE comment's
+      // live `mode` to `Editing`, mirroring how Cancel below writes nothing.
+      vscode.commands.registerCommand('orcaEditor.editComment', (comment?: EditableComment) => {
+        if (!comment?.orcaThreadId || !provider.comments) {
+          return;
+        }
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, true);
+      }),
+      // US-23.14 AC1/AC2: Save — VS Code copies the live-edited text into
+      // `comment.body` before invoking this, the standard native
+      // comment-editing convention. A refused edit is reported and the field
+      // stays in `Editing` mode with the user's typed text intact for retry; a
+      // successful one is rebuilt back to `Preview` by `editComment` itself
+      // (`nativeCommentsFor` never sets `mode`, so it defaults there), so no
+      // separate flip-back is needed here.
+      vscode.commands.registerCommand('orcaEditor.saveEditComment', async (comment?: EditableComment) => {
+        // Both bookkeeping fields are validated, not just the thread id: a
+        // command can be invoked with any argument (`when: false` hides an entry
+        // from the palette, it does not make the command unreachable), and
+        // `Uri.parse(undefined)` would throw inside an async command as an
+        // unhandled rejection with nothing shown to the user.
+        if (!comment?.orcaThreadId || !comment.orcaDocUri || !provider.comments) {
+          return;
+        }
+        let document: vscode.TextDocument;
+        try {
+          document = await vscode.workspace.openTextDocument(vscode.Uri.parse(comment.orcaDocUri));
+        } catch {
+          void vscode.window.showWarningMessage('That edit could not be saved — its document could not be opened.');
+          return;
+        }
+        const body = typeof comment.body === 'string' ? comment.body : comment.body.value;
+        const outcome = await provider.comments.editComment(
+          {
+            type: 'editComment',
+            requestId: 0,
+            docUri: document.uri.toString(),
+            threadId: comment.orcaThreadId,
+            targetReplyId: comment.orcaReplyId,
+            body,
+          },
+          document
+        );
+        if (!outcome.ok) {
+          // AC2: the field deliberately stays in `Editing` mode with the typed
+          // text intact so the user can retry.
+          void vscode.window.showWarningMessage(outcome.error ?? 'That edit could not be saved.');
+          return;
+        }
+        // Flipped back explicitly rather than relying on `editComment`'s own
+        // rebuild: the unchanged-text branch (AC2's "Save on unchanged text is
+        // Cancel") returns ok WITHOUT rebuilding `thread.comments`, so without
+        // this the native field would sit open in `Editing` mode forever after
+        // saving a body the user did not actually change.
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, false);
+        provider.syncCommentThreads(document);
+      }),
+      // US-23.14 AC1: Cancel — writes nothing; flips the field back to
+      // `Preview`, discarding whatever was typed (mirrors the webview's own
+      // Cancel restoring the displayed text with no write).
+      vscode.commands.registerCommand('orcaEditor.cancelEditComment', (comment?: EditableComment) => {
+        if (!comment?.orcaThreadId || !provider.comments) {
+          return;
+        }
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, false);
+      }),
       // Req 23 US-23.3: the same two-step resolve state machine from the NATIVE
       // `vscode.comments` UI. No confirmation dialog on any of the three — every
       // transition is reversible by the Reviewer's Reopen (the PO decision's own
@@ -1518,6 +1591,26 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             : ({ ok: false, error: 'Comments are not available in this window.' } as const);
           void postToWebview({
             type: 'deleteCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'editComment': {
+          // Req 24 US-23.14: editComment() validates the whole payload
+          // (document identity, non-empty body within the shared length bound,
+          // live target, thread not Closed) — a webview message is untrusted
+          // input like any other. Appends an `edit` sidecar line; nothing here
+          // edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.editComment(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'editCommentResult',
             requestId: msg.requestId,
             ok: outcome.ok,
             ...(outcome.ok ? {} : { error: outcome.error }),

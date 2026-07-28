@@ -47,6 +47,7 @@ import {
   copyConfirmationMessage,
   createCommentRejection,
   deleteRejection,
+  editRejection,
   nextAuthoritativePanel,
   replyRejection,
   resolveCommentAuthor,
@@ -56,6 +57,7 @@ import {
   type AnchorUpdateMessage,
   type CreateCommentMessage,
   type DeleteCommentMessage,
+  type EditCommentMessage,
   type ReplyMessage,
   type StatusChangeMessage,
 } from '../src/comments/comment-utils';
@@ -72,6 +74,7 @@ import {
   buildAnchorUpdateLine,
   buildCommentLine,
   buildDeleteLine,
+  buildEditLine,
   buildReplyLine,
   buildStatusChangeLine,
   foldSidecarRecords,
@@ -88,10 +91,19 @@ import {
   type CommentLine,
   type CommentStatus,
   type DeleteLine,
+  type EditLine,
   type SidecarThread,
   type ReplyLine,
   type StatusChangeLine,
 } from '../src/comments/sidecar-format';
+import {
+  clipCommentBodyToLimit,
+  commentBodyCodePointLength,
+  neutralizeCommentBody,
+  normalizeCommentBodyEol,
+  COMMENT_BODY_COUNTER_THRESHOLD,
+  COMMENT_BODY_MAX_CODEPOINTS,
+} from '../src/comments/comment-body-limit';
 import {
   anchorTextRetention,
   anchorThresholdFor,
@@ -2390,6 +2402,65 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
   check('sidecar: a duplicate anchor-update id is flagged',
     foldSidecarRecords([comment(), anchorUpdate(), anchorUpdate()]).warnings.length === 1);
 
+  // US-23.14: an append-only correction of a comment/reply's `body`, mirroring
+  // `delete`'s tombstone pattern — but UNLIKE anchor-update's pure file-order
+  // fold, AC3 says the LATEST TIMESTAMP wins, tie broken by file/append order.
+  const editLine = (over: Partial<EditLine> = {}): EditLine => ({
+    ...buildEditLine({
+      id: 'e1',
+      targetId: 'c1',
+      author: 'author',
+      timestamp: '2026-07-28T16:00:00.000Z',
+      body: 'edited body',
+    }),
+    ...over,
+  });
+  check('sidecar: with no edit line, a thread keeps its original comment body',
+    foldSidecarRecords([comment()]).threads[0].comment.body === 'why?');
+  check('sidecar: with no edit line, editedAt is never set',
+    foldSidecarRecords([comment()]).threads[0].comment.editedAt === undefined);
+  check('sidecar: a single edit line replaces the comment\'s displayed body',
+    foldSidecarRecords([comment(), editLine()]).threads[0].comment.body === 'edited body');
+  check('sidecar: a folded edit sets editedAt to the winning edit\'s own timestamp',
+    foldSidecarRecords([comment(), editLine()]).threads[0].comment.editedAt === '2026-07-28T16:00:00.000Z');
+  check('sidecar: the original author/timestamp survive an edit unchanged',
+    foldSidecarRecords([comment(), editLine()]).threads[0].comment.author === 'reviewer' &&
+      foldSidecarRecords([comment(), editLine()]).threads[0].comment.timestamp === '2026-07-26T10:00:00.000Z');
+  check('sidecar: an edit line can also target a reply',
+    foldSidecarRecords([comment(), reply(), editLine({ id: 'e2', target_id: 'r1', body: 'fixed the typo' })])
+      .threads[0].replies[0].body === 'fixed the typo');
+  // AC3: latest TIMESTAMP wins — the opposite primary rule from anchor-update's
+  // pure file-order fold.
+  check('sidecar: edit fold — the LATER timestamp wins regardless of file order',
+    foldSidecarRecords([
+      comment(),
+      editLine({ id: 'e1', timestamp: '2026-07-28T18:00:00.000Z', body: 'first-in-file-later-timestamp' }),
+      editLine({ id: 'e2', timestamp: '2026-07-28T09:00:00.000Z', body: 'second-in-file-earlier-timestamp' }),
+    ]).threads[0].comment.body === 'first-in-file-later-timestamp');
+  // AC3 sub: an exact timestamp tie resolves by file/append order.
+  check('sidecar: edit fold — an exact timestamp tie resolves by file/append order',
+    foldSidecarRecords([
+      comment(),
+      editLine({ id: 'e1', timestamp: '2026-07-28T16:00:00.000Z', body: 'first-in-file' }),
+      editLine({ id: 'e2', timestamp: '2026-07-28T16:00:00.000Z', body: 'second-in-file' }),
+    ]).threads[0].comment.body === 'second-in-file');
+  // AC5: idempotent no-op on an unknown or already-tombstoned target — the
+  // same tolerance `delete` already has.
+  check('sidecar: an edit naming an unknown target_id is an idempotent no-op',
+    foldSidecarRecords([comment(), editLine({ target_id: 'no-such-id' })]).threads[0].comment.body === 'why?');
+  check('sidecar: an edit naming an unknown target does not warn or error',
+    foldSidecarRecords([comment(), editLine({ target_id: 'no-such-id' })]).warnings.length === 0);
+  check('sidecar: an edit naming a tombstoned target is a no-op, load does not error',
+    foldSidecarRecords([comment(), tombstone({ target_id: 'c1', author: 'reviewer' }), editLine()]).threads.length === 0);
+  // AC8: no authority check — any author's edit line is accepted for any target.
+  check('sidecar: an edit is accepted regardless of whose name is on it (no authority check)',
+    foldSidecarRecords([comment(), editLine({ author: 'someone-else' })]).threads[0].comment.body === 'edited body');
+  // Same first-seen-wins defensive pattern every other line type has.
+  check('sidecar: a duplicate edit id keeps the first-seen line',
+    foldSidecarRecords([comment(), editLine({ body: 'first' }), editLine({ body: 'second' })]).threads[0].comment.body === 'first');
+  check('sidecar: a duplicate edit id is flagged',
+    foldSidecarRecords([comment(), editLine(), editLine()]).warnings.length === 1);
+
   // AC7 clause 2: does this sidecar even describe the document it sits next to?
   // Decided by CONTENT, never by the file's creation date — `git clone`/`git
   // checkout` recreate the file so its birth time becomes "now" while its comments
@@ -2691,6 +2762,104 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     'Copied 9 threads as Markdown (3 Closed hidden)');
   eq('copy-confirmation: a zero hidden-closed count is not named', copyConfirmationMessage(9, 0),
     'Copied 9 threads as Markdown');
+}
+
+// --- Req 24 US-23.14: editRejection (the host-side write-path validator) ------
+{
+  const base: EditCommentMessage = {
+    type: 'editComment',
+    requestId: 1,
+    docUri: 'file:///a.md',
+    threadId: 't1',
+    body: 'a corrected body',
+  };
+  const rej = (over: Partial<EditCommentMessage> = {}, status: CommentStatus | undefined = 'Open', original?: string) =>
+    editRejection({ ...base, ...over }, 'file:///a.md', status, original);
+
+  check('edit-rejection: a valid edit on an Open thread is accepted', rej() === null);
+  check('edit-rejection: a valid edit on a Resolved thread is accepted', rej({}, 'Resolved') === null);
+  // AC1's Closed lockout, enforced on the write path (not only in the popover).
+  check('edit-rejection: a Closed thread is refused',
+    (rej({}, 'Closed') ?? '').includes('closed'));
+  // Called directly, not through `rej`: passing `undefined` to a parameter that
+  // HAS a default silently gets the default ('Open'), so the helper cannot
+  // express "no such thread".
+  check('edit-rejection: an unknown thread is refused',
+    editRejection(base, 'file:///a.md', undefined) !== null);
+  check('edit-rejection: a different document is refused',
+    rej({ docUri: 'file:///other.md' }) !== null);
+  check('edit-rejection: an empty threadId is refused', rej({ threadId: '' }) !== null);
+  // AC7: empty/whitespace-only is what Delete is for.
+  check('edit-rejection: an empty body is refused', rej({ body: '' }) !== null);
+  check('edit-rejection: a whitespace-only body is refused', rej({ body: '   \n\t ' }) !== null);
+  // Untrusted input: a non-string body must be refused, never reach `.trim()`
+  // and throw inside the host handler (which would post no result at all).
+  check('edit-rejection: a non-string body is refused, not thrown on',
+    rej({ body: undefined as unknown as string }) !== null &&
+      rej({ body: 42 as unknown as string }) !== null);
+  // AC7's cap.
+  check('edit-rejection: a body at the cap is accepted',
+    rej({ body: 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS) }) === null);
+  check('edit-rejection: a body over the cap is refused',
+    rej({ body: 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS + 1) }) !== null);
+  // ...but an ALREADY over-cap body (creation's own cap is unbuilt — US-23.10
+  // AC10) must stay editable, and an edit must never be blamed for length it
+  // did not introduce. Ceiling = max(cap, original length).
+  const overLong = 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS + 500);
+  check('edit-rejection: an already-over-cap body can still be edited at its own length',
+    rej({ body: overLong }, 'Open', overLong) === null);
+  check('edit-rejection: an already-over-cap body can be edited DOWN',
+    rej({ body: 'a'.repeat(100) }, 'Open', overLong) === null);
+  check('edit-rejection: an already-over-cap body still cannot be GROWN further',
+    rej({ body: 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS + 501) }, 'Open', overLong) !== null);
+  // AC8: no authority check anywhere in this validator — there is no author
+  // parameter to gate on, unlike `deleteRejection`.
+  check('edit-rejection: takes no author argument at all (AC8 — no authority check)',
+    editRejection.length <= 4);
+}
+
+// --- Req 23 US-23.10 AC9: the shared body neutralize/EOL helpers -------------
+{
+  // Moved into `src/comments/comment-body-limit.ts` so the NATIVE write path
+  // (US-23.14) gets the identical strip the webview already applied.
+  check('body-neutralize: a bidi override (Trojan Source) is stripped',
+    neutralizeCommentBody('safe‮evil') === 'safeevil');
+  check('body-neutralize: a bidi isolate is stripped',
+    neutralizeCommentBody('a⁦b⁩c') === 'abc');
+  check('body-neutralize: a C0 control char is stripped', neutralizeCommentBody('ab') === 'ab');
+  check('body-neutralize: newline and tab survive (a body is multi-line)',
+    neutralizeCommentBody('a\nb\tc') === 'a\nb\tc');
+  check('body-eol: CRLF and lone CR both reconcile to LF',
+    normalizeCommentBodyEol('a\r\nb\rc') === 'a\nb\nc');
+  // The webview's own exports must be the SAME behaviour, not a second copy.
+  check('body-neutralize: dom-utils delegates to the shared implementation',
+    neutralizeBodyText('x‮y') === neutralizeCommentBody('x‮y') &&
+      normalizeBodyEol('x\r\ny') === normalizeCommentBodyEol('x\r\ny'));
+}
+
+// --- Req 23 US-23.10 AC10 / Req 24 US-23.14 AC7: comment-body length bound --
+{
+  check('body-limit: an empty string counts as 0 code points', commentBodyCodePointLength('') === 0);
+  check('body-limit: plain ASCII counts one per character', commentBodyCodePointLength('hello') === 5);
+  // Code-point-safe: an astral character (surrogate pair in UTF-16) counts as 1.
+  check('body-limit: a surrogate-pair (astral) character counts as ONE code point',
+    commentBodyCodePointLength('😀') === 1 && '😀'.length === 2);
+  check('body-limit: text under the cap is returned unchanged',
+    clipCommentBodyToLimit('short text') === 'short text');
+  const exact = 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS);
+  check('body-limit: text exactly at the cap is unchanged', clipCommentBodyToLimit(exact) === exact);
+  const over = 'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS + 50);
+  const clipped = clipCommentBodyToLimit(over);
+  check('body-limit: text over the cap is clipped to exactly the cap',
+    commentBodyCodePointLength(clipped) === COMMENT_BODY_MAX_CODEPOINTS);
+  // Never split a surrogate pair mid-character when clipping at the boundary.
+  const astralOver = `${'a'.repeat(COMMENT_BODY_MAX_CODEPOINTS - 1)}😀EXTRA`;
+  const astralClipped = clipCommentBodyToLimit(astralOver);
+  check('body-limit: clipping never splits a surrogate pair',
+    commentBodyCodePointLength(astralClipped) === COMMENT_BODY_MAX_CODEPOINTS &&
+      astralClipped.endsWith('😀'));
+  check('body-limit: the counter threshold sits below the hard cap',
+    COMMENT_BODY_COUNTER_THRESHOLD < COMMENT_BODY_MAX_CODEPOINTS);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

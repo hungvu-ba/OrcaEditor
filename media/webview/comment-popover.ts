@@ -29,6 +29,7 @@ import {
   COMMENT_ACTION_BAR_CLASS,
   COMMENT_DELETE_CONFIRM_CLASS,
   COMMENT_DRIFT_STRIP_CLASS,
+  COMMENT_EDIT_INPUT_CLASS,
   COMMENT_POPOVER_CLASS,
   COMMENT_REPLY_INPUT_CLASS,
   COMMENT_REPLY_RESULT_TIMEOUT_MS,
@@ -37,6 +38,12 @@ import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } fro
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 import { sameAuthor } from '../../src/comments/sidecar-format';
+import {
+  clipCommentBodyToLimit,
+  commentBodyCodePointLength,
+  COMMENT_BODY_COUNTER_THRESHOLD,
+  COMMENT_BODY_MAX_CODEPOINTS,
+} from '../../src/comments/comment-body-limit';
 import type { CommentStatusAction } from '../../src/shared/messages';
 
 export interface CommentPopoverController {
@@ -54,6 +61,8 @@ export interface CommentPopoverController {
   notifyDeleteResult(requestId: number, ok: boolean, error?: string): void;
   /** US-23.3: outcome of a Resolve/Close/Reopen request this popover sent. */
   notifyStatusResult(requestId: number, ok: boolean, error?: string): void;
+  /** US-23.14: outcome of an `editComment` request this popover sent. */
+  notifyEditResult(requestId: number, ok: boolean, error?: string): void;
 }
 
 /** One button in the popover's action bar, already decided for the thread being rendered. */
@@ -134,6 +143,47 @@ export function initCommentPopover(
   let inFlightStatusRequest: number | undefined;
   /** Whether Cancel has collapsed the reply composer for the open thread. */
   let replyCollapsed = false;
+
+  // US-23.14: only one edit FIELD is open at a time in this single-instance
+  // popover, but saves are tracked PER TARGET (`inFlightEdits` below) — AC6
+  // requires that an in-flight edit on one comment never block a different
+  // comment's edit, and a field can be closed (or its thread switched away
+  // from) while its own save is still with the host.
+  let editingOpen = false;
+  /** `undefined` = editing the thread's own opening comment; else that reply's durable id. */
+  let editingReplyId: string | undefined;
+  let editingThreadId: string | undefined;
+  let editingDraftText = '';
+  /**
+   * The field's caret/selection, carried across a `render()` rebuild. Unlike the
+   * reply box — a persistent element `render` never touches — the edit field
+   * lives INSIDE `list`, which every render clears and rebuilds. Without this
+   * the caret would jump to the end of the text on every settled re-resolution
+   * pass (`resolve.onChange`) while the user is mid-sentence.
+   */
+  let editingCaretStart = 0;
+  let editingCaretEnd = 0;
+  /** Whether the rebuilt field should reclaim focus — true on open, and whenever it held focus before the rebuild. */
+  let editFocusPending = false;
+  /**
+   * The length ceiling for the field currently open: the shared cap, or the
+   * body's own already-over-cap length when it has one. Set per `startEdit`.
+   */
+  let editingCapCeiling = COMMENT_BODY_MAX_CODEPOINTS;
+  let editError = '';
+  /**
+   * One in-flight save per TARGET, keyed by `editTargetKey`. AC6: the guard is
+   * "keyed per target being edited" — an in-flight edit on one comment can
+   * never block or release a different comment's edit (nor a reply, which has
+   * its own separate guard). A single scalar could not express that: the user
+   * can save on thread A, switch to B, and legitimately save B before A's
+   * result lands.
+   *
+   * Each entry also remembers WHICH target it is for, so a result can be
+   * matched back to it by `requestId` alone and surfaced only if that exact
+   * target's field is still the one on screen.
+   */
+  const inFlightEdits = new Map<string, { requestId: number; timeout: number; thread: string; replyId: string | undefined }>();
 
   const card = el('div', COMMENT_POPOVER_CLASS);
   card.hidden = true;
@@ -313,14 +363,71 @@ export function initCommentPopover(
 
   // --- Rendering ---------------------------------------------------------------
 
-  function personRow(className: string, author: string, timestamp: string, body: string, onDelete: (() => void) | undefined): HTMLElement {
-    const row = el('div', className);
+  /**
+   * The avatar/author/time header every row starts with — shared by the static
+   * row and US-23.14's edit row so the two cannot drift (and so the identical
+   * block is not duplicated, which `check:duplication` would flag).
+   */
+  function personMeta(author: string, timestamp: string): HTMLElement {
     const meta = el('div', 'comment-popover-person-meta');
     // First CODE POINT, not `author[0]`: an emoji-first name would otherwise be
     // split mid-surrogate-pair and render as a replacement char.
     const initial = Array.from(author)[0] ?? '?';
     const avatar = el('span', 'comment-popover-avatar', initial.toUpperCase());
-    meta.append(avatar, el('span', 'comment-popover-author', author), el('span', 'comment-popover-time', formatTimestamp(timestamp)));
+    meta.append(
+      avatar,
+      el('span', 'comment-popover-author', author),
+      el('span', 'comment-popover-time', formatTimestamp(timestamp))
+    );
+    return meta;
+  }
+
+  function rememberEditCaret(input: HTMLTextAreaElement): void {
+    editingCaretStart = input.selectionStart ?? input.value.length;
+    editingCaretEnd = input.selectionEnd ?? editingCaretStart;
+  }
+
+  /** US-23.14 AC4: "edited ⟨timestamp⟩" marker text, or '' when never edited. */
+  function editedMarker(editedAt: string | undefined): string {
+    if (editedAt === undefined) {
+      return '';
+    }
+    const t = formatTimestamp(editedAt);
+    // AC4: "an edit is never silently indistinguishable from the original text".
+    // A hand-edited or merge-mangled sidecar can carry an empty/unparseable
+    // stamp, and `formatTimestamp` returns '' for those — dropping the marker
+    // entirely would hide the edit, so mark it without a time instead.
+    return t ? `edited ${t}` : 'edited';
+  }
+
+  function personRow(
+    className: string,
+    author: string,
+    timestamp: string,
+    body: string,
+    editedAt: string | undefined,
+    onDelete: (() => void) | undefined,
+    onEdit: (() => void) | undefined
+  ): HTMLElement {
+    const row = el('div', className);
+    const meta = personMeta(author, timestamp);
+    const marker = editedMarker(editedAt);
+    if (marker !== '') {
+      meta.appendChild(el('span', 'comment-popover-edited', marker));
+    }
+    // AC8: Edit carries no authority check — offered to whoever is at the
+    // keyboard, unlike Delete below. `onEdit` is undefined only when the
+    // thread is Closed (mirrors `replyBox.hidden = closed`'s gating), never by
+    // authorship.
+    if (onEdit) {
+      const editBtn = el('button', 'comment-popover-edit', '');
+      editBtn.type = 'button';
+      editBtn.setAttribute('aria-label', 'Edit');
+      editBtn.title = 'Edit';
+      editBtn.textContent = '✎';
+      editBtn.addEventListener('click', onEdit);
+      meta.appendChild(editBtn);
+    }
     // AC5: the Delete control is DISABLED (a visible soft nudge showing the
     // content isn't yours), not removed — the real enforcement is the host's
     // author check in `deleteRejection`, not this button's state.
@@ -339,6 +446,90 @@ export function initCommentPopover(
     meta.appendChild(deleteBtn);
     row.appendChild(meta);
     row.appendChild(el('div', 'comment-popover-body-text', body));
+    return row;
+  }
+
+  /**
+   * US-23.14 AC1: the editable field replacing a row's body — reuses the reply
+   * `<textarea>` pattern (its own native undo history) pre-filled with the
+   * post-fold displayed text via the closure-held `editingDraftText`, which
+   * survives a `render()` re-run triggered by anything else changing
+   * (AC1's "not force-refreshed" sub-criterion) since it is read back in here
+   * rather than reset.
+   */
+  function personEditRow(
+    className: string,
+    author: string,
+    timestamp: string,
+    threadId: string,
+    replyId: string | undefined
+  ): HTMLElement {
+    const row = el('div', className);
+    row.appendChild(personMeta(author, timestamp));
+
+    const input = document.createElement('textarea');
+    input.className = COMMENT_EDIT_INPUT_CLASS;
+    input.rows = 3;
+    input.setAttribute('aria-label', 'Edit comment text');
+    input.value = editingDraftText;
+    input.readOnly = isEditBusy();
+
+    const errorEl = el('div', 'comment-popover-edit-error');
+    errorEl.setAttribute('role', 'alert');
+    errorEl.hidden = editError === '';
+    if (editError !== '') {
+      errorEl.textContent = editError;
+    }
+
+    const counter = el('span', 'comment-popover-edit-counter');
+    const actions = el('div', 'comment-popover-edit-actions');
+    const cancelBtn = el('button', 'comment-popover-edit-cancel', 'Cancel');
+    cancelBtn.type = 'button';
+    const saveBtn = el('button', 'comment-popover-edit-save', 'Save');
+    saveBtn.type = 'button';
+    actions.append(counter, cancelBtn, saveBtn);
+
+    function refreshCounter(): void {
+      const len = commentBodyCodePointLength(input.value);
+      counter.hidden = len < COMMENT_BODY_COUNTER_THRESHOLD;
+      counter.textContent = `${len}/${COMMENT_BODY_MAX_CODEPOINTS}`;
+    }
+    function refreshSaveState(): void {
+      saveBtn.setAttribute('aria-disabled', String(isEditBusy() || input.value.trim() === ''));
+    }
+
+    input.addEventListener('input', () => {
+      // AC7 sub-criterion: paste-clipping, code-point-safe — bounded by
+      // `editingCapCeiling`, never below the length the body ALREADY had.
+      // US-23.10 AC10 has not shipped, so an over-cap comment can exist;
+      // clipping it to 4000 on the first keystroke would silently destroy
+      // content this editor did not write (AC8 lets anyone edit anyone's).
+      // Mirrors `editRejection`'s identical ceiling host-side.
+      const clipped = clipCommentBodyToLimit(input.value, editingCapCeiling);
+      if (clipped !== input.value) {
+        const pos = Math.min(input.selectionStart ?? clipped.length, clipped.length);
+        input.value = clipped;
+        input.setSelectionRange(pos, pos);
+      }
+      editingDraftText = input.value;
+      rememberEditCaret(input);
+      refreshCounter();
+      refreshSaveState();
+    });
+    // A click/arrow-key move is not an `input` event, so the caret is recorded
+    // on selection changes too — otherwise a render mid-navigation would snap it
+    // back to wherever the last keystroke left it.
+    input.addEventListener('keyup', () => rememberEditCaret(input));
+    input.addEventListener('mouseup', () => rememberEditCaret(input));
+    cancelBtn.addEventListener('click', () => cancelEdit());
+    saveBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    saveBtn.addEventListener('click', () => submitEdit(threadId, replyId, input.value));
+
+    row.appendChild(input);
+    row.appendChild(errorEl);
+    refreshCounter();
+    refreshSaveState();
+    row.appendChild(actions);
     return row;
   }
 
@@ -457,30 +648,87 @@ export function initCommentPopover(
     quoteRow.hidden = quote === '';
     quoteText.textContent = quote ? `“${quote}”` : '';
 
+    // Captured BEFORE the rebuild below destroys the node: if the edit field
+    // held focus, the rebuilt one must reclaim it (and its caret), otherwise a
+    // settled re-resolution pass would drop the user out of the field mid-word.
+    const editFieldHadFocus =
+      document.activeElement instanceof HTMLTextAreaElement &&
+      document.activeElement.classList.contains(COMMENT_EDIT_INPUT_CLASS);
+    if (editFieldHadFocus) {
+      editFocusPending = true;
+    }
+
     list.textContent = '';
     const ownsComment = authorName !== '' && sameAuthor(authorName, anchor.author);
-    list.appendChild(
-      personRow(
-        'comment-popover-original',
-        anchor.author,
-        anchor.createdAt,
-        anchor.body,
-        ownsComment ? () => requestDeleteThread(anchor, list.getBoundingClientRect()) : undefined
-      )
-    );
+    // AC1 sub-criterion: Edit is gated on thread status exactly like Reply —
+    // not offered at all on a Closed thread.
+    const editGated = anchor.status === 'Closed';
+    let editingThisThread = editingOpen && editingThreadId === anchor.threadId;
+    if (editingThisThread && editGated) {
+      // The lockout applies to a field that is ALREADY open, not just to the
+      // button: a Close landing from another panel or the native UI would
+      // otherwise leave a live, Save-armed field the host is bound to refuse.
+      // The in-flight guard is deliberately NOT released — if a save for this
+      // target is still with the host, its result must still find a home (a
+      // toast, via `editFieldStillOn`) rather than be dropped silently.
+      resetEditState();
+      editingThisThread = false;
+      showToast('This thread was closed — editing is no longer available.');
+    }
+    if (editingThisThread && editingReplyId === undefined) {
+      list.appendChild(personEditRow('comment-popover-original', anchor.author, anchor.createdAt, anchor.threadId, undefined));
+    } else {
+      list.appendChild(
+        personRow(
+          'comment-popover-original',
+          anchor.author,
+          anchor.createdAt,
+          anchor.body,
+          anchor.editedAt,
+          ownsComment ? () => requestDeleteThread(anchor, list.getBoundingClientRect()) : undefined,
+          editGated ? undefined : () => startEdit(anchor.threadId, undefined, anchor.body)
+        )
+      );
+    }
     for (const reply of anchor.replies) {
+      if (editingThisThread && editingReplyId === reply.id) {
+        const row = personEditRow('comment-popover-reply', reply.author, reply.timestamp, anchor.threadId, reply.id);
+        row.dataset.replyId = reply.id;
+        list.appendChild(row);
+        continue;
+      }
       const ownsReply = authorName !== '' && sameAuthor(authorName, reply.author);
       const row = personRow(
         'comment-popover-reply',
         reply.author,
         reply.timestamp,
         reply.body,
-        ownsReply ? () => requestDeleteReply(anchor, reply.id, list.getBoundingClientRect()) : undefined
+        reply.editedAt,
+        ownsReply ? () => requestDeleteReply(anchor, reply.id, list.getBoundingClientRect()) : undefined,
+        editGated ? undefined : () => startEdit(anchor.threadId, reply.id, reply.body)
       );
       // Distinguishes replies whose rendered text happens to be a substring of
       // one another — not something a display-only class/text query can do.
       row.dataset.replyId = reply.id;
       list.appendChild(row);
+    }
+    if (editingThisThread) {
+      const stillExists = editingReplyId === undefined || anchor.replies.some((r) => r.id === editingReplyId);
+      if (!stillExists) {
+        // AC1 sub-criterion: the target vanished (deleted directly, or via a
+        // cascading thread delete) while the field was open — close it with a
+        // stated notice instead of leaving stale state around.
+        resetEditState();
+        showToast('This comment was deleted.');
+      } else if (editFocusPending) {
+        editFocusPending = false;
+        const input = list.querySelector<HTMLTextAreaElement>(`.${COMMENT_EDIT_INPUT_CLASS}`);
+        if (input) {
+          input.focus();
+          const max = input.value.length;
+          input.setSelectionRange(Math.min(editingCaretStart, max), Math.min(editingCaretEnd, max));
+        }
+      }
     }
 
     // Replying is blocked while the thread is Closed (US-23.3) — the popover
@@ -656,6 +904,177 @@ export function initCommentPopover(
     });
   }
 
+  // --- US-23.14: edit an already-posted comment or reply ----------------------
+
+  /** The `inFlightEdits` key for one target. ` ` cannot occur in a durable id, so the two halves can never run together ambiguously. */
+  function editTargetKey(thread: string | undefined, replyId: string | undefined): string {
+    return `${thread ?? ''} ${replyId ?? ''}`;
+  }
+
+  function inFlightEditByRequest(requestId: number): { requestId: number; thread: string; replyId: string | undefined } | undefined {
+    for (const entry of inFlightEdits.values()) {
+      if (entry.requestId === requestId) {
+        return entry;
+      }
+    }
+    return undefined;
+  }
+
+  /** Whether the OPEN field's own save is in flight — what makes it read-only and its Save inert. */
+  function isEditBusy(): boolean {
+    return inFlightEdits.has(editTargetKey(editingThreadId, editingReplyId));
+  }
+
+  /** Closes the FIELD only — never touches `inFlightEdits`, so a save already sent still resolves and surfaces. */
+  function resetEditState(): void {
+    editingOpen = false;
+    editingReplyId = undefined;
+    editingThreadId = undefined;
+    editingDraftText = '';
+    editingCaretStart = 0;
+    editingCaretEnd = 0;
+    editFocusPending = false;
+    editError = '';
+  }
+
+  /** AC6 sub: clears ONE target's in-flight entry and its timeout, whatever released it. */
+  function releaseEditGuard(key: string): void {
+    const entry = inFlightEdits.get(key);
+    if (!entry) {
+      return;
+    }
+    window.clearTimeout(entry.timeout);
+    inFlightEdits.delete(key);
+  }
+
+  /**
+   * Whether the field currently on screen is open on the exact target a
+   * just-resolved request was for — the only case an inline surface belongs to
+   * it. Anything else (the user switched threads, switched targets, or closed
+   * the field) falls back to a toast, mirroring `notifyReplyResult`.
+   */
+  function editFieldStillOn(thread: string | undefined, replyId: string | undefined): boolean {
+    return editingOpen && editingThreadId === thread && editingReplyId === replyId && thread === currentThreadId;
+  }
+
+  /** Re-render whichever thread is open, when there is one. */
+  function rerenderOpenThread(): void {
+    const anchor = currentThreadId ? resolve.anchorOf(currentThreadId) : undefined;
+    if (anchor) {
+      render(anchor);
+    }
+  }
+
+  /**
+   * Open (or retarget) the edit field for one comment/reply. `replyId`
+   * undefined targets the thread's own opening comment. Only one field is open
+   * at a time; re-opening the field for a target whose OWN save is still in
+   * flight is ignored (there is nothing to type into it yet), while a different
+   * target's in-flight save never blocks this one (AC6).
+   */
+  function startEdit(threadId: string, replyId: string | undefined, currentBody: string): void {
+    if (inFlightEdits.has(editTargetKey(threadId, replyId))) {
+      return;
+    }
+    editingOpen = true;
+    editingReplyId = replyId;
+    editingThreadId = threadId;
+    editingDraftText = currentBody;
+    // Caret at the end of the pre-filled text — the field opens ready to type.
+    editingCaretStart = currentBody.length;
+    editingCaretEnd = currentBody.length;
+    editFocusPending = true;
+    editingCapCeiling = Math.max(COMMENT_BODY_MAX_CODEPOINTS, commentBodyCodePointLength(currentBody));
+    editError = '';
+    const anchor = resolve.anchorOf(threadId);
+    if (anchor) {
+      render(anchor);
+    }
+  }
+
+  /** Cancel: discard the draft and close the field, appending no sidecar line. */
+  function cancelEdit(): void {
+    // Scoped to THIS target's own request: releasing a DIFFERENT target's guard
+    // would drop its `requestId`, and its later `editCommentResult` would match
+    // nothing and be discarded silently — the user would be told nothing about
+    // a refusal that really happened.
+    releaseEditGuard(editTargetKey(editingThreadId, editingReplyId));
+    const threadId = editingThreadId;
+    resetEditState();
+    const anchor = threadId ? resolve.anchorOf(threadId) : undefined;
+    if (anchor) {
+      render(anchor);
+    }
+  }
+
+  /** AC6 sub: `editCommentResult` never arrived — same surfacing rule `handleReplyTimeout` uses. */
+  function handleEditTimeout(requestId: number): void {
+    const entry = inFlightEditByRequest(requestId);
+    if (!entry) {
+      return;
+    }
+    releaseEditGuard(editTargetKey(entry.thread, entry.replyId));
+    const message = 'No response from the host — the edit may not have been saved. Try again.';
+    if (!editFieldStillOn(entry.thread, entry.replyId)) {
+      showToast(message);
+      return;
+    }
+    editError = message;
+    rerenderOpenThread();
+  }
+
+  function submitEdit(threadId: string, replyId: string | undefined, rawValue: string): void {
+    // AC6: a second Save for the SAME target while its first is in flight is a
+    // no-op (this is the double-click/double-Enter case). A save in flight for
+    // any OTHER target is irrelevant here and must not block this one.
+    if (inFlightEdits.has(editTargetKey(threadId, replyId))) {
+      return;
+    }
+    const trimmed = rawValue.trim();
+    const anchor = resolve.anchorOf(threadId);
+    if (anchor?.status === 'Closed') {
+      // Mirrors `submitReply`'s own Closed guard: refuse locally rather than
+      // spend a round trip on a request the host is bound to refuse. Covers the
+      // click that races a Close arriving between two renders.
+      showToast('This thread is closed — reopen it before editing.');
+      return;
+    }
+    if (trimmed === '') {
+      editError = 'Removing all the text is what Delete is for — a comment cannot be saved empty.';
+      if (anchor) {
+        render(anchor);
+      }
+      return;
+    }
+    const currentBody = replyId === undefined ? anchor?.body : anchor?.replies.find((r) => r.id === replyId)?.body;
+    // AC2 sub-criterion: unchanged (trimmed) text is Cancel — no message sent,
+    // no line appended, no "edited" marker newly set.
+    if (currentBody !== undefined && trimmed === currentBody.trim()) {
+      cancelEdit();
+      return;
+    }
+    editError = '';
+    const requestId = ++requestSeq;
+    inFlightEdits.set(editTargetKey(threadId, replyId), {
+      requestId,
+      thread: threadId,
+      replyId,
+      timeout: window.setTimeout(() => handleEditTimeout(requestId), COMMENT_REPLY_RESULT_TIMEOUT_MS),
+    });
+    if (anchor) {
+      render(anchor);
+    }
+    // US-23.10 AC9: same neutralize + CRLF->LF treatment as a new comment's body.
+    vscode.postMessage({
+      type: 'editComment',
+      requestId,
+      docUri,
+      threadId,
+      targetReplyId: replyId,
+      body: neutralizeBodyText(normalizeBodyEol(trimmed)),
+    });
+  }
+
   replyInput.addEventListener('input', syncSubmitState);
   replyCancel.addEventListener('click', () => {
     // Cancel discards the draft without appending any sidecar line — distinct
@@ -698,6 +1117,20 @@ export function initCommentPopover(
         replyInput.value = '';
         replyCollapsed = false;
         clearReplyError();
+        // US-23.14: an edit field belongs to the thread it was opened
+        // against — switching threads closes its LOCAL UI; an in-flight save,
+        // if any, still resolves in the background and surfaces via a toast
+        // (`notifyEditResult`'s `forThread !== currentThreadId` branch), same
+        // as an in-flight reply. `editingThreadId` is deliberately NOT cleared:
+        // it is what that branch reads to know which thread the late result
+        // belonged to.
+        editingOpen = false;
+        editingReplyId = undefined;
+        editingDraftText = '';
+        editingCaretStart = 0;
+        editingCaretEnd = 0;
+        editFocusPending = false;
+        editError = '';
       }
       // US-23.10 AC5: the shared reply box is busy/read-only only for the
       // thread whose OWN reply is actually in flight — opening a DIFFERENT
@@ -802,6 +1235,40 @@ export function initCommentPopover(
       // push carries the new status/actor/timestamp, and `resolve.onChange`
       // re-renders whichever thread is open — including the case where the user
       // moved to a different thread while this was in flight.
+    },
+    notifyEditResult(requestId, ok, error): void {
+      // Matched back to its own target by `requestId` — several saves can be in
+      // flight at once (AC6 keys them per target), so this is never "the" one.
+      const entry = inFlightEditByRequest(requestId);
+      if (!entry) {
+        return;
+      }
+      const forThread = entry.thread;
+      const forReplyId = entry.replyId;
+      releaseEditGuard(editTargetKey(forThread, forReplyId));
+      if (!editFieldStillOn(forThread, forReplyId)) {
+        // Resolved, but the field this result belongs to is no longer the one on
+        // screen (the user switched thread or target, or closed it) — same
+        // fallback `notifyReplyResult` uses: a refusal still needs SOME visible
+        // surface, but never a field that is showing a different target.
+        if (!ok) {
+          showToast(error ?? 'The edit could not be saved.');
+        }
+        return;
+      }
+      if (!ok) {
+        // The field stays open with its typed text intact and the reason shown
+        // inline — never a toast (mirrors `notifyReplyResult`'s failure branch).
+        editError = error ?? 'The edit could not be saved.';
+        rerenderOpenThread();
+        return;
+      }
+      // Closed here rather than left to the follow-up `commentThreadsSync`: a
+      // dropped or delayed sync would otherwise leave the field sitting open
+      // over a comment that has already been saved. The sync that does arrive
+      // is what swaps in the new body and its "edited" marker.
+      resetEditState();
+      rerenderOpenThread();
     },
   };
 }

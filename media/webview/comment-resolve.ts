@@ -64,6 +64,8 @@ export interface ThreadAnchor {
   author: string;
   /** ISO-8601 creation timestamp from the host; the panel orders newest-first by it. */
   createdAt: string;
+  /** US-23.14 AC4: the winning `edit` line's own timestamp, once this comment has been edited at least once. */
+  editedAt?: string;
   /**
    * US-23.3's Open/Resolved/Closed axis, kept up to date by `syncThread` —
    * orthogonal to `state` (anchor resolution) below. The two must never be
@@ -601,6 +603,12 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     existing.body = seed.body;
     existing.author = seed.author;
     existing.createdAt = seed.createdAt;
+    // US-23.14 AC4: refreshed alongside `body`, since the two always move
+    // together — an `edit` line changes the displayed body AND stamps the
+    // marker. Omitting it here left a freshly-edited comment showing its new
+    // text with no "edited" marker until the next reload. (A reply's own
+    // `editedAt` rides along inside `seed.replies` above.)
+    existing.editedAt = seed.editedAt;
     existing.statusChanges = seed.statusChanges;
     if (seed.status === 'Closed') {
       // US-23.3 AC3, widened by US-23.11 AC4: only a Closed thread (from this

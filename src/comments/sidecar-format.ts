@@ -51,6 +51,8 @@ export interface CommentLine extends SidecarEnvelope {
   type: 'comment';
   body: string;
   anchor: SidecarAnchor;
+  /** Set only on a FOLDED (in-memory) copy when an `edit` line named this comment — never present on a raw parsed line (US-23.14 AC4). The winning edit's timestamp. */
+  editedAt?: string;
 }
 
 /** A reply under a thread (US-23.2). */
@@ -58,6 +60,8 @@ export interface ReplyLine extends SidecarEnvelope {
   type: 'reply';
   parent_comment_id: string;
   body: string;
+  /** Set only on a FOLDED (in-memory) copy when an `edit` line named this reply — never present on a raw parsed line (US-23.14 AC4). The winning edit's timestamp. */
+  editedAt?: string;
 }
 
 /** An Open/Resolved/Closed transition (US-23.3). */
@@ -91,7 +95,20 @@ export interface AnchorUpdateLine extends SidecarEnvelope {
   anchor: SidecarAnchor;
 }
 
-export type SidecarLine = CommentLine | ReplyLine | StatusChangeLine | DeleteLine | AnchorUpdateLine;
+/**
+ * An append-only correction of an earlier `comment` or `reply` line's `body`
+ * (US-23.14 PO decision) — mirrors `DeleteLine`'s tombstone pattern rather than
+ * rewriting the target line (US-23.5 AC2, US-23.6 AC1/AC5). `target_id` names
+ * either a `comment` or a `reply` line; the target's own `author`/`timestamp`
+ * are never overwritten, so original attribution survives every edit.
+ */
+export interface EditLine extends SidecarEnvelope {
+  type: 'edit';
+  target_id: string;
+  body: string;
+}
+
+export type SidecarLine = CommentLine | ReplyLine | StatusChangeLine | DeleteLine | AnchorUpdateLine | EditLine;
 
 /** One reassembled thread, ready to become a `vscode.CommentThread`. */
 export interface SidecarThread {
@@ -375,6 +392,25 @@ export function buildAnchorUpdateLine(input: {
   };
 }
 
+/** Assemble an edit line (US-23.14). Caller supplies id/timestamp so this stays pure. */
+export function buildEditLine(input: {
+  id: string;
+  targetId: string;
+  author: string;
+  timestamp: string;
+  body: string;
+}): EditLine {
+  return {
+    schema_version: SIDECAR_SCHEMA_VERSION,
+    type: 'edit',
+    id: input.id,
+    target_id: input.targetId,
+    author: input.author,
+    timestamp: input.timestamp,
+    body: input.body,
+  };
+}
+
 function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
@@ -443,6 +479,10 @@ function asSidecarLine(value: unknown): SidecarLine | null {
         : null;
     case 'delete':
       return isString(line.target_id) && line.target_id !== '' ? (line as unknown as DeleteLine) : null;
+    case 'edit':
+      return isString(line.target_id) && line.target_id !== '' && isString(line.body)
+        ? (line as unknown as EditLine)
+        : null;
     case 'anchor-update':
       return isString(line.parent_comment_id) &&
         line.parent_comment_id !== '' &&
@@ -560,6 +600,21 @@ function byTimestamp(a: { timestamp: string }, b: { timestamp: string }): number
   return keyA - keyB;
 }
 
+/**
+ * The winning `edit` line for one target (US-23.14 AC3): the latest `timestamp`
+ * wins; an exact tie resolves by file/append order (`byTimestamp`'s stable sort
+ * keeps disk order among equal keys, so the last entry after sorting is the
+ * latest-appended one among the tied maxima) — never by re-comparing equal
+ * timestamps.
+ */
+function resolveEdit(edits: EditLine[] | undefined): EditLine | null {
+  if (!edits || edits.length === 0) {
+    return null;
+  }
+  const sorted = edits.slice().sort(byTimestamp);
+  return sorted[sorted.length - 1];
+}
+
 function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
   const existing = map.get(key);
   if (existing) {
@@ -589,6 +644,8 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
   const statusChangeIds = new Set<string>();
   const anchorUpdatesByParent = new Map<string, AnchorUpdateLine[]>();
   const anchorUpdateIds = new Set<string>();
+  const editsByTarget = new Map<string, EditLine[]>();
+  const editIds = new Set<string>();
   const tombstones: DeleteLine[] = [];
 
   for (const line of lines) {
@@ -623,6 +680,16 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
         break;
       case 'delete':
         tombstones.push(line);
+        break;
+      case 'edit':
+        if (editIds.has(line.id)) {
+          warnings.push(`duplicate edit id ${line.id}: keeping the first-seen line`);
+          break;
+        }
+        editIds.add(line.id);
+        // Pushed in on-disk order; resolveEdit() below sorts by timestamp and
+        // relies on this order only to break an exact-timestamp tie (AC3).
+        pushInto(editsByTarget, line.target_id, line);
         break;
       case 'anchor-update':
         if (anchorUpdateIds.has(line.id)) {
@@ -674,7 +741,14 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
     }
     const replies = (repliesByParent.get(id) ?? [])
       .filter((reply) => !deletedReplies.has(reply.id))
-      .sort(byTimestamp);
+      .sort(byTimestamp)
+      .map((reply) => {
+        // Unknown/tombstoned targets never reach here (id was filtered above),
+        // so a stray edit for one is a silent no-op — same tolerance `delete`
+        // already has (AC5).
+        const winningEdit = resolveEdit(editsByTarget.get(reply.id));
+        return winningEdit ? { ...reply, body: winningEdit.body, editedAt: winningEdit.timestamp } : reply;
+      });
     const recordedChanges = (statusByParent.get(id) ?? []).slice().sort(byTimestamp);
     // Last-write-wins on `to_status`, defaulting to Open when nothing has been
     // recorded: the current status is always this fold, never a stored field on
@@ -701,9 +775,13 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
     // see the push above), never by `timestamp`.
     const anchorUpdates = anchorUpdatesByParent.get(id);
     const anchor = anchorUpdates && anchorUpdates.length > 0 ? anchorUpdates[anchorUpdates.length - 1].anchor : comment.anchor;
+    const winningCommentEdit = resolveEdit(editsByTarget.get(id));
+    const foldedComment = winningCommentEdit
+      ? { ...comment, body: winningCommentEdit.body, editedAt: winningCommentEdit.timestamp }
+      : comment;
     threads.push({
       id,
-      comment,
+      comment: foldedComment,
       replies,
       statusChanges,
       status,

@@ -3,6 +3,7 @@
  * caret/selection, escape chuỗi, icon SVG, toast nhỏ.
  */
 import { TOAST_DURATION_MS } from './constants';
+import { neutralizeCommentBody, normalizeCommentBodyEol } from '../../src/comments/comment-body-limit';
 
 export function closestElement(node: Node): HTMLElement | null {
   return node instanceof HTMLElement ? node : node.parentElement;
@@ -16,34 +17,18 @@ export function escapeAttr(s: string): string {
   return escapeHtml(s).replace(/"/g, '&quot;');
 }
 
-/** Bidi override/isolate control characters — the "Trojan Source" family (LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI). */
-function isBidiControlChar(codePoint: number): boolean {
-  return (codePoint >= 0x202a && codePoint <= 0x202e) || (codePoint >= 0x2066 && codePoint <= 0x2069);
-}
-
-/** C0/C1 control characters other than `\n` (a comment body is multi-line) and `\t`. */
-function isOtherControlChar(codePoint: number): boolean {
-  return (codePoint <= 0x1f && codePoint !== 0x0a && codePoint !== 0x09) || (codePoint >= 0x7f && codePoint <= 0x9f);
-}
-
 /**
- * Req 23 US-23.10 AC9: strip bidi-override/isolate characters and other
- * control characters from a comment body before it is inserted into the DOM
- * or written to the sidecar. `textContent` alone does not neutralize these —
- * a bidi override reorders the DISPLAYED text of everything that follows it
- * regardless of how it was inserted, so it needs active stripping rather than
- * just avoiding `innerHTML`.
+ * Req 23 US-23.10 AC9: strip bidi-override/isolate characters and other control
+ * characters from a comment body before it is inserted into the DOM or written
+ * to the sidecar.
+ *
+ * Delegates to the host+webview-shared implementation rather than carrying its
+ * own copy: the native `vscode.comments` write path (US-23.14) never passes
+ * through the webview and needs the identical strip, and two copies of a
+ * security-relevant filter would be free to drift.
  */
 export function neutralizeBodyText(text: string): string {
-  let out = '';
-  for (const ch of text) {
-    const codePoint = ch.codePointAt(0) ?? 0;
-    if (isBidiControlChar(codePoint) || isOtherControlChar(codePoint)) {
-      continue;
-    }
-    out += ch;
-  }
-  return out;
+  return neutralizeCommentBody(text);
 }
 
 /**
@@ -53,7 +38,7 @@ export function neutralizeBodyText(text: string): string {
  * "reconcile to document.eol" rule does not apply here).
  */
 export function normalizeBodyEol(text: string): string {
-  return text.split('\r\n').join('\n').split('\r').join('\n');
+  return normalizeCommentBodyEol(text);
 }
 
 /**

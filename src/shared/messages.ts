@@ -300,11 +300,13 @@ export interface CommentTransition {
 
 /** Req 23 US-23.2: one reply, as carried in a `commentThreadsSync` snapshot. */
 export interface CommentSyncReply {
-  /** Durable sidecar id — what a later `deleteComment.targetReplyId` names to remove just this reply. */
+  /** Durable sidecar id — what a later `deleteComment.targetReplyId`/`editComment.targetReplyId` names to act on just this reply. */
   id: string;
   author: string;
   timestamp: string;
   body: string;
+  /** US-23.14 AC4: the winning `edit` line's timestamp, when this reply has been edited at least once. */
+  editedAt?: string;
 }
 
 /**
@@ -325,6 +327,8 @@ export interface CommentSyncThread {
   author: string;
   timestamp: string;
   body: string;
+  /** US-23.14 AC4: the winning `edit` line's timestamp, when the thread's opening comment has been edited at least once. */
+  editedAt?: string;
   /** US-23.4 tier 2 snapshot — recorded at creation, only used to seed a thread the webview has not resolved itself yet. */
   recordedText: string;
   /** Character offsets WITHIN `recordedText` — the anchor's own quote, and what places it precisely inside whatever node tier 2 matches it to. */
@@ -585,6 +589,17 @@ export type WebviewToHost =
    */
   | { type: 'deleteComment'; requestId: number; docUri: string; threadId: string; targetReplyId?: string }
   /**
+   * US-23.14: correct a comment's or reply's own `body` — never a rewrite of the
+   * original `comment`/`reply` line (US-23.5 AC2, US-23.6), always a new `edit`
+   * sidecar line append (US-23.5). `targetReplyId` absent edits the thread's
+   * opening comment; present edits that one reply. Rejected (empty/whitespace
+   * body after trim, over the shared length bound, unknown target, thread
+   * Closed) without appending a sidecar line — same host-side validation
+   * convention as `deleteComment`/`changeCommentStatus`. No authority check
+   * (AC8): any user with the file open may edit any comment or reply.
+   */
+  | { type: 'editComment'; requestId: number; docUri: string; threadId: string; targetReplyId?: string; body: string }
+  /**
    * Req 23 US-23.3: move a thread along the Open → Resolved → Closed axis, or
    * Reopen it back to Open in one step. Appends a `status-change` sidecar line
    * (US-23.5) — never rewrites a prior line, and never edits the `.md`
@@ -764,6 +779,14 @@ export type HostToWebview =
   | { type: 'replyResult'; requestId: number; ok: boolean; error?: string; replyId?: string; author?: string; timestamp?: string }
   /** Req 23 US-23.2: reply to `deleteComment`. `ok: false` carries the refusal reason (unknown target, author mismatch). */
   | { type: 'deleteCommentResult'; requestId: number; ok: boolean; error?: string }
+  /**
+   * US-23.14: reply to `editComment`. `ok: false` carries the refusal reason
+   * (empty body, over the length bound, unknown target, thread Closed,
+   * deleted-while-editing). `ok: true` carries nothing else on purpose — the new
+   * body and `editedAt` reach every surface through the `commentThreadsSync`
+   * push that follows, same rationale as `changeCommentStatusResult`.
+   */
+  | { type: 'editCommentResult'; requestId: number; ok: boolean; error?: string }
   /**
    * Req 23 US-23.3: reply to `changeCommentStatus`. `ok: false` carries the
    * refusal reason: an illegal transition from the thread's live status, or a

@@ -80,6 +80,21 @@
         "category": "Orca MD Editor"
       },
       {
+        "command": "orcaEditor.editComment",
+        "title": "Edit Comment",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.saveEditComment",
+        "title": "Save Comment Edit",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.cancelEditComment",
+        "title": "Cancel Comment Edit",
+        "category": "Orca MD Editor"
+      },
+      {
         "command": "orcaEditor.resolveComment",
         "title": "Mark Comment as Resolved",
         "category": "Orca MD Editor"
@@ -122,6 +137,18 @@
         },
         {
           "command": "orcaEditor.deleteComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.editComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.saveEditComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.cancelEditComment",
           "when": "false"
         },
         {
@@ -194,6 +221,25 @@
           "command": "orcaEditor.reopenComment",
           "group": "inline@5",
           "when": "commentController == orcaEditor.comments && commentThread =~ /status-(resolved|closed)/"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "orcaEditor.editComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-(open|resolved)/"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "orcaEditor.saveEditComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.cancelEditComment",
+          "group": "inline@2",
+          "when": "commentController == orcaEditor.comments"
         }
       ]
     },

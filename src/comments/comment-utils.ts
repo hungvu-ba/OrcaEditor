@@ -6,6 +6,7 @@
 import * as os from 'os';
 import type { CommentStatus, CommentStatusAction, WebviewToHost } from '../shared/messages';
 import { sameAuthor } from './sidecar-format';
+import { COMMENT_BODY_MAX_CODEPOINTS, commentBodyCodePointLength } from './comment-body-limit';
 
 /**
  * US-23.10 AC4: `os.userInfo()` throws on some containerized/CI environments
@@ -34,6 +35,9 @@ export type ReplyMessage = Extract<WebviewToHost, { type: 'replyToComment' }>;
 
 /** A `deleteComment` message (US-23.2), narrowed out of the WebviewToHost union. */
 export type DeleteCommentMessage = Extract<WebviewToHost, { type: 'deleteComment' }>;
+
+/** An `editComment` message (US-23.14), narrowed out of the WebviewToHost union. */
+export type EditCommentMessage = Extract<WebviewToHost, { type: 'editComment' }>;
 
 /** A `changeCommentStatus` message (US-23.3), narrowed out of the WebviewToHost union. */
 export type StatusChangeMessage = Extract<WebviewToHost, { type: 'changeCommentStatus' }>;
@@ -248,6 +252,65 @@ export function deleteRejection(
   }
   if (!sameAuthor(target.author, currentAuthor)) {
     return 'Only the original author can delete this.';
+  }
+  return null;
+}
+
+/**
+ * Why an `editComment` request is refused, or null when valid (US-23.14).
+ * `threadStatus` `undefined` means the named thread does not exist. **No
+ * authority check** (AC8, PO decision) — unlike `deleteRejection`, any user
+ * with the file open may edit any comment or reply regardless of whose name
+ * is on it. The "unchanged text is treated as Cancel" rule (AC2's sub-
+ * criterion) is NOT a rejection — it is a silent no-op the caller checks
+ * after this passes, so it is handled in `commentController.ts`, not here.
+ */
+export function editRejection(
+  msg: EditCommentMessage,
+  docUri: string,
+  threadStatus: CommentStatus | undefined,
+  /**
+   * The body this edit would replace, when the caller has resolved the target.
+   * Used only to avoid punishing an edit for length it did not introduce — see
+   * the cap check below.
+   */
+  originalBody?: string
+): string | null {
+  if (msg.docUri !== docUri) {
+    return 'This edit was written for a different document.';
+  }
+  if (msg.threadId === '') {
+    return 'This edit names no thread.';
+  }
+  // Untrusted input: every field arrives off the wire, so a non-string body is
+  // refused rather than reaching `.trim()` and throwing inside the host's
+  // message handler — a throw there posts no result at all and leaves the
+  // webview's guard waiting out its full timeout.
+  if (typeof msg.body !== 'string') {
+    return 'This edit carries no usable text.';
+  }
+  if (msg.body.trim() === '') {
+    return 'Removing all the text is what Delete is for — a comment cannot be saved empty.';
+  }
+  // AC7 bounds an edit at the same cap creation enforces — but US-23.10 AC10 has
+  // NOT shipped, so bodies longer than the cap already exist in the wild. Capping
+  // such a body at 4000 would make an editor silently destroy content they did
+  // not write (AC8 lets anyone edit anyone's comment), and refusing outright
+  // would make it permanently uneditable. So the ceiling is the cap OR the
+  // length already there, whichever is larger: an edit can never GROW an
+  // over-long body, and a normal body still cannot exceed the cap.
+  const ceiling = Math.max(
+    COMMENT_BODY_MAX_CODEPOINTS,
+    originalBody === undefined ? 0 : commentBodyCodePointLength(originalBody)
+  );
+  if (commentBodyCodePointLength(msg.body) > ceiling) {
+    return `A comment can be at most ${COMMENT_BODY_MAX_CODEPOINTS} characters.`;
+  }
+  if (threadStatus === undefined) {
+    return 'This comment thread no longer exists.';
+  }
+  if (threadStatus === 'Closed') {
+    return 'This thread is closed — reopen it before editing.';
   }
   return null;
 }
