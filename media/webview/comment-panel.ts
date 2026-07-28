@@ -25,6 +25,7 @@
  */
 import { anchorCandidates, commentAnchorLineRange, type AnchorCandidateNode } from './block-map';
 import { normalizeAnchorText, rankReattachTargets, type ReattachTarget } from './comment-anchor';
+import { RENDER_GENERATION_ATTR } from './block-patch';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
 import {
   ANCHOR_REEVAL_DEBOUNCE_MS,
@@ -586,6 +587,8 @@ export function initCommentPanel(
    * recomputed the same list.
    */
   let pickerCandidates: AnchorCandidateNode[] = [];
+  /** RENDER_GENERATION_ATTR value the candidate walk above was taken against (P-9). */
+  let pickerGeneration: string | null = null;
   let pickerRows: Array<{ row: HTMLElement; node: HTMLElement }> = [];
   let pickerIndex = 0;
   let pointerMoved = false;
@@ -625,13 +628,19 @@ export function initCommentPanel(
     }
     pickerList.textContent = '';
     pickerRows = [];
-    // A host 'update' rebuilds #content wholesale (renderDocument) and does NOT close this
-    // picker, which detaches every cached node — attach() would then refuse every row
-    // (`!node.isConnected`) until the user reopened the picker. Re-walk on that signal so the
-    // list heals itself the way the pre-cache per-keystroke walk did. One isConnected read
-    // per keystroke, not a document walk.
-    if (pickerCandidates.length > 0 && !pickerCandidates[0].el.isConnected) {
+    // A host 'update' re-renders #content (renderDocument) and does NOT close this picker.
+    // Pre-P-9 that rebuild detached every cached node, so "first candidate disconnected" was
+    // the re-walk signal; a P-9 block patch can KEEP that node while still inserting blocks
+    // the cache has never seen — compare the render-generation stamp instead (one attribute
+    // read per keystroke, not a document walk). isConnected stays as a second trigger for
+    // non-render detachment. Without a re-walk, attach() would refuse detached rows and new
+    // blocks would never be offered until the user reopened the picker.
+    // No `length > 0` gate on the generation half: a picker opened over an
+    // empty walk must still heal when an update inserts blocks (iter-1 review).
+    const generation = content.getAttribute(RENDER_GENERATION_ATTR);
+    if (generation !== pickerGeneration || (pickerCandidates.length > 0 && !pickerCandidates[0].el.isConnected)) {
       pickerCandidates = attachTargets();
+      pickerGeneration = generation;
     }
     const candidates = pickerCandidates;
     const { suggested, all } = rankReattachTargets(
@@ -721,6 +730,7 @@ export function initCommentPanel(
     pointerMoved = false;
     picker.hidden = false;
     pickerCandidates = attachTargets();
+    pickerGeneration = content.getAttribute(RENDER_GENERATION_ATTR);
     buildPicker();
     positionNear(picker, anchorRect);
     pickerDismiss.arm();

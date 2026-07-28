@@ -38,6 +38,11 @@ import {
   MD_CODE_WRAP_CLASS,
   initFrontMatterToggle,
   applyFrontMatterViewState,
+  MERMAID_CLASS,
+  MERMAID_CHART_CLASS,
+  PLANTUML_CLASS,
+  PLANTUML_CHART_CLASS,
+  type LineRange,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
@@ -54,6 +59,7 @@ import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
+import { copySrcLines, lineAgnosticKey, planBlockPatch, RENDER_GENERATION_ATTR } from './block-patch';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
 import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, ownsNativeTextHistory, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
@@ -985,6 +991,150 @@ function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
 // Render
 // ---------------------------------------------------------------------------
 
+/**
+ * The passes every fresh render must go through before it is shown or diffed.
+ * Runs on the live #content for a full rebuild and on the detached staging
+ * container for a P-9 block patch — every pass takes a plain root and reads no
+ * layout. First entry is US-2.7: reapply the last known collapsed/expanded/raw
+ * state onto the fresh `.md-front-matter` node — that state is in-memory only
+ * (no extension-host persistence), so it must run on every render, not just
+ * cold-open, and it must run before the snapshot/diff so both sides key the
+ * front-matter block at the same stage.
+ */
+function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): void {
+  applyFrontMatterViewState(root);
+  postProcessMathDom(root, document, mathRanges);
+  postProcessMermaidDom(root, document);
+  postProcessPlantumlDom(root, document);
+  postProcessCodeHeaders(root, document);
+  postProcessRelativePathLinks(root, document);
+  postProcessCaptions(root, document);
+  postProcessEntityRefs(root);
+  postProcessEmptyLinks(root);
+}
+
+/**
+ * Performance Audit P-9: each live top-level node's render-time key (the
+ * lineAgnosticKey of its post-postprocess DOM). A local mutation overwrites
+ * the node's entry with NO_RENDER_KEY via markDirtyFrom (the same
+ * MutationObserver feed P-7 uses), so a REAL key always means "this node still
+ * shows exactly what its render produced" — only such a node may be kept by
+ * the next host update; a poisoned node stays in the diff and always lands in
+ * the replaced run. Caret-trap <p>s are created after the snapshot and get a
+ * key only if a local mutation later touches them.
+ */
+let renderKeyByBlock = new WeakMap<Element, string>();
+let hasRenderSnapshot = false;
+/** Key stand-in for a poisoned live block — never equal to any real key (keys are outerHTML, starting with '<'). */
+const NO_RENDER_KEY = ' ';
+/** Monotonic render counter behind RENDER_GENERATION_ATTR (see block-patch.ts). */
+let renderGeneration = 0;
+
+function snapshotRenderKeys(): void {
+  renderKeyByBlock = new WeakMap();
+  for (const child of Array.from(content.children)) {
+    renderKeyByBlock.set(child, lineAgnosticKey(child));
+  }
+  hasRenderSnapshot = true;
+}
+
+/** `cls` present on or under any of the freshly inserted top-level nodes. */
+function insertedHas(inserted: Element[], cls: string): boolean {
+  return inserted.some((el) => el.classList.contains(cls) || el.querySelector(`.${cls}`) !== null);
+}
+
+/**
+ * P-9 review (iter 1): a KEPT diagram can be stuck on its "Rendering…"
+ * placeholder — its in-flight pass was discarded by a newer renderSeq (manual
+ * code→chart toggle) and nothing landed, so its render key is intact and the
+ * scoped renderAll below would never retry it. Pre-P-9 the unconditional
+ * renderAll healed this on the next update; detect it instead: a rendered
+ * chart holds an element child (SVG/img), a placeholder or error chart holds
+ * only text (retrying an errored chart on update is also pre-P-9 parity).
+ */
+function hasUnrenderedChart(chartCls: string): boolean {
+  return Array.from(content.querySelectorAll(`.${chartCls}`)).some((chart) => chart.childElementCount === 0);
+}
+
+/** All <table> elements on or under the given top-level nodes. */
+function tablesWithin(els: Element[]): HTMLTableElement[] {
+  const out: HTMLTableElement[] = [];
+  for (const el of els) {
+    if (el.tagName === 'TABLE') {
+      out.push(el as HTMLTableElement);
+    }
+    for (const t of Array.from(el.querySelectorAll('table'))) {
+      out.push(t as HTMLTableElement);
+    }
+  }
+  return out;
+}
+
+/**
+ * Performance Audit P-9: render the update into a DETACHED container, keep
+ * every live block whose key still matches pairwise from both ends, and splice
+ * only the middle run into #content — kept blocks retain node identity (ids,
+ * rendered diagram SVGs, inline styles) and only adopt the new render's line
+ * attrs. Returns the inserted top-level elements (possibly none, for a pure
+ * line shift), or null when there is no snapshot to diff against yet and the
+ * caller must rebuild in full. Runs with the MutationObserver disconnected
+ * (renderDocument brackets it), so the splice marks nothing dirty.
+ */
+function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null {
+  if (!hasRenderSnapshot) {
+    return null;
+  }
+  const staging = document.createElement('div');
+  staging.innerHTML = html;
+  postProcessRenderedDom(staging, mathRanges);
+  const fresh = Array.from(staging.children);
+  const freshKeys = fresh.map((el) => lineAgnosticKey(el));
+  // Live blocks that take part in the diff: keyed (pristine since their
+  // render) or at least a real markdown block (poisoned → NO_RENDER_KEY →
+  // always lands in the replaced run). Everything else (caret-trap <p>s) is
+  // swept together with whichever run it sits in.
+  const live = Array.from(content.children).filter((el) => renderKeyByBlock.has(el) || readSrcRange(el) !== null);
+  const liveKeys = live.map((el) => renderKeyByBlock.get(el) ?? NO_RENDER_KEY);
+  const { prefix, suffix } = planBlockPatch(liveKeys, freshKeys);
+
+  // Remove the live changed run — anchored on the KEPT neighbours, so
+  // interleaved caret-traps and stray text nodes inside the run go with it.
+  const liveStop: ChildNode | null = suffix > 0 ? live[live.length - suffix] : null;
+  let cursor: ChildNode | null = prefix === 0 ? content.firstChild : live[prefix - 1].nextSibling;
+  while (cursor && cursor !== liveStop) {
+    const next: ChildNode | null = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
+
+  // Move the fresh changed run in (same anchoring, keeping text nodes).
+  const inserted = fresh.slice(prefix, fresh.length - suffix);
+  const freshStop: ChildNode | null = suffix > 0 ? fresh[fresh.length - suffix] : null;
+  let src: ChildNode | null = prefix === 0 ? staging.firstChild : fresh[prefix - 1].nextSibling;
+  const frag = document.createDocumentFragment();
+  while (src && src !== freshStop) {
+    const next: ChildNode | null = src.nextSibling;
+    frag.appendChild(src);
+    src = next;
+  }
+  content.insertBefore(frag, liveStop);
+
+  // Kept blocks: adopt the new render's line attrs (an edit above or below
+  // moved them even though their content did not change) and re-key.
+  for (let i = 0; i < prefix; i++) {
+    copySrcLines(fresh[i], live[i]);
+    renderKeyByBlock.set(live[i], freshKeys[i]);
+  }
+  for (let k = 1; k <= suffix; k++) {
+    copySrcLines(fresh[fresh.length - k], live[live.length - k]);
+    renderKeyByBlock.set(live[live.length - k], freshKeys[freshKeys.length - k]);
+  }
+  for (let i = 0; i < inserted.length; i++) {
+    renderKeyByBlock.set(inserted[i], freshKeys[prefix + i]);
+  }
+  return inserted;
+}
+
 function renderDocument(markdown: string): void {
   if (!renderer) {
     return;
@@ -996,24 +1146,27 @@ function renderDocument(markdown: string): void {
   resetBlockSerializeState();
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
-  content.innerHTML = stripMetaRefresh(html);
-  // US-2.7: reapply the last known collapsed/expanded/raw state onto the
-  // fresh `.md-front-matter` node this innerHTML assignment just replaced —
-  // Boundaries: in-memory only (no extension-host persistence), so this must
-  // run on every render, not just cold-open.
-  applyFrontMatterViewState(content);
-  postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
-  postProcessMermaidDom(content, document);
-  postProcessPlantumlDom(content, document);
-  postProcessCodeHeaders(content, document);
-  postProcessRelativePathLinks(content, document);
-  postProcessCaptions(content, document);
-  postProcessEntityRefs(content);
-  postProcessEmptyLinks(content);
+  const cleanHtml = stripMetaRefresh(html);
+  const mathRanges = renderer.getLastMathBlockRanges();
+  // Performance Audit P-9: splice only the blocks this update changed; null =
+  // nothing to diff against yet (first render) → full innerHTML rebuild.
+  const inserted = tryPatchRender(cleanHtml, mathRanges);
+  if (!inserted) {
+    content.innerHTML = cleanHtml;
+    postProcessRenderedDom(content, mathRanges);
+    snapshotRenderKeys();
+  }
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
-  mermaidView.renderAll();
-  plantumlView.renderAll();
+  // P-9: diagram re-render and table fitting are the async/layout-heavy halves
+  // of the old full rebuild — after a patch, run them only for inserted nodes
+  // (kept diagrams still hold their live SVG; kept tables their fitted widths).
+  if (!inserted || insertedHas(inserted, MERMAID_CLASS) || hasUnrenderedChart(MERMAID_CHART_CLASS)) {
+    mermaidView.renderAll();
+  }
+  if (!inserted || insertedHas(inserted, PLANTUML_CLASS) || hasUnrenderedChart(PLANTUML_CHART_CLASS)) {
+    plantumlView.renderAll();
+  }
   table.hideTableToolbar();
   // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
   // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
@@ -1024,10 +1177,15 @@ function renderDocument(markdown: string): void {
   // Co từng cột bảng vừa dựng về vừa nội dung (cột ngắn không bị ép rộng bằng
   // sàn 14ch của cột dài nhất) — phải chạy TRƯỚC stickyTableHeader.refresh() vì
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
-  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+  const freshTables = inserted ? tablesWithin(inserted) : (Array.from(content.querySelectorAll('table')) as HTMLTableElement[]);
+  freshTables.forEach((t) => fitTableColumns(t));
   blockMap = buildBlockMap(content, markdown, blockMap);
   blockById = new Map(blockMap.map((entry) => [entry.id, entry]));
   siblingSensitiveDocument = hasSiblingSensitiveBlock(blockMap);
+  // P-9: a patched render keeps untouched nodes, so "my cached node detached"
+  // no longer signals "a render happened" — consumers holding a cached DOM
+  // walk (the re-attach picker) compare this stamp instead.
+  content.setAttribute(RENDER_GENERATION_ATTR, String(++renderGeneration));
   // Watch again only now: buildBlockMap stamps data-block-id on every block, and
   // those attribute writes are not edits.
   observeContentMutations();
@@ -1460,6 +1618,16 @@ function markDirtyFrom(node: Node): void {
   const block = topLevelBlockOf(node);
   if (block) {
     dirtyBlocks.add(block);
+    // Performance Audit P-9: the block no longer shows what its render
+    // produced — poison its render key so the next host update replaces it
+    // instead of keeping stale local DOM over the document's text. SET the
+    // sentinel, never delete: a deleted entry drops a LINE-LESS block (raw
+    // html_block, e.g. a top-level <img>/<div>) out of the patch diff
+    // entirely, and an update deleting it from the source would then leave it
+    // alive in the DOM to be serialized back (review finding, iter 1).
+    if (block instanceof Element) {
+      renderKeyByBlock.set(block, NO_RENDER_KEY);
+    }
   }
 }
 

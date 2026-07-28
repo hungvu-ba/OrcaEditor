@@ -39,6 +39,8 @@ import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { copySrcLines, lineAgnosticKey, planBlockPatch } from '../media/webview/block-patch';
+import domino from '@mixmark-io/domino';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
 import { buildGroups } from '../media/webview/comment-gutter';
@@ -4328,6 +4330,84 @@ check(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Performance Audit P-9 — block patch plan (media/webview/block-patch.ts)
+// ---------------------------------------------------------------------------
+
+{
+  eq('P-9 plan: identical lists → everything kept, empty changed run', planBlockPatch(['a', 'b', 'c'], ['a', 'b', 'c']), {
+    prefix: 3,
+    suffix: 0,
+  });
+  eq('P-9 plan: one changed block in the middle', planBlockPatch(['a', 'b', 'c'], ['a', 'x', 'c']), { prefix: 1, suffix: 1 });
+  eq('P-9 plan: insertion keeps both neighbours', planBlockPatch(['a', 'b'], ['a', 'x', 'b']), { prefix: 1, suffix: 1 });
+  eq('P-9 plan: deletion keeps both neighbours', planBlockPatch(['a', 'x', 'b'], ['a', 'b']), { prefix: 1, suffix: 1 });
+  eq('P-9 plan: nothing in common → full replace', planBlockPatch(['a', 'b'], ['x', 'y']), { prefix: 0, suffix: 0 });
+  eq('P-9 plan: empty old list (first content)', planBlockPatch([], ['a']), { prefix: 0, suffix: 0 });
+  eq('P-9 plan: empty new list (document cleared)', planBlockPatch(['a'], []), { prefix: 0, suffix: 0 });
+  // Repeated blocks: prefix + suffix must never claim the same live node twice.
+  eq('P-9 plan: repeated blocks clamp (aa → aaa)', planBlockPatch(['a', 'a'], ['a', 'a', 'a']), { prefix: 2, suffix: 0 });
+  eq('P-9 plan: repeated blocks clamp (a → aa)', planBlockPatch(['a'], ['a', 'a']), { prefix: 1, suffix: 0 });
+
+  const keyDoc = domino.createDocument('', true);
+  const key = (html: string): string => {
+    const host = keyDoc.createElement('div');
+    host.innerHTML = html;
+    return lineAgnosticKey(host.firstElementChild!);
+  };
+  check(
+    'P-9 key: two renders differing only in line values share one key',
+    key('<p data-line="3" data-line-end="4">x</p>') === key('<p data-line="7" data-line-end="9">x</p>')
+  );
+  check(
+    'P-9 key: nested list-item line values are normalized too',
+    key('<ul data-line="1" data-line-end="2"><li data-line="1">a</li></ul>') ===
+      key('<ul data-line="5" data-line-end="6"><li data-line="5">a</li></ul>')
+  );
+  check('P-9 key: content changes change the key', key('<p data-line="3">x</p>') !== key('<p data-line="3">y</p>'));
+  check(
+    'P-9 key: a literal data-line=... inside TEXT is content, not an attribute (iter-1 review)',
+    key('<p data-line="1"><code>see data-line="5" here</code></p>') !==
+      key('<p data-line="1"><code>see data-line="7" here</code></p>')
+  );
+  check(
+    'P-9 key: carrier PRESENCE is part of the key (setext/atx, indented/fenced replaced, not kept)',
+    key('<h1 data-line="3" data-line-end="4">T</h1>') !== key('<h1 data-line="3">T</h1>')
+  );
+  check(
+    'P-9 key: attributes merely starting with data-line are untouched content',
+    key('<p data-lineage="3">x</p>') === key('<p data-lineage="3">x</p>') &&
+      key('<p data-lineage="3">x</p>') !== key('<p data-lineage="4">x</p>')
+  );
+}
+
+{
+  // copySrcLines zips the carrier lists (self + descendants) and copies both attrs.
+  const doc = domino.createDocument(
+    '<div id="from"><ul data-line="10" data-line-end="13"><li data-line="10">x</li><li data-line="12" data-line-end="13">y</li></ul></div>' +
+      '<div id="to"><ul data-line="3" data-line-end="6"><li data-line="3">x</li><li data-line="5" data-line-end="6">y</li></ul></div>',
+    true
+  );
+  const from = doc.querySelector('#from > ul')!;
+  const to = doc.querySelector('#to > ul')!;
+  copySrcLines(from, to);
+  eq(
+    'P-9 copySrcLines: block and nested carriers adopt the fresh values',
+    [
+      to.getAttribute('data-line'),
+      to.getAttribute('data-line-end'),
+      ...Array.from(to.querySelectorAll('li')).map((li) => `${li.getAttribute('data-line')}/${li.getAttribute('data-line-end')}`),
+    ],
+    ['10', '13', '10/null', '12/13']
+  );
+
+  // Guard: a carrier-count mismatch copies nothing rather than misaligning.
+  const guarded = doc.createElement('p');
+  guarded.setAttribute('data-line', '2');
+  copySrcLines(from, guarded);
+  eq('P-9 copySrcLines: carrier-count mismatch leaves the target untouched', guarded.getAttribute('data-line'), '2');
+}
 
 console.log(`\n${pass} pass, ${fail} fail`);
 if (failures.length) {
