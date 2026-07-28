@@ -487,3 +487,5 @@
 | 0.10.0 | 2026-07-28 | Feature (US-23.16 AC1-AC8): comment sidecar dedup now spans every line type, belonging uses discriminating-length thresholds, delete drops its author gate. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.22): an unregistered `#content` CSS class now fails `npm test`; the scan found and registered three more leaking classes. |
 | 0.10.0 | 2026-07-28 | Feature (US-23.15): the comment sidecar now reloads when it changes on disk — threads added, refreshed and removed — and load losses plus an unshareable sidecar are surfaced. |
+| 0.10.0 | 2026-07-28 | Fix: repo hygiene — typecheck and lint now pass clean, roundtrip skips stale bundles with no source (23/23, was a misleading 27/27), comment-popover.ts no longer binary. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.18 host track): AC6's probe now proves an undo reverts US-23.5's sidecar rename — a confirmed defect; the capability positive control no longer reddens the gate. |

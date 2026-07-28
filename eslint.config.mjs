@@ -18,6 +18,9 @@ export default tseslint.config(
       'node_modules/**',
       'dist/**',
       'out/**',
+      // Downloaded VS Code tree for @vscode/test-electron: not our source, and its
+      // .ts files are outside tsconfig, so the type-aware parser errors on each one.
+      '.vscode-test/**',
       'test/**',
       'Local Test/**',
       'playwright.config.ts',

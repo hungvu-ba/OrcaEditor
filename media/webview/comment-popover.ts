@@ -906,9 +906,9 @@ export function initCommentPopover(
 
   // --- US-23.14: edit an already-posted comment or reply ----------------------
 
-  /** The `inFlightEdits` key for one target. ` ` cannot occur in a durable id, so the two halves can never run together ambiguously. */
+  /** The `inFlightEdits` key for one target. `\0` cannot occur in a durable id, so the two halves can never run together ambiguously. */
   function editTargetKey(thread: string | undefined, replyId: string | undefined): string {
-    return `${thread ?? ''} ${replyId ?? ''}`;
+    return `${thread ?? ''}\0${replyId ?? ''}`;
   }
 
   function inFlightEditByRequest(requestId: number): { requestId: number; thread: string; replyId: string | undefined } | undefined {

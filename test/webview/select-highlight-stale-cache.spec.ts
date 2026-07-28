@@ -8,7 +8,7 @@
  * instead of the real other occurrence (reported live: selecting "US-23.22"
  * highlighted "21"/"Nên" on a different line).
  */
-import { test, expect } from '@playwright/test';
+import { test } from '@playwright/test';
 import { openEditor } from './_harness';
 
 type PWPage = import('@playwright/test').Page;
