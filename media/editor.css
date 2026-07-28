@@ -3236,6 +3236,7 @@ body.reading-mode-sepia {
    * shifts it to ochre/gold for exactly this collision. */
   --comment-status-done-fg: #4b7a3f;
   --comment-warn-fg: #8f6a1a;
+  --comment-pin-group-border: #5b4636;
 }
 body.reading-mode-paper {
   --toolbar-bg: #f4f4ea;
@@ -3262,6 +3263,7 @@ body.reading-mode-paper {
    * anchor-trouble family stays — no collision to resolve. */
   --comment-status-done-fg: #1a7a4a;
   --comment-warn-fg: #9a6a1a;
+  --comment-pin-group-border: #111110;
 }
 /* #table-toolbar vẫn kế thừa --rp-* như US-19.11 (chỉ #toolbar tách sang
  * --toolbar-* riêng ở trên). */
@@ -3542,6 +3544,18 @@ body[class*='reading-mode-'] ::highlight(search-current) {
   --comment-status-closed-fg: var(--toc-muted);
   --comment-status-closed-bg: color-mix(in srgb, var(--toc-fg) 10%, transparent);
   --comment-status-anchor-bg: color-mix(in srgb, var(--comment-warn-fg) 16%, transparent);
+  /* Outline of the gutter's "comment group" pill (the clustered ⌗ +N pin). Takes
+   * the mode's own foreground (COMMENT_SYSTEM_TOKENS.md `--cmt-fg`) rather than
+   * an accent tint, so a group reads as its own object next to the accent-tinted
+   * single pins. Standard Dark is the default here; the three other modes
+   * override it below (Light) and in their own palette blocks (Sepia/Paper). */
+  --comment-pin-group-border: #cccccc;
+}
+
+/* Must sit AFTER the :root block above — same specificity, so source order
+ * decides which value the light theme ends up with. */
+.vscode-light {
+  --comment-pin-group-border: #3b3b3b;
 }
 
 #comment-tabpanel {
@@ -4789,6 +4803,28 @@ body[class*='reading-mode-'] .comment-composer-input {
   text-decoration-thickness: 1.5px;
 }
 
+/* Standard — Dark only: the violet wash above is tuned for a light page and
+ * loses too much contrast against #1f1f1f. Raised per the Comment System token
+ * table's dark column — wash .22 → .30, active .34 → .46, plus the "comment
+ * rule" the handoff always specified but that only the non-exact variant ever
+ * implemented (a solid underline here, so AC2's dashed one stays distinct).
+ * Nothing about the TEXT changes — background and underline only, never the
+ * glyph colour, so a commented run still reads exactly as the author wrote it.
+ * `:not([class*='reading-mode-'])` is what "Standard" means in this codebase:
+ * Sepia and Paper are the only palettes that add a colour class, and their own
+ * (light) backgrounds do not need the boost. */
+body.vscode-dark:not([class*='reading-mode-']) ::highlight(comment-anchor) {
+  background-color: rgba(130, 110, 220, 0.3);
+  text-decoration: underline solid rgba(184, 176, 255, 0.9);
+  text-decoration-thickness: 1px;
+}
+
+body.vscode-dark:not([class*='reading-mode-']) ::highlight(comment-anchor-open) {
+  background-color: rgba(130, 110, 220, 0.46);
+  text-decoration: underline solid rgba(184, 176, 255, 0.9);
+  text-decoration-thickness: 1px;
+}
+
 /* --- Req 23 US-23.2: gutter pins ---------------------------------------------
  * A lane immediately left of #content, independent of gutter.ts's numbered
  * line gutter (a separate lane, own reservation) and of the showLineNumbers
@@ -4828,8 +4864,13 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
   height: 16px;
   padding: 0 5px 0 4px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 14%, transparent);
-  color: var(--vscode-textLink-foreground, #005fb8);
+  /* Through the --comment-status-* layer, not --vscode-textLink-foreground
+   * directly: the handoff gives pins, pills and rows ONE status palette, and
+   * that layer already resolves per mode (Open = the mode's own accent). Read
+   * raw, the pin kept VS Code's blue on Sepia's cream page. Percentages are the
+   * ones the pin already used, so Standard renders unchanged. */
+  background: color-mix(in srgb, var(--comment-status-open-fg) 14%, transparent);
+  color: var(--comment-status-open-fg);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -4839,19 +4880,33 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 
 .comment-gutter-pin:hover,
 .comment-gutter-pin:focus-visible {
-  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 26%, transparent);
+  background: color-mix(in srgb, var(--comment-status-open-fg) 26%, transparent);
   outline: none;
 }
 
+/* Deliberately the CLOSED foreground, not the Resolved green: this pin's muted
+ * grey is what shipped, and swapping it for a status hue is a design change, not
+ * a palette fix. --comment-status-closed-fg resolves to the same
+ * --vscode-descriptionForeground under Standard. */
 .comment-gutter-pin.resolved {
   background: color-mix(in srgb, currentColor 8%, transparent);
-  color: var(--vscode-descriptionForeground, #9d9d9d);
+  color: var(--comment-status-closed-fg);
 }
 
 .comment-gutter-pin-cluster {
+  /* border-box: there is no global box-sizing reset, so content-box would push
+   * the pill to 20px and break its alignment with the single pins. */
+  box-sizing: border-box;
   height: 18px;
+  border: 1px solid var(--comment-pin-group-border);
   border-radius: 9px;
-  box-shadow: 0 0 0 3px var(--vscode-editor-background);
+  /* The halo is a spacer that punches the pill out of whatever is behind it, so
+   * it must paint the PAGE background — --rp-bg, which Sepia/Paper redefine.
+   * Reading straight from --vscode-editor-background painted the VS Code theme's
+   * (dark) background over a cream page and read as a thick black ring, drowning
+   * the 1px group border above. --rp-bg is declared on :root and maps back to
+   * --vscode-editor-background under Standard, so this is unchanged there. */
+  box-shadow: 0 0 0 3px var(--rp-bg, var(--vscode-editor-background));
 }
 
 .comment-gutter-pin-icon {

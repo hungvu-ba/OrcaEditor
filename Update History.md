@@ -517,3 +517,8 @@
 | 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |
 | 0.10.0 | 2026-07-28 | Fix (security S-1 residual): asset paste/drop/undo-restore/orphan-cleanup now refuse a symlinked target file instead of writing or reading through it. |
 | 0.10.0 | 2026-07-28 | Perf: typing re-serializes only the blocks an edit touched via a per-block markdown cache, instead of turndown over the whole document (Performance Audit P-7). |
+| 0.10.0 | 2026-07-28 | Perf: each typing sync now sends only the changed region to the host instead of the whole document, with a revision-checked full resync fallback (Performance Audit P-8). |
+| 0.10.0 | 2026-07-28 | Feature: the gutter comment-group (cluster) pill gets a per-mode outline token --comment-pin-group-border for Standard Light/Dark, Sepia and Paper. |
+| 0.10.0 | 2026-07-28 | Fix: comment-anchor highlight gains contrast in Standard Dark — wash .22 to .30, active .34 to .46, plus a violet underline rule; text colour untouched. |
+| 0.10.0 | 2026-07-28 | Fix: the comment-group pin halo painted the VS Code theme background over Sepia/Paper pages, reading as a thick black ring; it now follows --rp-bg. |
+| 0.10.0 | 2026-07-28 | Fix: gutter comment pins read the VS Code link/description colours directly, showing blue on Sepia/Paper; they now resolve through the per-palette --comment-status-* layer. |
