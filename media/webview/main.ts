@@ -87,7 +87,7 @@ import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS } from './constants';
+import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, REF_NAV_FLASH_CLASS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -660,6 +660,7 @@ window.addEventListener('message', (event) => {
           body: t.body,
           author: t.author,
           createdAt: t.timestamp,
+          editedAt: t.editedAt,
           status: t.status,
           replies: t.replies,
           // `?? []`: the field is required on the wire, but this is the untrusted
@@ -688,6 +689,10 @@ window.addEventListener('message', (event) => {
     }
     case 'deleteCommentResult': {
       commentPopover.notifyDeleteResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'editCommentResult': {
+      commentPopover.notifyEditResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'changeCommentStatusResult': {
@@ -1971,8 +1976,8 @@ function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
     return;
   }
   bodyAnchor.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-  bodyAnchor.classList.add('ref-nav-flash');
-  setTimeout(() => bodyAnchor.classList.remove('ref-nav-flash'), 1200);
+  bodyAnchor.classList.add(REF_NAV_FLASH_CLASS);
+  setTimeout(() => bodyAnchor.classList.remove(REF_NAV_FLASH_CLASS), 1200);
   quickCorrect.open(bodyAnchor);
 }
 

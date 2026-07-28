@@ -15,6 +15,8 @@ import {
   PLANTUML_CLASS,
   AUTOLINK_PATH_ATTR,
   EMPTY_LINK_ATTR,
+  ENTITY_REF_CLASS,
+  MD_CODE_WRAPPED_CLASS,
 } from './render';
 import { hasAncestor, getAncestor } from './dom-portable';
 import { hasUrlScheme } from '../../src/shared/link-scheme';
@@ -30,7 +32,16 @@ import {
   TABLE_SEP_STYLE_ATTR,
 } from './block-style';
 import { COMMENT_ANCHOR_ATTR } from './block-map';
-import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_ANCHOR_STATE_ATTR } from './constants';
+import {
+  COMMENT_ANCHOR_ACTIVE_CLASS,
+  COMMENT_ANCHOR_STATE_ATTR,
+  REF_NAV_FLASH_CLASS,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+  MD_TABLE_FIT_CLASS,
+  MD_CHROME_MARKER_ATTR,
+} from './constants';
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -185,6 +196,10 @@ export function createTurndown(): TurndownService {
   });
 
   // --- <img> HTML thô có attribute ngoài src/alt/title → giữ nguyên HTML ---
+  //     US-23.21 AC3: một attribute/class sẽ bị safeOuterHtml strip sạch
+  //     (TRANSIENT_ATTRS, hoặc `class` chỉ toàn token TRANSIENT_CLASSES) không
+  //     được tính là "extra" — nếu không thì kết quả đã stripped-về-không vẫn
+  //     đi đường raw HTML thay vì rule ảnh mặc định (![]()).
   td.addRule('htmlImgWithAttrs', {
     filter: (node) => {
       if (node.nodeName !== 'IMG') {
@@ -192,9 +207,23 @@ export function createTurndown(): TurndownService {
       }
       const attrs = (node as Element).attributes;
       for (let i = 0; i < attrs.length; i++) {
-        if (!['src', 'alt', 'title'].includes(attrs[i].name)) {
-          return true;
+        const name = attrs[i].name;
+        if (['src', 'alt', 'title'].includes(name)) {
+          continue;
         }
+        if (TRANSIENT_ATTRS.includes(name)) {
+          continue;
+        }
+        if (name === 'class') {
+          // .every() on an empty array is vacuously true, so a present-but-empty
+          // class="" (no real tokens) discounts the same as an all-transient one —
+          // both leave nothing for stripTransientClasses to strip.
+          const tokens = attrs[i].value.trim().split(/\s+/).filter(Boolean);
+          if (tokens.every((t) => TRANSIENT_CLASSES.includes(t))) {
+            continue;
+          }
+        }
+        return true;
       }
       return false;
     },
@@ -577,7 +606,9 @@ export function createTurndown(): TurndownService {
       const el = node as HTMLElement;
       const align = getBlockAlign(el);
       const tag = el.nodeName.toLowerCase();
-      const inner = collapseBlankLines(el.innerHTML ?? '');
+      // US-23.21 AC1: route through cloneAndStrip like every other raw-HTML
+      // emitter — this rule used to read live el.innerHTML unstripped.
+      const inner = collapseBlankLines(cloneAndStrip(el).innerHTML ?? '');
       return `\n\n<${tag} align="${align}">${inner}</${tag}>\n\n`;
     },
   });
@@ -712,15 +743,40 @@ const TRANSIENT_ATTRS = [
  * raw-HTML path. Every future comment class belongs here too (see the same
  * warning at comment-panel.ts's drop-overlay).
  *
- * Scoped to comment classes on purpose: OTHER presentation classes stamped on
- * live `#content` nodes (`md-entity-ref`, `dd-hover-outline`, `ref-nav-flash`,
- * `md-code-wrapped`…) leak through this same path today. That is a pre-existing
- * defect of those features, not this one — recorded in
- * `_bmad-output/quick-dev/deferred-work.md`; this list is where its fix lands.
+ * US-23.21 AC2/AC4/AC6: every other presentation class stamped on live
+ * `#content` nodes registers here too, one exported constant per owning
+ * feature (Req 21's entity-ref marker, Req 20's cross-reference nav flash,
+ * Req 17's drag-drop hover/mute states, Req 04's code-wrap marker, and
+ * `md-table-fit`, folded in from `stripTablePresentation`'s own former rival
+ * strip list so there is exactly one place a class is registered).
+ *
+ * US-23.21 AC5: every name below is a RESERVED name — a user-authored class
+ * in hand-written HTML that happens to collide with one of these is removed
+ * exactly like the editor-stamped one, since by the time this list runs there
+ * is no way to tell them apart (`postProcessEntityRefs` re-stamps `md-entity-ref`
+ * on every render, so a user's own `class="md-entity-ref"` is indistinguishable
+ * from the editor's). A class NOT in this list, whatever its name, always
+ * survives serialization untouched.
  */
-const TRANSIENT_CLASSES = [COMMENT_ANCHOR_ACTIVE_CLASS];
+const TRANSIENT_CLASSES = [
+  COMMENT_ANCHOR_ACTIVE_CLASS,
+  ENTITY_REF_CLASS,
+  REF_NAV_FLASH_CLASS,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+  MD_CODE_WRAPPED_CLASS,
+  MD_TABLE_FIT_CLASS,
+];
 
-function safeOuterHtml(el: HTMLElement): string {
+/**
+ * Clones `el` and strips every TRANSIENT_ATTRS/TRANSIENT_CLASSES token, the
+ * table-fit presentation and any editor-injected UI chrome — shared by every
+ * raw-HTML emitter (US-23.21 AC1/AC1b) so a strip fix lands once instead of
+ * per call site. Operates on the clone only; the live #content DOM is never
+ * touched.
+ */
+function cloneAndStrip(el: HTMLElement): HTMLElement {
   const copy = el.cloneNode(true) as HTMLElement;
   for (const attr of TRANSIENT_ATTRS) {
     copy.removeAttribute(attr);
@@ -730,7 +786,31 @@ function safeOuterHtml(el: HTMLElement): string {
   }
   stripTransientClasses(copy);
   stripTablePresentation(copy);
-  return collapseBlankLines(copy.outerHTML);
+  stripInjectedChrome(copy);
+  return copy;
+}
+
+/**
+ * Removes every editor-injected UI control from the clone — the code-block
+ * header (language label, Copy/Wrap buttons) and the diagram/math toolbar
+ * toggles, all stamped with `MD_CHROME_MARKER_ATTR` in `dom-postprocess.ts`.
+ * Ownership-based (any marked descendant is chrome), not an enumerated
+ * TRANSIENT_CLASSES entry, so a future injected control is covered by
+ * stamping the one shared marker rather than a per-control registration.
+ * Matches the marker, not the bare `contenteditable="false"` attribute those
+ * controls also carry: that attribute alone is not ownership — Req 21's
+ * `.md-caption` badge carries it too (to block inline editing of the token)
+ * while holding real user content, which a blanket match would delete
+ * (US-23.21 AC1b, caught in review 2026-07-28).
+ */
+function stripInjectedChrome(copy: HTMLElement): void {
+  for (const chrome of Array.from(copy.querySelectorAll(`[${MD_CHROME_MARKER_ATTR}]`))) {
+    chrome.remove();
+  }
+}
+
+function safeOuterHtml(el: HTMLElement): string {
+  return collapseBlankLines(cloneAndStrip(el).outerHTML);
 }
 
 /**
@@ -759,11 +839,12 @@ function stripTransientClasses(copy: HTMLElement): void {
 
 /**
  * US-19.25: gỡ mọi tàn dư TRÌNH BÀY bề rộng cột (do fitTableColumns/fit-mode ghi
- * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `md-table-fit`
- * class + `width` trên <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML.
- * Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp (vd lồng
- * list trong ô) sẽ đi đường raw-HTML và rò các style/class này vào `.md`. Chỉ gỡ
- * các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
+ * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `width` trên
+ * <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML. `md-table-fit` class đã
+ * chuyển sang TRANSIENT_CLASSES chung (US-23.21 AC4, không strip riêng ở đây
+ * nữa). Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp
+ * (vd lồng list trong ô) sẽ đi đường raw-HTML và rò các style này vào `.md`.
+ * Chỉ gỡ các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
  */
 function stripTablePresentation(copy: HTMLElement): void {
   const tables = copy.tagName === 'TABLE' ? [copy] : [];
@@ -771,10 +852,6 @@ function stripTablePresentation(copy: HTMLElement): void {
     tables.push(t as HTMLElement);
   }
   for (const t of tables) {
-    t.classList.remove('md-table-fit');
-    if (t.getAttribute('class') === '') {
-      t.removeAttribute('class');
-    }
     t.style.removeProperty('width');
     if (t.getAttribute('style') === '') {
       t.removeAttribute('style');

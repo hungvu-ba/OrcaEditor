@@ -29,6 +29,7 @@
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
+import { DD_HOVER_OUTLINE_CLASS, DD_SOURCE_MUTED_CLASS } from './constants';
 import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
 import { normalizeListDom } from './dom-serialize-prep';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
@@ -285,7 +286,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     for (const el of blockOutlineSpan(block)) {
-      el.classList.add('dd-hover-outline');
+      el.classList.add(DD_HOVER_OUTLINE_CLASS);
     }
   }
 
@@ -294,7 +295,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     for (const el of blockOutlineSpan(block)) {
-      el.classList.remove('dd-hover-outline');
+      el.classList.remove(DD_HOVER_OUTLINE_CLASS);
     }
   }
 
@@ -372,7 +373,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (block === hoveredTableBlock) {
       return;
     }
-    hoveredTableBlock?.classList.remove('dd-hover-outline');
+    hoveredTableBlock?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     hoveredTableBlock = block;
   }
 
@@ -585,7 +586,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     menuTargetBlock = block;
     // Outline the whole section a "Move" would carry (bug General #2), reusing the span already
     // computed above — matches the section-spanning handle so the menu targets what it says.
-    span.forEach((el) => el.classList.add('dd-hover-outline'));
+    span.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
   }
 
   document.addEventListener('mousedown', (e) => {
@@ -664,7 +665,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (li === hoveredLi) {
       return;
     }
-    hoveredLi?.classList.remove('dd-hover-outline');
+    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     hoveredLi = li;
   }
 
@@ -1316,7 +1317,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (kind === 'block') {
       const rect = dragSpan[0].getBoundingClientRect();
       const clone = dragSpan[0].cloneNode(true) as HTMLElement;
-      clone.classList.remove('dd-hover-outline');
+      clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;
       // Height is left auto: the ghost's own padding needs extra room beyond
@@ -1327,22 +1328,22 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
         badge.textContent = String(dragSpan.length);
         ghostEl.appendChild(badge);
       }
-      dragSpan.forEach((el) => el.classList.add('dd-source-muted'));
+      dragSpan.forEach((el) => el.classList.add(DD_SOURCE_MUTED_CLASS));
     } else if (liDragged) {
       const rect = liDragged.getBoundingClientRect();
       const clone = liDragged.cloneNode(true) as HTMLElement;
-      clone.classList.remove('dd-hover-outline');
+      clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;
-      liDragged.classList.add('dd-source-muted');
+      liDragged.classList.add(DD_SOURCE_MUTED_CLASS);
     }
     ghostEl.style.display = 'block';
     document.body.classList.add('dd-dragging');
   }
 
   function cleanupVisuals(): void {
-    dragSpan.forEach((el) => el.classList.remove('dd-source-muted'));
-    liDragged?.classList.remove('dd-source-muted');
+    dragSpan.forEach((el) => el.classList.remove(DD_SOURCE_MUTED_CLASS));
+    liDragged?.classList.remove(DD_SOURCE_MUTED_CLASS);
     ghostEl.style.display = 'none';
     ghostEl.replaceChildren();
     dropLineEl.style.display = 'none';
@@ -1535,7 +1536,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     armedBlock = block;
     // Preview the whole span a drag will move (bug General #2) — dragSpan is exactly the section
     // for a heading, or [block] otherwise, so no recompute is needed here.
-    dragSpan.forEach((el) => el.classList.add('dd-hover-outline'));
+    dragSpan.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
     attachDragListeners();
   }
 
@@ -1555,7 +1556,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liFlatEntries = entries;
     liOrigDepth = liDepth(li);
     currentLiDepth = liOrigDepth;
-    li.classList.add('dd-hover-outline');
+    li.classList.add(DD_HOVER_OUTLINE_CLASS);
     attachDragListeners();
   }
 
@@ -1598,7 +1599,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
-    hoveredLi?.classList.add('dd-hover-outline');
+    hoveredLi?.classList.add(DD_HOVER_OUTLINE_CLASS);
   });
 
   liHandleEl.addEventListener('mousedown', (e) => {
@@ -1645,7 +1646,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // only re-targets which handle shows (a bare gutter band is not a glyph, so it
     // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
     // return-to-#content path — so clear it unconditionally here.
-    hoveredLi?.classList.remove('dd-hover-outline');
+    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (
@@ -1678,13 +1679,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
-    hoveredTableBlock?.classList.add('dd-hover-outline');
+    hoveredTableBlock?.classList.add(DD_HOVER_OUTLINE_CLASS);
   });
   tableHandleEl.addEventListener('mouseleave', () => {
     if (state !== 'idle' || isMenuOpen()) {
       return;
     }
-    hoveredTableBlock?.classList.remove('dd-hover-outline');
+    hoveredTableBlock?.classList.remove(DD_HOVER_OUTLINE_CLASS);
   });
 
   function refresh(): void {

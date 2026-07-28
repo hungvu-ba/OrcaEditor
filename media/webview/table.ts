@@ -5,7 +5,13 @@
  */
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
-import { TABLE_TOOLBAR_HIDE_MS } from './constants';
+import {
+  TABLE_TOOLBAR_HIDE_MS,
+  MD_TABLE_FIT_CLASS as FIT_CLASS,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+} from './constants';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
@@ -253,8 +259,7 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
 const MEASURE_CLASS = 'md-table-col-fit-measuring';
 /** US-19.25: class tạm ép cột về min-content (từ dài nhất) để đo sàn vật lý. */
 const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
-/** US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap). */
-const FIT_CLASS = 'md-table-fit';
+// US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap) — imported above as FIT_CLASS (US-23.21).
 
 // US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ
 // còn áp khi Σmax-content > budget (thiếu chỗ thật) — còn chỗ ngang thì không cắt.
@@ -1094,7 +1099,7 @@ function setHighlightedRow(row: HTMLTableRowElement | null): void {
   if (row === hoveredRow) {
     return;
   }
-  hoveredRow?.classList.remove('dd-hover-outline');
+  hoveredRow?.classList.remove(DD_HOVER_OUTLINE_CLASS);
   hoveredRow = row;
 }
 
@@ -1108,7 +1113,7 @@ function setColumnHighlight(col: { table: HTMLTableElement; index: number } | nu
   }
   if (hoveredCol) {
     for (const row of Array.from(hoveredCol.table.rows)) {
-      row.cells[hoveredCol.index]?.classList.remove('dd-hover-outline-cell');
+      row.cells[hoveredCol.index]?.classList.remove(DD_HOVER_OUTLINE_CELL_CLASS);
     }
   }
   hoveredCol = col;
@@ -1140,10 +1145,10 @@ function colGapAt(table: HTMLTableElement, clientX: number): number {
 
 function tdCleanupVisuals(): void {
   if (tdKind === 'row' && tdTable) {
-    tdRows[tdRowIdx]?.classList.remove('dd-source-muted');
+    tdRows[tdRowIdx]?.classList.remove(DD_SOURCE_MUTED_CLASS);
   } else if (tdKind === 'col' && tdTable) {
     for (const row of Array.from(tdTable.rows)) {
-      row.cells[tdColIndex]?.classList.remove('dd-source-muted');
+      row.cells[tdColIndex]?.classList.remove(DD_SOURCE_MUTED_CLASS);
     }
   }
   tdGhostEl.style.display = 'none';
@@ -1179,7 +1184,7 @@ function closeRowMenu(): void {
   rowMenuPopupEl.style.display = 'none';
   rowMenuPopupEl.replaceChildren();
   if (rowMenuTargetRow) {
-    rowMenuTargetRow.classList.remove('dd-hover-outline');
+    rowMenuTargetRow.classList.remove(DD_HOVER_OUTLINE_CLASS);
     rowMenuTargetRow = null;
   }
   // Release the scroll freeze taken in openRowMenu (bug General R2 #3) — ref-counted, safe no-op
@@ -1214,7 +1219,7 @@ function openRowMenu(row: HTMLTableRowElement): void {
   lockPageScroll();
 
   rowMenuTargetRow = row;
-  row.classList.add('dd-hover-outline');
+  row.classList.add(DD_HOVER_OUTLINE_CLASS);
 }
 
 function onHeaderRowHandleMouseUp(): void {
@@ -1359,11 +1364,11 @@ function tdStartDragging(): void {
     const row = tdRows[tdRowIdx];
     const rect = row.getBoundingClientRect();
     const clone = row.cloneNode(true) as HTMLElement;
-    clone.classList.remove('dd-hover-outline');
+    clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
     tdGhostEl.replaceChildren(clone);
     tdGhostEl.style.width = `${rect.width}px`;
     tdGhostEl.style.height = `${rect.height}px`;
-    row.classList.add('dd-source-muted');
+    row.classList.add(DD_SOURCE_MUTED_CLASS);
   } else if (tdKind === 'col' && tdTable) {
     const headerRow = tdTable.tHead?.rows[0];
     const cell = headerRow?.cells[tdColIndex];
@@ -1382,7 +1387,7 @@ function tdStartDragging(): void {
           continue;
         }
         const cellClone = srcCell.cloneNode(true) as HTMLElement;
-        cellClone.classList.remove('dd-hover-outline', 'dd-hover-outline-cell', 'dd-source-muted');
+        cellClone.classList.remove(DD_HOVER_OUTLINE_CLASS, DD_HOVER_OUTLINE_CELL_CLASS, DD_SOURCE_MUTED_CLASS);
         cellClone.style.width = '100%';
         cellClone.style.height = `${row.getBoundingClientRect().height}px`;
         const rowWrap = document.createElement('tr');
@@ -1393,7 +1398,7 @@ function tdStartDragging(): void {
       tdGhostEl.style.height = `${tableRect.height}px`;
     }
     for (const row of Array.from(tdTable.rows)) {
-      row.cells[tdColIndex]?.classList.add('dd-source-muted');
+      row.cells[tdColIndex]?.classList.add(DD_SOURCE_MUTED_CLASS);
     }
   }
   tdGhostEl.style.display = 'block';
@@ -1483,7 +1488,7 @@ function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number):
   tdTable = table;
   tdRows = tbodyRows(table);
   tdRowIdx = tdRows.indexOf(row);
-  row.classList.add('dd-hover-outline');
+  row.classList.add(DD_HOVER_OUTLINE_CLASS);
   attachDragListeners();
 }
 
@@ -1495,7 +1500,7 @@ function armColDrag(table: HTMLTableElement, index: number, clientX: number, cli
   tdTable = table;
   tdColIndex = index;
   for (const row of Array.from(table.rows)) {
-    row.cells[index]?.classList.add('dd-hover-outline-cell');
+    row.cells[index]?.classList.add(DD_HOVER_OUTLINE_CELL_CLASS);
   }
   attachDragListeners();
 }

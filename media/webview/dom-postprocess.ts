@@ -29,6 +29,7 @@ import {
   CAPTION_ID_CLASS,
   ENTITY_REF_CLASS,
 } from './render';
+import { MD_CHROME_MARKER_ATTR } from './constants';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';
@@ -121,6 +122,10 @@ function createToolbarToggle(
   const toolbar = doc.createElement('div');
   toolbar.className = opts.toolbarClass;
   toolbar.setAttribute('contenteditable', 'false');
+  // US-23.21 AC1b: marks this as editor-injected chrome for turndown.ts's
+  // stripInjectedChrome — see MD_CHROME_MARKER_ATTR's doc comment for why the
+  // bare contenteditable="false" attribute alone is not a safe match.
+  toolbar.setAttribute(MD_CHROME_MARKER_ATTR, '');
   toolbar.appendChild(toggle);
   return toolbar;
 }
@@ -157,6 +162,9 @@ function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl:
     toggle.className = MATH_TOGGLE_CLASS;
     toggle.setAttribute('title', 'Edit formula');
     toggle.setAttribute('contenteditable', 'false');
+    // US-23.21 AC1b: not built via createToolbarToggle (no toolbar div here),
+    // so it needs its own chrome marker — see MD_CHROME_MARKER_ATTR's doc comment.
+    toggle.setAttribute(MD_CHROME_MARKER_ATTR, '');
     wrapper.appendChild(toggle);
   }
 }
@@ -312,6 +320,8 @@ export function postProcessCodeHeaders(root: ParentNode & Node, doc: Document): 
     const header = doc.createElement('div');
     header.className = MD_CODE_HEADER_CLASS;
     header.setAttribute('contenteditable', 'false');
+    // US-23.21 AC1b: chrome marker — see MD_CHROME_MARKER_ATTR's doc comment.
+    header.setAttribute(MD_CHROME_MARKER_ATTR, '');
 
     const label = doc.createElement('span');
     label.className = MD_CODE_LANG_CLASS;

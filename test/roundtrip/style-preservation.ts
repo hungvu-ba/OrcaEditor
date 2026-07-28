@@ -659,4 +659,271 @@ const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
   );
 }
 
+// --- Req 24 US-23.21: the transient-class strip list becomes an enforced rule
+// instead of a per-feature convention — 7 previously-leaking classes register,
+// the one unrouted emitter (alignedBlock) and injected UI chrome close, and the
+// img-attribute filter and rival stripTablePresentation list stop working
+// around the mechanism instead of using it. ---
+
+{
+  // AC2: each of the 7 newly-registered classes strips to byte-identical
+  // output on the raw-HTML table path, one named case per class.
+  const NAMED_CLASSES: Array<{ name: string; cls: string; attrEl: 'td' | 'table' }> = [
+    { name: 'md-entity-ref (Req 21)', cls: 'md-entity-ref', attrEl: 'td' },
+    { name: 'ref-nav-flash (Req 20 US-20.5)', cls: 'ref-nav-flash', attrEl: 'td' },
+    { name: 'dd-hover-outline (Req 17)', cls: 'dd-hover-outline', attrEl: 'td' },
+    { name: 'dd-hover-outline-cell (Req 17)', cls: 'dd-hover-outline-cell', attrEl: 'td' },
+    { name: 'dd-source-muted (Req 17)', cls: 'dd-source-muted', attrEl: 'td' },
+    { name: 'md-code-wrapped (Req 04)', cls: 'md-code-wrapped', attrEl: 'td' },
+    { name: 'md-table-fit (US-19.25, folded from stripTablePresentation)', cls: 'md-table-fit', attrEl: 'table' },
+  ];
+  for (const { name, cls, attrEl } of NAMED_CLASSES) {
+    const withClass =
+      attrEl === 'td'
+        ? serializeHtml(
+            `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+              `<td class="${cls}">ref</td>${COMPLEX_CELL}</tr></tbody></table>`
+          )
+        : serializeHtml(
+            `<table class="${cls}"><thead><tr><th>A</th></tr></thead>` +
+              `<tbody><tr>${COMPLEX_CELL}</tr></tbody></table>`
+          );
+    const withoutClass =
+      attrEl === 'td'
+        ? serializeHtml(
+            `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+              `<td>ref</td>${COMPLEX_CELL}</tr></tbody></table>`
+          )
+        : serializeHtml(
+            `<table><thead><tr><th>A</th></tr></thead><tbody><tr>${COMPLEX_CELL}</tr></tbody></table>`
+          );
+    runner.check(
+      `US-23.21 AC2: ${name} strips to byte-identical output`,
+      withClass === withoutClass,
+      `  withClass    = ${JSON.stringify(withClass)}\n  withoutClass = ${JSON.stringify(withoutClass)}`
+    );
+  }
+}
+
+{
+  // AC3: an <img> whose only extra attribute is a transient class must fall
+  // through to the default image rule (![]()), not htmlImgWithAttrs's raw HTML
+  // — before this fix, safeOuterHtml would strip the class to nothing while the
+  // filter still routed here on the class attribute's mere presence.
+  const out = serializeHtml('<p><img src="a.png" alt="x" class="dd-hover-outline"></p>');
+  runner.check(
+    'US-23.21 AC3: an <img> whose only extra attribute is a transient class serializes as markdown, not raw HTML',
+    out.includes('![x](a.png)') && !out.includes('<img'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC3 regression guard (caught in review 2026-07-28): a present-but-EMPTY
+  // class="" must discount the same as an all-transient one — the old
+  // `tokens.length > 0 && …` guard treated zero tokens as "extra", so this
+  // case wrongly fell through to raw HTML before the fix.
+  const out = serializeHtml('<p><img src="a.png" alt="x" class=""></p>');
+  runner.check(
+    'US-23.21 AC3: an <img> with an empty class="" serializes as markdown, not raw HTML',
+    out.includes('![x](a.png)') && !out.includes('<img'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC1: alignedBlock used to read live el.innerHTML with zero stripping — the
+  // one raw-HTML emitter that didn't funnel through safeOuterHtml/cloneAndStrip.
+  const out = serializeHtml('<p align="center">Hello <span class="dd-hover-outline">world</span></p>');
+  runner.check(
+    'US-23.21 AC1: alignedBlock rule strips a transient class from its subtree (previously unrouted emitter)',
+    out.includes('align="center"') && out.includes('world') && !out.includes('dd-hover-outline'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC1b: injected UI chrome (code-block header, language label, Copy/Wrap
+  // buttons), stamped with the MD_CHROME_MARKER_ATTR ownership marker
+  // (data-md-chrome) alongside contenteditable="false", must never reach the
+  // .md on the same raw-HTML table path a fenced block can be dragged into.
+  const codeCell =
+    '<td><pre><div class="md-code-header" contenteditable="false" data-md-chrome>' +
+    '<span class="md-code-lang" role="button">js</span>' +
+    '<button class="md-code-wrap" contenteditable="false">Wrap</button>' +
+    '<button class="md-code-copy" contenteditable="false">Copy</button>' +
+    '</div><code>const x = 1;</code></pre></td>';
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>${codeCell}${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC1b: injected code-header chrome (Copy/Wrap buttons) never reaches raw-HTML serialize',
+    out.includes('const x = 1;') &&
+      !out.includes('<button') &&
+      !out.includes('md-code-header') &&
+      !out.includes('Copy') &&
+      !out.includes('Wrap'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC1b: a diagram/math toolbar's shape (toolbar div + toggle button, both
+  // carrying the marker, per createToolbarToggle in dom-postprocess.ts) is
+  // covered by the same marker match, not just the code-header shape above.
+  const toolbarCell =
+    '<td><div class="mermaid-toolbar" contenteditable="false" data-md-chrome>' +
+    '<button class="mermaid-toggle" contenteditable="false" data-md-chrome>Toggle</button>' +
+    '</div>content</td>';
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>${toolbarCell}${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC1b: a marked diagram/math toolbar never reaches raw-HTML serialize',
+    out.includes('content') && !out.includes('Toggle') && !out.includes('mermaid-toolbar'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC1b regression guard (caught in review 2026-07-28): Req 21's `.md-caption`
+  // declaration badge also carries contenteditable="false" (blocks inline
+  // editing of the token) but holds REAL user content, no chrome marker. It
+  // must survive the raw-HTML path unlike the two chrome cases above.
+  const badge =
+    '<span class="md-caption" contenteditable="false">' +
+    '<span class="md-caption-prefix">caption::</span>' +
+    '<span class="md-caption-ns">UC</span><span class="md-caption-id">02</span></span>';
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td>a ${badge}</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC1b: a contenteditable="false" node with no chrome marker (Req 21 .md-caption badge) survives — not blanket-matched',
+    // The token's text is split across 3 child spans (prefix/ns/id) by design
+    // (fillCaptionBadge), so check the structure survived, not a contiguous string.
+    out.includes('class="md-caption"') &&
+      out.includes('>caption::<') &&
+      out.includes('>UC<') &&
+      out.includes('>02<'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC4: stripTablePresentation's own rival `md-table-fit` strip is gone —
+  // registering it centrally (the AC2 case above) is the only strip path left.
+  // This asserts the width/box-sizing presentation strip AC4 must not break
+  // still runs alongside the now-centralized class strip.
+  const out = serializeHtml(
+    `<table class="md-table-fit" style="width: 300px;"><thead><tr><th style="width: 100px;">A</th></tr></thead>` +
+      `<tbody><tr>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC4: md-table-fit and its width presentation both strip, no rival list left',
+    !out.includes('md-table-fit') && !out.includes('width: 300px') && !out.includes('width: 100px'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC5: a hand-authored class the document legitimately carries must survive —
+  // only registered names are removed, unchanged behavior being reasserted
+  // against the newly-registered 7.
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td class="user-defined-class">kept</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC5: a hand-authored non-transient class survives serialization unchanged',
+    out.includes('class="user-defined-class"') && out.includes('kept'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // AC5: a hand-authored class colliding with a registered name is
+  // indistinguishable from an editor-stamped one at serialize time and is
+  // removed all the same (deferred-work.md US-23.6 item 6(b), accepted).
+  const out = serializeHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+      `<td class="dd-hover-outline">collision</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'US-23.21 AC5: a hand-authored class colliding with a registered name is removed like an editor-stamped one',
+    out.includes('collision') && !out.includes('dd-hover-outline') && !out.includes('class=""'),
+    `  out = ${JSON.stringify(out)}`
+  );
+}
+
+{
+  // Clone-only safety (necessary precondition for AC7, not AC7 itself — see
+  // below): after a raw-HTML serialize pass, the live #content DOM node
+  // stamped with a transient class must be untouched, proving strip never
+  // reaches the source a re-stamp would otherwise have to fight. One case per
+  // newly-registered class.
+  const CELL_CLASSES = [
+    'md-entity-ref',
+    'ref-nav-flash',
+    'dd-hover-outline',
+    'dd-hover-outline-cell',
+    'dd-source-muted',
+    'md-code-wrapped',
+  ];
+  for (const cls of CELL_CLASSES) {
+    const doc = domino.createDocument(
+      `<div id="content"><table><thead><tr><th>A</th></tr></thead><tbody><tr>` +
+        `<td class="${cls}">ref</td>${COMPLEX_CELL}</tr></tbody></table></div>`,
+      true
+    );
+    const root = doc.getElementById('content') as HTMLElement;
+    const carrier = root.querySelector(`.${cls}`) as HTMLElement;
+    turndown.turndown(root);
+    runner.check(
+      `US-23.21 (clone-only safety): ${cls} — serialize never mutates the live DOM`,
+      carrier.classList.contains(cls),
+      `  classList after serialize = "${carrier.className}"`
+    );
+  }
+
+  const tableDoc = domino.createDocument(
+    `<div id="content"><table class="md-table-fit"><thead><tr><th>A</th></tr></thead>` +
+      `<tbody><tr>${COMPLEX_CELL}</tr></tbody></table></div>`,
+    true
+  );
+  const tableRoot = tableDoc.getElementById('content') as HTMLElement;
+  const tableCarrier = tableRoot.querySelector('table') as HTMLElement;
+  turndown.turndown(tableRoot);
+  runner.check(
+    'US-23.21 (clone-only safety): md-table-fit — serialize never mutates the live DOM',
+    tableCarrier.classList.contains('md-table-fit'),
+    `  classList after serialize = "${tableCarrier.className}"`
+  );
+}
+
+/**
+ * AC7 proper — "a test asserts the owning feature re-applies it [on render];
+ * a class with no re-stamp path is reported back rather than registered
+ * silently" — determined per class (2026-07-28 review):
+ *
+ *  - md-entity-ref: re-stamped by postProcessEntityRefs on every render pass.
+ *    Already covered by test/roundtrip/entity-ref.ts (real render pipeline,
+ *    asserts the class reappears on a fresh render) — not duplicated here.
+ *  - md-code-wrapped: re-stamped by postProcessCodeHeaders on every render
+ *    pass. Covered by test/roundtrip/code-header.ts (added alongside this
+ *    story, same real-pipeline pattern as entity-ref.ts).
+ *  - ref-nav-flash, dd-hover-outline, dd-hover-outline-cell, dd-source-muted:
+ *    REPORTED BACK — no render re-stamp path exists. Each is a one-shot,
+ *    event-driven interaction state (nav-flash timeout, mouse hover/drag)
+ *    applied directly by its owning handler outside any render pass; nothing
+ *    "re-applies" it on the next render because rendering never runs while
+ *    the interaction is live. The clone-only safety tests above are what
+ *    keeps registering these for strip from ever breaking their handlers:
+ *    since strip runs on the clone, the live node the handler adds/removes
+ *    the class on is never touched by a serialize pass.
+ *  - md-table-fit: REPORTED BACK — same shape as the four above. Set by a
+ *    user-triggered fit-mode toggle (table.ts, US-19.25), not by a render
+ *    pass; nothing to re-stamp on render.
+ */
+
 runner.finish('style-preservation');

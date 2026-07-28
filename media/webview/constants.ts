@@ -294,6 +294,8 @@ export const COMMENT_POPOVER_CLASS = 'comment-popover';
 export const COMMENT_REPLY_INPUT_CLASS = 'comment-popover-reply-input';
 /** DOM class for a delete-confirmation dialog, mounted on `document.body`. */
 export const COMMENT_DELETE_CONFIRM_CLASS = 'comment-delete-confirm';
+/** DOM class for the popover's edit `<textarea>` (US-23.14) — native field undo, same convention as `COMMENT_REPLY_INPUT_CLASS`. */
+export const COMMENT_EDIT_INPUT_CLASS = 'comment-popover-edit-input';
 
 // --- Req 23 US-23.7: shared right-dock tab container (media/webview/right-dock.ts) ---
 
@@ -332,3 +334,28 @@ export const COMMENT_ACTION_BAR_CLASS = 'comment-popover-actions';
 export const COMMENT_DRIFT_STRIP_CLASS = 'comment-popover-drift';
 /** DOM class for AC3's anchor-lost dialog, mounted on `document.body` behind its own scrim. */
 export const COMMENT_ANCHOR_LOST_CLASS = 'comment-anchor-lost';
+
+// --- Req 24 US-23.21: presentation classes registered in turndown.ts's TRANSIENT_CLASSES ---
+
+/** DOM class flashed briefly on a cross-reference target after `navigateReferenceEntry` scrolls to it (Req 20 US-20.5). */
+export const REF_NAV_FLASH_CLASS = 'ref-nav-flash';
+/** DOM class for the drop-target outline drawn during drag-drop (Req 17). */
+export const DD_HOVER_OUTLINE_CLASS = 'dd-hover-outline';
+/** DOM class for the drop-target outline drawn on a table cell during drag-drop (Req 17). */
+export const DD_HOVER_OUTLINE_CELL_CLASS = 'dd-hover-outline-cell';
+/** DOM class muting the drag source while a drag is in flight (Req 17). */
+export const DD_SOURCE_MUTED_CLASS = 'dd-source-muted';
+/** DOM class marking a table fit to its column widths by `fitTableColumns` (US-19.25). */
+export const MD_TABLE_FIT_CLASS = 'md-table-fit';
+
+/**
+ * Positive ownership marker `turndown.ts`'s `stripInjectedChrome` matches on to
+ * remove editor-injected UI controls (code-block header/Copy/Wrap, diagram/math
+ * toolbars and toggles) from the raw-HTML serialize clone (US-23.21 AC1b).
+ * Stamped in `dom-postprocess.ts` alongside `contenteditable="false"` — the bare
+ * attribute alone is not a safe match: Req 21's `.md-caption` badge also carries
+ * `contenteditable="false"` (to block inline editing of the token) while holding
+ * real user content, which a blanket `[contenteditable="false"]` selector would
+ * silently delete on that same raw-HTML path.
+ */
+export const MD_CHROME_MARKER_ATTR = 'data-md-chrome';
