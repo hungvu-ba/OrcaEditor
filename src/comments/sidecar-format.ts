@@ -74,7 +74,24 @@ export interface DeleteLine extends SidecarEnvelope {
   target_id: string;
 }
 
-export type SidecarLine = CommentLine | ReplyLine | StatusChangeLine | DeleteLine;
+/**
+ * A persisted re-attachment or automatic resolution of a thread's anchor
+ * (US-23.13 AC1/AC2) — appended, never a rewrite of the original `comment`
+ * line's own `anchor`. `origin` records how the transition happened: a
+ * deliberate re-attach (drag, `⋯` picker, keyboard walk) is `'manual'`; a tier
+ * promoting a floating thread back onto the document on its own is
+ * `'resolved'`. Only one of the two is ever written for a given transition —
+ * whichever fires first, the other never writes a second, redundant line for
+ * it.
+ */
+export interface AnchorUpdateLine extends SidecarEnvelope {
+  type: 'anchor-update';
+  parent_comment_id: string;
+  origin: 'manual' | 'resolved';
+  anchor: SidecarAnchor;
+}
+
+export type SidecarLine = CommentLine | ReplyLine | StatusChangeLine | DeleteLine | AnchorUpdateLine;
 
 /** One reassembled thread, ready to become a `vscode.CommentThread`. */
 export interface SidecarThread {
@@ -87,6 +104,14 @@ export interface SidecarThread {
   statusChanges: StatusChangeLine[];
   /** Derived by folding `statusChanges`; never read off the comment line. */
   status: CommentStatus;
+  /**
+   * Where the thread currently believes it is anchored (US-23.13 AC1/AC2).
+   * Starts as `comment.anchor` and is replaced by the latest folded
+   * `anchor-update` line, resolved by FILE/APPEND order — never by comparing
+   * `timestamp` (a fast retry or a clock with coarse resolution must never
+   * decide the winner).
+   */
+  anchor: SidecarAnchor;
 }
 
 export interface FoldedSidecar {
@@ -214,7 +239,12 @@ export function sidecarBelongsToDocument(
   const haystack = toBelongingText(documentText);
   let considered = 0;
   for (const thread of threads) {
-    const needle = toBelongingText(thread.comment.anchor.recorded_text);
+    // US-23.13 AC1/AC2: `thread.anchor` is the folded CURRENT position (a
+    // persisted re-attach/auto-resolve if one exists), not the immutable
+    // `thread.comment.anchor` creation-time snapshot — a thread deliberately
+    // re-attached away from since-deleted text must be tested against where it
+    // now points, not where it used to.
+    const needle = toBelongingText(thread.anchor.recorded_text);
     if (needle.length < BELONGING_MIN_TEXT_LEN) {
       continue;
     }
@@ -324,6 +354,27 @@ export function buildDeleteLine(input: {
   };
 }
 
+/** Assemble an anchor-update line (US-23.13 AC1/AC2). Caller supplies id/timestamp so this stays pure. */
+export function buildAnchorUpdateLine(input: {
+  id: string;
+  parentCommentId: string;
+  author: string;
+  timestamp: string;
+  origin: 'manual' | 'resolved';
+  anchor: SidecarAnchor;
+}): AnchorUpdateLine {
+  return {
+    schema_version: SIDECAR_SCHEMA_VERSION,
+    type: 'anchor-update',
+    id: input.id,
+    parent_comment_id: input.parentCommentId,
+    author: input.author,
+    timestamp: input.timestamp,
+    origin: input.origin,
+    anchor: input.anchor,
+  };
+}
+
 function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
@@ -334,6 +385,10 @@ function isInt(value: unknown): value is number {
 
 function isStatus(value: unknown): value is CommentStatus {
   return value === 'Open' || value === 'Resolved' || value === 'Closed';
+}
+
+function isAnchorOrigin(value: unknown): value is AnchorUpdateLine['origin'] {
+  return value === 'manual' || value === 'resolved';
 }
 
 function isAnchor(value: unknown): value is SidecarAnchor {
@@ -388,6 +443,13 @@ function asSidecarLine(value: unknown): SidecarLine | null {
         : null;
     case 'delete':
       return isString(line.target_id) && line.target_id !== '' ? (line as unknown as DeleteLine) : null;
+    case 'anchor-update':
+      return isString(line.parent_comment_id) &&
+        line.parent_comment_id !== '' &&
+        isAnchorOrigin(line.origin) &&
+        isAnchor(line.anchor)
+        ? (line as unknown as AnchorUpdateLine)
+        : null;
     default:
       return null;
   }
@@ -525,6 +587,8 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
   const repliesByParent = new Map<string, ReplyLine[]>();
   const statusByParent = new Map<string, StatusChangeLine[]>();
   const statusChangeIds = new Set<string>();
+  const anchorUpdatesByParent = new Map<string, AnchorUpdateLine[]>();
+  const anchorUpdateIds = new Set<string>();
   const tombstones: DeleteLine[] = [];
 
   for (const line of lines) {
@@ -559,6 +623,18 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
         break;
       case 'delete':
         tombstones.push(line);
+        break;
+      case 'anchor-update':
+        if (anchorUpdateIds.has(line.id)) {
+          warnings.push(`duplicate anchor-update id ${line.id}: keeping the first-seen line`);
+          break;
+        }
+        anchorUpdateIds.add(line.id);
+        // Pushed in on-disk order (the loop above walks `lines` in file order) —
+        // last-one-wins below reads the array's LAST entry, never sorts it by
+        // `timestamp` (US-23.13 AC1's own rule: a fast retry or a coarse-resolution
+        // clock must never decide the winner).
+        pushInto(anchorUpdatesByParent, line.parent_comment_id, line);
         break;
     }
   }
@@ -621,12 +697,17 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
       statusChanges.push(change);
       status = change.to_status;
     }
+    // Last-one-wins by file/append order (the array is already in that order —
+    // see the push above), never by `timestamp`.
+    const anchorUpdates = anchorUpdatesByParent.get(id);
+    const anchor = anchorUpdates && anchorUpdates.length > 0 ? anchorUpdates[anchorUpdates.length - 1].anchor : comment.anchor;
     threads.push({
       id,
       comment,
       replies,
       statusChanges,
       status,
+      anchor,
     });
   }
   threads.sort((a, b) => byTimestamp(a.comment, b.comment));

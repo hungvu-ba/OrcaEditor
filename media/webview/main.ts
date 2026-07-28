@@ -691,6 +691,12 @@ window.addEventListener('message', (event) => {
       commentPopover.notifyStatusResult(msg.requestId, msg.ok, msg.error);
       break;
     }
+    case 'commentAnchorUpdateResult': {
+      // Req 24 US-23.13 AC1/AC2: keyed by threadId, not requestId — the
+      // `commentAnchorUpdate` this replies to carries none.
+      commentResolve.notifyAnchorUpdateResult(msg.threadId, msg.ok, msg.error);
+      break;
+    }
     case 'namespaceListResult': {
       // Req 21 US-21.1's Declare-entity flow (triggerSlash) and Req 21 US-21.2's
       // `@` Entities scope (triggerAt) share the SAME 'namespaceList'/

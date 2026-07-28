@@ -29,6 +29,8 @@ interface AnchorUpdate {
   anchorId: string;
   line: number;
   state: string;
+  /** Req 24 US-23.13 AC1/AC2: set only on a transition the host should persist. */
+  origin?: string;
 }
 
 function posted(page: Page, type: string): Promise<Array<Record<string, unknown>>> {
@@ -111,6 +113,10 @@ test('tier 2: a re-render with fresh ids relocates the thread by its recorded te
   const update = await lastUpdateFor(page, threadId);
   expect(update?.state).toBe('exact');
   expect(update?.line).toBe(5); // was line 3, now two lines lower
+  // Req 24 US-23.13 AC2: a relocation that never passed through floating is
+  // never persisted — this thread went tier1(exact) -> tier2(exact), not
+  // floating -> non-floating.
+  expect(update?.origin).toBeUndefined();
 });
 
 test('tier 3: a rewritten anchor lands on the block that still covers it, marked approximate', async ({ page }) => {
@@ -167,6 +173,10 @@ test('AC5: undoing the deletion promotes a floating thread back to an exact anch
   await expect(page.locator(`[data-comment-anchor-id="${anchorId}"]`)).toHaveText(
     'The refund queue drains in enqueue order.'
   );
+  // Req 24 US-23.13 AC2: a genuine floating -> non-floating promotion IS
+  // persisted, with the auto-resolve origin (never 'manual' — no Reviewer
+  // action drove this one).
+  expect(update?.origin).toBe('resolved');
 });
 
 /** Duplicate the anchored node the way an edit does: clone it, fire `input`, no re-render. */

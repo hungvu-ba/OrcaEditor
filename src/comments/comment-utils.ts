@@ -171,6 +171,25 @@ export function anchorUpdateRejection(msg: AnchorUpdateMessage, docUri: string):
   if (!ANCHOR_STATES.includes(msg.state)) {
     return 'This anchor update carries an unknown resolution state.';
   }
+  // US-23.13 AC1/AC2: `origin` marks a transition the host must also persist —
+  // validated only when present, since most `commentAnchorUpdate`s stay
+  // in-memory-only and never carry one.
+  if (msg.origin !== undefined) {
+    if (msg.origin !== 'manual' && msg.origin !== 'resolved') {
+      return 'This anchor update carries an unknown origin.';
+    }
+    if (
+      !Number.isInteger(msg.offsetStart) ||
+      !Number.isInteger(msg.offsetEnd) ||
+      msg.offsetStart < 0 ||
+      msg.offsetEnd < msg.offsetStart
+    ) {
+      return 'This anchor update carries no usable anchor text range.';
+    }
+    if (typeof msg.recordedText !== 'string' || typeof msg.nearestHeading !== 'string') {
+      return 'This anchor update carries no usable anchor text.';
+    }
+  }
   return null;
 }
 

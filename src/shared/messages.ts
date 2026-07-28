@@ -528,10 +528,21 @@ export type WebviewToHost =
   /**
    * Req 23 US-23.4: a tier relocated (or gave up on) a thread's anchor — move the
    * native `CommentThread`'s best-effort Range to `line` and mark it with the new
-   * resolution `state`. Fire-and-forget: the structural anchor stays
-   * authoritative and the webview has already applied the move, so there is no
-   * requestId/reply pair. This path must never edit the `.md` — a comment action
-   * never occupies a slot in the document's undo stack (US-23.6).
+   * resolution `state`. Fire-and-forget for an in-memory-only relocation: the
+   * structural anchor stays authoritative and the webview has already applied
+   * the move, so there is no requestId/reply pair for that case. This path must
+   * never edit the `.md` — a comment action never occupies a slot in the
+   * document's undo stack (US-23.6).
+   *
+   * Req 24 US-23.13 AC1/AC2: `origin` is set only when this transition should
+   * also be PERSISTED — a deliberate re-attach (`'manual'`) or an automatic
+   * promotion out of floating (`'resolved'`). Omitted for every other
+   * relocation, which stays in-memory only, unchanged from before this AC. When
+   * set, `offsetStart`/`offsetEnd`/`recordedText`/`nearestHeading` (the same
+   * fields `createComment` carries) are what the host writes into the new
+   * `anchor-update` sidecar line; a failed persist is reported back via
+   * `commentAnchorUpdateResult` below, keyed by `threadId` since this message
+   * itself carries no `requestId`.
    */
   | {
       type: 'commentAnchorUpdate';
@@ -540,6 +551,11 @@ export type WebviewToHost =
       anchorId: string;
       line: number;
       state: 'exact' | 'approximate' | 'floating';
+      origin?: 'manual' | 'resolved';
+      offsetStart: number;
+      offsetEnd: number;
+      recordedText: string;
+      nearestHeading: string;
     }
   /**
    * Req 23 US-23.2: append a reply under an existing thread. `threadId` is
@@ -730,4 +746,12 @@ export type HostToWebview =
    * `commentThreadsSync` push that follows, so echoing them here would be a
    * second source of truth for the same three values.
    */
-  | { type: 'changeCommentStatusResult'; requestId: number; ok: boolean; error?: string };
+  | { type: 'changeCommentStatusResult'; requestId: number; ok: boolean; error?: string }
+  /**
+   * Req 24 US-23.13 AC1/AC2: reply to a `commentAnchorUpdate` that carried an
+   * `origin` (a persist-worthy transition). Keyed by `threadId`, not
+   * `requestId` — the request itself has none. Only a failure needs surfacing:
+   * a successful persist has already been applied in the webview's own
+   * registry, so there is nothing left to reconcile.
+   */
+  | { type: 'commentAnchorUpdateResult'; docUri: string; threadId: string; ok: boolean; error?: string };

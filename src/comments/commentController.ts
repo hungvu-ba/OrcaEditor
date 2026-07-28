@@ -37,6 +37,7 @@ import {
 } from './comment-utils';
 import { sameDocumentUri } from '../text-utils';
 import {
+  buildAnchorUpdateLine,
   buildCommentLine,
   buildDeleteLine,
   buildReplyLine,
@@ -85,10 +86,14 @@ export interface CommentSupport extends vscode.Disposable {
   createThread(msg: CreateCommentMessage, document: vscode.TextDocument): Promise<CreateThreadOutcome>;
   /**
    * US-23.4: a tier moved (or gave up on) a thread's anchor — follow it with the
-   * native Range and record the new state. Returns the rejection reason or null.
-   * Never edits the document (US-23.6).
+   * native Range and record the new state. Returns the rejection/write-failure
+   * reason or null. Never edits the document (US-23.6).
+   *
+   * US-23.13 AC1/AC2: when `msg.origin` is set, the transition is also
+   * persisted as an `anchor-update` sidecar line (save-first, like every other
+   * write) — which is why this is now async.
    */
-  updateAnchor(msg: AnchorUpdateMessage, document: vscode.TextDocument): string | null;
+  updateAnchor(msg: AnchorUpdateMessage, document: vscode.TextDocument): Promise<string | null>;
   /** The structural anchor a thread was created against — US-23.4 re-resolves from here. */
   anchorOf(threadId: string): CommentAnchor | undefined;
   /**
@@ -240,9 +245,11 @@ function buildLoadedThread(
   state: 'approximate' | 'floating'
 ): vscode.CommentThread {
   // last_known_line is 1-based and can sit past the end of a document that has
-  // been cut down since the comment was written.
+  // been cut down since the comment was written. `persisted.anchor` (not
+  // `persisted.comment.anchor`) is the loader's folded position — US-23.13
+  // AC1/AC2's `anchor-update` line if one exists, else the creation-time one.
   const line = Math.min(
-    commentThreadLine(persisted.comment.anchor.last_known_line),
+    commentThreadLine(persisted.anchor.last_known_line),
     Math.max(0, document.lineCount - 1)
   );
   const thread = controller.createCommentThread(document.uri, new vscode.Range(line, 0, line, 0), [
@@ -321,6 +328,11 @@ export function createCommentSupport(
   // other two: a create or a status change in flight for a thread must never
   // block (or be released by) a reply to it, and vice versa.
   const replying = new Set<string>();
+  // US-23.13 AC1: threadIds whose anchor-update append is in flight. Same shape
+  // and reason as `creating`/`changingStatus`/`replying` — a second re-attach
+  // for the same thread while the first's append is still pending is a no-op
+  // on the live thread, never a race between two `anchor-update` appends.
+  const updatingAnchor = new Set<string>();
   // Documents whose sidecar has already been loaded, so a second panel on the
   // same file doesn't duplicate every thread.
   const loaded = new Set<string>();
@@ -664,11 +676,16 @@ export function createCommentSupport(
               // A fresh parse mints fresh structural ids, so a reloaded thread has
               // no tier-1 anchor to name. An empty id marks it as "not tier-1".
               anchorId: '',
-              offsetStart: persisted.comment.anchor.offset_start,
-              offsetEnd: persisted.comment.anchor.offset_end,
-              recordedText: persisted.comment.anchor.recorded_text,
-              lastKnownLine: persisted.comment.anchor.last_known_line,
-              nearestHeading: persisted.comment.anchor.nearest_heading,
+              // US-23.13 AC1/AC2: `persisted.anchor` is the loader's folded
+              // position (the latest `anchor-update` line, if one exists) — NOT
+              // `persisted.comment.anchor`, which is the immutable creation-time
+              // snapshot. Reading the latter here would silently discard every
+              // persisted re-attachment/auto-resolution on reload.
+              offsetStart: persisted.anchor.offset_start,
+              offsetEnd: persisted.anchor.offset_end,
+              recordedText: persisted.anchor.recorded_text,
+              lastKnownLine: persisted.anchor.last_known_line,
+              nearestHeading: persisted.anchor.nearest_heading,
               // Placed from last_known_line, not from a resolved structural id —
               // AC3's "never silently indistinguishable from an exact anchor".
               state: loadedState,
@@ -716,7 +733,7 @@ export function createCommentSupport(
       sidecarState.delete(docKey);
     },
 
-    updateAnchor(msg, document): string | null {
+    async updateAnchor(msg, document): Promise<string | null> {
       const rejection = anchorUpdateRejection(msg, document.uri.toString());
       if (rejection !== null) {
         return rejection;
@@ -729,6 +746,16 @@ export function createCommentSupport(
         // Belt and braces behind the unique handle: never let one document's
         // resolution move a thread that lives in another file.
         return 'This anchor update names a thread in another document.';
+      }
+      if (msg.origin !== undefined && updatingAnchor.has(msg.threadId)) {
+        // AC1: a re-attach for this thread while a PREVIOUS RE-ATTACH's append
+        // is still in flight is a no-op — mirrors `changingStatus`'s guard
+        // shape, never racing two `anchor-update` appends for one thread.
+        // Scoped to `msg.origin !== undefined` so an ordinary in-memory-only
+        // relocation (no persist attempted either way) is never blocked by an
+        // unrelated persist that merely happens to be in flight for this same
+        // thread — only a SECOND persist-worthy update races the first.
+        return "This comment thread's anchor is already being updated.";
       }
       // A floating thread keeps its last known line, which can sit past the end
       // of a document that has since been cut down.
@@ -751,7 +778,51 @@ export function createCommentSupport(
       entry.anchor.anchorId = msg.anchorId;
       entry.anchor.lastKnownLine = msg.line;
       entry.anchor.state = msg.state;
-      return null;
+
+      if (msg.origin === undefined) {
+        // An ordinary in-memory-only relocation, unchanged from before this AC
+        // — nothing to persist.
+        return null;
+      }
+      if (entry.commentId === null) {
+        // Mirrors `reply`/`changeStatus`: a thread whose sidecar write is still
+        // in flight has no durable id an `anchor-update` line could reference
+        // yet. Reported rather than silently treated as already-persisted — the
+        // live in-memory move above still applies either way.
+        return 'This comment thread has no durable id yet — try again in a moment.';
+      }
+      updatingAnchor.add(msg.threadId);
+      try {
+        const author = await authorFor(document);
+        const writeError =
+          (await saveBeforeAppend(document)) ??
+          (await store.append(
+            document,
+            buildAnchorUpdateLine({
+              id: crypto.randomUUID(),
+              parentCommentId: entry.commentId,
+              author,
+              timestamp: new Date().toISOString(),
+              origin: msg.origin,
+              anchor: {
+                offset_start: msg.offsetStart,
+                offset_end: msg.offsetEnd,
+                recorded_text: msg.recordedText,
+                last_known_line: msg.line,
+                nearest_heading: msg.nearestHeading,
+              },
+            })
+          ));
+        return writeError;
+      } catch (err) {
+        // Same "report, don't swallow" contract as `changeStatus`: a throw here
+        // must not skip `commentAnchorUpdateResult` and leave the caller with no
+        // way to retry.
+        log('updateAnchor persist failed', err);
+        return 'This anchor could not be saved.';
+      } finally {
+        updatingAnchor.delete(msg.threadId);
+      }
     },
 
     async reply(msg, document) {

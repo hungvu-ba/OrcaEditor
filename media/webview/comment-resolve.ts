@@ -37,6 +37,7 @@ import {
   ANCHOR_RESOLVE_CHUNK_SIZE,
   COMMENT_ANCHOR_STATE_ATTR,
 } from './constants';
+import { showToast } from './dom-utils';
 import type { VsCodeApi } from './vscode-api';
 import type { CommentStatus, CommentSyncReply, CommentTransition } from '../../src/shared/messages';
 
@@ -183,6 +184,13 @@ export interface CommentResolveController {
    * fresher pass always wins over a stale one (AC7).
    */
   notifyContentRendered(): void;
+  /**
+   * US-23.13 AC1/AC2: the host failed to persist a `'manual'`/`'resolved'`
+   * anchor-update it was asked to. The live re-attachment/resolution stays
+   * applied either way (it already happened in-memory) — this only surfaces
+   * the reason so the Reviewer knows a retry is needed.
+   */
+  notifyAnchorUpdateResult(threadId: string, ok: boolean, error?: string): void;
 }
 
 export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): CommentResolveController {
@@ -401,7 +409,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     }
   }
 
-  function postUpdate(anchor: ThreadAnchor): void {
+  /**
+   * `origin` is set only for a transition this pass should also PERSIST
+   * (US-23.13 AC1/AC2): a deliberate re-attach (`'manual'`, from `reattach`) or
+   * an automatic promotion out of floating (`'resolved'`, from
+   * `resolveAnchor`). Omitted for every other relocation, which stays
+   * in-memory only, unchanged from before this AC.
+   */
+  function postUpdate(anchor: ThreadAnchor, origin?: 'manual' | 'resolved'): void {
     vscode.postMessage({
       type: 'commentAnchorUpdate',
       docUri,
@@ -409,6 +424,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       anchorId: anchor.anchorId,
       line: anchor.lastKnownLine,
       state: anchor.state,
+      origin,
+      offsetStart: anchor.offsetStart,
+      offsetEnd: anchor.offsetEnd,
+      recordedText: anchor.recordedText,
+      nearestHeading: anchor.nearestHeading,
     });
   }
 
@@ -456,7 +476,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       anchor.state !== previousState ||
       anchor.anchorId !== previousAnchorId
     ) {
-      postUpdate(anchor);
+      // AC2: persist only a genuine transition OUT of floating — not every
+      // relocation, and never a thread that merely stays exact/approximate —
+      // so a long editing session doesn't inflate the sidecar with one line
+      // per keystroke batch. `reattach` (AC1) covers the manual case; this is
+      // the automatic one, and the two never both fire for the same
+      // transition (this only runs when the PREVIOUS state was floating).
+      const origin = previousState === 'floating' && anchor.state !== 'floating' ? 'resolved' : undefined;
+      postUpdate(anchor, origin);
       changed = true;
     }
     if (
@@ -699,8 +726,8 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // deliberately re-anchored would otherwise read as permanently drifted
       // against the text of a paragraph that no longer exists. Rewritten BEFORE
       // `place`, so the offsets are clamped against the same node's length the
-      // snapshot was just taken from. Registry-only — US-23.13's `anchor-update`
-      // line is what makes it survive a reload.
+      // snapshot was just taken from. Persisted below via `postUpdate`'s
+      // `'manual'` origin (US-23.13 AC1), so it also survives a reload.
       anchor.recordedText = el.textContent ?? '';
       // The offsets described a range inside the OLD node, so they name nothing in
       // the new one — left as they were, the popover's quote row would show an
@@ -715,7 +742,10 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // belong", so it counts as exact — and the node now carries the id, which
       // makes tier 1 keep it there on every later pass.
       place(anchor, el, 'exact');
-      postUpdate(anchor);
+      // US-23.13 AC1: persist this re-attachment so it survives a reload —
+      // this IS the manual write `reattach`'s own comment above used to flag
+      // as unbuilt.
+      postUpdate(anchor, 'manual');
       notifyChanged();
       return true;
     },
@@ -750,6 +780,12 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       const run = deferredResolve;
       deferredResolve = undefined;
       run?.();
+    },
+    notifyAnchorUpdateResult(threadId, ok, error): void {
+      if (ok || !threads.has(threadId)) {
+        return;
+      }
+      showToast(error ?? 'This comment location could not be saved.');
     },
   };
 }

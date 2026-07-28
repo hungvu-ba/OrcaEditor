@@ -1299,12 +1299,28 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // Req 23 US-23.4: a tier relocated (or floated) a thread — follow it
           // with the native Range. updateAnchor validates the whole payload
           // (document identity, known thread, usable line, known state). No
-          // reply: the webview has already applied its own resolution, and a
-          // refused update only leaves the native Range stale, never wrong-way
-          // edited. Nothing here touches the document (US-23.6).
-          const error = this.comments?.updateAnchor(msg, document);
+          // reply for an in-memory-only relocation: the webview has already
+          // applied its own resolution, and a refused update only leaves the
+          // native Range stale, never wrong-way edited. Nothing here touches
+          // the document (US-23.6).
+          //
+          // Req 24 US-23.13 AC1/AC2: when `msg.origin` is set, this same
+          // update is also meant to be PERSISTED — a failure there DOES need a
+          // reply, since the Reviewer's re-attach (or an automatic promotion)
+          // would otherwise silently fail to survive a reload with no way to
+          // know it needs a retry.
+          const error = await this.comments?.updateAnchor(msg, document);
           if (error) {
             console.warn(`orca-editor: comment anchor update refused — ${error}`);
+            if (msg.origin !== undefined) {
+              void postToWebview({
+                type: 'commentAnchorUpdateResult',
+                docUri: msg.docUri,
+                threadId: msg.threadId,
+                ok: false,
+                error,
+              });
+            }
             // Nothing changed, so nothing to broadcast. Syncing here anyway made
             // every refused update push a full N-thread snapshot back, which the
             // webview then re-applied — pure amplification of a no-op.

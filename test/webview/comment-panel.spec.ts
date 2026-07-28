@@ -87,6 +87,16 @@ async function postedEditCount(page: Page): Promise<number> {
   );
 }
 
+/** The last `commentAnchorUpdate` posted (Req 24 US-23.13 AC1/AC2's `origin`). */
+async function lastAnchorUpdate(page: Page): Promise<Record<string, unknown> | undefined> {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __posted: Array<Record<string, unknown>> }).__posted
+        .filter((m) => m.type === 'commentAnchorUpdate')
+        .at(-1)
+  );
+}
+
 async function hostUpdate(page: Page, text: string): Promise<void> {
   await page.evaluate((value) => window.postMessage({ type: 'update', text: value }, '*'), text);
   await page.waitForTimeout(450);
@@ -195,6 +205,9 @@ test('dragging a row onto a node re-attaches it and empties the floating group',
   // Re-attaching only rewrites session-only data-comment-anchor-* attributes
   // (stripped by turndown's TRANSIENT_ATTRS) — it must not dirty the document.
   expect(await postedEditCount(page)).toBe(editsBefore);
+  // Req 24 US-23.13 AC1: a deliberate re-attach is persisted with the manual
+  // origin, so it survives a reload instead of floating again.
+  expect((await lastAnchorUpdate(page))?.origin).toBe('manual');
 
   // US-23.11 AC3: the snapshot follows the anchor. Without the rewrite the thread
   // reads as permanently drifted against a paragraph that no longer exists, so it

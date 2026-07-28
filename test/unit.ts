@@ -58,6 +58,7 @@ import {
   type StatusChangeMessage,
 } from '../src/comments/comment-utils';
 import {
+  buildAnchorUpdateLine,
   buildCommentLine,
   buildDeleteLine,
   buildReplyLine,
@@ -72,6 +73,7 @@ import {
   sidecarBackupNameFor,
   sidecarNameFor,
   sidecarNameMatches,
+  type AnchorUpdateLine,
   type CommentLine,
   type CommentStatus,
   type DeleteLine,
@@ -1653,6 +1655,10 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
     anchorId: 'comment-anchor-1',
     line: 12,
     state: 'approximate',
+    offsetStart: 0,
+    offsetEnd: 0,
+    recordedText: '',
+    nearestHeading: '',
     ...over,
   });
   check('anchorUpdate: a well-formed update is accepted', anchorUpdateRejection(update(), 'file:///a.md') === null);
@@ -2320,6 +2326,46 @@ check('bug1: undo khôi phục file kéo-thả re-track để dọn tiếp', /tr
       reply({ author: 'B', body: "B's" }),
       tombstone({ author: 'B' }),
     ]).threads[0].replies.length === 1);
+
+  // Req 24 US-23.13 AC1/AC2: `anchor-update` persists a re-attached or
+  // auto-resolved anchor. Its fold is the one line type that resolves
+  // last-one-wins by FILE/APPEND order, never by `timestamp` (a fast retry or a
+  // clock with coarse resolution must never decide the winner).
+  const anchorUpdate = (over: Partial<AnchorUpdateLine> = {}): AnchorUpdateLine => ({
+    ...buildAnchorUpdateLine({
+      id: 'u1',
+      parentCommentId: 'c1',
+      author: 'author',
+      timestamp: '2026-07-28T10:00:00.000Z',
+      origin: 'manual',
+      anchor: { offset_start: 0, offset_end: 0, recorded_text: 'moved here', last_known_line: 5, nearest_heading: '' },
+    }),
+    ...over,
+  });
+  check('sidecar: with no anchor-update line, a thread keeps its creation-time anchor',
+    foldSidecarRecords([comment()]).threads[0].anchor === anchor);
+  check('sidecar: a single anchor-update replaces the thread\'s anchor',
+    foldSidecarRecords([comment(), anchorUpdate()]).threads[0].anchor.recorded_text === 'moved here');
+  check('sidecar: anchor-update last-one-wins resolves by FILE order, not timestamp',
+    foldSidecarRecords([
+      comment(),
+      anchorUpdate({ id: 'u1', timestamp: '2026-07-28T11:00:00.000Z', anchor: { ...anchorUpdate().anchor, recorded_text: 'first-in-file-later-timestamp' } }),
+      anchorUpdate({ id: 'u2', timestamp: '2026-07-28T09:00:00.000Z', anchor: { ...anchorUpdate().anchor, recorded_text: 'second-in-file-earlier-timestamp' } }),
+    ]).threads[0].anchor.recorded_text === 'second-in-file-earlier-timestamp');
+  check('sidecar: a manual re-attach followed by an automatic resolve — the later one (in file order) wins regardless of origin',
+    foldSidecarRecords([
+      comment(),
+      anchorUpdate({ id: 'u1', origin: 'manual', anchor: { ...anchorUpdate().anchor, recorded_text: 'manual' } }),
+      anchorUpdate({ id: 'u2', origin: 'resolved', anchor: { ...anchorUpdate().anchor, recorded_text: 'resolved' } }),
+    ]).threads[0].anchor.recorded_text === 'resolved');
+  check('sidecar: a duplicate anchor-update id keeps the first-seen line',
+    foldSidecarRecords([
+      comment(),
+      anchorUpdate({ anchor: { ...anchorUpdate().anchor, recorded_text: 'first' } }),
+      anchorUpdate({ anchor: { ...anchorUpdate().anchor, recorded_text: 'second' } }),
+    ]).threads[0].anchor.recorded_text === 'first');
+  check('sidecar: a duplicate anchor-update id is flagged',
+    foldSidecarRecords([comment(), anchorUpdate(), anchorUpdate()]).warnings.length === 1);
 
   // AC7 clause 2: does this sidecar even describe the document it sits next to?
   // Decided by CONTENT, never by the file's creation date — `git clone`/`git
