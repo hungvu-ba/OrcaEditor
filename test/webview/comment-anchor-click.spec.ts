@@ -149,11 +149,13 @@ const popover = (page: Page) => page.locator('.comment-popover');
 const popoverBody = (page: Page) => page.locator('.comment-popover-original .comment-popover-body-text');
 
 /**
- * Settle window for asserting an effect did NOT happen. Must exceed
- * `COMMENT_ANCHOR_OPEN_DELAY_MS` (250ms) — the open is armed on `click` and fires
- * on a timer, so sampling earlier would pass before the feature had its chance.
+ * Settle window for asserting an effect did NOT happen. Must comfortably exceed
+ * `COMMENT_ANCHOR_OPEN_DELAY_MS` (500ms) — the open is armed on `click` and fires
+ * on a timer, so sampling earlier passes before the feature had its chance, and a
+ * thin margin fails in the PASSING direction under the worker oversubscription
+ * this suite's flake methodology uses. 850ms is a 1.7x margin.
  */
-const SETTLE_MS = 500;
+const SETTLE_MS = 850;
 
 /**
  * Record every transition of the popover card's `hidden` flag from now on.

@@ -239,11 +239,17 @@ export const COMMENT_PANEL_DRAG_THRESHOLD_PX = 4;
  * The leading click of a double-click is byte-identical to a plain click
  * (`detail === 1`, zero travel, collapsed selection), so the only way to honour
  * AC3's "no popover opens" is to wait out the double-click window and cancel on a
- * second press. The OS threshold is not exposed to JS; 250ms covers the common
- * case at a latency the reader still perceives as immediate. Raising it buys
- * slower double-clickers at the cost of every single click feeling laggy.
+ * second press.
+ *
+ * 500ms, not the 250ms first shipped: the OS threshold is not exposed to JS, and
+ * review measured that 250ms left every double-click slower than that opening the
+ * card and then having it dismissed — the visible flash the deferral exists to
+ * prevent. 500ms is Windows' default interval and covers the large majority
+ * (macOS is configurable to ~750ms, so a very slow double-click can still flash;
+ * AC3 records that limit rather than pretending otherwise). PO decision
+ * 2026-07-29, accepting the added latency on every single click as the cost.
  */
-export const COMMENT_ANCHOR_OPEN_DELAY_MS = 250;
+export const COMMENT_ANCHOR_OPEN_DELAY_MS = 500;
 
 /** How many ranked candidates the Re-attach… picker offers under "Suggested". */
 export const COMMENT_PANEL_REATTACH_SUGGESTIONS = 3;
