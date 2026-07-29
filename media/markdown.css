@@ -294,21 +294,11 @@ a:hover {
   margin-left: 0.35em;
 }
 
-/* US-20.5: transient highlight on the body occurrence a broken References entry
- * navigates to (main.ts adds/removes .ref-nav-flash around a ~1.2s window).
- * Reading-mode-tokenized via --rp-accent (never a hardcoded hex) so it restyles
- * per Reading Mode option. */
-#content a.ref-nav-flash {
-  border-radius: 3px;
-  background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
-  outline: 2px solid var(--rp-accent);
-  outline-offset: 1px;
-}
-
 /* Bug General #1: transient highlight on the caption declaration an entity link
  * navigates to (gutter.ts adds/removes .entity-reveal-flash around a ~1.2s
  * window). The badge is a non-selectable atom, so a flash stands in for a text
- * selection. Reading-mode-tokenized via --rp-accent, same as ref-nav-flash. */
+ * selection. Reading-mode-tokenized via --rp-accent (never a hardcoded hex) so
+ * it restyles per Reading Mode option. */
 #content .md-caption.entity-reveal-flash {
   background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
   outline: 2px solid var(--rp-accent);

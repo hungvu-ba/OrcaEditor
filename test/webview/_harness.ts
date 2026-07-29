@@ -26,7 +26,6 @@ const DEFAULT_CONFIG: InitConfig = {
   fontFamily: 'sans-serif',
   autoOpenToc: false,
   showLineNumbers: false,
-  caseInsensitiveFs: false,
   crossFileSearchScope: 'markdown',
   tableFitMode: false,
   readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },

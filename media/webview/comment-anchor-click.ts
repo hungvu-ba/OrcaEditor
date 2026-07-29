@@ -38,10 +38,10 @@ import { CAPTION_CLASS } from './render';
  * code (verified by mutation) that also implies images are otherwise clickable.
  *
  * A bare `<a>` is deliberately NOT here — a plain link click is not navigation in
- * this editor, so the AC opens the thread instead. That premise does NOT hold for a
- * `## References` entry (US-20.5 navigates on an unmodified click); recorded as
- * US-23.23's Open Question #1 and split to Requirement 20, because excluding it
- * would change what AC4 promises.
+ * this editor, so the AC opens the thread instead. This used to be false for a
+ * `## References` entry (US-20.5 navigated on an unmodified click, so a comment
+ * anchored over one fired both actions — US-23.23's Open Question #1); Requirement
+ * 20 removed that navigation, so the premise now holds for every `<a>` uniformly.
  */
 const CLICK_OWNED_ELSEWHERE = `button, .${CAPTION_CLASS}`;
 

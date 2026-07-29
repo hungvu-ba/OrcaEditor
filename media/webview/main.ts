@@ -100,14 +100,8 @@ import { initCommentGutter } from './comment-gutter';
 import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
-import { normalizeHrefKey } from '../../src/references-section';
 import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
-import {
-  SYNC_DEBOUNCE_MS,
-  SCROLL_SAVE_DEBOUNCE_MS,
-  REF_NAV_FLASH_CLASS,
-  MD_CODE_WRAPPED_CLASS,
-} from './constants';
+import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -162,9 +156,6 @@ initMathEdit(content);
 initFrontMatterToggle(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
-// X-12: filesystem case-sensitivity, from InitConfig — folds the ref-nav key so
-// a case-differing body occurrence matches on Windows/macOS. Host default off.
-let caseInsensitiveFs = false;
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
@@ -573,7 +564,6 @@ window.addEventListener('message', (event) => {
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
-      caseInsensitiveFs = cfg.caseInsensitiveFs === true;
       crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
       // US-2.8: engine PlantUML nạp lười lúc chạy — webview không tự dựng được
       // URI webview lẫn nonce CSP, nên nhận sẵn từ host. Phải set TRƯỚC
@@ -2381,13 +2371,6 @@ content.addEventListener('click', (e) => {
   if (anchor) {
     e.preventDefault();
     e.stopPropagation();
-    // US-20.5: a plain click on a `## References` entry is navigation, not
-    // link-open — broken (⚠️) → jump to first body occurrence; healthy → open
-    // its target. Cmd/Ctrl+Click on a References entry still opens normally.
-    if (!e.metaKey && !e.ctrlKey && referencesSectionAnchors().has(anchor)) {
-      navigateReferenceEntry(anchor);
-      return;
-    }
     if (e.metaKey || e.ctrlKey) {
       openLink(anchor.getAttribute('href') ?? '');
     }
@@ -2439,61 +2422,6 @@ function scrollToAnchor(fragment: string): void {
       return;
     }
   }
-}
-
-/**
- * US-20.5: anchors inside the rendered `## References` section — the run of
- * sibling blocks from the References `<h2>` up to the next H1/H2. Returned as a
- * Set so a clicked anchor can be classified as a References entry AND so the
- * first-body-occurrence search can SKIP them (a broken entry must never
- * navigate to itself).
- */
-function referencesSectionAnchors(): Set<HTMLAnchorElement> {
-  const anchors = new Set<HTMLAnchorElement>();
-  const h2 = Array.from(content.children).find(
-    (child) => child.tagName === 'H2' && /^references$/i.test((child.textContent ?? '').trim())
-  );
-  if (!h2) {
-    return anchors;
-  }
-  for (let sib = h2.nextElementSibling; sib; sib = sib.nextElementSibling) {
-    if (sib.tagName === 'H1' || sib.tagName === 'H2') {
-      break;
-    }
-    for (const a of Array.from(sib.querySelectorAll('a[href]'))) {
-      anchors.add(a as HTMLAnchorElement);
-    }
-  }
-  return anchors;
-}
-
-/**
- * US-20.5: handle a plain click on a References-section entry. A broken (`⚠️`)
- * entry scrolls to + flashes the FIRST body occurrence of the same link and
- * opens the quick-correct fix surface there (the entry itself is only a
- * listing — the real fix is in the body); a healthy entry opens its target
- * file via the normal open flow (no line-jump). Resolves US-20.5's open
- * question for both cases.
- */
-function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
-  const li = anchor.closest('li');
-  const broken = (li?.textContent ?? '').trimStart().startsWith('⚠️');
-  if (!broken) {
-    openLink(anchor.getAttribute('href') ?? '');
-    return;
-  }
-  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '', caseInsensitiveFs);
-  const sectionAnchors = referencesSectionAnchors();
-  const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
-    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '', caseInsensitiveFs) === key
-  );
-  if (!bodyAnchor) {
-    return;
-  }
-  bodyAnchor.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-  bodyAnchor.classList.add(REF_NAV_FLASH_CLASS);
-  setTimeout(() => bodyAnchor.classList.remove(REF_NAV_FLASH_CLASS), 1200);
-  quickCorrect.open(bodyAnchor);
 }
 
 // ---------------------------------------------------------------------------

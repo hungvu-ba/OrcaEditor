@@ -1383,7 +1383,7 @@ const triggerFixture: TriggerConfig = { dateFormat: 'YYYY-MM-DD', executeCommand
 const toWebview: HostToWebview[] = [
   { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
@@ -1391,7 +1391,7 @@ const toWebview: HostToWebview[] = [
   } },
   { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
     breaks: false, linkify: true, wordWrap: false, fontSize: 14,
-    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true, caseInsensitiveFs: false,
+    lineHeight: 1.6, fontFamily: 'sans', autoOpenToc: true, showLineNumbers: true,
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',

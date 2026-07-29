@@ -361,8 +361,6 @@ export const COMMENT_ANCHOR_LOST_CLASS = 'comment-anchor-lost';
 
 // --- Req 24 US-23.21: presentation classes registered in turndown.ts's TRANSIENT_CLASSES ---
 
-/** DOM class flashed briefly on a cross-reference target after `navigateReferenceEntry` scrolls to it (Req 20 US-20.5). */
-export const REF_NAV_FLASH_CLASS = 'ref-nav-flash';
 /** DOM class for the drop-target outline drawn during drag-drop (Req 17). */
 export const DD_HOVER_OUTLINE_CLASS = 'dd-hover-outline';
 /** DOM class for the drop-target outline drawn on a table cell during drag-drop (Req 17). */
@@ -389,9 +387,9 @@ export const MD_CODE_WRAPPED_CLASS = 'md-code-wrapped';
 export const BROKEN_REF_CLASS = 'broken-ref';
 /**
  * Req 21: transient highlight flashed on a revealed caption badge inside
- * `#content` for `ENTITY_REVEAL_FLASH_MS` (gutter.ts) — the same one-shot,
- * timeout-removed shape as `REF_NAV_FLASH_CLASS` above, registered for the same
- * reason (US-23.22).
+ * `#content` for `ENTITY_REVEAL_FLASH_MS` (gutter.ts) — a one-shot,
+ * timeout-removed effect, registered as transient for the same reason as the
+ * other interaction-state classes above (US-23.22).
  */
 export const ENTITY_REVEAL_FLASH_CLASS = 'entity-reveal-flash';
 /**

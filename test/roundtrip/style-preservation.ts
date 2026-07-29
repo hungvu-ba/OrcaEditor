@@ -669,7 +669,6 @@ runner.check(
   // output on the raw-HTML table path, one named case per class.
   const NAMED_CLASSES: Array<{ name: string; cls: string; attrEl: 'td' | 'table' }> = [
     { name: 'md-entity-ref (Req 21)', cls: 'md-entity-ref', attrEl: 'td' },
-    { name: 'ref-nav-flash (Req 20 US-20.5)', cls: 'ref-nav-flash', attrEl: 'td' },
     { name: 'dd-hover-outline (Req 17)', cls: 'dd-hover-outline', attrEl: 'td' },
     { name: 'dd-hover-outline-cell (Req 17)', cls: 'dd-hover-outline-cell', attrEl: 'td' },
     { name: 'dd-source-muted (Req 17)', cls: 'dd-source-muted', attrEl: 'td' },
@@ -937,7 +936,6 @@ runner.check(
   // newly-registered class.
   const CELL_CLASSES = [
     'md-entity-ref',
-    'ref-nav-flash',
     'dd-hover-outline',
     'dd-hover-outline-cell',
     'dd-source-muted',
@@ -989,9 +987,9 @@ runner.check(
  *  - md-code-wrapped: re-stamped by postProcessCodeHeaders on every render
  *    pass. Covered by test/roundtrip/code-header.ts (added alongside this
  *    story, same real-pipeline pattern as entity-ref.ts).
- *  - ref-nav-flash, dd-hover-outline, dd-hover-outline-cell, dd-source-muted:
+ *  - dd-hover-outline, dd-hover-outline-cell, dd-source-muted:
  *    REPORTED BACK — no render re-stamp path exists. Each is a one-shot,
- *    event-driven interaction state (nav-flash timeout, mouse hover/drag)
+ *    event-driven interaction state (mouse hover/drag)
  *    applied directly by its owning handler outside any render pass; nothing
  *    "re-applies" it on the next render because rendering never runs while
  *    the interaction is live. The clone-only safety tests above are what
@@ -1010,8 +1008,8 @@ runner.check(
  *  - entity-reveal-flash, dd-drop-target-cell: REPORTED BACK — one-shot,
  *    event-driven interaction states (a reveal-flash timeout, an external
  *    drag's hover highlight) applied outside any render pass, exactly like
- *    ref-nav-flash and the dd-* states above. The clone-only safety cases are
- *    what keep registering them from breaking their handlers.
+ *    the dd-* states above. The clone-only safety cases are what keep
+ *    registering them from breaking their handlers.
  */
 
 runner.finish('style-preservation');

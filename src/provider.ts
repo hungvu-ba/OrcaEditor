@@ -1530,8 +1530,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
-              // X-12: same value drives host dedup + webview ref-nav so both fold identically.
-              caseInsensitiveFs: CASE_INSENSITIVE_FS,
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
               // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.

@@ -45,7 +45,7 @@ import { ENTITY_REVEAL_FLASH_CLASS } from './constants';
 import { ownOrNestedAttr } from './block-info';
 import { scrollBehavior } from './dom-utils';
 
-/** How long the reveal flash stays on, ms (mirrors ref-nav-flash's ~1.2s window). */
+/** How long the reveal flash stays on, ms. */
 const REVEAL_FLASH_MS = 1200;
 
 export interface LineGutter {
@@ -390,7 +390,7 @@ export function initLineGutter(
    * entity links instead of line-based reveal because the target file is often
    * outside the workspace (not indexed) and this is immune to line↔DOM drift.
    * The declaration renders as a contenteditable=false atom, so a text Selection
-   * can't land inside it — a transient flash stands in (like ref-nav-flash).
+   * can't land inside it — a transient flash stands in.
    * Case-insensitive so a differently-cased link fragment still matches.
    */
   function scrollToText(query: string): boolean {
