@@ -353,14 +353,20 @@ eq('eol: mixed \\r\\n + \\n -> all CRLF', normalizeEol('a\r\nb\nc', true), 'a\r\
 function makeP8Pair(initialDoc: string, useCrlf = false) {
   // ---- host (src/provider.ts) ----
   // Seeded as the 'init' push leaves things: pushDocumentText stamped rev 1 onto
-  // the initial text and the webview rendered it, so both sides open on rev 1.
+  // the initial text and the webview rendered it, so both sides open on rev 1
+  // and seq 0 (the webview has authored nothing yet).
   let doc = initialDoc;
   let mirrorText = initialDoc;
   let mirrorRev = 1;
+  let mirrorSeq = 0;
+  let lastPushCaret: number | undefined;
   let pushRev = 1;
   let resyncsRequested = 0;
+  let fullPushesRequested = 0;
   let diffPayload = 0; // wire chars spent on diff-shaped edits
   let fullPayload = 0; // wire chars spent on full-text edits
+  let pushDiffPayload = 0; // wire chars spent on diff-shaped host pushes (the reverse half)
+  let pushFullPayload = 0; // wire chars spent on full-text host pushes
 
   /** case 'edit' — resolves BOTH wire shapes to one full text, then applies it as before. */
   function hostOnEdit(msg: WebviewToHost & { type: 'edit' }): void {
@@ -370,6 +376,7 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
       text = msg.text;
       mirrorText = text;
       mirrorRev = msg.baseRev; // re-anchor onto the rev the webview is really on
+      mirrorSeq = msg.seq;
     } else {
       diffPayload += msg.newText.length;
       const rebuilt = msg.baseRev === mirrorRev ? rebuildFromEditDiff(mirrorText, msg) : null;
@@ -380,6 +387,7 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
       }
       text = rebuilt;
       mirrorText = text;
+      mirrorSeq = msg.seq; // only on acceptance — a refused diff leaves the mirror behind
     }
     // applyMinimalEdit — unchanged by P-8: always a full text in, minimal edit out.
     const reconciled = normalizeEol(text, useCrlf);
@@ -387,39 +395,126 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
     doc = d ? applyEdit(doc, d) : doc;
   }
 
-  /** Every host push goes through here (pushDocumentText): stamps a rev, re-anchors the mirror. */
-  function hostPush(text: string, defer = false): void {
+  function pushDocumentText(text: string): number {
     pushRev++;
     mirrorText = text;
     mirrorRev = pushRev;
-    wv.onUpdate(text, pushRev, defer);
+    return pushRev;
+  }
+
+  /**
+   * updateMessage — the reverse half: diff `mirrorText → pushed`, or full text
+   * when there is nothing to diff. Captures the base BEFORE pushDocumentText
+   * re-anchors the mirror onto this very push.
+   */
+  function updateMessage(pushed: string, caret?: number): HostToWebview & { type: 'update' } {
+    const diff = computeMinimalEdit(mirrorText, pushed);
+    const baseRev = mirrorRev;
+    const baseLength = mirrorText.length;
+    const baseSeq = mirrorSeq;
+    // Only a diff can be refused, and only undo/redo carries a caret — remember it
+    // so the healing full push can replay it instead of dropping it.
+    lastPushCaret = caret;
+    if (!diff || mirrorSeq < 0) {
+      // mirrorSeq < 0: a webview-authored advance reached us without its seq, so a
+      // diff is GUARANTEED to be refused — go straight to full text.
+      pushFullPayload += pushed.length;
+      return { type: 'update', text: pushed, caretLine: caret, rev: pushDocumentText(pushed) };
+    }
+    pushDiffPayload += diff.newText.length;
+    return {
+      type: 'update',
+      start: diff.start,
+      oldEnd: diff.oldEnd,
+      newText: diff.newText,
+      baseLength,
+      baseRev,
+      baseSeq,
+      caretLine: caret,
+      rev: pushDocumentText(pushed),
+    };
+  }
+
+  /**
+   * Every host push goes through here (pushDocumentText, via updateMessage). A
+   * push always originates from a document that ALREADY holds `text` (an external
+   * change, or the post-undo state), so the document moves with it — that is what
+   * `case 'requestFullPush'` re-reads when a diff is refused.
+   */
+  function hostPush(text: string, defer = false, caret?: number): void {
+    // document.getText() is the document's OWN eol, and that is what both the push
+    // and the mirror carry — the webview's currentText holds it verbatim.
+    const pushed = normalizeEol(text, useCrlf);
+    doc = pushed;
+    wv.onUpdate(updateMessage(pushed, caret), defer);
+  }
+
+  /** case 'requestFullPush' — re-push the CURRENT document in full; needs no base, so it always lands. */
+  function hostOnRequestFullPush(): void {
+    fullPushesRequested++;
+    pushFullPayload += doc.length;
+    // Replays the refused push's caret: dropping it is what made a refused undo
+    // land the caret at the pre-render snapshot instead of at the undone edit.
+    wv.onUpdate({ type: 'update', text: doc, caretLine: lastPushCaret, rev: pushDocumentText(doc) }, false);
   }
 
   // ---- webview (media/webview/main.ts) ----
   const wv = {
     currentText: initialDoc,
     appliedRev: 1,
+    localSeq: 0,
+    lastCaret: undefined as number | undefined,
     pending: undefined as { text: string; rev: number; baseText: string } | undefined,
-    /** syncNow(): serialize, diff against the PRE-edit text, post the changed region. */
-    type(newFullText: string): void {
+    /**
+     * syncNow(): serialize, diff against the PRE-edit text, post the changed
+     * region. `hold` models an 'edit' the webview has POSTED but the host has not
+     * received yet — `currentText`/`localSeq` have already advanced. Returns the
+     * held message so a test can deliver it later.
+     */
+    type(newFullText: string, hold = false): (WebviewToHost & { type: 'edit' }) | undefined {
       const prevText = wv.currentText;
       if (newFullText === prevText) {
-        return;
+        return undefined;
       }
       wv.currentText = newFullText;
+      wv.localSeq++; // serializeIfChanged: the one webview-authored advance
       const d = computeMinimalEdit(prevText, newFullText)!;
-      hostOnEdit({
+      const msg: WebviewToHost & { type: 'edit' } = {
         type: 'edit',
         start: d.start,
         oldEnd: d.oldEnd,
         newText: d.newText,
         baseLength: prevText.length,
         baseRev: wv.appliedRev,
-      });
+        seq: wv.localSeq,
+      };
+      if (hold) {
+        return msg;
+      }
+      hostOnEdit(msg);
+      return undefined;
     },
-    onUpdate(text: string, rev: number, defer: boolean): void {
-      if (text === wv.currentText) {
-        wv.appliedRev = rev; // same text — adopting keeps both sides on one rev
+    /** resolveUpdateText — either wire shape to one full text; undefined = refuse. */
+    resolveUpdateText(msg: HostToWebview & { type: 'update' }): string | undefined {
+      if ('text' in msg) {
+        return msg.text;
+      }
+      if (msg.baseRev !== wv.appliedRev || msg.baseSeq !== wv.localSeq) {
+        return undefined;
+      }
+      return rebuildFromEditDiff(wv.currentText, msg) ?? undefined;
+    },
+    onUpdate(msg: HostToWebview & { type: 'update' }, defer: boolean): void {
+      const next = wv.resolveUpdateText(msg);
+      if (next === undefined) {
+        hostOnRequestFullPush(); // nothing applied — ask for a base-free push
+        return;
+      }
+      // applyDocumentUpdate's caret argument — undefined means "no caret came with
+      // this update", which is the fallback-to-snapshot branch, not a position.
+      wv.lastCaret = msg.caretLine;
+      if (next === wv.currentText) {
+        wv.appliedRev = msg.rev; // same text — adopting keeps both sides on one rev
         // A queued deferred update older than this rev is stale: rendering it on
         // release would put back content the document moved past AND drag
         // appliedRev backwards. The flush guard only compares baseText.
@@ -430,11 +525,11 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
       }
       if (defer) {
         // A trigger popup owns the keyboard: stash WITHOUT adopting the rev.
-        wv.pending = { text, rev, baseText: wv.currentText };
+        wv.pending = { text: next, rev: msg.rev, baseText: wv.currentText };
         return;
       }
-      wv.currentText = text;
-      wv.appliedRev = rev;
+      wv.currentText = next;
+      wv.appliedRev = msg.rev;
     },
     flushPending(): void {
       const u = wv.pending;
@@ -446,17 +541,33 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
       wv.appliedRev = u.rev;
     },
     onRequestFullSync(): void {
-      hostOnEdit({ type: 'edit', text: wv.currentText, baseRev: wv.appliedRev });
+      hostOnEdit({ type: 'edit', text: wv.currentText, baseRev: wv.appliedRev, seq: wv.localSeq });
     },
   };
 
   return {
     wv,
     hostPush,
+    /** Deliver an 'edit' the webview held back (see wv.type's `hold`). */
+    deliver(msg: WebviewToHost & { type: 'edit' }): void { hostOnEdit(msg); },
+    /**
+     * case 'undo'/'redo' receiving `pendingText` — the one webview-authored
+     * advance that reaches the host WITHOUT an 'edit'. Mirrors text and seq
+     * synchronously at receipt; `seq === undefined` models the field missing from
+     * the wire, which must leave the mirror unable to claim agreement.
+     */
+    mirrorPending(pendingText: string, seq: number | undefined): void {
+      mirrorText = pendingText;
+      mirrorSeq = typeof seq === 'number' ? seq : -1;
+    },
     get docText() { return doc; },
+    get mirror() { return mirrorText; },
     get resyncs() { return resyncsRequested; },
+    get fullPushes() { return fullPushesRequested; },
     get diffPayload() { return diffPayload; },
     get fullPayload() { return fullPayload; },
+    get pushDiffPayload() { return pushDiffPayload; },
+    get pushFullPayload() { return pushFullPayload; },
   };
 }
 
@@ -546,11 +657,16 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
 {
   const p = makeP8Pair('X\n');
   p.hostPush('A\n', /* defer */ true); // rev 2, queued behind the popup
-  p.hostPush('X\n'); // rev 3, equal to what the webview holds → adopted
-  check('p8[stale-pending]: the newer equal-text push adopts rev 3', p.wv.appliedRev === 3);
+  // rev 3 is diff-shaped and stamped baseRev 2 — the rev the DEFERRED push
+  // anchored the mirror to, which the webview never adopted. So the reverse-half
+  // rev gate refuses it and asks for a full push; rev 4 is that push, and it is
+  // the one that reaches the equal-text branch.
+  p.hostPush('X\n');
+  check('p8[stale-pending]: the diff push against the un-adopted rev is refused', p.fullPushes === 1, `  fullPushes=${p.fullPushes}`);
+  check('p8[stale-pending]: the full re-push is adopted as the new rev', p.wv.appliedRev === 4);
   check('p8[stale-pending]: and discards the queued older update', p.wv.pending === undefined);
   p.wv.flushPending(); // popup releases — nothing left to render
-  check('p8[stale-pending]: appliedRev never regresses to the stale rev', p.wv.appliedRev === 3);
+  check('p8[stale-pending]: appliedRev never regresses to the stale rev', p.wv.appliedRev === 4);
   eq('p8[stale-pending]: the stale text is never rendered', p.wv.currentText, 'X\n');
   p.wv.type('XY\n');
   check('p8[stale-pending]: typing continues as a diff', p.resyncs === 0, `  resyncs=${p.resyncs}`);
@@ -604,6 +720,270 @@ function makeP8Pair(initialDoc: string, useCrlf = false) {
     }
   }
   check('p8[fuzz]: 400 × 4 random rewrites all land byte-exact', mismatches === 0, `  mismatches=${mismatches}`);
+}
+
+// ---------------------------------------------------------------------------
+// P-8 REVERSE HALF: host→webview 'update' ships only the changed region too.
+// Same bar as the forward direction — the webview must end up holding EXACTLY
+// what a pre-change full-text push would have given it, and every doubt about
+// the base must cost a full push rather than a splice at guessed offsets.
+// ---------------------------------------------------------------------------
+
+// The happy path: an external change (git checkout, another editor, a formatter)
+// while both sides agree.
+{
+  const big = '# Title\n\n' + 'lorem ipsum dolor sit amet. '.repeat(200);
+  const p = makeP8Pair(big);
+  p.hostPush(big + 'tail\n');
+  eq('p8rev: the webview holds what a full-text push would have given it', p.wv.currentText, big + 'tail\n');
+  check('p8rev: and adopts the push rev', p.wv.appliedRev === 2);
+  check('p8rev: no full push was needed', p.fullPushes === 0);
+  check(
+    'p8rev: the push cost the changed region, not the document',
+    p.pushDiffPayload === 5 && p.pushFullPayload === 0,
+    `  diff=${p.pushDiffPayload} full=${p.pushFullPayload} doc=${big.length}`
+  );
+}
+
+// Several external changes in a row (a git checkout that touches the file
+// repeatedly, a watch-mode formatter) — every one of them stays a diff.
+{
+  const p = makeP8Pair('a\n');
+  p.hostPush('ab\n');
+  p.hostPush('abc\n');
+  p.hostPush('abcd\n');
+  eq('p8rev[burst]: the webview tracks every push', p.wv.currentText, 'abcd\n');
+  check('p8rev[burst]: 3 pushes cost 3 wire chars', p.pushDiffPayload === 3 && p.pushFullPayload === 0);
+  check('p8rev[burst]: and never fell back to a full push', p.fullPushes === 0);
+}
+
+// The divergence baseSeq exists for, and the reason baseLength cannot replace it:
+// an 'edit' the webview POSTED but the host has not received yet. `appliedRev` is
+// unchanged (a webview-authored advance bumps no rev) and the in-flight edit is
+// LENGTH-PRESERVING (overtyping a selection), so both the rev gate and a
+// length-only guard would wave the diff through — straight into the wrong offsets.
+{
+  const p = makeP8Pair('AAAA\n');
+  const held = p.wv.type('BBBB\n', /* hold */ true)!; // same length, host has not seen it
+  check('p8rev[inflight]: the rev gate alone cannot see this', p.wv.appliedRev === 1);
+  check('p8rev[inflight]: nor can baseLength', p.wv.currentText.length === p.mirror.length);
+  p.hostPush('AAAA!\n'); // host diffs against its stale mirror
+  check('p8rev[inflight]: the seq gate refuses it → one full push', p.fullPushes === 1, `  fullPushes=${p.fullPushes}`);
+  eq('p8rev[inflight]: nothing was spliced into the wrong base', p.wv.currentText, 'AAAA!\n');
+  // What actually happens to the held edit — stated exactly, because the obvious
+  // reading is wrong: the full push bumped the rev, so this edit's `baseRev` no
+  // longer matches the mirror and the host REFUSES it. The resync reply then sends
+  // what the webview now holds (the pushed text), so the typed 'BBBB' is GONE.
+  // That is the accepted lost-keystroke race the audit already documents for the
+  // forward direction — the guarantee here is convergence, never preservation.
+  p.deliver(held);
+  check('p8rev[inflight]: the held edit is refused, costing one resync', p.resyncs === 1, `  resyncs=${p.resyncs}`);
+  eq('p8rev[inflight]: the typed text is lost, not resurrected', p.docText, 'AAAA!\n');
+  eq('p8rev[inflight]: and both sides agree on that', p.docText, p.wv.currentText);
+}
+
+// The reverse path's `baseLength` guard. It needs BOTH counters to agree, because
+// `resolveUpdateText` checks rev and seq FIRST and short-circuits — so a wrong
+// baseLength is only reachable through a mirror bug, not through any divergence
+// the counters can see. Without this case that branch has no reverse-path cover.
+{
+  const p = makeP8Pair('hello\n');
+  p.wv.onUpdate(
+    // Counters agree; the length claim does not (base is 6, not 99).
+    { type: 'update', start: 0, oldEnd: 1, newText: 'H', baseLength: 99, baseRev: 1, baseSeq: 0, rev: 2 },
+    false
+  );
+  check('p8rev[baselength]: a wrong baseLength is refused → full push', p.fullPushes === 1);
+  eq('p8rev[baselength]: and nothing was spliced', p.wv.currentText, 'hello\n');
+}
+
+// A push the webview DEFERRED (trigger popup owns the keyboard) leaves the mirror
+// ahead. The NEXT push is diffed against that un-adopted text, so the rev gate has
+// to refuse it — resolving a diff against the wrong base is exactly what would
+// corrupt the render, and the render writes back to the file.
+{
+  const p = makeP8Pair('one\n');
+  p.hostPush('two\n', /* defer */ true);
+  check('p8rev[defer]: the deferred push is stashed, not adopted', p.wv.appliedRev === 1 && p.wv.pending !== undefined);
+  p.hostPush('three\n');
+  check('p8rev[defer]: the follow-up diff is refused → full push', p.fullPushes === 1, `  fullPushes=${p.fullPushes}`);
+  eq('p8rev[defer]: the webview lands on the latest document', p.wv.currentText, 'three\n');
+}
+
+// The deferred diff push flushes on release: the text it resolved to at ARRIVAL
+// time is what renders, and only then is its rev adopted.
+{
+  const p = makeP8Pair('one\n');
+  p.hostPush('one two\n', /* defer */ true);
+  check('p8rev[defer-flush]: rev not adopted while stashed', p.wv.appliedRev === 1);
+  p.wv.flushPending();
+  eq('p8rev[defer-flush]: the resolved diff text renders on release', p.wv.currentText, 'one two\n');
+  check('p8rev[defer-flush]: and the rev is adopted only now', p.wv.appliedRev === 2);
+  check('p8rev[defer-flush]: no full push was ever needed', p.fullPushes === 0);
+}
+
+// A malformed/corrupted diff push (a mirror bug, not a legitimate divergence):
+// refused wholesale, and #content is left untouched.
+{
+  const p = makeP8Pair('hello\n');
+  p.wv.onUpdate(
+    { type: 'update', start: 0, oldEnd: 99, newText: 'x', baseLength: 6, baseRev: 1, baseSeq: 0, rev: 2 },
+    false
+  );
+  check('p8rev[malformed]: out-of-range offsets are refused → full push', p.fullPushes === 1);
+  eq('p8rev[malformed]: the webview text was never touched by the bad diff', p.wv.currentText, 'hello\n');
+}
+
+// undo/redo: pendingSeq is what keeps the post-undo push a diff. Without it the
+// mirror knows the text but claims a stale advance count, and every push after an
+// undo would ship the whole document for nothing.
+{
+  const p = makeP8Pair('start\n');
+  const pendingText = 'start typed\n';
+  p.wv.type(pendingText, /* hold */ true); // takePendingSync: advanced, no 'edit' sent
+  // case 'undo' mirrors the pending text AND its seq at message receipt.
+  p.mirrorPending(pendingText, p.wv.localSeq);
+  p.hostPush('start\n'); // the post-undo state
+  check('p8rev[undo]: the post-undo push stayed a diff', p.fullPushes === 0, `  fullPushes=${p.fullPushes}`);
+  eq('p8rev[undo]: and the webview shows the undone text', p.wv.currentText, 'start\n');
+}
+
+// The same undo, with pendingSeq dropped on the wire. The mirror must refuse to
+// claim agreement (-1 never equals a real localSeq) rather than authorize a diff
+// against the pre-flush text.
+{
+  const p = makeP8Pair('start\n');
+  const pendingText = 'start typed\n';
+  p.wv.type(pendingText, true);
+  p.mirrorPending(pendingText, undefined); // malformed message: text without its seq
+  p.hostPush('start\n');
+  // The sentinel is CONSULTED, not merely stored: a diff stamped with it would be
+  // refused for certain, so the push goes full-text directly. Spending a refusal
+  // round trip first would be the same outcome for three messages instead of one.
+  check('p8rev[undo-noseq]: no refusal round trip is spent', p.fullPushes === 0, `  fullPushes=${p.fullPushes}`);
+  check('p8rev[undo-noseq]: the push went full-text directly', p.pushDiffPayload === 0 && p.pushFullPayload > 0);
+  eq('p8rev[undo-noseq]: still lands on the right text', p.wv.currentText, 'start\n');
+}
+
+// A refused push must not silently become a caret-less one. Only undo/redo sends a
+// caret, and it is now diff-shaped, so without the replay a refused undo lands the
+// caret at applyDocumentUpdate's pre-render snapshot instead of at the undone edit.
+{
+  const p = makeP8Pair('one\n');
+  p.hostPush('two\n', /* defer */ true); // leaves the mirror anchored ahead
+  p.hostPush('three\n', false, /* caret line */ 1); // undo-shaped: diff + caret
+  check('p8rev[caret]: the caret-carrying diff was refused', p.fullPushes === 1, `  fullPushes=${p.fullPushes}`);
+  eq('p8rev[caret]: and the healing full push replayed its caret', p.wv.lastCaret, 1);
+  eq('p8rev[caret]: on the right text', p.wv.currentText, 'three\n');
+}
+
+// A CRLF document. KNOWN LIMITATION, measured here rather than left to be
+// discovered: the mirror holds whatever the webview last reported, and the webview
+// serializes in LF, so after ANY local edit the mirror is LF while every push is
+// CRLF. The diff then splits at the first newline and carries essentially the whole
+// document — correct (both sides agree on the LF base, so baseLength holds), but
+// the reverse half buys nothing on a CRLF document until the next full re-anchor.
+// Reconciling the eol across the mirror boundary is a design change, not a patch.
+{
+  const p = makeP8Pair('# A\r\n\r\nB\r\n', true);
+  p.hostPush('# A\r\n\r\nB!\r\n');
+  eq('p8rev[crlf]: the webview holds the CRLF text a full push would have sent', p.wv.currentText, '# A\r\n\r\nB!\r\n');
+  check('p8rev[crlf]: a push against a CRLF mirror is a real diff', p.fullPushes === 0 && p.pushDiffPayload === 1);
+
+  const q = makeP8Pair('# A\r\n\r\nB\r\n', true);
+  q.wv.type('# A\n\nB\n'); // serialize() is LF — the mirror is now LF too
+  const before = q.pushDiffPayload;
+  q.hostPush('# A\r\n\r\nB!\r\n');
+  eq('p8rev[crlf]: still byte-exact after the eol mismatch', q.wv.currentText, '# A\r\n\r\nB!\r\n');
+  check(
+    'p8rev[crlf]: but the diff degenerates to ~the whole document (known limitation)',
+    q.pushDiffPayload - before > 'B!'.length,
+    `  pushed=${q.pushDiffPayload - before} chars vs doc=${'# A\r\n\r\nB!\r\n'.length}`
+  );
+}
+
+// Fuzz: arbitrary interleavings of host pushes and webview edits must leave the
+// webview holding exactly what full-text pushes would have given it, and the
+// document self-consistent with it — refusals included.
+{
+  const alphabet = 'ab😀ữ\n #-';
+  const rnd = (n: number) => Math.floor(Math.random() * n);
+  const randDoc = () => {
+    let s = '';
+    const len = rnd(30);
+    for (let i = 0; i < len; i++) {
+      s += alphabet[rnd(alphabet.length)];
+    }
+    return s;
+  };
+  let mismatches = 0;
+  let divergences = 0;
+  let diffPushChars = 0;
+  for (let i = 0; i < 400; i++) {
+    const p = makeP8Pair(randDoc());
+    let lastPush: string | undefined;
+    // A LIST, not one slot: `held ?? …` would advance currentText/localSeq while
+    // dropping the message, so two in-flight edits — the shape invokeAction really
+    // produces (two 'edit's in one frame) — was unreachable.
+    const held: Array<WebviewToHost & { type: 'edit' }> = [];
+    for (let step = 0; step < 6; step++) {
+      const next = randDoc();
+      switch (rnd(4)) {
+        case 0: // an external change
+          lastPush = next;
+          p.hostPush(next);
+          break;
+        case 1: { // local typing that reaches the host
+          // Queue then drain: postMessage is FIFO, so an edit can never overtake an
+          // older one still in flight. Calling p.wv.type(next) directly here would
+          // deliver this edit ahead of the queue — an interleaving the real channel
+          // cannot produce, and one that trips the forward direction's documented
+          // baseLength-only footgun, reporting a model artifact as a defect.
+          const msg = p.wv.type(next, true);
+          if (msg) {
+            held.push(msg);
+          }
+          while (held.length > 0) {
+            p.deliver(held.shift()!);
+          }
+          lastPush = undefined;
+          break;
+        }
+        case 2: { // local typing still in flight when the next push is composed
+          const msg = p.wv.type(next, true);
+          if (msg) {
+            held.push(msg);
+          }
+          lastPush = undefined;
+          break;
+        }
+        default: { // deliver the oldest held edit, in the order it was posted
+          const msg = held.shift();
+          if (msg) {
+            p.deliver(msg);
+          }
+          break;
+        }
+      }
+    }
+    // A push is the last word on the webview's text: it renders (or refuses and
+    // takes the full re-push of the same document), so the webview must hold it.
+    if (lastPush !== undefined && p.wv.currentText !== lastPush) {
+      mismatches++;
+    }
+    // The harm a "final text matches the last push" check cannot see: the DOCUMENT
+    // drifting from what the webview shows. Only assertable with nothing in flight
+    // — an undelivered edit legitimately leaves the document behind.
+    if (held.length === 0 && p.docText !== p.wv.currentText) {
+      divergences++;
+    }
+    diffPushChars += p.pushDiffPayload;
+  }
+  check('p8rev[fuzz]: 400 × 6 random push/edit interleavings land byte-exact', mismatches === 0, `  mismatches=${mismatches}`);
+  check('p8rev[fuzz]: document never drifts from the webview once nothing is in flight', divergences === 0, `  divergences=${divergences}`);
+  // Without this, a regression that refuses EVERY diff stays green — the full
+  // re-push always re-establishes the text the other two checks look at.
+  check('p8rev[fuzz]: and diffs were actually exercised, not refused throughout', diffPushChars > 0, `  diffChars=${diffPushChars}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -976,8 +1356,10 @@ eq('scheme: UNC KHÔNG phải scheme', hasUrlScheme('\\\\server\\share\\x.md'), 
 const fromWebview: WebviewToHost[] = [
   { type: 'ready' },
   // P-8: both 'edit' shapes — the steady-state diff and the full-text resync reply.
-  { type: 'edit', start: 0, oldEnd: 1, newText: 'y', baseLength: 1, baseRev: 1 },
-  { type: 'edit', text: 'x', baseRev: 1 },
+  { type: 'edit', start: 0, oldEnd: 1, newText: 'y', baseLength: 1, baseRev: 1, seq: 1 },
+  { type: 'edit', text: 'x', baseRev: 1, seq: 1 },
+  // P-8 reverse half: the webview's refusal reply to a diff-shaped 'update'.
+  { type: 'requestFullPush' },
   { type: 'openLink', href: 'https://x' },
   { type: 'searchFiles', query: 'q', requestId: 1 },
   { type: 'copyFileMention' },
@@ -1014,6 +1396,9 @@ const toWebview: HostToWebview[] = [
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x', rev: 2 },
+  // P-8 reverse half: the diff-shaped 'update' — the same message carrying only
+  // the changed region, guarded by baseRev + baseSeq.
+  { type: 'update', start: 0, oldEnd: 1, newText: 'y', baseLength: 1, baseRev: 1, baseSeq: 3, rev: 2 },
   { type: 'requestFullSync' },
   { type: 'fileSearchResult', requestId: 1, files: [{ path: 'a.md', name: 'a.md', dir: '.' }] },
   { type: 'configUpdate', autoOpenToc: true, showLineNumbers: true, triggerMode: 'advanced', commentAuthorName: 'hungvu' },
@@ -1024,8 +1409,8 @@ const toWebview: HostToWebview[] = [
   { type: 'zenChanged', zen: true },
   { type: 'readingModeChanged', enabled: true, mode: 'sepia' },
 ];
-check('contract: WebviewToHost phủ đủ 14 biến thể (P-8 splits edit into diff + full-text)', fromWebview.length === 14);
-check('contract: HostToWebview phủ đủ 12 biến thể (init có/không reveal + requestFullSync + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 12);
+check('contract: WebviewToHost phủ đủ 15 biến thể (P-8 splits edit into diff + full-text; + requestFullPush)', fromWebview.length === 15);
+check('contract: HostToWebview phủ đủ 13 biến thể (init có/không reveal + update diff/full + requestFullSync + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 13);
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho

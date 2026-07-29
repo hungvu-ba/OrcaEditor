@@ -443,15 +443,27 @@ export type WebviewToHost =
    *
    * `baseLength` is the mirror's expected length (the webview's `currentText`
    * length before this edit); `start`/`oldEnd` index that same base text.
+   *
+   * `seq` is the counter described on the REVERSE direction's diff-shaped
+   * 'update' — the webview's own advance count AFTER this edit, so the host can
+   * tell whether its mirror has caught up with every text the webview authored.
    */
-  | { type: 'edit'; start: number; oldEnd: number; newText: string; baseLength: number; baseRev: number }
+  | {
+      type: 'edit';
+      start: number;
+      oldEnd: number;
+      newText: string;
+      baseLength: number;
+      baseRev: number;
+      seq: number;
+    }
   /**
    * The full-text, self-healing variant — every 'edit' had this shape before
    * P-8. Sent in reply to `requestFullSync`, and it re-anchors the host's mirror
-   * onto `baseRev` (the rev the WEBVIEW is actually on), so the two sides
-   * converge after one round trip instead of resyncing forever.
+   * onto `baseRev` (the rev the WEBVIEW is actually on) and `seq`, so the two
+   * sides converge after one round trip instead of resyncing forever.
    */
-  | { type: 'edit'; text: string; baseRev: number }
+  | { type: 'edit'; text: string; baseRev: number; seq: number }
   /**
    * Uỷ quyền undo/redo cho TextDocument (một undo stack duy nhất, đúng mô hình
    * CustomTextEditor): webview chặn Ctrl/Cmd+Z·Y rồi gửi message này, host gọi
@@ -459,9 +471,23 @@ export type WebviewToHost =
    * 'update'. `pendingText`: nếu còn thay đổi đang chờ debounce lúc bấm phím,
    * webview serialize NGAY và gắn kèm để host commit nó thành 1 undo-unit TRƯỚC
    * khi undo (atomic trong một handler — tránh đua thứ tự với edit debounce).
+   *
+   * `pendingSeq` accompanies `pendingText`: that text is an advance of the
+   * webview's `currentText` delivered WITHOUT an 'edit', so the host mirrors it
+   * from here — and must mirror its `seq` from here too, or the mirror is right
+   * about the text while claiming a stale advance count, and every subsequent
+   * host push falls back to full text for no reason.
    */
-  | { type: 'undo'; pendingText?: string }
-  | { type: 'redo'; pendingText?: string }
+  | { type: 'undo'; pendingText?: string; pendingSeq?: number }
+  | { type: 'redo'; pendingText?: string; pendingSeq?: number }
+  /**
+   * Performance Audit P-8 (reverse half): a diff-shaped 'update' arrived against
+   * a base this webview does not hold (see `baseRev`/`baseSeq` on
+   * `HostToWebview`'s 'update') — it was DROPPED, not partially applied. Asks
+   * the host to re-push the document in full, which needs no base and therefore
+   * always lands. The mirror image of the host's `requestFullSync`.
+   */
+  | { type: 'requestFullPush' }
   | { type: 'openLink'; href: string }
   | { type: 'searchFiles'; query: string; requestId: number }
   | { type: 'copyFileMention' }
@@ -723,6 +749,45 @@ export type HostToWebview =
    * mirror of the webview's text still describes the same document.
    */
   | { type: 'update'; text: string; caretLine?: number; caretCol?: number; rev: number }
+  /**
+   * Performance Audit P-8 (reverse half): the diff-shaped 'update' — the same
+   * message, carrying only the CHANGED REGION of the document instead of the
+   * whole text. Discriminated from the full-text variant above by whether `text`
+   * is present, exactly as `WebviewToHost`'s two 'edit' shapes are. The webview
+   * rebuilds the full text (`rebuildFromEditDiff`) and then runs the UNCHANGED
+   * render path, so only the wire payload differs.
+   *
+   * `start`/`oldEnd` index the base text, `baseLength` is its expected length.
+   * A diff is sound only against the exact base it was computed from, and TWO
+   * independent counters are needed to prove the webview still holds that base:
+   *
+   * - `baseRev` — the rev of the push the host's mirror is anchored to. Catches
+   *   divergence the HOST caused: a push the webview deferred (a trigger popup
+   *   owning the keyboard) or dropped leaves the webview on an older rev.
+   * - `baseSeq` — the webview's own advance count (`localSeq`) as last received
+   *   by the host. Catches divergence the WEBVIEW caused: an 'edit' still in
+   *   flight means the webview's `currentText` has moved on while `baseRev` is
+   *   unchanged (a webview-authored advance bumps no rev), so the rev gate is
+   *   blind to it. `baseLength` alone is not enough either — overtyping a
+   *   selection with equal-length text keeps the length and would splice at the
+   *   wrong offsets into the user's file.
+   *
+   * On either counter disagreeing — or a failed `baseLength`/bounds check — the
+   * webview drops the diff untouched and posts `requestFullPush`; no partial
+   * application is ever attempted. `rev` is this push's own rev either way.
+   */
+  | {
+      type: 'update';
+      start: number;
+      oldEnd: number;
+      newText: string;
+      baseLength: number;
+      baseRev: number;
+      baseSeq: number;
+      caretLine?: number;
+      caretCol?: number;
+      rev: number;
+    }
   /**
    * Performance Audit P-8: a diff-shaped 'edit' arrived against a base the host
    * does not hold (see `baseRev` on `WebviewToHost`'s 'edit') — it was DROPPED,

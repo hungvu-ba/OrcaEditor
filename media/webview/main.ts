@@ -100,7 +100,7 @@ import { initCommentGutter } from './comment-gutter';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
-import { computeMinimalEdit } from '../../src/text-utils';
+import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
 import {
   SYNC_DEBOUNCE_MS,
   SCROLL_SAVE_DEBOUNCE_MS,
@@ -333,8 +333,8 @@ initToolbar(content, toolbarEl, {
   syncNow,
   // Same host-delegation contract as the Ctrl+Z/Y keydown path below: one
   // single TextDocument undo stack, never the browser's native one.
-  requestUndo: () => postToHost({ type: 'undo', pendingText: takePendingSync() }),
-  requestRedo: () => postToHost({ type: 'redo', pendingText: takePendingSync() }),
+  requestUndo: () => postToHost({ type: 'undo', ...takePendingSync() }),
+  requestRedo: () => postToHost({ type: 'redo', ...takePendingSync() }),
   dom,
   toc,
   commentPanel,
@@ -458,6 +458,20 @@ let currentText = '';
  * apply at the wrong offsets.
  */
 let appliedRev = 0;
+/**
+ * Performance Audit P-8 (reverse half): how many times THIS webview has advanced
+ * `currentText` on its own (see `serializeIfChanged`). Rides to the host on every
+ * message carrying webview-authored text — both 'edit' shapes and undo/redo's
+ * `pendingText` — and comes back on a diff-shaped 'update' as `baseSeq`.
+ *
+ * It exists because `appliedRev` cannot see this direction of divergence: a
+ * webview-authored advance bumps no rev, so an 'edit' still in flight leaves
+ * `appliedRev === baseRev` while `currentText` has already moved past the base
+ * the host diffed against. `baseLength` does not close it either — overtyping a
+ * selection with equal-length text keeps the length — and there the wrong
+ * offsets would be spliced into the user's file.
+ */
+let localSeq = 0;
 /** Req 23 US-23.2: `document.uri.toString()` echoed back on `commentHighlightToggled`/`replyToComment`/`deleteComment`. */
 let currentDocUri = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -653,7 +667,16 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'update': {
-      if (msg.text === currentText) {
+      // P-8 (reverse half): resolve the two wire shapes to ONE full text before
+      // anything below looks at it, exactly as the host resolves the two 'edit'
+      // shapes. `undefined` = the diff was refused (see resolveUpdateText) and
+      // NOTHING is applied — ask for a full push, which needs no base.
+      const nextText = resolveUpdateText(msg);
+      if (nextText === undefined) {
+        postToHost({ type: 'requestFullPush' });
+        break;
+      }
+      if (nextText === currentText) {
         // P-8: nothing to render, but this rev's text IS what we hold — adopting
         // it keeps the host's mirror and ours on the same rev, so the next edit
         // stays a diff instead of forcing a pointless full resync. Same `?? 0`
@@ -682,7 +705,7 @@ window.addEventListener('message', (event) => {
         // mirror is now ahead of us and every edit until this flushes (or is
         // dropped) resyncs in full; that is the safe direction.
         pendingUpdate = {
-          text: msg.text ?? '',
+          text: nextText,
           caretLine: msg.caretLine,
           caretCol: msg.caretCol,
           baseText: currentText,
@@ -690,7 +713,7 @@ window.addEventListener('message', (event) => {
         };
         break;
       }
-      applyDocumentUpdate(msg.text ?? '', msg.caretLine, msg.caretCol);
+      applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
       appliedRev = msg.rev ?? 0;
       break;
     }
@@ -705,7 +728,7 @@ window.addEventListener('message', (event) => {
       // that keystroke reached the document for an instant — and then lost to
       // the next sync anyway, while leaving document and webview divergent. The
       // race is documented in deferred-work.md; converging is the better half.
-      postToHost({ type: 'edit', text: currentText, baseRev: appliedRev });
+      postToHost({ type: 'edit', text: currentText, baseRev: appliedRev, seq: localSeq });
       break;
     }
     case 'fileSearchResult': {
@@ -1254,6 +1277,31 @@ interface PendingUpdate {
 }
 let pendingUpdate: PendingUpdate | undefined;
 
+/**
+ * Performance Audit P-8 (reverse half): resolve either 'update' wire shape to the
+ * full text it means — the full-text variant as-is, a diff by splicing it onto
+ * `currentText`. Returns `undefined` for "refuse, ask for a full push"; the
+ * caller applies NOTHING in that case.
+ *
+ * A diff is sound only against the exact base the host computed it from, and the
+ * two guards below are not redundant — they catch opposite directions of
+ * divergence (see `baseSeq` in `src/shared/messages.ts`): `baseRev` catches a
+ * push this webview deferred or dropped, `baseSeq` catches an 'edit' of ours the
+ * host has not received yet. `rebuildFromEditDiff` then rejects a base-length or
+ * bounds mismatch, which would mean a mirror bug rather than a legitimate
+ * divergence. Every refusal is total: splicing at guessed offsets would corrupt
+ * the user's file, and the render below writes straight back to it.
+ */
+function resolveUpdateText(msg: HostToWebview & { type: 'update' }): string | undefined {
+  if ('text' in msg) {
+    return msg.text ?? '';
+  }
+  if (msg.baseRev !== appliedRev || msg.baseSeq !== localSeq) {
+    return undefined;
+  }
+  return rebuildFromEditDiff(currentText, msg) ?? undefined;
+}
+
 /** Render a host document 'update' and restore the caret (undo/redo carries an
  * explicit caretLine; a caret-less update snapshots the source caret and restores
  * it so it doesn't jump to the top of the file). */
@@ -1545,6 +1593,13 @@ function serializeIfChanged(): string | undefined {
     lineGutter.refreshFromMarkdown(markdown);
   }
   currentText = markdown;
+  // Performance Audit P-8 (reverse half): the ONE place the webview advances
+  // `currentText` itself (renderDocument, the only other writer, adopts a host
+  // push). Every such advance rides to the host as `seq`, and a diff-shaped
+  // 'update' is refused unless the host echoes back the count we are on — which
+  // is what makes an 'edit' still in flight visible to us instead of splicing
+  // against a text the host has not received yet.
+  localSeq++;
   return markdown;
 }
 
@@ -1580,6 +1635,7 @@ function syncNow(): void {
     newText: diff.newText,
     baseLength: prevText.length,
     baseRev: appliedRev,
+    seq: localSeq,
   });
 }
 
@@ -1589,14 +1645,20 @@ function syncNow(): void {
  * cho undo/redo: gắn kèm markdown này vào message để host commit lần gõ mới nhất
  * thành 1 undo-unit rồi mới undo — atomic trong một handler ở host. Trả undefined
  * khi không có gì đang chờ (nội dung đã đồng bộ).
+ *
+ * Performance Audit P-8 (reverse half): returns the undo/redo message FIELDS, not
+ * a bare string, so `pendingSeq` cannot be forgotten at one of the five post
+ * sites — this is the only advance of `currentText` the host learns about without
+ * an 'edit', so it is also the only place its seq can go missing.
  */
-function takePendingSync(): string | undefined {
+function takePendingSync(): { pendingText?: string; pendingSeq?: number } {
   if (syncTimer === undefined) {
-    return undefined;
+    return {};
   }
   clearTimeout(syncTimer);
   syncTimer = undefined;
-  return serializeIfChanged();
+  const pendingText = serializeIfChanged();
+  return pendingText === undefined ? {} : { pendingText, pendingSeq: localSeq };
 }
 
 /**
@@ -2551,14 +2613,14 @@ content.addEventListener('keydown', (e) => {
           return; // US-23.6 AC2 — the field's own undo, not the document's.
         }
         e.preventDefault();
-        postToHost({ type: 'undo', pendingText: takePendingSync() });
+        postToHost({ type: 'undo', ...takePendingSync() });
         return;
       case 'y':
         if (ownsNativeUndo(e.target)) {
           return;
         }
         e.preventDefault();
-        postToHost({ type: 'redo', pendingText: takePendingSync() });
+        postToHost({ type: 'redo', ...takePendingSync() });
         return;
       case 'b':
         applyInlineFormat(e, () => document.execCommand('bold'));
@@ -2597,7 +2659,7 @@ content.addEventListener('keydown', (e) => {
       return; // US-23.6 AC2, same as the mod-only z/y branch above.
     }
     e.preventDefault();
-    postToHost({ type: 'redo', pendingText: takePendingSync() });
+    postToHost({ type: 'redo', ...takePendingSync() });
     return;
   }
   // Lưới an toàn giữa phiên: nếu block cuối là khối "bẫy caret" (Mermaid/code/

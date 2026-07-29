@@ -1246,6 +1246,38 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
      */
     let mirrorText = '';
     let mirrorRev = 0;
+    /**
+     * P-8 (reverse half): the webview's own advance counter (`localSeq` in
+     * main.ts) as last RECEIVED here. Where `mirrorRev` tracks divergence the
+     * host caused, this tracks divergence the webview caused: it is bumped by
+     * the webview on every advance of its `currentText` and rides on every
+     * message carrying webview-authored text, so `mirrorSeq !== localSeq` means
+     * an 'edit' is still in flight and the mirror is behind. Stamped onto a
+     * diff-shaped push as `baseSeq`; a mismatch there makes the webview refuse
+     * the diff rather than splice at offsets computed against a text it has
+     * already moved past.
+     */
+    let mirrorSeq = 0;
+    /**
+     * Read a webview-reported seq off the wire. Every message boundary here gets
+     * the SAME treatment: a missing or non-numeric seq must leave the mirror
+     * UNABLE to claim agreement, rather than silently keeping a stale count that
+     * would authorize a diff push against text the webview has already moved past.
+     * -1 never equals a real `localSeq`, and `updateMessage` reads that sentinel to
+     * send full text directly instead of spending a refusal first.
+     *
+     * The realistic producer is a stale `dist/webview/main.js` running against a
+     * rebuilt host (CLAUDE.md's test-infra trap), or a future post site that
+     * forgets the field.
+     */
+    const seqOf = (msg: { seq?: number }): number =>
+      typeof msg.seq === 'number' ? msg.seq : -1;
+    /**
+     * The caret the most recent push carried, if any (only undo/redo sends one).
+     * Replayed by `case 'requestFullPush'` so a refused undo push does not silently
+     * become a caret-less one — see `updateMessage`.
+     */
+    let lastPushCaret: { line: number; col: number } | undefined;
     /** Monotonic push counter — bumped by `pushDocumentText` for every 'init'/'update'. */
     let pushRev = 0;
     /**
@@ -1259,6 +1291,57 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       mirrorText = text;
       mirrorRev = pushRev;
       return pushRev;
+    };
+    /**
+     * P-8 (reverse half): compose an 'update' for `pushed` — the diff-shaped
+     * variant against the mirror when there is a base to diff against, else the
+     * full text. MUST be called (and its result posted) before anything else
+     * mutates the mirror: `pushDocumentText` re-anchors the mirror onto this very
+     * push, so the base has to be captured first.
+     *
+     * The diff is emitted whenever the text changed at all — even a whole-file
+     * rewrite, where `newText` is the document plus ~60 bytes of guard fields.
+     * That costs nothing measurable and keeps one code path instead of a
+     * size-heuristic branch nothing would exercise.
+     */
+    const updateMessage = (
+      pushed: string,
+      caret?: { line: number; col: number }
+    ): HostToWebview => {
+      const diff = computeMinimalEdit(mirrorText, pushed);
+      const baseRev = mirrorRev;
+      const baseLength = mirrorText.length;
+      const baseSeq = mirrorSeq;
+      const caretLine = caret?.line;
+      const caretCol = caret?.col;
+      // Only a DIFF can be refused, and only the undo/redo push carries a caret,
+      // so the healing full push in `case 'requestFullPush'` would otherwise drop
+      // it — leaving the caret wherever the pre-undo DOM had it instead of at the
+      // undone edit. Remember it for that reply; a later caret-less push clears it.
+      lastPushCaret = caret;
+      if (!diff || mirrorSeq < 0) {
+        // `!diff`: nothing changed against the mirror — the webview already holds
+        // this text, so a diff would save nothing, and the full-text variant is
+        // what its "same text, adopt the rev" branch is written against.
+        //
+        // `mirrorSeq < 0`: the sentinel set when a webview-authored advance
+        // reached us WITHOUT its seq (see case 'undo'/'redo'). The mirror cannot
+        // claim agreement, so a diff is guaranteed to be refused — sending one
+        // would spend a refusal plus a full push where one full push does.
+        return { type: 'update', text: pushed, caretLine, caretCol, rev: pushDocumentText(pushed) };
+      }
+      return {
+        type: 'update',
+        start: diff.start,
+        oldEnd: diff.oldEnd,
+        newText: diff.newText,
+        baseLength,
+        baseRev,
+        baseSeq,
+        caretLine,
+        caretCol,
+        rev: pushDocumentText(pushed),
+      };
     };
     /** Serializes webview-originated document mutations — see case 'edit'. */
     let editChain: Promise<void> = Promise.resolve();
@@ -1334,8 +1417,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       updateTimer = setTimeout(() => {
         updateTimer = undefined;
-        const pushed = document.getText();
-        void postToWebview({ type: 'update', text: pushed, rev: pushDocumentText(pushed) });
+        void postToWebview(updateMessage(document.getText()));
       }, UPDATE_DEBOUNCE_MS);
     });
 
@@ -1417,6 +1499,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             this.pendingReveal.delete(docUriStr);
           }
           const initialText = document.getText();
+          // P-8 (reverse half): 'init' is always full text — there is no base to
+          // diff against. It also RESETS the seq mirror: a webview reload restarts
+          // `localSeq` at 0 while this closure survives with whatever count the
+          // previous incarnation reached, and a mirror claiming a higher seq than
+          // the webview will ever report would refuse every diff push forever.
+          mirrorSeq = 0;
           void postToWebview({
             type: 'init',
             text: initialText,
@@ -1494,6 +1582,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             text = msg.text;
             mirrorText = text;
             mirrorRev = msg.baseRev;
+            mirrorSeq = seqOf(msg);
           } else {
             // A diff is only sound against the exact base it was computed from.
             const rebuilt =
@@ -1506,6 +1595,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             }
             text = rebuilt;
             mirrorText = text;
+            // Only on acceptance: a refused diff leaves the mirror describing the
+            // older text, so it must keep claiming that text's seq too — the
+            // webview is ahead of us until its full-text resync reply lands.
+            mirrorSeq = seqOf(msg);
           }
           // Chain, don't apply directly: the webview can post two 'edit's in
           // the SAME frame (invokeAction: flush of pending typing + the
@@ -1552,6 +1645,33 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           await editChain;
           break;
         }
+        case 'requestFullPush': {
+          // P-8 (reverse half): the webview refused a diff-shaped 'update'
+          // because it does not hold the base we diffed against. Re-push the
+          // CURRENT document in full — a full text needs no base, so it always
+          // lands and cannot start a refusal loop. Deliberately the latest text
+          // rather than the refused push's: the point is agreement now, not
+          // replaying a stale rev.
+          //
+          // `await editChain` for the same reason case 'undo'/'redo' does: an
+          // accepted 'edit' updates the mirror SYNCHRONOUSLY at receipt but
+          // applies to the document on the chain, so reading document.getText()
+          // ahead of it would answer with a snapshot that edit is about to
+          // overwrite — and that overwrite is echo-suppressed, so the final text
+          // would never be pushed.
+          await editChain;
+          const pushed = document.getText();
+          // Replay the refused push's caret (undo/redo only): without it a refused
+          // undo lands the caret at the pre-render snapshot instead of the edit.
+          void postToWebview({
+            type: 'update',
+            text: pushed,
+            caretLine: lastPushCaret?.line,
+            caretCol: lastPushCaret?.col,
+            rev: pushDocumentText(pushed),
+          });
+          break;
+        }
         case 'undo':
         case 'redo': {
           // P-8 INVARIANT: every mirror mutation happens SYNCHRONOUSLY at
@@ -1566,6 +1686,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // equal-length text. That splices at wrong offsets into the user's file.
           if (msg.pendingText !== undefined) {
             mirrorText = msg.pendingText;
+            // The seq of that same advance (P-8 reverse half) — see `seqOf`.
+            mirrorSeq = seqOf({ seq: msg.pendingSeq });
           }
           // Any in-flight chained 'edit' must commit first — its undo unit
           // precedes this undo/redo chronologically (bug 0717).
@@ -1642,13 +1764,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           lastTextFromWebview = undefined;
           const diff = computeMinimalEdit(before, after);
           const caret = diff ? sourceLineCol(after, diff.start + diff.newText.length) : undefined;
-          void postToWebview({
-            type: 'update',
-            text: after,
-            caretLine: caret?.line,
-            caretCol: caret?.col,
-            rev: pushDocumentText(after),
-          });
+          void postToWebview(updateMessage(after, caret));
           break;
         }
         case 'openLink': {

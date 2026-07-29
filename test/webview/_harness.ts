@@ -96,9 +96,38 @@ function harnessHtml(readability: InitConfig['readability']): string {
   window.addEventListener('message', (e) => {
     const m = e.data;
     if (m && (m.type === 'init' || m.type === 'update')) {
+      if ('text' in m) {
+        window.__mirror = m.text ?? '';
+      } else if (
+        // P-8 reverse half: a diff-shaped 'update' carries only the changed
+        // region, so the mirror has to be RECONSTRUCTED here exactly as the
+        // webview reconstructs it — the host diffs against its own mirror, which
+        // is this same string. Taking m.text (what this did before the reverse
+        // half existed) blanks the mirror instead, and every following webview
+        // diff then fails its baseLength check — sending the spec down the resync
+        // path rather than the one it is testing.
+        //
+        // Gated on EXACTLY what src/text-utils.ts rebuildFromEditDiff refuses on,
+        // for the same reason the 'edit' branch below is: JS slice() clamps
+        // out-of-range indices and truncates fractional ones, so an ungated stub
+        // reconstructs plausible-but-wrong text from a payload the real webview
+        // would have refused outright, and the spec stays green.
+        // NOTE: this whole stub lives inside a template literal, so no backticks
+        // in these comments — one would close it and break the parse.
+        typeof m.newText === 'string' &&
+        m.baseLength === window.__mirror.length &&
+        Number.isInteger(m.start) && Number.isInteger(m.oldEnd) &&
+        m.start >= 0 && m.oldEnd >= m.start && m.oldEnd <= window.__mirror.length
+      ) {
+        window.__mirror =
+          window.__mirror.slice(0, m.start) + m.newText + window.__mirror.slice(m.oldEnd);
+      } else {
+        // Unreconstructable: leave the mirror alone and record it, so a spec that
+        // later reads a stale mirror fails loudly instead of quietly.
+        window.__mirrorDesync++;
+      }
       // Same '?? 0' the webview's own appliedRev uses, so a spec that posts a
       // rev-less update (most of them) keeps both sides on one consistent rev.
-      window.__mirror = m.text ?? '';
       window.__mirrorRev = m.rev ?? 0;
     }
   });
