@@ -16,9 +16,41 @@
 
 /** Priority tiers — higher wins. */
 export const ESCAPE_PRIORITY = {
+  /**
+   * A full-viewport modal with its own scrim (Req 23 US-23.3's anchor-lost
+   * dialog). Above everything else because it is visually on top of everything
+   * else: at NESTED_POPUP it tied with the comment popover's delete confirmation,
+   * and the stable sort broke that tie by registration order — so Escape closed
+   * whichever had been armed first, leaving the topmost dialog and its scrim up.
+   */
+  MODAL: 40,
   DRAG: 30,
+  /**
+   * A popover nested INSIDE another popover (Req 23 US-23.2's delete
+   * confirmation inside the comment thread card). Strictly above POPUP so
+   * Escape always resolves innermost-first: at equal priority the tie broke on
+   * registration order, so Escape closed the outer card — losing the reply
+   * draft — and which one won silently flipped as handlers were re-armed.
+   */
+  NESTED_POPUP: 25,
+  /**
+   * The right-dock's `⋯` overflow menu (Req 23 US-23.7). Its own tier rather
+   * than POPUP or NESTED_POPUP because it can be armed at the same time as
+   * either — a comment popover or a trigger popup lives in #content, the menu in
+   * the dock — and a shared priority would let registration order decide which
+   * one an Escape closes. Above DOCK so a surface opened from inside a tab always
+   * closes before the container itself.
+   */
+  DOCK_MENU: 22,
   POPUP: 20,
   CROSS_FILE: 15,
+  /**
+   * The right-dock container itself (Req 23 US-23.7) — the last thing Escape
+   * closes among the dock's surfaces. Above ZEN so Escape dismisses a
+   * just-opened dock before leaving Zen: a transient surface goes before a
+   * persistent mode.
+   */
+  DOCK: 12,
   ZEN: 10,
 } as const;
 
@@ -36,8 +68,9 @@ let listenerInstalled = false;
 
 function onKeyDown(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
-  // Priority-descending snapshot (registration order breaks ties; same-priority
-  // handlers here are mutually exclusive so tie order is irrelevant).
+  // Priority-descending snapshot. Registration order breaks ties, so any two
+  // handlers that can be armed AT THE SAME TIME must not share a priority — see
+  // MODAL above for the case that proved it.
   const ordered = entries.slice().sort((a, b) => b.priority - a.priority);
   for (const entry of ordered) {
     if (entry.handler()) {
@@ -89,7 +122,11 @@ export interface PopoverDismiss {
  * via `onClose` — so the identical hide/guard/dispose boilerplate lives in ONE
  * place instead of being copied per popover.
  */
-export function initPopoverDismiss(popover: HTMLElement, onClose: () => void): PopoverDismiss {
+export function initPopoverDismiss(
+  popover: HTMLElement,
+  onClose: () => void,
+  priority: number = ESCAPE_PRIORITY.POPUP
+): PopoverDismiss {
   let escDisposable: Disposable | undefined;
   const api: PopoverDismiss = {
     get isOpen(): boolean {
@@ -97,7 +134,7 @@ export function initPopoverDismiss(popover: HTMLElement, onClose: () => void): P
     },
     arm(): void {
       escDisposable?.dispose();
-      escDisposable = registerEscapeHandler(ESCAPE_PRIORITY.POPUP, () => {
+      escDisposable = registerEscapeHandler(priority, () => {
         if (popover.hidden) {
           return false;
         }

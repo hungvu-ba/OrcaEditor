@@ -40,6 +40,39 @@ export function computeMinimalEdit(oldText: string, newText: string): MinimalEdi
 }
 
 /**
+ * Performance Audit P-8: rebuild the webview's new full text from a diff-shaped
+ * 'edit' applied to `base` (the host's mirror of the webview's `currentText`).
+ *
+ * Returns `null` — meaning "refuse, ask for a full resync" — rather than
+ * applying anything questionable: `baseLength` disagreeing with the mirror says
+ * the two sides are describing different documents, and out-of-range or
+ * inverted offsets say the same about a message that cannot be trusted. Splicing
+ * at guessed offsets would corrupt the user's file, so every failure is total.
+ * The rev check that catches a LEGITIMATE divergence (a push the webview
+ * deferred) lives at the call site, which is the side that knows the revs.
+ */
+export function rebuildFromEditDiff(
+  base: string,
+  edit: { start: number; oldEnd: number; newText: string; baseLength: number }
+): string | null {
+  const { start, oldEnd, newText, baseLength } = edit;
+  // `newText` is typed as string, but this is a message boundary — a dropped or
+  // malformed field must be refused like every other bad input here, not
+  // concatenated. Without this, an absent `newText` splices the literal
+  // "undefined" into the user's markdown and is then stored as the new mirror.
+  if (typeof newText !== 'string') {
+    return null;
+  }
+  if (baseLength !== base.length) {
+    return null;
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(oldEnd) || start < 0 || oldEnd < start || oldEnd > base.length) {
+    return null;
+  }
+  return base.slice(0, start) + newText + base.slice(oldEnd);
+}
+
+/**
  * Normalize the line endings of `text` to the document's EOL before diffing.
  * The webview serialize() always emits LF; for a CRLF document a raw LF-vs-CRLF
  * diff mismatches at offset 0 → a whole-document edit (X-2). When `useCrlf`, turn
@@ -130,7 +163,8 @@ export function imageNamePrefix(baseName: string, caseInsensitive = true): strin
  * dropped from outside the editor). `name` is client-controlled (the
  * browser File object's `.name`, forwarded from the webview) so it must not
  * be trusted as a path: strips every `/`/`\` (no directory traversal
- * survives) and leading dots (no hidden file / relative-`..` trick), falling
+ * survives), leading dots (no hidden file / relative-`..` trick), trailing
+ * dots/spaces, and prefixes a Windows-reserved device stem (S-6), falling
  * back to a generic name if nothing safe is left.
  *
  * The stem is capped at DROPPED_STEM_MAX chars (X-9): a browser-supplied
@@ -157,8 +191,28 @@ export function isPathTooLongError(err: unknown): boolean {
   return /ENAMETOOLONG|ERROR_PATH_NOT_FOUND|path.*too long|name too long/i.test(msg);
 }
 
+/**
+ * Windows reserved device names (S-6): `CON`, `CON.pdf`, `com1.PDF`... all
+ * resolve to the device namespace on Windows regardless of extension, while
+ * `bacon.pdf` must not match (the anchors make it a whole-segment match, not a
+ * substring one).
+ */
+const WINDOWS_RESERVED_NAME = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
 export function sanitizeDroppedFileName(name: string): string {
-  const safe = name.replace(/[\\/]/g, '_').replace(/^\.+/, '').trim();
+  const safe = name
+    .replace(/[\\/]/g, '_')
+    // trim() BEFORE stripping leading dots (review finding, step-04, edge case
+    // hunter — confirmed by direct execution): a name with whitespace ahead of
+    // its leading dot(s) — " .htaccess", "  ..secret" — used to keep the dot(s)
+    // untouched, because they weren't at position 0 until trim ran, by which
+    // point the leading-dot strip had already had its one pass.
+    .trim()
+    .replace(/^\.+/, '')
+    // Windows silently drops trailing dots/spaces from the final path
+    // component (S-6) — left uncleaned, a name like "notes." or "notes. "
+    // writes as something other than what the caller expects.
+    .replace(/[.\s]+$/, '');
   if (!safe) {
     return 'file';
   }
@@ -166,8 +220,19 @@ export function sanitizeDroppedFileName(name: string): string {
   // short) so truncation never eats it; a name with no such dot is all stem.
   const dot = safe.lastIndexOf('.');
   const hasExt = dot > 0 && safe.length - dot <= 11;
-  const stem = hasExt ? safe.slice(0, dot) : safe;
+  let stem = hasExt ? safe.slice(0, dot) : safe;
   const ext = hasExt ? safe.slice(dot) : '';
+  // Review finding (blind hunter, 2026-07-28): Windows keys reserved-device-name
+  // blocking off the segment before the FIRST dot in the whole name, not the
+  // last — "aux.spec.ts" is still the AUX device even though the last-dot split
+  // above puts "aux.spec" in `stem`. Check that first segment specifically, but
+  // prefix `stem` (which may carry more than just that segment for a compound
+  // extension) so the rest of the name survives untouched.
+  const firstDot = safe.indexOf('.');
+  const reservedSegment = firstDot === -1 ? safe : safe.slice(0, firstDot);
+  if (WINDOWS_RESERVED_NAME.test(reservedSegment)) {
+    stem = `_${stem}`;
+  }
   return (stem.length > DROPPED_STEM_MAX ? stem.slice(0, DROPPED_STEM_MAX) : stem) + ext;
 }
 
@@ -382,4 +447,19 @@ export function driveMismatchHint(customPathNorm: string, workspacePathNorm: str
  */
 export function sameDocumentUri(aStr: string, bStr: string, caseInsensitive: boolean): boolean {
   return caseInsensitive ? aStr.toLowerCase() === bStr.toLowerCase() : aStr === bStr;
+}
+
+/**
+ * Canonical form of a document `Uri.toString()` for use as a persisted STORAGE
+ * KEY (Req 23 US-23.2's per-file "Show Comments" flag in `workspaceState`).
+ *
+ * `sameDocumentUri` answers "are these the same document?" but a key needs one
+ * stable string, so the same folding is applied here up-front. NFC as well as
+ * case: a name typed on macOS (NFD) and the same name on Windows (NFC) are
+ * different strings, so keying on the raw uri silently wrote the flag under one
+ * key and read it back under another (CLAUDE.md's cross-platform trap).
+ */
+export function documentStateKey(uriStr: string, caseInsensitive: boolean): string {
+  const nfc = uriStr.normalize('NFC');
+  return caseInsensitive ? nfc.toLowerCase() : nfc;
 }

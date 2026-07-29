@@ -294,21 +294,11 @@ a:hover {
   margin-left: 0.35em;
 }
 
-/* US-20.5: transient highlight on the body occurrence a broken References entry
- * navigates to (main.ts adds/removes .ref-nav-flash around a ~1.2s window).
- * Reading-mode-tokenized via --rp-accent (never a hardcoded hex) so it restyles
- * per Reading Mode option. */
-#content a.ref-nav-flash {
-  border-radius: 3px;
-  background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
-  outline: 2px solid var(--rp-accent);
-  outline-offset: 1px;
-}
-
 /* Bug General #1: transient highlight on the caption declaration an entity link
  * navigates to (gutter.ts adds/removes .entity-reveal-flash around a ~1.2s
  * window). The badge is a non-selectable atom, so a flash stands in for a text
- * selection. Reading-mode-tokenized via --rp-accent, same as ref-nav-flash. */
+ * selection. Reading-mode-tokenized via --rp-accent (never a hardcoded hex) so
+ * it restyles per Reading Mode option. */
 #content .md-caption.entity-reveal-flash {
   background-color: color-mix(in srgb, var(--rp-accent) 22%, transparent);
   outline: 2px solid var(--rp-accent);
@@ -920,8 +910,15 @@ body.reading-mode #content .contains-task-list {
   padding-left: var(--reading-list-indent);
 }
 
+/* Both task-item shapes: tight (checkbox is a direct li child) and loose
+ * (li wraps its content in a p, so the checkbox sits one level deeper — see
+ * taskCheckboxHost in media/webview/dom-utils.ts). Without the p variants a
+ * loose task item loses the -1.2em pull into the hidden-marker gutter and
+ * renders misaligned against its tight siblings. */
 ul.contains-task-list li.task-list-item > input.task-list-item-checkbox,
-ol.contains-task-list li.task-list-item > input.task-list-item-checkbox {
+ol.contains-task-list li.task-list-item > input.task-list-item-checkbox,
+ul.contains-task-list li.task-list-item > p > input.task-list-item-checkbox,
+ol.contains-task-list li.task-list-item > p > input.task-list-item-checkbox {
   margin: 0 0.4em 0.25em -1.2em;
   vertical-align: middle;
 }

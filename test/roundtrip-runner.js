@@ -7,10 +7,20 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const dir = path.join(__dirname, '..', 'dist', 'test', 'roundtrip');
-const files = fs
+const srcDir = path.join(__dirname, 'roundtrip');
+// dist/ is gitignored and never pruned, so a bundle outlives its source: a
+// renamed or deleted feature — and any scratch script someone once built —
+// keeps running forever and counts toward the pass total. Require a live .ts
+// source so the run reflects test/roundtrip/, not build-output history.
+const all = fs
   .readdirSync(dir)
   .filter((f) => f.endsWith('.js') && !f.endsWith('.js.map'))
   .sort();
+const files = all.filter((f) => fs.existsSync(path.join(srcDir, `${path.basename(f, '.js')}.ts`)));
+const orphans = all.filter((f) => !files.includes(f));
+if (orphans.length) {
+  console.log(`Skipping ${orphans.length} stale bundle(s) with no source: ${orphans.join(', ')}`);
+}
 
 const failed = [];
 for (const f of files) {

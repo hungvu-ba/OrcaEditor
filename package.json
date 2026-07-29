@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A fast, clean WYSIWYG editor for .md — drag-and-drop reorder, project-wide search, and a rich toolbar, all while keeping your Markdown source pristine and diff-friendly.",
-  "version": "0.10.0",
+  "version": "1.0.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -19,7 +19,12 @@
   "capabilities": {
     "virtualWorkspaces": false,
     "untrustedWorkspaces": {
-      "supported": "limited"
+      "supported": "limited",
+      "description": "Asset writes stay contained to the workspace even in a restricted/untrusted workspace (see the containment guard in src/fs-guard.ts). The two workspace-settable values below that could otherwise be used to redirect writes or spoof an author identity are restricted to User scope.",
+      "restrictedConfigurations": [
+        "orcaEditor.assetsPaste.customFolderPath",
+        "orcaEditor.comments.authorName"
+      ]
     }
   },
   "main": "./dist/extension.js",
@@ -68,6 +73,51 @@
         "command": "orcaEditor.toggleTableFitMode",
         "title": "Toggle Table Fit Width",
         "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.replyComment",
+        "title": "Reply to Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.deleteComment",
+        "title": "Delete Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.editComment",
+        "title": "Edit Comment",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.saveEditComment",
+        "title": "Save Comment Edit",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.cancelEditComment",
+        "title": "Cancel Comment Edit",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.resolveComment",
+        "title": "Mark Comment as Resolved",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.closeComment",
+        "title": "Close Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.reopenComment",
+        "title": "Reopen Comment Thread",
+        "category": "Orca MD Editor"
+      },
+      {
+        "command": "orcaEditor.copyCommentsAsMarkdown",
+        "title": "Copy Comments as Markdown",
+        "category": "Orca MD Editor"
       }
     ],
     "orcaEditorExecuteCommands": [
@@ -85,6 +135,42 @@
         {
           "command": "orcaEditor.openToSide",
           "when": "editorLangId == markdown"
+        },
+        {
+          "command": "orcaEditor.replyComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.deleteComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.editComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.saveEditComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.cancelEditComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.resolveComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.closeComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.reopenComment",
+          "when": "false"
+        },
+        {
+          "command": "orcaEditor.copyCommentsAsMarkdown",
+          "when": "activeCustomEditorId == 'orcaEditor.editor'"
         }
       ],
       "editor/title": [
@@ -113,6 +199,52 @@
           "command": "orcaEditor.open",
           "when": "resourceExtname =~ /\\.(md|markdown)$/",
           "group": "navigation@100"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "orcaEditor.replyComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.deleteComment",
+          "group": "inline@2",
+          "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.resolveComment",
+          "group": "inline@3",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-open/"
+        },
+        {
+          "command": "orcaEditor.closeComment",
+          "group": "inline@4",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-resolved/"
+        },
+        {
+          "command": "orcaEditor.reopenComment",
+          "group": "inline@5",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-(resolved|closed)/"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "orcaEditor.editComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments && commentThread =~ /status-(open|resolved)/"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "orcaEditor.saveEditComment",
+          "group": "inline@1",
+          "when": "commentController == orcaEditor.comments"
+        },
+        {
+          "command": "orcaEditor.cancelEditComment",
+          "group": "inline@2",
+          "when": "commentController == orcaEditor.comments"
         }
       ]
     },
@@ -177,6 +309,11 @@
           "type": "boolean",
           "default": true,
           "description": "On save, permanently delete pasted/dropped images that are no longer referenced anywhere in this file (and not referenced by sibling Markdown files in the same folder). If the reference reappears later (e.g. via undo), the image is restored automatically. Does not apply to non-image files dropped into the editor — those are never auto-deleted."
+        },
+        "orcaEditor.comments.authorName": {
+          "type": "string",
+          "default": "",
+          "description": "Name recorded as the author on review comments you create. Leave empty to use your OS username. This is a display name only — it is free text with no authentication behind it."
         },
         "orcaEditor.readability.enabled": {
           "type": "boolean",
@@ -257,9 +394,12 @@
     "test:roundtrip:empty-link": "node esbuild.js --test && node dist/test/roundtrip/empty-link.js",
     "test:roundtrip:paste-text": "node esbuild.js --test && node dist/test/roundtrip/paste-text.js",
     "test:roundtrip:links": "node esbuild.js --test && node dist/test/roundtrip/links.js",
+    "test:roundtrip:incremental-serialize": "node esbuild.js --test && node dist/test/roundtrip/incremental-serialize.js",
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
-    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
+    "test:host": "node esbuild.js --test && node dist/test/host/runTest.js",
+    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview && npm run test:host",
+    "shots": "node esbuild.js --test && playwright test --config playwright.shots.config.ts",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
@@ -274,6 +414,7 @@
     "@types/node": "^20.14.0",
     "@types/turndown": "^5.0.5",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.25.0",
     "eslint": "^10.8.0",

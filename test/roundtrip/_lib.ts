@@ -20,6 +20,15 @@ export { fillSequenceColumn, domino };
 export const renderer = new MarkdownRenderer({ breaks: false, linkify: true });
 export const turndown = createTurndown();
 
+/**
+ * A table cell that forces the whole table down the raw-HTML serialize path:
+ * `tableNeedsHtmlSerialization` matches on `td li li`, so a nested list is the
+ * cheapest trigger. Put any subject under test in a SIBLING cell — this one is
+ * only the trigger. Shared because five feature files need the same table shape;
+ * copying it made each one's "raw-HTML path" claim independently falsifiable.
+ */
+export const COMPLEX_CELL = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
+
 /** DOM (đã render từ markdown, hoặc dựng tay mô phỏng kết quả 1 thao tác editor) → markdown. */
 export function serializeHtml(html: string): string {
   const doc = domino.createDocument(`<div id="content">${html}</div>`, true);

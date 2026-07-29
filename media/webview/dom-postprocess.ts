@@ -18,7 +18,6 @@ import {
   MD_CODE_LANG_CLASS,
   MD_CODE_COPY_CLASS,
   MD_CODE_WRAP_CLASS,
-  MD_CODE_WRAPPED_CLASS,
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   AUTOLINK_PATH_ATTR,
@@ -27,8 +26,8 @@ import {
   CAPTION_PREFIX_CLASS,
   CAPTION_NS_CLASS,
   CAPTION_ID_CLASS,
-  ENTITY_REF_CLASS,
 } from './render';
+import { ENTITY_REF_CLASS, MD_CHROME_MARKER_ATTR, MD_CODE_WRAPPED_CLASS } from './constants';
 import { hasAncestor } from './dom-portable';
 import { encodeLinkPath } from './dom-utils';
 import { decodeEntityFragment } from '../../src/shared/entity-fragment';
@@ -121,6 +120,10 @@ function createToolbarToggle(
   const toolbar = doc.createElement('div');
   toolbar.className = opts.toolbarClass;
   toolbar.setAttribute('contenteditable', 'false');
+  // US-23.21 AC1b: marks this as editor-injected chrome for turndown.ts's
+  // stripInjectedChrome — see MD_CHROME_MARKER_ATTR's doc comment for why the
+  // bare contenteditable="false" attribute alone is not a safe match.
+  toolbar.setAttribute(MD_CHROME_MARKER_ATTR, '');
   toolbar.appendChild(toggle);
   return toolbar;
 }
@@ -157,6 +160,9 @@ function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl:
     toggle.className = MATH_TOGGLE_CLASS;
     toggle.setAttribute('title', 'Edit formula');
     toggle.setAttribute('contenteditable', 'false');
+    // US-23.21 AC1b: not built via createToolbarToggle (no toolbar div here),
+    // so it needs its own chrome marker — see MD_CHROME_MARKER_ATTR's doc comment.
+    toggle.setAttribute(MD_CHROME_MARKER_ATTR, '');
     wrapper.appendChild(toggle);
   }
 }
@@ -312,6 +318,8 @@ export function postProcessCodeHeaders(root: ParentNode & Node, doc: Document): 
     const header = doc.createElement('div');
     header.className = MD_CODE_HEADER_CLASS;
     header.setAttribute('contenteditable', 'false');
+    // US-23.21 AC1b: chrome marker — see MD_CHROME_MARKER_ATTR's doc comment.
+    header.setAttribute(MD_CHROME_MARKER_ATTR, '');
 
     const label = doc.createElement('span');
     label.className = MD_CODE_LANG_CLASS;
@@ -384,7 +392,12 @@ const RELATIVE_PATH_RE =
 function inSkippedContext(node: Node): boolean {
   return hasAncestor(node, (el) => {
     const tag = el.nodeName;
-    if (tag === 'A' || tag === 'CODE' || tag === 'PRE') {
+    // BUTTON: the interactive-content model forbids a nested <a> inside a
+    // <button> (e.g. US-2.7's collapsed-row title, which sits inside the
+    // toggle button) -- linkifying there would also make the link
+    // unreachable by a plain click, since the button's own click handler
+    // fires first.
+    if (tag === 'A' || tag === 'CODE' || tag === 'PRE' || tag === 'BUTTON') {
       return true;
     }
     const cl = el.classList;
@@ -409,6 +422,14 @@ function collectTextNodes(node: Node, out: Text[]): void {
   }
 }
 
+/**
+ * US-2.7: also linkifies path-like values inside an expanded `.md-front-matter`
+ * card's key/value grid — no special-casing needed, since `collectTextNodes`
+ * below already walks every descendant text node of `root` and the grid's
+ * value cells are plain elements (not `<pre>`/`<code>`, the only tags
+ * `inSkippedContext` excludes). The RAW view's `<pre>` and the invalid state's
+ * verbatim `<pre>` stay excluded the same way body code blocks already are.
+ */
 export function postProcessRelativePathLinks(root: ParentNode & Node, doc: Document): void {
   const textNodes: Text[] = [];
   collectTextNodes(root, textNodes);

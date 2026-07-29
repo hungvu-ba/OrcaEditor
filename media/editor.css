@@ -39,7 +39,7 @@ body {
 
 #toolbar {
   margin-left: -26px;
-  padding-left: 26px;
+  padding-left: var(--toolbar-edge-pad);
 }
 
 /* --- Vùng soạn thảo --- */
@@ -64,7 +64,7 @@ body.md-line-numbers {
 
 body.md-line-numbers #toolbar {
   margin-left: -98px;
-  padding-left: 98px;
+  padding-left: var(--toolbar-edge-pad);
 }
 
 /* Gutter sits after the 26px container padding: 26px offset + 56px width, then a
@@ -175,6 +175,15 @@ body.dd-dragging .dd-handle {
  * that diluting it by the same 0.4 still reads as a clear tint. */
 .dd-source-muted.dd-hover-outline {
   background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
+}
+
+/* Task-list counterpart of the muted-drag tint above — the base `.dd-hover-outline` background
+ * for a task-list `<li>` lives on a `::before` overlay instead of the element itself (see that
+ * rule further down), so the muted tint needs its own, higher-specificity `::before` override
+ * here to still apply while a task-list item is the dragged source. */
+li.task-list-item.dd-source-muted.dd-hover-outline::before {
+  background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
+  box-shadow: none;
 }
 
 /* --- Handle menu (HLR section 17, US-17.7, M5; merged into the handle click
@@ -387,6 +396,29 @@ body.dd-dragging .dd-handle {
   background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
 }
 
+/* A task-list checkbox sits outside the <li>'s own box — pulled left by its own negative
+ * margin into the hidden native-marker gutter (`margin-left: -1.2em`, markdown.css) — so
+ * `.dd-hover-outline`'s wash/accent bar above, sized to the li's own border-box, cuts across
+ * the checkbox instead of covering it (bug General #2 follow-up). A `::before` overlay lets the
+ * highlight extend further left without moving the li's own box (which would shift real
+ * content/layout); `z-index: -1` keeps it behind the checkbox and text so neither their paint
+ * order nor their hit-testing changes. */
+li.task-list-item.dd-hover-outline {
+  position: relative;
+  background-color: transparent;
+  box-shadow: none;
+}
+li.task-list-item.dd-hover-outline::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  left: calc(-1.2em + 4px);
+  z-index: -1;
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--rp-accent, var(--vscode-focusBorder, #007acc)) 7%, transparent);
+  box-shadow: -3px 0 0 0 var(--rp-accent, var(--vscode-focusBorder, #007acc));
+}
+
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
  * (biểu đồ Mermaid, công thức KaTeX): số ở mép trên là dòng bắt đầu, số này ở
  * mép dưới là dòng kết thúc. Dịch nhẹ lên trên để số không tràn ra ngoài block,
@@ -412,6 +444,13 @@ body.dd-dragging .dd-handle {
    * --toolbar-height mà main.ts đo runtime cho layout offset. Đổi đúng 1 giá trị
    * này cho một density toggle (compact/comfortable) về sau. */
   --toolbar-base-height: 40px;
+  /* Inner inset of the toolbar's own row of controls. The toolbar is full-bleed
+   * (negative margins cancel the body's left inset and the docked panels'
+   * reserve), so this — not the body's 26px — is what decides how close the
+   * first and last icon sit to the window edges. Kept small on purpose: every
+   * pixel here is width the width-based overflow split (US-4.7) can no longer
+   * give to a real button. */
+  --toolbar-edge-pad: 6px;
   --toolbar-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #f3f3f3));
   --toolbar-fg: var(--vscode-foreground, #3b3b3b);
   --toolbar-border: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
@@ -445,8 +484,8 @@ body.dd-dragging .dd-handle {
   gap: 3px;
   padding: calc(var(--toolbar-base-height) * 0.125) 0;
   margin: 0 -26px 8px;
-  padding-left: 26px;
-  padding-right: 26px;
+  padding-left: var(--toolbar-edge-pad);
+  padding-right: var(--toolbar-edge-pad);
   background: var(--toolbar-bg);
   border-bottom: 1px solid var(--toolbar-border);
 }
@@ -468,6 +507,14 @@ body:not(.reading-zen) {
  * and gets its own top inset, so scope this to non-zen. */
 body.reading-mode:not(.reading-zen) #content {
   padding-top: 24px;
+}
+
+/* `display: inline-flex` below would otherwise beat the UA sheet's
+ * `[hidden] { display: none }`, so a button that hides itself (Req 23 US-23.4's
+ * unresolved-location toggle, which only exists while something is floating)
+ * would stay on screen. */
+#toolbar button[hidden] {
+  display: none;
 }
 
 #toolbar button {
@@ -609,7 +656,13 @@ body.reading-mode:not(.reading-zen) #content {
  * popover mở tại một thời điểm, đóng khi click ra ngoài/Escape. --- */
 .toolbar-popover {
   position: fixed;
-  z-index: 300;
+  /* Above #search-box (500): openPopover() anchors the menu at the trigger's
+   * `rect.bottom + 4` (toolbar.ts), which is the exact band the Ctrl/Cmd+F box
+   * now occupies, and the two rightmost triggers (••• overflow, ⋮ more options)
+   * share its right edge. A mouse click on a trigger closes the box first, but
+   * the keyboard route (Tab to the trigger, Enter) does not — so the menu, not
+   * the box, has to win the overlap. */
+  z-index: 501;
   display: none;
   flex-direction: column;
   min-width: 180px;
@@ -872,32 +925,579 @@ body.reading-mode:not(.reading-zen) #content {
   background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
 }
 
-/* --- Front matter (không chỉnh sửa được, gấp gọn) --- */
+/* --- Front matter (US-2.7 redesign: collapsed line / expanded card / raw
+ * YAML — not editable, but interactive). Structural tokens + per-theme colors
+ * ported verbatim from Wireframe Handoff/design_handoff_front_matter/tokens.css;
+ * see media/webview/front-matter.ts for the markup these selectors target. --- */
+:root {
+  --fm-radius: 5px;
+  --fm-radius-collapsed: 4px;
+  --fm-border-width: 1px;
+  --fm-border-style-collapsed: dotted;
+  --fm-border-style-expanded: solid;
+  --fm-row-height: 30px;
+  --fm-header-height: 32px;
+  --fm-header-padding-x: 10px;
+  --fm-body-padding: 14px 14px 15px;
+  --fm-raw-padding: 12px;
+  --fm-key-col: 104px;
+  --fm-grid-gap: 11px 14px;
+  --fm-row-gap: 8px;
+  --fm-list-gap: 5px;
+  --fm-margin-bottom-collapsed: 20px;
+  --fm-margin-bottom-expanded: 22px;
+  --fm-label-size: 9.5px;
+  --fm-label-weight: 700;
+  --fm-label-tracking: 0.09em;
+  --fm-title-size: 14.5px;
+  --fm-title-weight: 600;
+  --fm-title-line-height: 1.4;
+  --fm-title-max-lines: 3;
+  --fm-value-size: 12px;
+  --fm-key-size: 11px;
+  --fm-meta-size: 10.5px;
+  --fm-badge-height: 19px;
+  --fm-badge-padding-x: 7px;
+  --fm-badge-radius: 3px;
+  --fm-badge-size: 10.5px;
+  --fm-badge-dot: 5px;
+  --fm-raw-line-height: 1.75;
+  /* Matches FM_COLLAPSE_THRESHOLD in front-matter.ts — keep both in sync by hand. */
+  --fm-collapse-threshold: 2;
+  --fm-transition: 120ms ease-out;
+}
+
+/* ---- VS Code Dark (default) ---- */
+.vscode-dark {
+  --fm-bg: rgba(255, 255, 255, 0.022);
+  --fm-header-bg: rgba(255, 255, 255, 0.028);
+  --fm-border: #333333;
+  --fm-border-collapsed: #3a3a3a;
+  --fm-divider: #2e2e2e;
+  --fm-title-fg: #e4e4e4;
+  --fm-value-fg: rgba(204, 204, 204, 0.9);
+  --fm-key-fg: #8c8c8c;
+  --fm-label-fg: #8c8c8c;
+  --fm-label-fg-open: #b4b4b4;
+  --fm-meta-fg: #787878;
+  --fm-sep: #343434;
+  --fm-link: #4daafc;
+  --fm-link-hover: #7cc4ff;
+  --fm-hover-bg: rgba(255, 255, 255, 0.055);
+  --fm-hover-border: #4a4a4a;
+  --fm-hover-fg: #cccccc;
+  --fm-toggle-on-bg: rgba(77, 170, 252, 0.16);
+  --fm-toggle-on-fg: #7cc4ff;
+  --fm-yaml-key: #9cdcfe;
+  --fm-yaml-string: #ce9178;
+  --fm-error: #f48771;
+  --fm-error-bg: rgba(244, 135, 113, 0.05);
+  --fm-error-border: rgba(244, 135, 113, 0.4);
+  --fm-error-divider: rgba(244, 135, 113, 0.28);
+  --fm-error-meta: #c98a7a;
+  --fm-badge-bg: rgba(255, 255, 255, 0.07);
+  --fm-badge-fg: #c8c8c8;
+  --fm-status-done: #4ec9b0;
+  --fm-status-done-bg: rgba(78, 201, 176, 0.14);
+  --fm-status-draft: #dcb45a;
+  --fm-status-draft-bg: rgba(220, 180, 90, 0.14);
+  --fm-status-blocked: #f48771;
+  --fm-status-blocked-bg: rgba(244, 135, 113, 0.14);
+}
+
+/* ---- VS Code Light ---- */
+.vscode-light {
+  --fm-bg: #fcfcfc;
+  --fm-header-bg: #f6f6f6;
+  --fm-border: #e0e0e0;
+  --fm-border-collapsed: #d4d4d4;
+  --fm-divider: #ececec;
+  --fm-title-fg: #2f2f2f;
+  --fm-value-fg: #3b3b3b;
+  --fm-key-fg: #767676;
+  --fm-label-fg: #767676;
+  --fm-label-fg-open: #5a5a5a;
+  --fm-meta-fg: #8a8a8a;
+  --fm-sep: #dedede;
+  --fm-link: #0a5fbd;
+  --fm-link-hover: #0846a0;
+  --fm-hover-bg: #f1f1f1;
+  --fm-hover-border: #c4c4c4;
+  --fm-hover-fg: #3b3b3b;
+  --fm-toggle-on-bg: rgba(10, 95, 189, 0.12);
+  --fm-toggle-on-fg: #0a5fbd;
+  --fm-yaml-key: #0451a5;
+  --fm-yaml-string: #a31515;
+  --fm-error: #c0392b;
+  --fm-error-bg: rgba(192, 57, 43, 0.045);
+  --fm-error-border: rgba(192, 57, 43, 0.34);
+  --fm-error-divider: rgba(192, 57, 43, 0.22);
+  --fm-error-meta: #9c5348;
+  --fm-badge-bg: rgba(0, 0, 0, 0.055);
+  --fm-badge-fg: #4a4a4a;
+  --fm-status-done: #137a55;
+  --fm-status-done-bg: rgba(26, 127, 95, 0.11);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(200, 150, 30, 0.14);
+  --fm-status-blocked: #b02f1c;
+  --fm-status-blocked-bg: rgba(176, 47, 28, 0.1);
+}
+
+/* ---- Reading Mode — Sepia (design handoff's `.rp-sepia` = this repo's body.reading-mode-sepia) ---- */
+body.reading-mode-sepia {
+  --fm-bg: rgba(139, 110, 60, 0.045);
+  --fm-header-bg: rgba(139, 110, 60, 0.06);
+  --fm-border: #d3c09a;
+  --fm-border-collapsed: #c9b489;
+  --fm-divider: #dccbaa;
+  --fm-title-fg: #4d3a2b;
+  --fm-value-fg: #5b4636;
+  --fm-key-fg: #8a7355;
+  --fm-label-fg: #8a7355;
+  --fm-label-fg-open: #7a6446;
+  --fm-meta-fg: #9c8562;
+  --fm-sep: #d3c09a;
+  --fm-link: #8a4f1e;
+  --fm-link-hover: #6d3d14;
+  --fm-hover-bg: rgba(139, 110, 60, 0.1);
+  --fm-hover-border: #bda677;
+  --fm-hover-fg: #4d3a2b;
+  --fm-toggle-on-bg: rgba(138, 79, 30, 0.14);
+  --fm-toggle-on-fg: #8a4f1e;
+  --fm-yaml-key: #6b5a86;
+  --fm-yaml-string: #8a4f1e;
+  --fm-error: #a33b23;
+  --fm-error-bg: rgba(163, 59, 35, 0.05);
+  --fm-error-border: rgba(163, 59, 35, 0.32);
+  --fm-error-divider: rgba(163, 59, 35, 0.22);
+  --fm-error-meta: #8d5b48;
+  --fm-badge-bg: rgba(91, 70, 54, 0.09);
+  --fm-badge-fg: #5b4636;
+  --fm-status-done: #2b6e50;
+  --fm-status-done-bg: rgba(43, 110, 80, 0.12);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(180, 140, 40, 0.14);
+  --fm-status-blocked: #a33b23;
+  --fm-status-blocked-bg: rgba(163, 59, 35, 0.11);
+  /* Label + badges stay sans even though the body is serif; serif runs small so the title gets +1.5px. */
+  --fm-label-font: 'Segoe UI', system-ui, sans-serif;
+  --fm-title-size: 16px;
+  --fm-value-size: 12px;
+}
+
+/* ---- Reading Mode — Paper (design handoff's `.rp-paper` = this repo's body.reading-mode-paper) ---- */
+body.reading-mode-paper {
+  --fm-bg: rgba(0, 0, 0, 0.015);
+  --fm-header-bg: rgba(0, 0, 0, 0.025);
+  --fm-border: rgba(0, 0, 0, 0.13);
+  --fm-border-collapsed: rgba(0, 0, 0, 0.16);
+  --fm-divider: rgba(0, 0, 0, 0.09);
+  --fm-title-fg: #111110;
+  --fm-value-fg: #23221e;
+  --fm-key-fg: #6b6a63;
+  --fm-label-fg: #6b6a63;
+  --fm-label-fg-open: #4e4d47;
+  --fm-meta-fg: #7b7a72;
+  --fm-sep: rgba(0, 0, 0, 0.13);
+  --fm-link: #14508f;
+  --fm-link-hover: #0f3d6e;
+  --fm-hover-bg: rgba(0, 0, 0, 0.045);
+  --fm-hover-border: rgba(0, 0, 0, 0.24);
+  --fm-hover-fg: #111110;
+  --fm-toggle-on-bg: rgba(20, 80, 143, 0.12);
+  --fm-toggle-on-fg: #14508f;
+  --fm-yaml-key: #0451a5;
+  --fm-yaml-string: #a31515;
+  --fm-error: #b02f1c;
+  --fm-error-bg: rgba(176, 47, 28, 0.045);
+  --fm-error-border: rgba(176, 47, 28, 0.32);
+  --fm-error-divider: rgba(176, 47, 28, 0.22);
+  --fm-error-meta: #8f5647;
+  --fm-badge-bg: rgba(0, 0, 0, 0.055);
+  --fm-badge-fg: #3f3e39;
+  --fm-status-done: #146b4c;
+  --fm-status-done-bg: rgba(26, 127, 95, 0.1);
+  --fm-status-draft: #8a6410;
+  --fm-status-draft-bg: rgba(200, 150, 30, 0.13);
+  --fm-status-blocked: #b02f1c;
+  --fm-status-blocked-bg: rgba(176, 47, 28, 0.1);
+}
+
+/* ---- Reading Mode density overrides (tokens.css: follows the existing
+ * --reading-embed-padding scale). No `.rp-density-*` toggle exists in this app
+ * yet — ported verbatim and ready for whenever a density feature adds the
+ * class; inert (unreachable) until then, same as the source token file. ---- */
+.rp-density-compact {
+  --fm-body-padding: 10px 10px 11px;
+  --fm-raw-padding: 9px;
+  --fm-grid-gap: 9px 12px;
+}
+.rp-density-comfortable {
+  --fm-body-padding: 14px 14px 15px;
+  --fm-raw-padding: 12px;
+  --fm-grid-gap: 11px 14px;
+}
+.rp-density-academic {
+  --fm-body-padding: 16px 16px 18px;
+  --fm-raw-padding: 14px;
+  --fm-grid-gap: 13px 16px;
+}
+
+/* ---- High Contrast ---- */
+.vscode-high-contrast {
+  --fm-bg: #000000;
+  --fm-header-bg: #000000;
+  --fm-border: #ffffff;
+  --fm-border-collapsed: #ffffff;
+  --fm-border-width: 2px;
+  --fm-divider: #ffffff;
+  --fm-title-fg: #ffffff;
+  --fm-value-fg: #ffffff;
+  --fm-key-fg: #ffffff;
+  --fm-label-fg: #ffffff;
+  --fm-label-fg-open: #ffffff;
+  --fm-meta-fg: #ffffff;
+  --fm-sep: #ffffff;
+  --fm-link: #6fc3ff;
+  --fm-link-hover: #9ad8ff;
+  --fm-hover-bg: #000000;
+  --fm-hover-border: #6fc3ff;
+  --fm-hover-fg: #ffffff;
+  --fm-badge-bg: transparent;
+  --fm-badge-fg: #ffffff;
+  --fm-error: #f48771;
+}
+/* README a11y: "transparent badge fills" needs its own border in HC or a
+ * badge is invisible — the one addition beyond the ported token values, using
+ * currentColor (not a new color). */
+.vscode-high-contrast .md-fm-badge {
+  border: 1px solid currentColor;
+}
+
+/* ---- Structure: wrapper + collapsed row / expanded header (same button,
+ * content swapped per data-fm-view — README: "single <button aria-expanded>"). ---- */
 .md-front-matter {
-  margin: 0 0 16px;
-  padding: var(--reading-embed-padding);
-  border: 1px dashed var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.4));
-  border-radius: 4px;
-  opacity: 0.75;
-  user-select: none;
+  display: block;
+  max-width: 640px;
+  margin: 0 0 var(--fm-margin-bottom-collapsed);
+  font-family: var(--vscode-font-family);
+  color: var(--fm-value-fg);
+  transition: var(--fm-transition);
+}
+.md-front-matter[data-fm-view='expanded'],
+.md-front-matter[data-fm-view='invalid'] {
+  margin-bottom: var(--fm-margin-bottom-expanded);
+}
+.md-front-matter[data-fm-view='collapsed'],
+.md-front-matter[data-fm-view='line'] {
+  border-radius: var(--fm-radius-collapsed);
+  border: var(--fm-border-width) var(--fm-border-style-collapsed) var(--fm-border-collapsed);
+  background: transparent;
+}
+.md-front-matter[data-fm-view='collapsed']:hover,
+.md-front-matter[data-fm-view='line']:hover {
+  background: var(--fm-hover-bg);
+  border-color: var(--fm-hover-border);
+  color: var(--fm-hover-fg);
+}
+.md-front-matter[data-fm-view='expanded'] {
+  /* Implementation notes: overflow:hidden clips the header strip to the
+   * corner radius — don't drop it in favour of matching the radius on the header. */
+  overflow: hidden;
+  border-radius: var(--fm-radius);
+  border: var(--fm-border-width) var(--fm-border-style-expanded) var(--fm-border);
+  background: var(--fm-bg);
+}
+.md-front-matter[data-fm-view='invalid'] {
+  border-radius: var(--fm-radius);
+  border: var(--fm-border-width) var(--fm-border-style-expanded) var(--fm-error-border);
+  background: var(--fm-error-bg);
 }
 
-.md-front-matter .md-front-matter-label {
-  /* em, not px: scales with #content's --reading-font-size (embedded-block
-   * chrome, not a --reading-ui-* bucket — see US-19.6 note further below).
-   * 0.714286em × 14px Standard base ≈ 10px (unchanged). */
-  font-size: 0.714286em;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  opacity: 0.7;
-  margin-bottom: 2px;
+.md-fm-topline {
+  display: flex;
+  align-items: center;
+  gap: var(--fm-row-gap);
+  height: var(--fm-row-height);
+  padding: 0 var(--fm-header-padding-x);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-topline,
+.md-front-matter[data-fm-view='invalid'] .md-fm-topline {
+  height: var(--fm-header-height);
+  background: var(--fm-header-bg);
+  border-bottom: var(--fm-border-width) solid var(--fm-divider);
+}
+.md-front-matter[data-fm-view='invalid'] .md-fm-topline {
+  border-bottom-color: var(--fm-error-divider);
 }
 
-.md-front-matter pre {
-  margin: 0;
-  padding: 0;
+.md-fm-toggle,
+.md-fm-line {
+  display: flex;
+  align-items: center;
+  gap: var(--fm-row-gap);
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   background: none;
-  font-size: 0.85em;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.md-fm-toggle {
+  cursor: pointer;
+}
+
+.md-fm-chevron {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: var(--fm-transition);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-chevron {
+  transform: rotate(45deg);
+}
+
+.md-fm-label {
+  flex-shrink: 0;
+  font-size: var(--fm-label-size);
+  font-weight: var(--fm-label-weight);
+  letter-spacing: var(--fm-label-tracking);
+  text-transform: uppercase;
+  font-family: var(--fm-label-font, inherit);
+  color: var(--fm-label-fg);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-label {
+  color: var(--fm-label-fg-open);
+}
+.md-fm-label-error {
+  color: var(--fm-error);
+}
+
+.md-fm-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fm-value-size);
+  color: var(--fm-title-fg);
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-row-title {
+  display: none;
+}
+
+.md-fm-count,
+.md-fm-error-line {
+  flex-shrink: 0;
+  font-size: var(--fm-meta-size);
+  color: var(--fm-meta-fg);
+}
+
+.md-fm-actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 6px;
+  contain: layout;
+}
+.md-front-matter[data-fm-view='expanded'] .md-fm-actions {
+  display: flex;
+}
+.md-fm-raw-toggle,
+.md-fm-copy {
+  border: none;
+  background: none;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: var(--fm-meta-size);
+  font-family: inherit;
+  color: var(--fm-meta-fg);
+  cursor: pointer;
+}
+.md-fm-raw-toggle:hover,
+.md-fm-copy:hover {
+  background: var(--fm-hover-bg);
+}
+.md-fm-raw-toggle[aria-pressed='true'] {
+  background: var(--fm-toggle-on-bg);
+  color: var(--fm-toggle-on-fg);
+}
+
+/* Screen-reader-only live region for the Copy confirmation — standard
+ * visually-hidden clip pattern, not `display: none` (which would stop it
+ * being announced at all). */
+.md-fm-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* ---- Body: title / badges / grid (structured) — hidden while raw or collapsed. ---- */
+.md-fm-body,
+.md-fm-raw-body,
+.md-fm-error-body {
+  display: none;
+}
+.md-front-matter[data-fm-view='expanded'][data-fm-raw='false'] .md-fm-body {
+  display: block;
+  padding: var(--fm-body-padding);
+}
+.md-front-matter[data-fm-view='expanded'][data-fm-raw='true'] .md-fm-raw-body {
+  display: block;
+}
+.md-front-matter[data-fm-view='invalid'] .md-fm-error-body {
+  display: block;
+}
+
+.md-fm-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--fm-title-max-lines);
+  overflow: hidden;
+  font-size: var(--fm-title-size);
+  font-weight: var(--fm-title-weight);
+  line-height: var(--fm-title-line-height);
+  color: var(--fm-title-fg);
+}
+
+.md-fm-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.md-fm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--fm-badge-height);
+  padding: 0 var(--fm-badge-padding-x);
+  border-radius: var(--fm-badge-radius);
+  font-size: var(--fm-badge-size);
+  font-weight: 600;
+  background: var(--fm-badge-bg);
+  color: var(--fm-badge-fg);
+}
+.md-fm-badge-inline {
+  margin-left: auto;
+}
+.md-fm-status-dot {
+  flex-shrink: 0;
+  width: var(--fm-badge-dot);
+  height: var(--fm-badge-dot);
+  border-radius: 50%;
+  background: currentColor;
+}
+.md-fm-status-done {
+  color: var(--fm-status-done);
+  background: var(--fm-status-done-bg);
+}
+.md-fm-status-draft {
+  color: var(--fm-status-draft);
+  background: var(--fm-status-draft-bg);
+}
+.md-fm-status-blocked {
+  color: var(--fm-status-blocked);
+  background: var(--fm-status-blocked-bg);
+}
+.md-fm-status-neutral {
+  color: var(--fm-badge-fg);
+  background: var(--fm-badge-bg);
+}
+.md-fm-meta {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-meta-size);
+  color: var(--fm-meta-fg);
+}
+
+.md-fm-hairline {
+  height: 1px;
+  margin: 10px 0;
+  background: var(--fm-sep);
+}
+
+.md-fm-grid {
+  display: grid;
+  grid-template-columns: var(--fm-key-col) 1fr;
+  gap: var(--fm-grid-gap);
+}
+/* `display: contents` removes the row's own box so its children become the
+ * actual grid items (2 per row: key + value) — the raw-fallback row instead
+ * wraps its single spanning cell in `.md-fm-value-raw` below, never bare text
+ * directly inside a `display: contents` element. */
+.md-fm-grid-row {
+  display: contents;
+}
+.md-fm-key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-key-size);
+  color: var(--fm-key-fg);
+}
+.md-fm-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-value-size);
+  color: var(--fm-value-fg);
+}
+.md-fm-value a {
+  color: var(--fm-link);
+}
+.md-fm-value a:hover {
+  color: var(--fm-link-hover);
+}
+.md-fm-value-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fm-list-gap);
+  white-space: normal;
+}
+.md-fm-value-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.md-fm-value-raw {
+  grid-column: 1 / -1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Raw YAML view (opt-in third state) + invalid state's verbatim body. ---- */
+.md-fm-raw-body,
+.md-fm-error-body {
+  margin: 0;
+  padding: var(--fm-raw-padding);
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fm-value-size);
+  line-height: var(--fm-raw-line-height);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-fm-error-body {
+  color: var(--fm-error-meta);
+}
+.md-fm-yaml-key {
+  color: var(--fm-yaml-key);
+}
+.md-fm-yaml-string {
+  color: var(--fm-yaml-string);
 }
 
 /* --- Math atom (KaTeX): công thức đã dựng, có nút "Edit" mở popup sửa TeX
@@ -1212,7 +1812,17 @@ th:empty::after {
 
 #search-box {
   position: fixed;
-  top: 6px;
+  /* Sit BELOW the sticky #toolbar (top: 0, z-index 160) instead of on top of it:
+   * the box is fixed + z-index 500, so at top: 6px it covered the toolbar's own
+   * controls (bug report screenshot). --toolbar-height is measured at runtime by
+   * syncToolbarHeightVar() (main.ts) so this tracks font/width-driven height
+   * changes; the fallback matches the other consumers of the var. */
+  /* clamp(): a pane shorter than the toolbar + the box (a horizontal editor
+   * split, or a high webview zoom, which shrinks the viewport in CSS px while
+   * the toolbar keeps its authored height) would otherwise push the box
+   * entirely below the fold — Ctrl/Cmd+F would look like it did nothing while
+   * the hidden input holds focus. */
+  top: clamp(6px, calc(var(--toolbar-height, 48px) + 6px), calc(100vh - 44px));
   right: 20px;
   z-index: 500;
   display: flex;
@@ -1489,6 +2099,38 @@ body.toc-open #select-viewport-band {
   right: var(--toc-width);
 }
 
+/* US-23.9 retired `body.comment-panel-open` and its duplicate right-offsets:
+ * the Unresolved-location panel is a tab inside the one right dock now, so the
+ * `body.toc-open` rules above are the only offset mechanism. */
+
+/* The lost-anchor count badge. It used to sit on the retired `⚑` button and now
+ * rides on "Show Comments", which is always present — so [data-count="0"] is the
+ * normal resting state and the badge itself has to disappear at zero. */
+#comment-highlight-toggle {
+  position: relative;
+}
+
+#comment-highlight-toggle::after {
+  content: attr(data-count);
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+  color: var(--vscode-badge-foreground, #fff);
+  background: var(--comment-warn-fg);
+  border-radius: 7px;
+}
+
+#comment-highlight-toggle[data-count='0']::after,
+#comment-highlight-toggle:not([data-count])::after {
+  display: none;
+}
+
 /*---------------------------------------------------------------------------
  * Mục lục (Table of Contents) — panel cố định bên phải
  *--------------------------------------------------------------------------*/
@@ -1510,6 +2152,27 @@ body.toc-open #select-viewport-band {
   --toc-accent: var(--vscode-textLink-foreground, #3794ff);
   --toc-accent-soft: color-mix(in srgb, var(--toc-accent) 18%, transparent);
   --toc-pill-bg: var(--vscode-inputOption-activeBackground, rgba(14, 99, 156, 0.35));
+  /* US-10.8 progress-bar track. Deliberately NOT --toc-accent-soft: the rail
+   * handoff specifies a neutral per-mode track, distinct from the accent tint the
+   * retired ring reused (dark 0.16 vs 0.18, paper 0.14 vs 0.07). Dark is the
+   * baseline here, matching VS Code's default theme kind; light and the two
+   * high-contrast kinds are scoped below. */
+  --toc-progress-track: rgba(230, 225, 213, 0.16);
+}
+
+body.vscode-light {
+  --toc-progress-track: rgba(28, 27, 24, 0.14);
+}
+
+/* Both high-contrast kinds, light and dark. The retired ring's track read
+ * --toc-accent-soft, which was theme-derived and so could never lose contrast;
+ * the handoff's literals cover only the four normal modes, and vscode-high-contrast-light
+ * would otherwise inherit the near-white dark value onto a white panel and vanish.
+ * --vscode-contrastBorder is the token VS Code defines only in HC themes for
+ * exactly this purpose, so the bar stays visible without inventing a colour. */
+body.vscode-high-contrast,
+body.vscode-high-contrast-light {
+  --toc-progress-track: var(--vscode-contrastBorder, var(--toc-fg));
 }
 
 /* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục.
@@ -1538,7 +2201,7 @@ body.toc-open {
 
 body.toc-open #toolbar {
   margin-right: calc(-26px - var(--toc-width));
-  padding-right: calc(26px + var(--toc-width));
+  padding-right: calc(var(--toolbar-edge-pad) + var(--toc-width));
 }
 
 /* Đẩy hộp tìm + thước overview sang trái để không bị panel che. */
@@ -1653,135 +2316,238 @@ body.toc-resizing #toolbar {
   transition: none;
 }
 
-#toc-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* padding-top chừa dải toolbar (position:sticky, full-width, z-index cao
-   * hơn #toc-panel — xem #toolbar) đè lên đỉnh panel, tránh title bị che. */
-  padding: calc(8px + var(--toolbar-height, 48px)) 14px 8px;
-  /* Must resolve to the SAME value as #toc-panel's own background (--toc-bg
-   * === --toc-chrome-bg, see :root above) — otherwise a lighter/darker band
-   * shows behind the progress ring. */
-  background: var(--toc-chrome-bg);
-}
+/*---------------------------------------------------------------------------
+ * US-23.7 — shared right-dock tab strip. Owns the panel's top edge, so it is
+ * what clears the toolbar band (the TOC header used to, before US-10.8).
+ *--------------------------------------------------------------------------*/
 
-/* US-10.7: reading-stats block (progress ring + read-time/word-count text),
- * replaces the former #toc-title row. Sits inside #toc-header, which already
- * reserves the toolbar-height top padding above. */
-#toc-stats {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  width: 100%;
-}
-
-/* Design handoff (Wireframe Handoff/design_handoff_toc_outline_rail): ring is a
- * fixed 54px. It used to scale with --toc-width, but a ring that grows/shrinks
- * as the panel is resized read as unstable — pinned to the hifi's 54px target
- * regardless of panel width. */
-#toc-progress-ring {
-  flex: none;
-  width: 54px;
-  height: 54px;
-}
-
-/* SVG elements aren't covered by the UA [hidden] { display: none } rule
- * (that rule only targets the HTML namespace) — enforce it explicitly. */
-#toc-progress-ring[hidden] {
+/* A tab body carries its own author `display` (see #toc-tabpanel below), and an
+ * author declaration outranks the UA stylesheet's [hidden] { display: none }
+ * whatever the specificity — so without this the dock's `hidden` toggle would be
+ * inert and every registered tab would render at once. */
+.right-dock-tabpanel[hidden] {
   display: none;
 }
 
-/* Track = a soft accent tint (design: faint ring, not a hard theme border),
- * fill + percent value = the palette accent — one mechanism for every mode. */
-#toc-progress-ring .toc-progress-track {
-  fill: none;
-  stroke: var(--toc-accent-soft);
-  stroke-width: 6;
+.right-dock-tabs {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  /* border-box so the bottom border lands INSIDE the 32px: there is no global
+   * box-sizing reset, and content-box made the strip occupy 33px, breaking both
+   * this rule's own "exactly 32px" intent and US-10.8's 63px chrome budget. */
+  box-sizing: border-box;
+  height: 32px;
+  /* Clears the #toolbar band (position:sticky, full-width, higher z-index than
+   * the panel) that overlaps the panel's top edge. Margin rather than padding so
+   * the strip itself stays exactly 32px. */
+  margin-top: var(--toolbar-height, 48px);
+  background: var(--toc-chrome-bg);
+  border-bottom: 1px solid var(--toc-border);
 }
 
-#toc-progress-ring .toc-progress-fill {
-  fill: none;
-  stroke: var(--toc-accent);
-  stroke-width: 6;
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  transform-origin: 50% 50%;
-  transition: stroke-dashoffset 0.15s linear;
-}
-
-#toc-progress-ring .toc-progress-value {
-  fill: var(--toc-fg);
-  font-size: 12px;
+.right-dock-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  /* Handoff: the count sits 6px after the label, not glued to it. */
+  gap: 6px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--toc-muted);
+  font: inherit;
+  font-size: 11px;
   font-weight: 700;
-  text-anchor: middle;
-  dominant-baseline: central;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
 }
 
-#toc-stats-text {
-  min-width: 0;
-  overflow: hidden;
+/* Active tab takes the panel body's own background — not a tint — plus a 2px
+ * inset accent bar, so nothing but the bar moves when tabs switch. */
+.right-dock-tab.active {
+  background: var(--toc-bg);
+  color: var(--toc-fg);
+  box-shadow: inset 0 -2px 0 var(--toc-accent);
 }
 
-.toc-stats-minutes,
-.toc-stats-words {
+.right-dock-tab:hover:not(.active) {
+  color: var(--toc-fg);
+}
+
+/* US-23.9 count badge. It sits inside the tab button, which is bold uppercase
+ * 11px with letter-spacing — all of which has to be undone here, or the count
+ * reads as part of the label. */
+.right-dock-tab-badge {
+  padding: 0 5px;
+  font-size: 9.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--toc-muted);
+  background: color-mix(in srgb, var(--toc-fg) 8%, transparent);
+  border-radius: 8px;
+}
+
+.right-dock-menu-btn {
+  flex: none;
+  margin-left: auto;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--toc-muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.right-dock-menu-btn:hover,
+.right-dock-menu-btn.open {
+  background: var(--toc-accent-soft);
+  color: var(--toc-fg);
+}
+
+.right-dock-tab:focus-visible,
+.right-dock-menu-btn:focus-visible {
+  outline: 1px solid var(--toc-accent);
+  outline-offset: -2px;
+}
+
+/* Rendered as a document.body child (right-dock.ts explains why), positioned
+ * against the panel's box — so it needs its own stacking above #toc-panel's 150
+ * and to sit under #toolbar's 160, same band the panel itself lives in. */
+.right-dock-menu {
+  position: fixed;
+  width: 168px;
+  /* A long item list must scroll inside the menu rather than run off the
+   * viewport bottom — the menu is fixed-positioned with nowhere to reflow to. */
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  z-index: 151;
+  border: 1px solid var(--toc-border);
+  border-radius: 8px;
+  background: var(--toc-chrome-bg);
+  color: var(--toc-fg);
+  /* Deliberately NOT --toc-shadow: that token is `transparent` in Standard
+   * because the docked panel sits flush against the edge and needs no shadow. A
+   * menu floating over the panel always does — its background is the same
+   * --toc-chrome-bg, so the shadow plus the 1px border is all that separates
+   * them. Handoff alpha per mode is .10–.40; one neutral value covers the range. */
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.right-dock-menu-title {
+  padding: 4px 8px;
+  color: var(--toc-muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.right-dock-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.right-dock-menu-item:hover:not(:disabled) {
+  background: var(--toc-accent-soft);
+}
+
+.right-dock-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.right-dock-menu-check {
+  flex: none;
+  width: 12px;
+  color: var(--toc-accent);
+}
+
+#toc-tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Paired [hidden] rule at matching specificity, same reason and same shape as
+ * `#toolbar button[hidden]` above: the ID rule's `display: flex` outranks both
+ * the UA sheet and `.right-dock-tabpanel[hidden]`, so without this the dock's
+ * `hidden` toggle is inert and a second tab (US-23.9) would paint on top of the
+ * TOC instead of replacing it. */
+#toc-tabpanel[hidden] {
+  display: none;
+}
+
+/* US-10.8: the 54px ring, the two stacked stat lines and the depth-pill row are
+ * restacked into a 3px progress bar plus one 28px meta row — 31px of chrome
+ * instead of 110px (design handoff: design_handoff_comment_system/
+ * design_handoff_rail_panel_tabs). Toolbar clearance lives on
+ * .right-dock-tabs (US-23.7), so neither of these reserves it. */
+#toc-progress {
+  flex: none;
+  height: 3px;
+  background: var(--toc-progress-track);
+}
+
+#toc-progress[hidden] {
+  display: none;
+}
+
+.toc-progress-fill {
+  height: 3px;
+  width: 0;
+  background: var(--toc-accent);
+  transition: width 0.2s ease;
+}
+
+/* border-box: there is no global box-sizing reset, so content-box would ADD the
+ * 1px bottom border on top of the 28px and blow the handoff's 31px budget. */
+#toc-meta {
+  box-sizing: border-box;
+  flex: none;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 11.5px;
+  color: var(--toc-muted);
+  border-bottom: 1px solid var(--toc-border);
+}
+
+#toc-meta-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.toc-stats-minutes {
-  font-size: 13px;
-  font-weight: 600;
+/* No --toc-heading token exists; --toc-fg is the per-palette heading colour the
+ * retired ring's percent label already used. */
+#toc-meta-pct {
+  margin-left: auto;
+  padding-left: 8px;
+  font-weight: 700;
+  color: var(--toc-fg);
 }
 
-.toc-stats-words {
-  font-size: 12px;
-  opacity: 0.75;
-}
-
-/* US-10.6: thanh lọc heading-level (H1 / H1–H2 / H1–H2–H3) — hàng riêng, full
- * width, nằm dưới #toc-header (đã chừa chỗ toolbar ở trên) nên luôn lộ rõ.
- * 3 nút pill (design handoff: Wireframe Handoff/design_handoff_orca_editor —
- * depthBtns) thay cho slider liên tục trước đây. */
-#toc-filter-bar {
-  flex: none;
-  display: flex;
-  gap: 5px;
-  padding: 0 14px 8px;
-  border-bottom: 1px solid var(--toc-border);
-}
-
-/* Borderless-filter design: inactive pills are plain muted text, only the
- * active depth gets a soft-fill pill — no border on either state. Routed
- * through --toc-* (see :root above) so Standard and Sepia/Paper share one
- * mechanism; Standard's --toc-pill-bg/--toc-accent already map to the VS Code
- * "active option" convention (--vscode-inputOption-active*), so it keeps
- * looking native. */
-.toc-depth-btn {
-  padding: 3px 11px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 6px;
-  cursor: pointer;
-  /* 1px transparent, not `none` — keeps the same box footprint as before this
-   * design (avoids a 2px layout shift), just invisible. */
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--toc-muted);
-  transition: background 0.18s, border-color 0.18s, color 0.18s;
-}
-
-.toc-depth-btn:hover {
-  background: var(--toc-accent-soft);
-}
-
-.toc-depth-btn.active {
-  border-color: transparent;
-  background: var(--toc-pill-bg);
-  color: var(--toc-accent);
+#toc-meta-pct[hidden] {
+  display: none;
 }
 
 #toc-list {
@@ -1941,7 +2707,15 @@ body.toc-resizing #toolbar {
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
   pointer-events: none;
-  z-index: 60;
+  /* Top of the whole stack — the next layer down is .md-math-edit-popover
+   * (1000). At its previous 60 this sat under the right dock (#toc-panel, 150:
+   * opaque, full height, over exactly this corner), so any toast raised with the
+   * dock open was painted behind it and never seen. That a toast may now cover an
+   * open popover for its few seconds is the accepted trade (PO 2026-07-29): a
+   * toast is often the ONLY feedback for an action taken inside that popover, so
+   * sitting under it is the same silent failure — and pointer-events: none above
+   * means it can never intercept a click on whatever it covers. */
+  z-index: 1100;
 }
 
 #wysiwyg-toast.show {
@@ -2339,6 +3113,22 @@ body.reading-zen.md-line-numbers #toolbar {
   margin-left: 0;
   padding-left: 26px;
 }
+/* Zen's toolbar is already `position: fixed; right: 0`, spanning the full
+ * viewport width on its own — the negative-margin "stretch to overlap the
+ * dock's top strip" trick (body.toc-open #toolbar above) is for the in-flow
+ * toolbar only. Left uncountered, its margin/padding-right would shift the
+ * fixed toolbar away from the true right edge, opening a gap while Zen and the
+ * dock are both open. Same specificity (one class + #toolbar) as the rule it
+ * must beat, so it has to repeat the extra class to win.
+ *
+ * US-23.9 re-pointed this from `comment-panel-open` to `toc-open`: there is one
+ * right dock now, and the class this was written against is retired. The TOC
+ * never had its own copy of the counter-rule, so this also closes the same gap
+ * for the Contents tab. */
+body.reading-zen.toc-open #toolbar {
+  margin-right: 0;
+  padding-right: var(--toolbar-edge-pad);
+}
 
 /* --- US-19.6/US-19.24: chrome (TOC + pop-up) phóng cỡ chữ trong Reading Mode ---
  * Mỗi selector đọc bucket --reading-ui-fs-N khớp với cỡ NATIVE của chính nó
@@ -2362,20 +3152,17 @@ body.reading-mode .toc-item {
  * reached it. readability.ts now also hoists --reading-font-override onto
  * <body>; --reading-ui-font-family (markdown.css) covers the per-preset stack. */
 body.reading-mode #toc-panel,
-body.reading-mode .toc-item {
+body.reading-mode .toc-item,
+/* US-23.7: the `⋯` menu is a document.body child (see right-dock.ts), so it is
+ * outside #toc-panel's subtree and needs the rail font stack named explicitly. */
+body.reading-mode .right-dock-menu {
   font-family: var(--reading-font-override, var(--reading-ui-font-family));
 }
-body.reading-mode #toc-progress-ring .toc-progress-value {
+/* US-10.8: one meta row replaces the ring's percent label and the two stat lines;
+ * it shares the 12px bucket with .right-dock-menu-item, where the depth control
+ * now lives. The 3px bar has no text to scale. */
+body.reading-mode #toc-meta {
   font-size: var(--reading-ui-fs-12);
-}
-body.reading-mode .toc-stats-minutes {
-  font-size: var(--reading-ui-fs-13);
-}
-body.reading-mode .toc-stats-words {
-  font-size: var(--reading-ui-fs-12);
-}
-body.reading-mode .toc-depth-btn {
-  font-size: var(--reading-ui-fs-11);
 }
 body.reading-mode .toc-empty-msg {
   font-size: var(--reading-ui-fs-12);
@@ -2446,6 +3233,17 @@ body.reading-mode .cross-file-search-more {
 body.reading-mode #wysiwyg-toast {
   font-size: var(--reading-ui-fs-12);
 }
+/* US-23.7: the tab strip and its overflow menu are rail chrome like the outline
+ * rows above — scale them with Reading Mode too, or the strip stays at OS-chrome
+ * size beside outline rows that grew. US-10.8 put the depth control in this menu,
+ * so these rules also carry the depth rows' Reading-Mode scaling. */
+body.reading-mode .right-dock-tab,
+body.reading-mode .right-dock-menu-title {
+  font-size: var(--reading-ui-fs-11);
+}
+body.reading-mode .right-dock-menu-item {
+  font-size: var(--reading-ui-fs-12);
+}
 
 /* --- US-4.25/US-19.24: mỗi reading mode màu có bộ token toolbar/TOC RIÊNG
  * (hue chrome độc lập, KHÔNG kế thừa content --rp-*) — toolbar/TOC đọc như chrome
@@ -2469,9 +3267,17 @@ body.reading-mode-sepia {
   --toc-muted: #8a7a63;
   --toc-accent: #8a4b08;
   --toc-accent-soft: rgba(90, 60, 20, 0.2);
+  --toc-progress-track: rgba(90, 60, 20, 0.18);
   --toc-pill-bg: rgba(138, 75, 8, 0.14);
   --toc-pill-border: rgba(90, 60, 20, 0.25);
   --toc-pill-fg: rgba(59, 47, 34, 0.62);
+  /* COMMENT_SYSTEM_TOKENS.md, Sepia column. Anchor-trouble is deliberately NOT
+   * the shared amber here: Sepia's own accent (#8a4b08) is also amber-brown, so
+   * "Open" and "Anchor trouble" would be one hue at a glance — the tokens doc
+   * shifts it to ochre/gold for exactly this collision. */
+  --comment-status-done-fg: #4b7a3f;
+  --comment-warn-fg: #8f6a1a;
+  --comment-pin-group-border: #5b4636;
 }
 body.reading-mode-paper {
   --toolbar-bg: #f4f4ea;
@@ -2490,9 +3296,15 @@ body.reading-mode-paper {
   --toc-muted: rgba(0, 0, 0, 0.55);
   --toc-accent: #2554a0;
   --toc-accent-soft: rgba(0, 0, 0, 0.07);
+  --toc-progress-track: rgba(0, 0, 0, 0.14);
   --toc-pill-bg: rgba(37, 84, 160, 0.1);
   --toc-pill-border: rgba(0, 0, 0, 0.14);
   --toc-pill-fg: rgba(0, 0, 0, 0.6);
+  /* COMMENT_SYSTEM_TOKENS.md, Paper column. Paper's accent is blue, so the amber
+   * anchor-trouble family stays — no collision to resolve. */
+  --comment-status-done-fg: #1a7a4a;
+  --comment-warn-fg: #9a6a1a;
+  --comment-pin-group-border: #111110;
 }
 /* #table-toolbar vẫn kế thừa --rp-* như US-19.11 (chỉ #toolbar tách sang
  * --toolbar-* riêng ở trên). */
@@ -2548,7 +3360,7 @@ body[class*='reading-mode-'] .toolbar-popover-item.selected {
  * --toc-* RIÊNG (như --toolbar-* ở US-4.25), KHÔNG kế thừa --rp-* của content, vì highContrast
  * card (nền đen/chữ trắng) đảo ngược hẳn so với highContrast content (nền
  * trắng/chữ đen) trong design spec — hai hệ không thể dùng chung token.
- * Every #toc-panel/#toc-header/.toc-item/.toc-depth-btn/#toc-progress-ring/
+ * Every #toc-panel/.toc-item/#toc-progress/#toc-meta/.right-dock-menu-item/
  * .toc-empty-reset/#toc-resize color rule now reads var(--toc-*) directly in
  * its base (non-reading-mode-scoped) declaration — Standard's own --toc-*
  * baseline (see :root near --toc-width) already renders identically to the
@@ -2683,10 +3495,8 @@ body[class*='reading-mode-'] .md-plantuml-chart {
   background: var(--rp-elev-bg);
 }
 
-/* Front matter (khối YAML gấp gọn, viền dashed). */
-body[class*='reading-mode-'] .md-front-matter {
-  border-color: var(--rp-embed-border);
-}
+/* Front matter's border color is now theme-tokenized directly (body.reading-mode-sepia/-paper
+ * blocks above), superseding the old single --rp-embed-border override (US-2.7 redesign). */
 
 /* Drag-and-drop ghost / cell-highlight outline: --vscode-focusBorder is always
  * a VS Code accent blue, which clashes with sepia's deliberately low-blue
@@ -2703,6 +3513,10 @@ body[class*='reading-mode-'] .dd-hover-outline-cell {
  * (it has to stand out as a selection color), so diluted by .dd-source-muted's
  * opacity:0.4 it lands back around the same visual strength as the rule above. */
 body[class*='reading-mode-'] .dd-source-muted.dd-hover-outline {
+  background-color: var(--rp-selection-bg);
+}
+/* Task-list counterpart (see the base `::before` overlay rule near .dd-hover-outline-cell). */
+body[class*='reading-mode-'] li.task-list-item.dd-source-muted.dd-hover-outline::before {
   background-color: var(--rp-selection-bg);
 }
 body[class*='reading-mode-'] .dd-ghost {
@@ -2736,6 +3550,434 @@ body[class*='reading-mode-'] ::highlight(search-current) {
 .toc-item:focus-visible {
   outline: 2px solid var(--vscode-focusBorder, #007acc);
   outline-offset: -2px;
+}
+
+/*--------------------------------------------------------------------------*
+ * Req 23 US-23.9 — Comment tab (absorbs US-23.4's "Unresolved location" panel)
+ *
+ * The tab BODY only: US-23.7's dock owns the panel box, the strip and the
+ * width, so there is no dock geometry here at all. Token discipline is
+ * unchanged — every rule reads through the --comment-panel-* layer, never a raw
+ * --vscode-* var, so a reading mode can restyle the whole tab in one block.
+ *--------------------------------------------------------------------------*/
+
+:root {
+  --comment-panel-bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --comment-panel-fg: var(--vscode-foreground);
+  --comment-panel-muted: var(--vscode-descriptionForeground, rgba(204, 204, 204, 0.7));
+  --comment-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --comment-card-border: var(--vscode-widget-border, rgba(128, 128, 128, 0.28));
+  --comment-accent: var(--vscode-textLink-foreground, #3794ff);
+  --comment-accent-soft: color-mix(in srgb, var(--comment-accent) 14%, transparent);
+  --comment-warn-fg: var(--vscode-editorWarning-foreground, #cca700);
+  --comment-panel-field-bg: var(--vscode-input-background, transparent);
+  --comment-panel-field-fg: var(--vscode-input-foreground, inherit);
+  --comment-panel-field-border: var(--vscode-input-border, var(--comment-card-border));
+  /* US-23.9 row chrome and status pills (COMMENT_SYSTEM_TOKENS.md). Derived from
+   * the rail's own --toc-* set rather than from --vscode-* directly: the tab is a
+   * body INSIDE #toc-panel, and --toc-* is the layer Sepia and Paper already
+   * override wholesale — so the list is per-mode correct without a second
+   * three-mode block to keep in sync. Open IS the mode's accent in every palette
+   * (no separate hue is invented for it); Resolved/Closed/Anchor-trouble keep
+   * independent hues, mixed against the mode's own foreground so a theme the
+   * handoff never saw still yields a pill that reads on its own background. */
+  --comment-row-hover: color-mix(in srgb, var(--toc-fg) 7%, transparent);
+  --comment-status-open-fg: var(--toc-accent);
+  --comment-status-open-bg: color-mix(in srgb, var(--toc-accent) 16%, transparent);
+  --comment-status-done-fg: #59c48a;
+  --comment-status-done-bg: color-mix(in srgb, var(--comment-status-done-fg) 18%, transparent);
+  --comment-status-closed-fg: var(--toc-muted);
+  --comment-status-closed-bg: color-mix(in srgb, var(--toc-fg) 10%, transparent);
+  --comment-status-anchor-bg: color-mix(in srgb, var(--comment-warn-fg) 16%, transparent);
+  /* Outline of the gutter's "comment group" pill (the clustered ⌗ +N pin). Takes
+   * the mode's own foreground (COMMENT_SYSTEM_TOKENS.md `--cmt-fg`) rather than
+   * an accent tint, so a group reads as its own object next to the accent-tinted
+   * single pins. Standard Dark is the default here; the three other modes
+   * override it below (Light) and in their own palette blocks (Sepia/Paper). */
+  --comment-pin-group-border: #cccccc;
+}
+
+/* Must sit AFTER the :root block above — same specificity, so source order
+ * decides which value the light theme ends up with. */
+.vscode-light {
+  --comment-pin-group-border: #3b3b3b;
+}
+
+#comment-tabpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The paired [hidden] rule US-23.7 names as a trap: the author `display: flex`
+ * above outranks both the UA sheet's `[hidden] { display: none }` and the
+ * dock's generic `.right-dock-tabpanel[hidden]`, so without a rule at MATCHING
+ * ID specificity this body keeps painting while the TOC tab is active. */
+#comment-tabpanel[hidden] {
+  display: none;
+}
+
+/* AC13: one banner naming the cause, instead of N unexplained floating rows. */
+.comment-tab-banner {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--comment-warn-fg);
+  background: var(--comment-status-anchor-bg);
+  border-bottom: 1px solid var(--toc-border);
+}
+
+.comment-panel-list {
+  flex: 1 1 auto;
+  /* Uncapped by design: seven rows or seven hundred, the list is the whole list. */
+  overflow-y: auto;
+}
+
+/* Sticky so the status of whatever is on screen is always named. Opaque, or
+ * rows would show through as they scroll under it (AC4). */
+.comment-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--toc-muted);
+  background: var(--toc-bg);
+  border-bottom: 1px solid var(--toc-border);
+}
+
+/* Every group after the first is separated from the rows above it, matching the
+ * handoff's 2nd+ header treatment. */
+.comment-group:not(:first-child) {
+  border-top: 1px solid var(--toc-border);
+}
+
+.comment-group-count {
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.comment-group-note {
+  margin-left: auto;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.comment-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--toc-border);
+  cursor: pointer;
+}
+
+.comment-row:hover {
+  background: var(--comment-row-hover);
+}
+
+.comment-row.selected {
+  background: var(--toc-accent-soft);
+  box-shadow: inset 2px 0 0 var(--toc-accent);
+}
+
+.comment-row:focus-visible {
+  outline: 1px solid var(--toc-accent);
+  outline-offset: -2px;
+}
+
+/* An orphaned line is a record, not a destination — nothing to activate, so it
+ * must not offer the hover affordance either. */
+.comment-row.orphan {
+  cursor: default;
+}
+
+.comment-row.orphan:hover {
+  background: transparent;
+}
+
+.comment-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.comment-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.comment-row-pill {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  border-radius: 8px;
+  color: var(--comment-status-open-fg);
+  background: var(--comment-status-open-bg);
+}
+
+.comment-row-pill[data-status='resolved'] {
+  color: var(--comment-status-done-fg);
+  background: var(--comment-status-done-bg);
+}
+
+.comment-row-pill[data-status='closed'] {
+  color: var(--comment-status-closed-fg);
+  background: var(--comment-status-closed-bg);
+}
+
+.comment-row-pill[data-status='anchor'] {
+  color: var(--comment-warn-fg);
+  background: var(--comment-status-anchor-bg);
+}
+
+/* AC6: a guessed location is never presented silently on this surface. */
+.comment-row-approx {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
+}
+
+.comment-row-snippet {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* "No comment text" — a stated label, not a blank cell. */
+.comment-row-snippet.empty {
+  color: var(--toc-muted);
+  font-style: italic;
+}
+
+/* Readable, clearly past. */
+.comment-row[data-group='closed'] .comment-row-snippet {
+  color: var(--toc-muted);
+}
+
+.comment-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--toc-muted);
+}
+
+.comment-row-author {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.comment-row-where {
+  flex: none;
+}
+
+.comment-row-time {
+  flex: none;
+  margin-left: auto;
+}
+
+.comment-empty {
+  padding: 24px 26px;
+  text-align: center;
+}
+
+.comment-empty-title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.comment-empty-note {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--toc-muted);
+}
+
+/* The only empty state with an accent: a sidecar that failed or was refused is
+ * not the same news as a file nobody has commented on. */
+.comment-empty[data-kind='problem'] .comment-empty-title {
+  color: var(--comment-warn-fg);
+}
+
+.comment-empty-action {
+  margin-top: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--toc-accent);
+  background: none;
+  border: 1px solid var(--toc-accent);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* Always drawn, never hover-revealed: a row that can be dragged should say so
+ * at rest (design handoff). */
+.comment-panel-handle {
+  flex: 0 0 auto;
+  padding-top: 1px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--toc-muted);
+  cursor: grab;
+}
+
+.comment-panel-more {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--comment-panel-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.comment-panel-more:hover {
+  color: var(--comment-panel-fg);
+}
+
+/* Drop aim — one visual language for the pointer route and the keyboard route. */
+.comment-drop-target {
+  background: var(--comment-accent-soft);
+  outline: 1px solid var(--comment-accent);
+  outline-offset: 2px;
+}
+
+.comment-drop-chip {
+  position: fixed;
+  z-index: 260;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--comment-accent);
+  background: var(--comment-panel-bg);
+  border: 1px solid var(--comment-accent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+body.comment-card-dragging {
+  cursor: grabbing;
+}
+
+body.comment-card-dragging * {
+  user-select: none;
+}
+
+/* --- Re-attach... picker --- */
+
+.comment-reattach-picker {
+  position: fixed;
+  z-index: 270;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 320px;
+  max-height: min(70vh, 460px);
+  padding: 10px;
+  color: var(--comment-panel-fg);
+  background: var(--comment-card-bg);
+  border: 1px solid var(--comment-card-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+}
+
+.comment-reattach-picker[hidden] {
+  display: none;
+}
+
+.comment-reattach-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.comment-reattach-filter {
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--comment-panel-field-fg);
+  background: var(--comment-panel-field-bg);
+  border: 1px solid var(--comment-panel-field-border);
+  border-radius: 4px;
+}
+
+.comment-reattach-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.comment-reattach-group {
+  padding: 6px 4px 3px;
+  font-size: 10px;
+  color: var(--comment-panel-muted);
+  text-transform: uppercase;
+}
+
+.comment-reattach-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.comment-reattach-row:hover,
+.comment-reattach-row.active {
+  background: var(--comment-accent-soft);
+}
+
+.comment-reattach-line {
+  flex: 0 0 auto;
+  color: var(--comment-panel-muted);
+}
+
+.comment-reattach-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Ranked, not chosen: the percentage is similarity to the recorded context, and
+ * even a 92% match still sits behind a click. */
+.comment-reattach-score {
+  flex: 0 0 auto;
+  color: var(--comment-accent);
+}
+
+.comment-reattach-empty,
+.comment-reattach-hint {
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--comment-panel-muted);
 }
 
 /* --- US-19.4 Image click-to-zoom ---
@@ -3280,4 +4522,1280 @@ body[class*='reading-mode-'] #md-lightbox-stage[data-canvas='light'] {
 .caption-edit-confirm:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* --- Req 23 US-23.1: "Add Comment" context menu + composer -----------------
+ * The menu reuses the handle-menu shell (.dd-menu-popup / .dd-menu-item /
+ * .dd-menu-sep) so a right-click menu and a handle menu read as the same
+ * VS Code menu; only the per-item icon + accelerator layout is new here.
+ * Commenting never rewrites document text, so nothing below changes metrics of
+ * the anchored content — the active-anchor mark is a background wash only. */
+
+.comment-context-menu[hidden] {
+  display: none;
+}
+
+.comment-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.comment-menu-item-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.comment-menu-item-label {
+  flex: 1;
+}
+
+.comment-menu-item-accel {
+  opacity: 0.7;
+  font-size: 11.5px;
+}
+
+.comment-menu-item[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.comment-menu-item[aria-disabled='true']:hover {
+  background: none;
+}
+
+/* Icon-less items keep the label column aligned with the "Add Comment" row. */
+.comment-menu-item:not(:has(.comment-menu-item-icon)) .comment-menu-item-label {
+  padding-left: 23px;
+}
+
+.comment-composer {
+  position: fixed;
+  z-index: 497;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 390px;
+  max-width: calc(100vw - 8px);
+  padding: 12px 13px;
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+
+.comment-composer[hidden] {
+  display: none;
+}
+
+.comment-composer-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-composer-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.comment-composer-title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.comment-composer-target {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.comment-composer-quote {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.comment-composer-quote[hidden] {
+  display: none;
+}
+
+.comment-composer-quote-rule {
+  flex: none;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  opacity: 0.4;
+}
+
+.comment-composer-quote-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.55;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.comment-composer-author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-composer-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  color: var(--vscode-editor-background);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.comment-composer-author-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.comment-composer-author-note {
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+
+.comment-composer-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.comment-composer-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-focusBorder) 30%, transparent);
+}
+
+.comment-composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.comment-composer-hint {
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+
+.comment-composer-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.comment-composer-btn {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.comment-composer-cancel {
+  padding: 5px 13px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-composer-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-composer-submit {
+  padding: 6px 14px;
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.comment-composer-submit:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.comment-composer-submit[aria-disabled='true'] {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.7));
+  cursor: not-allowed;
+}
+
+/* US-23.10 AC5: a create refusal's reason, shown inline instead of a toast —
+ * the composer stays open with the body intact. */
+.comment-composer-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+}
+
+.comment-composer-error[hidden] {
+  display: none;
+}
+
+.comment-composer-retarget {
+  padding: 3px 9px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+}
+
+.comment-composer-retarget[hidden] {
+  display: none;
+}
+
+.comment-composer-retarget:hover {
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 15%, transparent);
+}
+
+/* The anchor stays lit while the composer is open, so it is obvious what the
+ * comment will attach to. Background only — no weight, size or spacing change,
+ * so the document never reflows while composing. */
+.comment-anchor-active {
+  background: color-mix(in srgb, var(--vscode-focusBorder) 9%, transparent);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--vscode-focusBorder) 9%, transparent);
+  border-radius: 2px;
+}
+
+/* US-19.11: the composer is floating chrome, so it follows the reading palette
+ * like every other popup rather than staying on the VS Code theme tokens. */
+body[class*='reading-mode-'] .comment-composer {
+  background: var(--rp-widget-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+  box-shadow: 0 16px 36px var(--rp-widget-shadow, rgba(0, 0, 0, 0.3));
+}
+
+body[class*='reading-mode-'] .comment-composer-input {
+  background: var(--rp-elev-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+
+/* --- Req 23 US-23.2: comment highlight overlay ------------------------------
+ * CSS Custom Highlight API, same mechanism as search-match/select-match above
+ * — a 4th, independent registration so an active comment highlight and an
+ * active search-match highlight never mix or override one another. Fixed
+ * violet (not a --vscode-* var, matching the design handoff — no theme token
+ * maps to this hue), deliberately far from the amber find uses. */
+::highlight(comment-anchor) {
+  background-color: rgba(130, 110, 220, 0.22);
+}
+
+/* Req 24 US-23.8 AC2: a tier-3 (approximate) anchor's wash — the same warm
+ * "anchor trouble" tone US-23.9's Comment-tab pill already uses
+ * (--comment-warn-fg/--comment-status-anchor-bg), plus a dashed underline so
+ * the distinction is never colour alone. Tier 4 (floating) never reaches
+ * here — no live carrier to highlight (see COMMENT_HIGHLIGHT_NONEXACT_NAME). */
+::highlight(comment-anchor-nonexact) {
+  background-color: var(--comment-status-anchor-bg);
+  text-decoration: underline dashed var(--comment-warn-fg);
+  text-decoration-thickness: 1.5px;
+}
+
+/* Req 24 US-23.8 AC5: the temporary, thread-scoped wash for whichever
+ * thread's popover is open right now — its own registrations (never the
+ * toggle-gated buckets above), so they render even with "Show Comments" off
+ * and for a Closed thread opened from the Comment tab. Slightly stronger than
+ * the passive exact wash so the "this is what you're looking at" cue reads
+ * clearly even when it overlaps one of the buckets above. Split exact/
+ * non-exact so AC2's distinction (dashed underline, never colour alone)
+ * still holds for the active thread with the toggle off. */
+::highlight(comment-anchor-open) {
+  background-color: rgba(130, 110, 220, 0.34);
+}
+
+::highlight(comment-anchor-open-nonexact) {
+  background-color: var(--comment-status-anchor-bg);
+  text-decoration: underline dashed var(--comment-warn-fg);
+  text-decoration-thickness: 1.5px;
+}
+
+/* Standard — Dark only: the violet wash above is tuned for a light page and
+ * loses too much contrast against #1f1f1f. Raised per the Comment System token
+ * table's dark column — wash .22 → .30, active .34 → .46, plus the "comment
+ * rule" the handoff always specified but that only the non-exact variant ever
+ * implemented (a solid underline here, so AC2's dashed one stays distinct).
+ * Nothing about the TEXT changes — background and underline only, never the
+ * glyph colour, so a commented run still reads exactly as the author wrote it.
+ * `:not([class*='reading-mode-'])` is what "Standard" means in this codebase:
+ * Sepia and Paper are the only palettes that add a colour class, and their own
+ * (light) backgrounds do not need the boost. */
+body.vscode-dark:not([class*='reading-mode-']) ::highlight(comment-anchor) {
+  background-color: rgba(130, 110, 220, 0.3);
+  text-decoration: underline solid rgba(184, 176, 255, 0.9);
+  text-decoration-thickness: 1px;
+}
+
+body.vscode-dark:not([class*='reading-mode-']) ::highlight(comment-anchor-open) {
+  background-color: rgba(130, 110, 220, 0.46);
+  text-decoration: underline solid rgba(184, 176, 255, 0.9);
+  text-decoration-thickness: 1px;
+}
+
+/* --- Req 23 US-23.2: gutter pins ---------------------------------------------
+ * A lane immediately left of #content, independent of gutter.ts's numbered
+ * line gutter (a separate lane, own reservation) and of the showLineNumbers
+ * setting — pins show regardless of it. Reserved only while the document has
+ * at least one Open/Resolved thread (body.comment-gutter-active). */
+body.comment-gutter-active {
+  padding-left: 60px; /* 26px base + 34px pin lane */
+}
+body.comment-gutter-active #toolbar {
+  margin-left: -60px;
+  padding-left: var(--toolbar-edge-pad);
+}
+body.comment-gutter-active.md-line-numbers {
+  padding-left: 132px; /* 26 + 34 (pins) + 56 (numbers) + 16 (gap) */
+}
+body.comment-gutter-active.md-line-numbers #toolbar {
+  margin-left: -132px;
+  padding-left: var(--toolbar-edge-pad);
+}
+body.comment-gutter-active.md-line-numbers #line-gutter {
+  left: 60px; /* shifted right past the pin lane */
+}
+
+#comment-gutter {
+  position: absolute;
+  top: 0;
+  left: 26px;
+  width: 34px;
+}
+
+.comment-gutter-pin {
+  position: absolute;
+  left: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 5px 0 4px;
+  border-radius: 8px;
+  /* Through the --comment-status-* layer, not --vscode-textLink-foreground
+   * directly: the handoff gives pins, pills and rows ONE status palette, and
+   * that layer already resolves per mode (Open = the mode's own accent). Read
+   * raw, the pin kept VS Code's blue on Sepia's cream page. Percentages are the
+   * ones the pin already used, so Standard renders unchanged. */
+  background: color-mix(in srgb, var(--comment-status-open-fg) 14%, transparent);
+  color: var(--comment-status-open-fg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.comment-gutter-pin:hover,
+.comment-gutter-pin:focus-visible {
+  background: color-mix(in srgb, var(--comment-status-open-fg) 26%, transparent);
+  outline: none;
+}
+
+/* Deliberately the CLOSED foreground, not the Resolved green: this pin's muted
+ * grey is what shipped, and swapping it for a status hue is a design change, not
+ * a palette fix. --comment-status-closed-fg resolves to the same
+ * --vscode-descriptionForeground under Standard. */
+.comment-gutter-pin.resolved {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: var(--comment-status-closed-fg);
+}
+
+.comment-gutter-pin-cluster {
+  /* border-box: there is no global box-sizing reset, so content-box would push
+   * the pill to 20px and break its alignment with the single pins. */
+  box-sizing: border-box;
+  height: 18px;
+  border: 1px solid var(--comment-pin-group-border);
+  border-radius: 9px;
+  /* The halo is a spacer that punches the pill out of whatever is behind it, so
+   * it must paint the PAGE background — --rp-bg, which Sepia/Paper redefine.
+   * Reading straight from --vscode-editor-background painted the VS Code theme's
+   * (dark) background over a cream page and read as a thick black ring, drowning
+   * the 1px group border above. --rp-bg is declared on :root and maps back to
+   * --vscode-editor-background under Standard, so this is unchanged there. */
+  box-shadow: 0 0 0 3px var(--rp-bg, var(--vscode-editor-background));
+}
+
+.comment-gutter-pin-icon {
+  width: 9px;
+  height: 9px;
+  flex: none;
+}
+
+.comment-gutter-pin-count {
+  white-space: nowrap;
+}
+
+/* Req 24 US-23.8 AC2: tier 3 (approximate) — the same "anchor trouble" tone
+ * as the Comment tab's pill (US-23.9), plus a badge glyph so the distinction
+ * survives forced-colors/greyscale, not colour alone. */
+.comment-gutter-pin-nonexact {
+  background: var(--comment-status-anchor-bg);
+  color: var(--comment-warn-fg);
+}
+.comment-gutter-pin-nonexact:hover,
+.comment-gutter-pin-nonexact:focus-visible {
+  background: color-mix(in srgb, var(--comment-warn-fg) 26%, transparent);
+}
+.comment-gutter-pin-nonexact-badge {
+  font-weight: 700;
+}
+
+.comment-gutter-cluster-row-nonexact {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
+}
+
+.comment-gutter-cluster-list {
+  z-index: 498;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px;
+  padding: 4px;
+}
+
+.comment-gutter-cluster-list[hidden] {
+  display: none;
+}
+
+.comment-gutter-cluster-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.comment-gutter-cluster-row:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-gutter-cluster-row-line {
+  flex: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+
+.comment-gutter-cluster-row-snippet {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comment-gutter-cluster-row-status {
+  flex: none;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+/* --- Req 23 US-23.2: thread popover ------------------------------------------
+ * Same shell convention as .comment-composer — body-mounted, fixed, high
+ * z-index. Original comment carries no edit control; delete (own-authored
+ * content only) is the one destructive action, always confirmation-gated. */
+.comment-popover {
+  position: fixed;
+  z-index: 498;
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-width: calc(100vw - 8px);
+  max-height: 70vh;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  font-size: 12.5px;
+}
+
+.comment-popover[hidden] {
+  display: none;
+}
+
+.comment-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  flex: none;
+}
+
+.comment-popover-title {
+  font-weight: 650;
+}
+
+.comment-popover-line {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.comment-popover-status {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 9px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.comment-popover-status.status-open {
+  background: color-mix(in srgb, var(--vscode-textLink-foreground, #005fb8) 13%, transparent);
+  color: var(--vscode-textLink-foreground, #005fb8);
+}
+
+.comment-popover-status.status-resolved {
+  background: rgba(44, 122, 75, 0.14);
+  color: #2c7a4b;
+}
+
+.comment-popover-status.status-closed {
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--vscode-descriptionForeground, #8a8a8a);
+}
+
+/* Req 24 US-23.8 AC2: "Approximate location" / "Unresolved location" — same
+ * warm "anchor trouble" tone as the gutter pin and the Comment tab's pill
+ * (US-23.9), so the three surfaces read as one signal, not colour alone. */
+.comment-popover-anchor-state {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--comment-warn-fg);
+}
+
+.comment-popover-anchor-state[hidden] {
+  display: none;
+}
+
+.comment-popover-quote {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  flex: none;
+}
+
+.comment-popover-quote[hidden] {
+  display: none;
+}
+
+.comment-popover-quote-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.comment-popover-list {
+  overflow-y: auto;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.comment-popover-reply {
+  padding-left: 12px;
+  border-left: 2px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+}
+
+.comment-popover-person-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.comment-popover-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  color: var(--vscode-editor-background);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.comment-popover-author {
+  font-weight: 650;
+}
+
+.comment-popover-time {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.comment-popover-delete {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.comment-popover-delete:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* AC5's soft nudge: visible but inert on content the current author didn't write. */
+.comment-popover-delete:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+/* US-23.14 AC1: same treatment as .comment-popover-delete, but never disabled
+ * — AC8 carries no authority check, so it is never shown inert. */
+.comment-popover-edit {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.comment-popover-edit:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+/* When both Edit and Delete are present, Delete no longer needs its own
+ * margin-left: auto push — Edit already claims the row's trailing edge. */
+.comment-popover-edit + .comment-popover-delete {
+  margin-left: 0;
+}
+
+/* US-23.14 AC4: the "edited ⟨timestamp⟩" marker next to the author/time. */
+.comment-popover-edited {
+  font-size: 11px;
+  opacity: 0.55;
+  font-style: italic;
+}
+
+.comment-popover-body-text {
+  padding-left: 26px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  /* The card is `overflow: hidden`, so one long unbroken token (a URL, a path)
+     would be clipped unreadably instead of wrapping. */
+  overflow-wrap: anywhere;
+}
+
+.comment-popover-reply-box {
+  flex: none;
+  padding: 10px 12px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comment-popover-reply-box[hidden] {
+  display: none;
+}
+
+/* US-23.10 AC5: a reply refusal's reason, shown inline instead of a toast —
+ * mirrors `.comment-composer-error`. */
+.comment-popover-reply-error {
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+}
+
+.comment-popover-reply-error[hidden] {
+  display: none;
+}
+
+.comment-popover-reply-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.comment-popover-reply-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+
+.comment-popover-reply-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.comment-popover-reply-cancel,
+.comment-popover-reply-submit {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-popover-reply-cancel {
+  padding: 4px 12px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+/* Re-opens the composer after Cancel collapsed it (AC6). */
+.comment-popover-reply-open {
+  flex: none;
+  margin: 0 12px 10px;
+  padding: 5px 12px;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  background: none;
+  color: var(--vscode-textLink-foreground, var(--vscode-button-background));
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-popover-reply-open:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-reply-open[hidden] {
+  display: none;
+}
+
+.comment-popover-reply-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-reply-submit {
+  padding: 5px 13px;
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.comment-popover-reply-submit:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.comment-popover-reply-submit[aria-disabled='true'] {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.7));
+  cursor: not-allowed;
+}
+
+/* US-23.14: an edit field replacing one row's body — same shapes as the reply
+ * box's own input/error/actions, scoped to `.comment-popover-original`/
+ * `.comment-popover-reply` instead of the fixed reply-box slot. */
+.comment-popover-edit-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-left: 26px;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.comment-popover-edit-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+
+.comment-popover-edit-error {
+  margin-left: 26px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--vscode-errorForeground, #f14c4c);
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+}
+
+.comment-popover-edit-error[hidden] {
+  display: none;
+}
+
+.comment-popover-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: 26px;
+  margin-top: 6px;
+}
+
+.comment-popover-edit-counter {
+  margin-right: auto;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.comment-popover-edit-counter[hidden] {
+  display: none;
+}
+
+.comment-popover-edit-cancel,
+.comment-popover-edit-save {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comment-popover-edit-cancel {
+  padding: 4px 12px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-popover-edit-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-edit-save {
+  padding: 5px 13px;
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.comment-popover-edit-save:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.comment-popover-edit-save[aria-disabled='true'] {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.7));
+  cursor: not-allowed;
+}
+
+.comment-popover-closed-notice {
+  flex: none;
+  padding: 12px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.comment-popover-closed-notice[hidden] {
+  display: none;
+}
+
+/* Req 24 US-23.8 AC4: the transient notice shown ABOVE a still-visible reply
+ * box when a Close lands while a draft is open — same "anchor trouble" warn
+ * tone as .comment-popover-drift above (Req 23 US-23.3), since it is
+ * likewise passive and informational, not an error. */
+.comment-popover-closed-while-draft {
+  flex: none;
+  padding: 7px 12px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #a4680b) 14%, transparent);
+  color: var(--vscode-editorWarning-foreground, #a4680b);
+}
+
+.comment-popover-closed-while-draft[hidden] {
+  display: none;
+}
+
+/* --- Req 23 US-23.2: delete confirmation — nested inside .comment-popover so
+ * its own outside-mousedown dismissal never reads as "outside the popover"
+ * (see comment-popover.ts). Positioned independently via position: fixed. */
+.comment-delete-confirm {
+  position: fixed;
+  z-index: 499;
+  width: 240px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.4);
+  font-size: 12.5px;
+}
+
+.comment-delete-confirm[hidden] {
+  display: none;
+}
+
+.comment-delete-confirm-message {
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.comment-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.comment-delete-confirm-cancel,
+.comment-delete-confirm-delete {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 12px;
+}
+
+.comment-delete-confirm-cancel {
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-delete-confirm-cancel:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-delete-confirm-delete {
+  border: none;
+  font-weight: 600;
+  background: var(--vscode-errorForeground, #f14c4c);
+  color: #ffffff;
+}
+
+/* --- Req 23 US-23.3: two-step resolve --------------------------------------
+ * Drift strip: the "anchor trouble" tone from the design tokens, routed through
+ * VS Code's own warning color so it retunes per theme instead of shipping the
+ * light value to both. Passive by construction — no button, no dismiss. */
+.comment-popover-drift {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #a4680b) 14%, transparent);
+  color: var(--vscode-editorWarning-foreground, #a4680b);
+}
+
+.comment-popover-drift[hidden] {
+  display: none;
+}
+
+.comment-popover-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+}
+
+.comment-popover-action-note {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* US-23.11 AC2: the thread's transition trail, above the action bar. Same muted
+   11px typography as the single note it replaces — the design specifies one
+   right-aligned line, and a list of them reads as the same element repeated. */
+.comment-popover-transitions {
+  flex: none;
+  list-style: none;
+  margin: 0;
+  padding: 6px 12px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  /* Bounded: the card is max-height capped and the action bar is rendered AFTER
+     this list, so an unbounded trail on a much-transitioned thread would push
+     Resolve/Close/Reopen past the clipped bottom edge. */
+  max-height: 84px;
+  overflow-y: auto;
+}
+
+/* `display: flex` above outranks the UA's `[hidden] { display: none }`, exactly
+   as the drift strip has to restore it. */
+.comment-popover-transitions[hidden] {
+  display: none;
+}
+
+.comment-popover-transition {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.comment-popover-action {
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 12px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+}
+
+.comment-popover-action.is-primary {
+  border: none;
+  padding: 5px 13px;
+  font-weight: 600;
+  background: var(--vscode-button-background, #005fb8);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.comment-popover-action:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-popover-action.is-primary:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background, #005fb8));
+}
+
+/* AC6: a gated control is rendered disabled WITH its reason in the tooltip,
+ * never omitted — the nudge has to be visible to work as one. */
+.comment-popover-action[aria-disabled='true'],
+.comment-popover-action[aria-disabled='true']:hover {
+  cursor: not-allowed;
+  border-color: transparent;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-disabledForeground, rgba(128, 128, 128, 0.8));
+  font-weight: 600;
+}
+
+/* AC3's anchor-lost dialog. The scrim covers the webview only (it is inside the
+ * webview's own document), and it centres the card rather than anchoring it to a
+ * rect: this is a decision the Author owes about a comment whose place in the
+ * document is exactly what is gone. */
+.comment-anchor-lost-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.comment-anchor-lost-scrim[hidden] {
+  display: none;
+}
+
+.comment-anchor-lost {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  padding: 14px 16px 12px;
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.35));
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+  font-size: 12.5px;
+}
+
+.comment-anchor-lost-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.comment-anchor-lost-title {
+  font-weight: 650;
+  font-size: 13px;
+}
+
+.comment-anchor-lost-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+
+.comment-anchor-lost-close:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  opacity: 1;
+}
+
+.comment-anchor-lost-lede {
+  line-height: 1.5;
+  opacity: 0.85;
+}
+
+.comment-anchor-lost-quote {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.3));
+  font-size: 11.5px;
+  font-style: italic;
+  line-height: 1.5;
+  opacity: 0.75;
+}
+
+.comment-anchor-lost-body {
+  margin-top: 8px;
+  line-height: 1.55;
+}
+
+/* Both answers at identical weight: same fill, same size, stacked rather than
+ * side-by-side so neither reads as the default. No autofocus, no Enter default. */
+.comment-anchor-lost-answers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+
+.comment-anchor-lost-answer {
+  width: 100%;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 12px;
+  background: none;
+  color: inherit;
+  border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.4)));
+}
+
+.comment-anchor-lost-answer:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+.comment-anchor-lost-consequence {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0.7;
+}
+
+.comment-anchor-lost-later {
+  display: block;
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  opacity: 0.7;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.comment-anchor-lost-later:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+  opacity: 1;
+}
+
+/* --- Req 23 US-23.2: "Show Comments" toolbar toggle -------------------------
+ * Same latching-button convention as #toc-toggle (toolbar.ts): a plain `.active`
+ * class toggle read from `aria-pressed`. Its lost-anchor count badge is defined
+ * with the other toolbar chrome further up this file. */
+#comment-highlight-toggle.active {
+  background: color-mix(in srgb, rgba(130, 110, 220, 1) 14%, transparent);
+  color: rgb(130, 110, 220);
+}
+
+/* US-19.11: floating comment chrome follows the reading palette like every
+ * other popup, rather than staying on the VS Code theme tokens. */
+body[class*='reading-mode-'] .comment-popover,
+body[class*='reading-mode-'] .comment-delete-confirm,
+body[class*='reading-mode-'] .comment-anchor-lost,
+body[class*='reading-mode-'] .comment-gutter-cluster-list {
+  background: var(--rp-widget-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
+}
+
+body[class*='reading-mode-'] .comment-popover-reply-input {
+  background: var(--rp-elev-bg, var(--rp-bg));
+  color: var(--rp-fg);
+  border-color: var(--rp-border);
 }

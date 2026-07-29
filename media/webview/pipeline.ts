@@ -18,9 +18,13 @@
  *  - dom-postprocess.ts     — postProcessMathDom, postProcessMermaidDom, extractTex.
  *  - dom-serialize-prep.ts  — prepareDomForSerialize & bộ chuẩn hóa DOM, fillSequenceColumn.
  *  - turndown.ts            — createTurndown + rule, normalizeMarkdown.
+ *  - serialize-blocks.ts    — serialize theo từng block + full pass (Performance Audit P-7).
  *  - dom-portable.ts        — hasAncestor/getAncestor dùng chung.
+ *  - front-matter.ts        — parseFrontMatterFields/buildFrontMatterHtml (US-2.7).
  */
 export * from './render';
 export * from './dom-postprocess';
 export * from './dom-serialize-prep';
 export * from './turndown';
+export * from './serialize-blocks';
+export * from './front-matter';

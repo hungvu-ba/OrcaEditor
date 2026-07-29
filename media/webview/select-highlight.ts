@@ -20,12 +20,12 @@
 
 import { MIN_SELECT_LENGTH, SELECT_OVERVIEW_THROTTLE_MS } from './constants';
 import {
+  attachViewportBandScroll,
   buildOverviewTicks,
-  collectHaystack,
+  createHaystackCache,
   createViewportBand,
   findMatches,
   updateViewportBand,
-  type Haystack,
 } from './match-utils';
 
 export interface SelectHighlightController {
@@ -78,20 +78,10 @@ export function initSelectHighlight(
   }
 
   // Cache haystack giữa các lần 'selectionchange' liên tiếp (nội dung tài liệu
-  // không đổi khi chỉ selection đổi). Chỉ invalidate khi content thay đổi,
-  // qua refresh() bên dưới.
-  let haystackCache: Haystack | undefined;
-
-  function invalidateHaystack(): void {
-    haystackCache = undefined;
-  }
-
-  function collect(): Haystack {
-    if (!haystackCache) {
-      haystackCache = collectHaystack(content);
-    }
-    return haystackCache;
-  }
+  // không đổi khi chỉ selection đổi). Invalidate khi content đổi — qua refresh()
+  // bên dưới (renderDocument()) hoặc qua MutationObserver bên dưới (mọi chỉnh
+  // sửa local khác không đi qua renderDocument()).
+  const { collect, invalidate: invalidateHaystack } = createHaystackCache(content);
 
   function clear(): void {
     if (supportsHighlight) {
@@ -219,6 +209,19 @@ export function initSelectHighlight(
     });
   });
 
+  // Một chỉnh sửa local (gõ phím, paste, sửa bảng/list...) đổi text trong
+  // #content mà KHÔNG qua renderDocument() (chỉ 'update' host mới gọi refresh()
+  // bên dưới) — haystackCache cũ (node/offset) sẽ lệch khỏi DOM sống, khiến lần
+  // tô tiếp theo tính đúng match nhưng dựng Range sai chỗ (vd. chọn "US-23.22"
+  // lại tô nhầm "21"/"Nên" ở dòng khác). Theo dõi mọi mutation trong #content
+  // để invalidate cache bất kể qua đường nào — không thể dò từng call site sửa
+  // DOM rải khắp main.ts/table.ts/list-ops.ts/drag-drop.ts...
+  new MutationObserver(invalidateHaystack).observe(content, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+  });
+
   // Esc luôn xoá highlight + strip (rẻ, không cần điều kiện gì thêm).
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -228,20 +231,7 @@ export function initSelectHighlight(
 
   // Cập nhật vị trí viewport band theo scroll, coalesce về 1 lần/khung hình — độc lập với throttle
   // rebuild tick (SELECT_OVERVIEW_THROTTLE_MS) vì chỉ tính lại top/height %, không đụng DOM tick.
-  let viewportRafId: number | undefined;
-  window.addEventListener(
-    'scroll',
-    () => {
-      if (viewportBand.hidden || viewportRafId !== undefined) {
-        return;
-      }
-      viewportRafId = requestAnimationFrame(() => {
-        viewportRafId = undefined;
-        updateViewportBand(viewportBand);
-      });
-    },
-    { passive: true }
-  );
+  attachViewportBandScroll(viewportBand);
 
   return {
     refresh(): void {

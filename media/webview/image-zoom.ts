@@ -78,10 +78,22 @@ export function initImageZoom(content: HTMLElement, toolbarEl: HTMLElement): voi
     // Read before the display write below so both rect reads land before any
     // style write forces a layout — avoids an extra forced reflow.
     const toolbarBottom = toolbarEl.getBoundingClientRect().bottom;
+    // The Ctrl/Cmd+F box is pinned to the same top-right band right under the
+    // toolbar and paints above this button (z-index 500 vs 250), so an image
+    // scrolled under the toolbar has to clear the box as well — otherwise the
+    // zoom click lands on the find box's own next/close buttons. Only when the
+    // two actually overlap horizontally, so a left-hand image keeps its button.
+    const searchBox = document.getElementById('search-box');
+    const searchRect = searchBox && !searchBox.hidden ? searchBox.getBoundingClientRect() : undefined;
     currentImg = img;
     btn.style.display = 'flex';
-    btn.style.top = `${Math.max(rect.top + 6, toolbarBottom + TOOLBAR_GAP_PX)}px`;
-    btn.style.left = `${rect.right - btn.offsetWidth - 6}px`;
+    const left = rect.right - btn.offsetWidth - 6;
+    const searchFloor =
+      searchRect && left < searchRect.right && rect.right > searchRect.left
+        ? searchRect.bottom + TOOLBAR_GAP_PX
+        : 0;
+    btn.style.top = `${Math.max(rect.top + 6, toolbarBottom + TOOLBAR_GAP_PX, searchFloor)}px`;
+    btn.style.left = `${left}px`;
   }
 
   function hideBtn(): void {

@@ -30,6 +30,19 @@ function selectAcross(el: HTMLElement, [startText, endText]: string[]): void {
   s.addRange(r);
 }
 
+/** Collapse the caret inside the top-level block whose text includes `text` --
+ *  unlike selectAcross's multi-block span, this confines the selection to exactly
+ *  ONE block, so resolveTopLevelBlocks() sees a single-element run. */
+function collapseCaretIn(el: HTMLElement, text: string): void {
+  const block = [...el.children].find((b) => (b.textContent ?? '').includes(text)) as HTMLElement;
+  const r = document.createRange();
+  r.selectNodeContents(block);
+  r.collapse(true);
+  const s = window.getSelection()!;
+  s.removeAllRanges();
+  s.addRange(r);
+}
+
 async function lastEdit(page: import('@playwright/test').Page): Promise<string> {
   const handle = await page.waitForFunction(
     () => (window as unknown as { __posted: Array<{ type: string; text: string }> }).__posted
@@ -161,4 +174,108 @@ test('Task List with the caret inside a table cell is a safe no-op (no list, tab
   }), before);
   expect(facts.hasList).toBe(false);
   expect(facts.tableUnchanged).toBe(true);
+});
+
+test('Task list on a paragraph immediately followed by a sibling blockquote does not merge into the blockquote', async ({
+  page,
+}) => {
+  await openEditor(page, 'Heading\n\n> Quote text\n');
+  const content = page.locator('#content');
+  await clearPosted(page);
+  await content.evaluate(collapseCaretIn, 'Heading');
+  await page.locator('#fmt-task').click();
+
+  const facts = await content.evaluate((el) => ({
+    blockquoteNestedInList: !!el.querySelector('ul blockquote, ol blockquote'),
+    listNestedInBlockquote: !!el.querySelector('blockquote ul, blockquote ol'),
+    topLevelBlockquote: !!el.querySelector(':scope > blockquote'),
+    taskItem: (el.querySelector('ul > li')?.textContent ?? '').trim(),
+  }));
+  // The core bug: resolveTopLevelBlocks used to ignore the sibling blockquote,
+  // routing through execCommand('insertHTML'), which merged the new <ul> into it.
+  expect(facts.blockquoteNestedInList).toBe(false);
+  expect(facts.listNestedInBlockquote).toBe(false);
+  expect(facts.topLevelBlockquote).toBe(true);
+  expect(facts.taskItem).toBe('Heading');
+
+  const md = await lastEdit(page);
+  expect(md).toContain('> Quote text');
+  const firstLine = md.trim().split('\n')[0];
+  expect(firstLine.startsWith('>')).toBe(false);
+});
+
+test('Bullet on a paragraph immediately preceded by a sibling blockquote does not merge into the blockquote', async ({
+  page,
+}) => {
+  await openEditor(page, '> Quote text\n\nHeading\n');
+  const content = page.locator('#content');
+  await clearPosted(page);
+  await content.evaluate(collapseCaretIn, 'Heading');
+  await page.locator('#fmt-bullet').click();
+
+  const facts = await content.evaluate((el) => ({
+    blockquoteNestedInList: !!el.querySelector('ul blockquote, ol blockquote'),
+    listNestedInBlockquote: !!el.querySelector('blockquote ul, blockquote ol'),
+    topLevelBlockquote: !!el.querySelector(':scope > blockquote'),
+    bulletItem: (el.querySelector('ul > li')?.textContent ?? '').trim(),
+  }));
+  expect(facts.blockquoteNestedInList).toBe(false);
+  expect(facts.listNestedInBlockquote).toBe(false);
+  expect(facts.topLevelBlockquote).toBe(true);
+  expect(facts.bulletItem).toBe('Heading');
+});
+
+test('Bullet on a paragraph with no adjacent atom keeps its existing DOM outcome unchanged (regression guard)', async ({
+  page,
+}) => {
+  await openEditor(page, 'Alpha\n\nBravo\n');
+  const content = page.locator('#content');
+  await clearPosted(page);
+  await content.evaluate(collapseCaretIn, 'Bravo');
+  await page.locator('#fmt-bullet').click();
+
+  const facts = await content.evaluate((el) => ({
+    items: [...el.querySelectorAll('ul > li')].map((li) => (li.textContent ?? '').trim()),
+    firstParagraphUnchanged: (el.querySelector(':scope > p')?.textContent ?? '').trim(),
+  }));
+  expect(facts.items).toEqual(['Bravo']);
+  expect(facts.firstParagraphUnchanged).toBe('Alpha');
+});
+
+test('Numbered list on a paragraph immediately followed by a sibling blockquote does not merge into the blockquote', async ({
+  page,
+}) => {
+  await openEditor(page, 'Heading\n\n> Quote text\n');
+  const content = page.locator('#content');
+  await clearPosted(page);
+  await content.evaluate(collapseCaretIn, 'Heading');
+  await page.locator('#fmt-numbered').click();
+
+  const facts = await content.evaluate((el) => ({
+    blockquoteNestedInList: !!el.querySelector('ol blockquote'),
+    listNestedInBlockquote: !!el.querySelector('blockquote ol'),
+    topLevelBlockquote: !!el.querySelector(':scope > blockquote'),
+    item: (el.querySelector('ol > li')?.textContent ?? '').trim(),
+  }));
+  expect(facts.blockquoteNestedInList).toBe(false);
+  expect(facts.listNestedInBlockquote).toBe(false);
+  expect(facts.topLevelBlockquote).toBe(true);
+  expect(facts.item).toBe('Heading');
+});
+
+test('Bullet on a paragraph immediately adjacent to a heading is unaffected (headings are convertible, not atoms)', async ({
+  page,
+}) => {
+  await openEditor(page, '### Section\n\nHeading\n');
+  const content = page.locator('#content');
+  await clearPosted(page);
+  await content.evaluate(collapseCaretIn, 'Heading');
+  await page.locator('#fmt-bullet').click();
+
+  const facts = await content.evaluate((el) => ({
+    headingUnchanged: (el.querySelector(':scope > h3')?.textContent ?? '').trim(),
+    item: (el.querySelector('ul > li')?.textContent ?? '').trim(),
+  }));
+  expect(facts.headingUnchanged).toBe('Section');
+  expect(facts.item).toBe('Heading');
 });

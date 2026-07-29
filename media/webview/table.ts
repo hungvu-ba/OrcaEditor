@@ -5,7 +5,13 @@
  */
 import { fillSequenceColumn } from './pipeline';
 import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
-import { TABLE_TOOLBAR_HIDE_MS } from './constants';
+import {
+  TABLE_TOOLBAR_HIDE_MS,
+  MD_TABLE_FIT_CLASS as FIT_CLASS,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+} from './constants';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
@@ -253,10 +259,10 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
 const MEASURE_CLASS = 'md-table-col-fit-measuring';
 /** US-19.25: class tạm ép cột về min-content (từ dài nhất) để đo sàn vật lý. */
 const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
-/** US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap). */
-const FIT_CLASS = 'md-table-fit';
+// US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap) — imported above as FIT_CLASS (US-23.21).
 
-// US-19.25 — hằng số thuật toán fit-mode (chốt PO 2026-07-24).
+// US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ
+// còn áp khi Σmax-content > budget (thiếu chỗ thật) — còn chỗ ngang thì không cắt.
 const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
 const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
 const FIT_COMFORT_FLOOR_CH = 30; // sàn dễ đọc: (a) không cắt cột lệch xuống dưới ngần này; (b) co cột cũng không xuống dưới ngần này (dưới nữa thì scroll)
@@ -311,6 +317,14 @@ function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number)
  * của ô (đậm ở th...). Dùng làm SÀN cột để không cột nào hẹp hơn 1 từ → không cắt
  * giữa từ và không ngắt ngày tháng ở '-'. CSS `width:1px` (Pass 2) ngắt cả ở '-'
  * nên cho sàn quá thấp; hàm này bù lại. Trả 0 khi ô không có chữ (vd ô ảnh).
+ *
+ * A Range covers GLYPHS only — it excludes the padding/border of an inline box
+ * wrapping the word. A token sitting alone inside an inline `<code>` chip (~5px
+ * horizontal padding) therefore yields a floor short by exactly that padding: the
+ * column is pinned a few px under what the token needs, the browser breaks it at a
+ * '-' anyway, and the cell wraps inside a column already wide enough for the whole
+ * token — leaving dead space. So for an inline box whose ENTIRE content is one
+ * word, take its border box as a floor candidate too.
  */
 function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
   let widest = 0;
@@ -328,14 +342,58 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
       }
     }
   }
+  // Inline boxes only: a block child (e.g. a <p>) stretches to the cell's full
+  // width, so its border box is the column width, not a word width — feeding that
+  // in would inflate the floor.
+  for (const el of Array.from(cell.querySelectorAll('*'))) {
+    const content = (el.textContent ?? '').trim();
+    if (content === '' || /\s/.test(content)) {
+      continue; // empty, or several words → the chip can wrap at its own whitespace
+    }
+    if (!getComputedStyle(el).display.startsWith('inline')) {
+      continue;
+    }
+    // Replaced content makes the box far wider than its one word (e.g. an <a>
+    // wrapping an <img> next to a short label) — the same inflation as a block
+    // child. Same selector list as isEmptyCell's embedded-content probe.
+    if (el.querySelector('img,svg,video,input')) {
+      continue;
+    }
+    // getBoundingClientRect UNIONS every line fragment of an inline box, so one
+    // split by a <br> (which breaks even under nowrap) reports the cell's whole
+    // one-line width — that floor leaves the column zero shrink slack and pushes
+    // the table into the scroll branch. Only an unbroken single fragment is a word.
+    const rects = el.getClientRects();
+    if (rects.length !== 1) {
+      continue;
+    }
+    if (rects[0].width > widest) {
+      widest = rects[0].width;
+    }
+  }
   return widest;
+}
+
+/**
+ * US-19.26: ô "rỗng" = không chữ và không nội dung nhúng (ảnh/SVG/video/checkbox).
+ * Ô mới do `emptyCell()` tạo chỉ chứa `<br>` placeholder nên vẫn tính là rỗng. Xét
+ * theo NỘI DUNG, không so bề rộng với padding (sai số sub-pixel, `&nbsp;`).
+ */
+function isEmptyCell(cell: HTMLTableCellElement): boolean {
+  return (cell.textContent ?? '').trim() === '' && !cell.querySelector('img,svg,video,input');
 }
 
 /**
  * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
  * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
- * `false` để caller rơi về hành vi mặc định (scroll) — khi hết đường co
- * (`Σ min-content > W`) hoặc không đo được khung.
+ * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
+ * max-width) — khi còn đủ chỗ ngang (`Σ max-content ≤ W`, US-19.26), hết đường co
+ * (`Σ min-content > W`), hay không đo được khung.
+ *
+ * US-19.26: chỉ ghim width/max-width khi THIẾU chỗ. Còn chỗ ngang → bail SỚM (không
+ * cắt gì), để cột tự giãn theo layout auto — kể cả khi gõ thêm chữ, không cần đợi
+ * debounced re-fit mới nới ra. Thiếu chỗ mới vào thang cắt: ①b (cắt xong dư thì trả
+ * lại phần dư) → ② (co tỉ lệ) → ③ (scroll tại sàn).
  */
 function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
   const parent = table.parentElement;
@@ -370,13 +428,19 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   table.classList.add(MEASURE_CLASS);
   const range = document.createRange();
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
+  // US-19.26: cùng số đo nhưng CHỈ ô có nội dung — mẫu để tính p75 (xem dưới).
+  const contentWidths: number[][] = Array.from({ length: colCount }, () => []);
   // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
   // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
   const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
       range.selectNodeContents(row.cells[i]);
-      colWidths[i].push(range.getBoundingClientRect().width + padBorderX);
+      const cellW = range.getBoundingClientRect().width + padBorderX;
+      colWidths[i].push(cellW);
+      if (!isEmptyCell(row.cells[i])) {
+        contentWidths[i].push(cellW);
+      }
       const wf = widestWordWidth(row.cells[i], range) + padBorderX;
       if (wf > wordFloorByCol[i]) {
         wordFloorByCol[i] = wf;
@@ -384,6 +448,20 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     }
   }
   table.classList.remove(MEASURE_CLASS);
+
+  // US-19.26 (revised): max-content mỗi cột đã đủ để biết còn chỗ ngang hay không —
+  // bail NGAY tại đây, TRƯỚC khi đo min-content/tính cap, khi `Σmax ≤ W`. Lý do bail
+  // hẳn (không tự ghim width=natural như bản trước) thay vì áp rồi mới nới: nếu ghim
+  // `width`/`max-width` = bề rộng đo LÚC NÀY, gõ thêm chữ vào ô sẽ bị max-width cũ
+  // chặn wrap ngay, đợi đủ 200ms debounce (`scheduleFitRefit`) mới nới lại ra — co
+  // trước, giãn sau, giật hình. Bail để rơi về `applyDefaultColumnWidths` (chỉ đặt
+  // min-width, không đặt max-width) thì cột tự giãn theo layout auto ngay khi gõ,
+  // không cần đợi refit — vì hoàn toàn không cần bóp gì trong trường hợp này.
+  const natural: number[] = colWidths.map((w) => (w.length ? Math.max(...w) : 0));
+  const sumNatural = natural.reduce((a, b) => a + b, 0);
+  if (sumNatural <= budgetW) {
+    return false;
+  }
 
   // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
   table.classList.add(MIN_MEASURE_CLASS);
@@ -402,11 +480,18 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
   }
 
-  // comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max].
+  // Comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max]. Chỉ chạy
+  // tới đây khi đã biết THIẾU chỗ (sumNatural > budgetW ở trên) nên cắt là cần thiết.
   const comf: number[] = new Array(colCount);
   for (let i = 0; i < colCount; i++) {
-    const maxI = colWidths[i].length ? Math.max(...colWidths[i]) : minByCol[i];
-    const p75I = percentile(colWidths[i], 75);
+    const maxI = natural[i];
+    // US-19.26: p75 chỉ tính trên ô CÓ NỘI DUNG. Ô rỗng chỉ rộng bằng padding, để
+    // chúng vào mẫu thì bảng nhiều dòng trống (bảng "Các bước" đang điền dở) luôn có
+    // p75 ≈ padding → cột nào cũng bị coi là lệch và bị cắt, và cột co lại mỗi lần
+    // thêm một dòng trống. Cột TOÀN rỗng → dùng lại mẫu đầy đủ, vì mẫu trống sẽ cho
+    // p75 = 0 làm `max > K×p75` đúng vô điều kiện — đúng cái đang muốn tránh.
+    const sample = contentWidths[i].length > 0 ? contentWidths[i] : colWidths[i];
+    const p75I = percentile(sample, 75);
     const capI = maxI > FIT_OUTLIER_K * p75I ? Math.min(maxI, Math.max(comfortFloorPx, p75I * FIT_CAP_M)) : maxI;
     comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
   }
@@ -419,11 +504,17 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   const desired = comf.reduce((a, b) => a + b, 0);
   const sumFloor = shrinkFloor.reduce((a, b) => a + b, 0);
   const totalSlack = comf.reduce((a, c, i) => a + (c - shrinkFloor[i]), 0);
+  // US-19.26: tổng phần đã bị cap cắt đi — dùng để trả lại khi khung còn chỗ (①b).
+  const capSlack = natural.reduce((a, n, i) => a + (n - comf[i]), 0);
 
   let widths: number[];
   let scroll = false;
   if (desired <= budgetW) {
-    widths = comf; // ① vừa khung → comfortable (không kéo giãn full-width)
+    // ①b US-19.26: cắt outlier xong lại dư chỗ → trả phần dư về đúng những cột đã bị
+    // cắt, theo tỉ lệ phần bị cắt, trần là max-content → bảng lấp đúng budget, không
+    // chừa khoảng trắng cạnh cột đang wrap. capSlack > 0 vì desired < sumNatural.
+    const spare = budgetW - desired;
+    widths = comf.map((c, i) => c + (natural[i] - c) * (spare / capSlack));
   } else if (sumFloor >= budgetW || totalSlack <= 0) {
     // ③ co tới sàn dễ đọc vẫn không vừa → SCROLL ngang, GIỮ độ rộng = sàn. Đây đúng
     // là độ rộng mà nhánh ② tiến tới ở tới hạn (deficit→totalSlack) nên qua mốc
@@ -1045,7 +1136,7 @@ function setHighlightedRow(row: HTMLTableRowElement | null): void {
   if (row === hoveredRow) {
     return;
   }
-  hoveredRow?.classList.remove('dd-hover-outline');
+  hoveredRow?.classList.remove(DD_HOVER_OUTLINE_CLASS);
   hoveredRow = row;
 }
 
@@ -1059,7 +1150,7 @@ function setColumnHighlight(col: { table: HTMLTableElement; index: number } | nu
   }
   if (hoveredCol) {
     for (const row of Array.from(hoveredCol.table.rows)) {
-      row.cells[hoveredCol.index]?.classList.remove('dd-hover-outline-cell');
+      row.cells[hoveredCol.index]?.classList.remove(DD_HOVER_OUTLINE_CELL_CLASS);
     }
   }
   hoveredCol = col;
@@ -1091,10 +1182,10 @@ function colGapAt(table: HTMLTableElement, clientX: number): number {
 
 function tdCleanupVisuals(): void {
   if (tdKind === 'row' && tdTable) {
-    tdRows[tdRowIdx]?.classList.remove('dd-source-muted');
+    tdRows[tdRowIdx]?.classList.remove(DD_SOURCE_MUTED_CLASS);
   } else if (tdKind === 'col' && tdTable) {
     for (const row of Array.from(tdTable.rows)) {
-      row.cells[tdColIndex]?.classList.remove('dd-source-muted');
+      row.cells[tdColIndex]?.classList.remove(DD_SOURCE_MUTED_CLASS);
     }
   }
   tdGhostEl.style.display = 'none';
@@ -1130,7 +1221,7 @@ function closeRowMenu(): void {
   rowMenuPopupEl.style.display = 'none';
   rowMenuPopupEl.replaceChildren();
   if (rowMenuTargetRow) {
-    rowMenuTargetRow.classList.remove('dd-hover-outline');
+    rowMenuTargetRow.classList.remove(DD_HOVER_OUTLINE_CLASS);
     rowMenuTargetRow = null;
   }
   // Release the scroll freeze taken in openRowMenu (bug General R2 #3) — ref-counted, safe no-op
@@ -1165,7 +1256,7 @@ function openRowMenu(row: HTMLTableRowElement): void {
   lockPageScroll();
 
   rowMenuTargetRow = row;
-  row.classList.add('dd-hover-outline');
+  row.classList.add(DD_HOVER_OUTLINE_CLASS);
 }
 
 function onHeaderRowHandleMouseUp(): void {
@@ -1310,11 +1401,11 @@ function tdStartDragging(): void {
     const row = tdRows[tdRowIdx];
     const rect = row.getBoundingClientRect();
     const clone = row.cloneNode(true) as HTMLElement;
-    clone.classList.remove('dd-hover-outline');
+    clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
     tdGhostEl.replaceChildren(clone);
     tdGhostEl.style.width = `${rect.width}px`;
     tdGhostEl.style.height = `${rect.height}px`;
-    row.classList.add('dd-source-muted');
+    row.classList.add(DD_SOURCE_MUTED_CLASS);
   } else if (tdKind === 'col' && tdTable) {
     const headerRow = tdTable.tHead?.rows[0];
     const cell = headerRow?.cells[tdColIndex];
@@ -1333,7 +1424,7 @@ function tdStartDragging(): void {
           continue;
         }
         const cellClone = srcCell.cloneNode(true) as HTMLElement;
-        cellClone.classList.remove('dd-hover-outline', 'dd-hover-outline-cell', 'dd-source-muted');
+        cellClone.classList.remove(DD_HOVER_OUTLINE_CLASS, DD_HOVER_OUTLINE_CELL_CLASS, DD_SOURCE_MUTED_CLASS);
         cellClone.style.width = '100%';
         cellClone.style.height = `${row.getBoundingClientRect().height}px`;
         const rowWrap = document.createElement('tr');
@@ -1344,11 +1435,49 @@ function tdStartDragging(): void {
       tdGhostEl.style.height = `${tableRect.height}px`;
     }
     for (const row of Array.from(tdTable.rows)) {
-      row.cells[tdColIndex]?.classList.add('dd-source-muted');
+      row.cells[tdColIndex]?.classList.add(DD_SOURCE_MUTED_CLASS);
     }
   }
   tdGhostEl.style.display = 'block';
   document.body.classList.add('dd-dragging');
+}
+
+// Performance Audit P-4: rAF-coalesce the drop-line half of the live table drag.
+// `tdUpdateRowDropLine`/`tdUpdateColDropLine` read a rect per row / per header cell and then
+// write the drop-line styles, so an uncoalesced handler forces a reflow per mousemove — the
+// same approved pattern the idle hover handler below already uses. The ghost's left/top write
+// stays per-event: it forces no read, and keeping it uncoalesced keeps the ghost crisp.
+let tdDragRaf = 0;
+let tdDragX = 0;
+let tdDragY = 0;
+
+function tdCancelDragFrame(): void {
+  if (tdDragRaf !== 0) {
+    cancelAnimationFrame(tdDragRaf);
+    tdDragRaf = 0;
+  }
+}
+
+/** The coalesced per-frame drop-line update — it also resolves `tdCurrentGap`/`tdCurrentGapValid`. */
+function tdRunDragFrame(): void {
+  if (tdState !== 'dragging') {
+    return;
+  }
+  if (tdKind === 'row') {
+    tdUpdateRowDropLine(tdDragY);
+  } else {
+    tdUpdateColDropLine(tdDragX);
+  }
+}
+
+/** Runs a still-pending frame now. Called from mouseup so a release inside the same frame as
+ * the last mousemove drops at the cursor's real gap, not the previous frame's. */
+function tdFlushDragFrame(): void {
+  if (tdDragRaf === 0) {
+    return;
+  }
+  tdCancelDragFrame();
+  tdRunDragFrame();
 }
 
 function onTdMouseMove(e: MouseEvent): void {
@@ -1362,14 +1491,20 @@ function onTdMouseMove(e: MouseEvent): void {
     return;
   }
   tdUpdateGhostPosition(e.clientX, e.clientY);
-  if (tdKind === 'row') {
-    tdUpdateRowDropLine(e.clientY);
-  } else {
-    tdUpdateColDropLine(e.clientX);
+  tdDragX = e.clientX;
+  tdDragY = e.clientY;
+  if (tdDragRaf !== 0) {
+    return;
   }
+  tdDragRaf = requestAnimationFrame(() => {
+    tdDragRaf = 0;
+    // Re-check inside the frame: the drag can end (mouseup/Esc) between the event and here.
+    tdRunDragFrame();
+  });
 }
 
 function onTdMouseUp(): void {
+  tdFlushDragFrame();
   if (tdState === 'dragging') {
     const shouldMove = tdCurrentGapValid;
     const kind = tdKind;
@@ -1416,6 +1551,7 @@ function attachDragListeners(): void {
 }
 
 function detachDragListeners(): void {
+  tdCancelDragFrame();
   document.removeEventListener('mousemove', onTdMouseMove);
   document.removeEventListener('mouseup', onTdMouseUp);
   tdEscDisposable?.dispose();
@@ -1434,7 +1570,7 @@ function armRowDrag(row: HTMLTableRowElement, clientX: number, clientY: number):
   tdTable = table;
   tdRows = tbodyRows(table);
   tdRowIdx = tdRows.indexOf(row);
-  row.classList.add('dd-hover-outline');
+  row.classList.add(DD_HOVER_OUTLINE_CLASS);
   attachDragListeners();
 }
 
@@ -1446,7 +1582,7 @@ function armColDrag(table: HTMLTableElement, index: number, clientX: number, cli
   tdTable = table;
   tdColIndex = index;
   for (const row of Array.from(table.rows)) {
-    row.cells[index]?.classList.add('dd-hover-outline-cell');
+    row.cells[index]?.classList.add(DD_HOVER_OUTLINE_CELL_CLASS);
   }
   attachDragListeners();
 }

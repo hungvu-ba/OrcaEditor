@@ -3,9 +3,30 @@
  * caret/selection, escape chuỗi, icon SVG, toast nhỏ.
  */
 import { TOAST_DURATION_MS } from './constants';
+import { neutralizeCommentBody, normalizeCommentBodyEol } from '../../src/comments/comment-body-limit';
 
 export function closestElement(node: Node): HTMLElement | null {
   return node instanceof HTMLElement ? node : node.parentElement;
+}
+
+/** Input types carrying an undo history of their own — a task-list checkbox has none and must keep delegating. */
+const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
+
+/**
+ * Does `target` own a native text-undo history the browser (or `execCommand`)
+ * can roll back on its own?
+ *
+ * Shared by `main.ts`'s `ownsNativeUndo` (which declines to delegate a chord
+ * pressed in such a field) and `comment-undo-guard.ts` (which reissues the undo
+ * it just cancelled). Both need the same answer to the same question, so it is
+ * declared once — two copies of the type set would drift, and a drift here means
+ * one of the two guards silently stops covering a field the other still does.
+ */
+export function ownsNativeTextHistory(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) {
+    return true;
+  }
+  return target instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(target.type);
 }
 
 export function escapeHtml(s: string): string {
@@ -14,6 +35,30 @@ export function escapeHtml(s: string): string {
 
 export function escapeAttr(s: string): string {
   return escapeHtml(s).replace(/"/g, '&quot;');
+}
+
+/**
+ * Req 23 US-23.10 AC9: strip bidi-override/isolate characters and other control
+ * characters from a comment body before it is inserted into the DOM or written
+ * to the sidecar.
+ *
+ * Delegates to the host+webview-shared implementation rather than carrying its
+ * own copy: the native `vscode.comments` write path (US-23.14) never passes
+ * through the webview and needs the identical strip, and two copies of a
+ * security-relevant filter would be free to drift.
+ */
+export function neutralizeBodyText(text: string): string {
+  return neutralizeCommentBody(text);
+}
+
+/**
+ * Req 23 US-23.10 AC9: a submitted comment body's line endings, reconciled to
+ * LF before it reaches the sidecar — never `document.eol` (the JSONL sidecar
+ * is a separate append-only file, not the `.md`, so this repo's usual
+ * "reconcile to document.eol" rule does not apply here).
+ */
+export function normalizeBodyEol(text: string): string {
+  return normalizeCommentBodyEol(text);
 }
 
 /**
@@ -125,6 +170,37 @@ export function findTaskCheckbox(li: Element): HTMLInputElement | null {
   );
 }
 
+/**
+ * Where a task checkbox belongs inside `li`. Tight item (<li>Bravo</li>) → the
+ * `<li>` itself; LOOSE item (<li><p>Bravo</p></li>, how markdown-it renders a
+ * blank-line-separated list) → its child `<p>`. A checkbox placed before the
+ * `<p>` instead makes turndown emit an empty "- [ ]" line plus a detached
+ * indented paragraph (bug 2026-07-28: converting a loose bullet item to a task
+ * item lost its text off the item), and those two are the only shapes
+ * `findTaskCheckbox` and turndown's `taskCheckbox` rule accept.
+ *
+ * The `<p>` only qualifies when nothing but whitespace precedes it: markdown-it
+ * emits "<li>\n<p>…" (a whitespace text node is normal and must not disqualify
+ * it), but a `<li>` with REAL leading inline content (<li>ZZ<p>vo</p></li>,
+ * reachable mid-edit) would put the checkbox on the item's SECOND block — the
+ * same detached-paragraph corruption, one block further down.
+ *
+ * Shared with list-ops.ts's `computeTaskifyListRange` (the <ol>→task path) so
+ * both placements stay identical; pure and domino-safe for roundtrip tests.
+ */
+export function taskCheckboxHost(li: Element): Element {
+  const firstEl = li.firstElementChild;
+  if (!firstEl || firstEl.tagName !== 'P') {
+    return li;
+  }
+  for (let node = li.firstChild; node && node !== firstEl; node = node.nextSibling) {
+    if (node.nodeType !== 3 || (node.textContent ?? '').trim() !== '') {
+      return li;
+    }
+  }
+  return firstEl;
+}
+
 export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
   if (findTaskCheckbox(li)) {
     // Already a task item (tight or loose shape) — no-op (idempotency guard against duplicate/stacked checkboxes).
@@ -133,7 +209,8 @@ export function addCheckbox(li: HTMLLIElement | HTMLElement): void {
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.className = 'task-list-item-checkbox';
-  li.insertBefore(input, li.firstChild);
+  const host = taskCheckboxHost(li);
+  host.insertBefore(input, host.firstChild);
   li.classList.add('task-list-item');
   li.parentElement?.classList.add('contains-task-list');
 }
@@ -175,9 +252,9 @@ const DRAG_IGNORE_SELECTOR = 'input, textarea, select, button, a, [contenteditab
  * `target` chuyển từ vị trí do layout quyết định (vd flexbox căn giữa) sang
  * `position: fixed` với toạ độ tự do ngay ở lần kéo đầu tiên, giữ nguyên vị
  * trí hiện tại lúc đó (không giật chỗ). Vị trí luôn bị clamp trong viewport,
- * tính lại kích thước `target` ở MỖI lần di chuyển (không chỉ lúc bắt đầu) vì
- * nội dung bên trong có thể đổi cao/rộng giữa chừng (vd danh sách gợi ý file
- * hiện/ẩn). Hàm thuần, không phụ thuộc gì riêng của `.prompt-box` — dùng
+ * tính lại kích thước `target` ở MỖI frame trong lúc kéo (không chỉ lúc bắt
+ * đầu) vì nội dung bên trong có thể đổi cao/rộng giữa chừng (vd danh sách gợi
+ * ý file hiện/ẩn). Hàm thuần, không phụ thuộc gì riêng của `.prompt-box` — dùng
  * chung được cho mọi popup/popover kéo-thả khác (US-17.1).
  *
  * Không cần cờ chặn riêng cho "click ra ngoài đóng popup" trong lúc kéo: thao
@@ -206,14 +283,51 @@ export function makeDraggable(target: HTMLElement): void {
     const startTop = rect.top;
     target.classList.add('dragging');
 
-    const onMove = (ev: MouseEvent): void => {
+    // Performance Audit P-5: the rect read below used to run on every raw mousemove,
+    // right after the previous move had written left/top — a forced reflow per event.
+    // The read is NOT cached away: the size recompute is load-bearing (see the doc
+    // comment above — the popup's content can grow/shrink mid-drag). Instead the whole
+    // move body is rAF-coalesced, so the read lands once per frame after the browser
+    // has laid out anyway (the doc comment above says "MỖI frame" for this reason).
+    // Same approved pattern as drag-drop.ts's hover path.
+    let moveRaf = 0;
+    let moveX = 0;
+    let moveY = 0;
+    const applyMove = (): void => {
+      // A popup can be dismissed (Escape, a host re-render) while the button is still held.
+      // A detached or hidden target measures 0×0, which would collapse the clamp bounds to
+      // the full viewport and park the popup off-screen for its next open — so don't write.
+      if (!target.isConnected) {
+        return;
+      }
       const size = target.getBoundingClientRect();
+      if (size.width === 0 && size.height === 0) {
+        return;
+      }
       const maxLeft = Math.max(0, window.innerWidth - size.width);
       const maxTop = Math.max(0, window.innerHeight - size.height);
-      target.style.left = `${Math.min(Math.max(0, startLeft + (ev.clientX - startX)), maxLeft)}px`;
-      target.style.top = `${Math.min(Math.max(0, startTop + (ev.clientY - startY)), maxTop)}px`;
+      target.style.left = `${Math.min(Math.max(0, startLeft + (moveX - startX)), maxLeft)}px`;
+      target.style.top = `${Math.min(Math.max(0, startTop + (moveY - startY)), maxTop)}px`;
+    };
+    const onMove = (ev: MouseEvent): void => {
+      moveX = ev.clientX;
+      moveY = ev.clientY;
+      if (moveRaf !== 0) {
+        return;
+      }
+      moveRaf = requestAnimationFrame(() => {
+        moveRaf = 0;
+        applyMove();
+      });
     };
     const onUp = (): void => {
+      // Land the last move even if its frame has not fired yet, so the popup ends where
+      // the pointer was released rather than one frame behind it.
+      if (moveRaf !== 0) {
+        cancelAnimationFrame(moveRaf);
+        moveRaf = 0;
+        applyMove();
+      }
       target.classList.remove('dragging');
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
@@ -280,6 +394,59 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
     return null;
   }
   return probe.toString().length;
+}
+
+/**
+ * Inverse of `getOffsetWithin`: maps a `[start, end)` character range measured
+ * in `root`'s `Range.toString()` space back to a live DOM Range.
+ *
+ * Deliberately walks EVERY Text descendant in document order with no filtering
+ * and no separator insertion, because that is exactly what `Range.toString()`
+ * counts. `match-utils.ts`'s `collectHaystack`/`rangeAt` look interchangeable
+ * but are NOT: that pair inserts '\n' between block elements and rejects
+ * `.katex`/script/style text, so feeding it a `getOffsetWithin` offset washes
+ * the wrong characters — early by one per block boundary crossed, late by the
+ * length of KaTeX's hidden MathML/annotation text. Use that pair for search
+ * (which needs block boundaries) and this one for a stored character anchor.
+ *
+ * Offsets are clamped rather than throwing; returns null when no range can be
+ * built (no text nodes, or a collapsed result).
+ */
+export function rangeWithinOffsets(root: Element, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let consumed = 0;
+  let startNode: Text | undefined;
+  let startOffset = 0;
+  let endNode: Text | undefined;
+  let endOffset = 0;
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    const node = n as Text;
+    const len = node.data.length;
+    if (startNode === undefined && start <= consumed + len) {
+      startNode = node;
+      startOffset = Math.max(0, start - consumed);
+    }
+    if (end <= consumed + len) {
+      endNode = node;
+      endOffset = Math.max(0, end - consumed);
+      break;
+    }
+    consumed += len;
+    endNode = node;
+    endOffset = len;
+  }
+  if (!startNode || !endNode) {
+    return null;
+  }
+  const range = document.createRange();
+  try {
+    range.setStart(startNode, Math.min(startOffset, startNode.data.length));
+    range.setEnd(endNode, Math.min(endOffset, endNode.data.length));
+  } catch {
+    return null;
+  }
+  return range.collapsed ? null : range;
 }
 
 /**

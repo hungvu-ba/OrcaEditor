@@ -6,6 +6,10 @@
  * cell is capped so the outlier wraps; falls back to horizontal scroll only when
  * even min-content overflows. Needs real layout (Range/getBoundingClientRect,
  * ResizeObserver, table-layout:fixed wrapping), so it lives here, not roundtrip.
+ *
+ * US-19.26 narrows when the cap fires: only when Σmax-content exceeds the panel
+ * (branch ①a keeps max-content while there is room, ①b hands the spare back), and
+ * empty cells no longer count towards p75.
  */
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
@@ -22,6 +26,17 @@ function makeTable(cols: number, rows: number, cell: (r: number, c: number) => s
 
 const SHORT = (r: number, c: number): string => `r${r + 1}c${c + 1}`;
 const WIDE = (r: number, c: number): string => `long cell content value for row ${r + 1} column ${c + 1}`;
+/** Column 1 (index 1) holds one very long cell among short ones → outlier column. */
+const OUTLIER = (r: number, c: number): string =>
+  c === 1 ? (r === 1 ? 'this is a very very very long outlier value that dominates the column width' : 'ok') : SHORT(r, c);
+
+/** Rendered width of cell `col` in the first body row. */
+async function bodyCellWidth(page: Page, col: number): Promise<number> {
+  return page.evaluate((i) => {
+    const t = document.querySelector('#content table') as HTMLTableElement;
+    return Math.round(t.tBodies[0].rows[0].cells[i].getBoundingClientRect().width);
+  }, col);
+}
 
 interface TableInfo {
   fit: boolean;
@@ -76,14 +91,11 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(wrapped).toBe(true);
   });
 
-  test('ON: an outlier column (one very long cell) is capped so that cell wraps', async ({ page }) => {
-    await page.setViewportSize({ width: 900, height: 600 });
-    // Column 2 (index 1): 3 short rows + 1 very long row → outlier. Others short.
-    const outlier = (r: number, c: number): string => {
-      if (c === 1) return r === 1 ? 'this is a very very very long outlier value that dominates the column width' : 'ok';
-      return SHORT(r, c);
-    };
-    await openEditor(page, makeTable(3, 4, outlier), { tableFitMode: true });
+  test('ON: an outlier column is capped so that cell wraps — once the panel runs out of room', async ({ page }) => {
+    // US-19.26: the panel must be too narrow for Σmax-content (~680px here), otherwise
+    // the cap is not allowed to fire at all (branch ①a — see the next test).
+    await page.setViewportSize({ width: 560, height: 600 });
+    await openEditor(page, makeTable(3, 4, OUTLIER), { tableFitMode: true });
     await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
 
     // The outlier cell must have wrapped (height > a short cell's single-line height),
@@ -101,24 +113,111 @@ test.describe('US-19.25 table fit-mode', () => {
     // Short columns must stay near their content width — not inflated by the wide
     // panel or the outlier (the cap redistributed width, it didn't stretch neighbors).
     expect(r.shortColWidth).toBeLessThan(160);
+    // US-19.26 branch ①b: the width the cap freed goes BACK to the capped column, so
+    // the table fills the panel instead of leaving a gap beside the wrapped column.
+    const m = await tableInfo(page);
+    expect(m.rectWidth).toBeGreaterThan(m.contentWidth - 4);
   });
 
-  test('ON, table narrower than panel: not stretched to full width', async ({ page }) => {
+  test('ON: an outlier column is NOT capped while the panel still has room (US-19.26 ①a)', async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 600 });
+    await openEditor(page, makeTable(3, 4, OUTLIER), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+
+    const r = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('#content table tbody tr')) as HTMLTableRowElement[];
+      const range = document.createRange();
+      range.selectNodeContents(rows[1].cells[1]);
+      return { outlierLines: range.getClientRects().length };
+    });
+    // Σmax-content fits the panel → no cap, no wrap: the long cell keeps one line.
+    expect(r.outlierLines).toBe(1);
+    // Still not stretched to full width (US-19.25 invariant kept).
+    const m = await tableInfo(page);
+    expect(m.rectWidth).toBeLessThan(m.contentWidth * 0.9);
+  });
+
+  test('ON: empty rows do not shrink a column (US-19.26 — p75 ignores empty cells)', async ({ page }) => {
+    // Narrow enough that Σmax-content > budget (real capping territory, ①b/②) —
+    // otherwise US-19.26's bail (plenty of room) would trivially pass this test
+    // without ever exercising the p75-ignores-empty-cells fix it's meant to check.
+    await page.setViewportSize({ width: 480, height: 600 });
+    const head = '| # | Step | Description |\n| --- | --- | --- |\n';
+    const filled =
+      '| 1 | pick action | choose the "create leave request" action on the business list screen |\n' +
+      '| 2 | fill it in | enter leave type, reason, and the start and end date of the leave |\n' +
+      '| 3 | submit | the system generates the request code and stores the request |\n';
+    const empties = '|  |  |  |\n'.repeat(20);
+
+    await openEditor(page, head + filled, { tableFitMode: true });
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+    const withoutEmpties = await bodyCellWidth(page, 2);
+
+    await openEditor(page, head + filled + empties, { tableFitMode: true });
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+    const withEmpties = await bodyCellWidth(page, 2);
+
+    // Same content, 20 extra blank rows: the description column must not budge.
+    // (Before US-19.26 the blank cells dragged p75 down to padding width, so the
+    // outlier cap fired and cut this column back to the 30ch floor.)
+    expect(Math.abs(withEmpties - withoutEmpties)).toBeLessThanOrEqual(2);
+  });
+
+  test('ON: no width jump crossing the ①a⇄①b boundary (US-19.26 continuity)', async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 600 });
+    await openEditor(page, makeTable(3, 4, OUTLIER), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+
+    // Branch ①a → the table is exactly Σmax-content wide; derive the viewport width
+    // whose budget lands just BELOW that sum (chrome = viewport − #content width).
+    const m = await tableInfo(page);
+    const naturalW = await bodyCellWidth(page, 1);
+    // Precondition: we really are in ①a (uncapped), so the step below measures the
+    // ①a→①b transition and not two already-capped states.
+    const uncapped = await page.evaluate(() => {
+      const range = document.createRange();
+      range.selectNodeContents((document.querySelectorAll('#content table tbody tr')[1] as HTMLTableRowElement).cells[1]);
+      return range.getClientRects().length === 1;
+    });
+    expect(uncapped).toBe(true);
+    const justBelow = Math.round(m.rectWidth + (1400 - m.contentWidth)) - 20;
+
+    await page.setViewportSize({ width: justBelow, height: 600 });
+    await page.waitForTimeout(300);
+    const cappedW = await bodyCellWidth(page, 1);
+
+    // 20px short of fitting → the outlier column gives up ~20px, NOT a snap down to
+    // the 30ch cap (which was a ~125px jump before US-19.26's ①b).
+    expect(naturalW - cappedW).toBeLessThan(45);
+    expect(cappedW).toBeLessThanOrEqual(naturalW + 2);
+  });
+
+  test('ON, table narrower than panel: not stretched to full width, and no fit-class pinning (US-19.26)', async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 600 });
     await openEditor(page, makeTable(2, 3, SHORT), { tableFitMode: true });
-    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
 
     const m = await tableInfo(page);
-    // Compact: the small table must NOT fill the wide panel (branch ①, no width:100%).
+    // US-19.26: plenty of room → applyFitColumns bails entirely (no cap needed), so
+    // the table falls back to the natural default (no `.md-table-fit`, cells are not
+    // pinned by max-width — typing more text can grow a column immediately instead
+    // of waiting for a debounced re-fit).
+    expect(m.fit).toBe(false);
+    // Compact: the small table must NOT fill the wide panel either way.
     expect(m.rectWidth).toBeLessThan(m.contentWidth * 0.7);
   });
 
   test('ON: reflows when the panel is resized narrower', async ({ page }) => {
-    await page.setViewportSize({ width: 900, height: 600 });
+    // Narrow enough from the start that Σmax-content > budget (US-19.26 bails to the
+    // default, uncapped, when there's room — this test wants to start already capped).
+    await page.setViewportSize({ width: 520, height: 600 });
     await openEditor(page, makeTable(2, 4, WIDE), { tableFitMode: true });
     await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
 
-    await page.setViewportSize({ width: 560, height: 600 });
+    await page.setViewportSize({ width: 420, height: 600 });
     // After the ResizeObserver reflow, the table still fits the new (narrower) panel.
     await expect
       .poll(async () => {
@@ -219,13 +318,93 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(r.descLines).toBeGreaterThan(1); // the wide column absorbed the shrink
   });
 
+  test('ON: a one-token inline `code` chip stays on one line (its padding counts towards the floor)', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 800 });
+    // The per-word floor is measured with a Range over TEXT NODES, which excludes
+    // the horizontal padding of the inline <code> chip wrapping the token. The
+    // column then lands a few px under what the token needs, so the browser breaks
+    // the UUID at a '-' anyway — inside a column already sized for the whole token,
+    // leaving the dead space this test guards against.
+    const md =
+      '| # | Session | Ngày | Message Title | Tổng thời gian | Bug tìm được | Chi tiết |\n' +
+      '|---|---|---|---|---|---|---|\n' +
+      '| 1 | `0b81da2d-8790-4002-bd2f-795f848d748c` | 2026-07-27 | US-23.20 — Sidecar appends survive a second writer | 30m31s | 3 (1 patch, 2 defer) | [file](./a.md) |\n' +
+      '| 2 | `9a7f1129-c796-445e-b246-9ad1eda116de` | 2026-07-27 | US-23.19 — Save-first gate for comment writes | 22m25s | 2 (0 patch, 2 defer) | [file](./b.md) |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    // Deliberately NOT expect.poll on `.fit`: this fixture lands in the scroll
+    // branch (③), where no fit class is added, so polling it would just time out.
+    await page.locator('#content table').waitFor();
+
+    const r = await page.evaluate(() => {
+      const table = document.querySelector('#content table') as HTMLTableElement;
+      const cell = table.tBodies[0].rows[0].cells[1]; // the `Session` column
+      const code = cell.querySelector('code') as HTMLElement;
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const rects = Array.from(range.getClientRects());
+      return {
+        codeLines: rects.length,
+        widestLine: Math.max(...rects.map((x) => x.width)),
+        cellWidth: cell.getBoundingClientRect().width,
+      };
+    });
+    expect(r.codeLines).toBe(1); // the token is not broken at a '-'
+    // ...and the column is not left far wider than what it actually renders: the
+    // gap should be just the box model (cell padding 20px + chip padding ~5px),
+    // not the ~111px of dead space the bug left behind.
+    expect(r.cellWidth - r.widestLine).toBeLessThan(40);
+  });
+
+  test('ON: a multi-word inline element does not pin its column at max-content', async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 600 });
+    // The floor only takes an inline box whole when its ENTIRE content is one word.
+    // Drop that guard and every bold/linked phrase — the most common markdown in a
+    // table — pins its column at max-content, so shrinking stops and the table
+    // scrolls much further than it needs to.
+    const bold = (r: number, c: number): string => `**long cell content value for row ${r + 1} column ${c + 1}**`;
+    await openEditor(page, makeTable(3, 2, bold), { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+
+    const m = await tableInfo(page);
+    const cols = await Promise.all([0, 1, 2].map((i) => bodyCellWidth(page, i)));
+    // Each column shrank well under its own one-line width (~317px unpinned).
+    for (const w of cols) {
+      expect(w).toBeLessThan(280);
+    }
+    expect(m.scrollWidth - m.clientWidth).toBeLessThan(120); // ~3x that if pinned
+  });
+
+  test('ON: an inline element split by a <br> is not measured as one word', async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 600 });
+    // getBoundingClientRect unions every line fragment of an inline box, and a <br>
+    // breaks even under the nowrap measuring class. Measuring the union would give
+    // this column a floor equal to the cell's whole one-line width — zero shrink
+    // slack — and push the table out of fit-mode into horizontal scroll.
+    const md =
+      '| Note | Wide |\n| --- | --- |\n' +
+      '| a fairly long note that should be free to wrap across several lines **Alpha<br>Beta** | a very long description that must absorb the shrink and keep this column wide enough to force overall shrinking |\n' +
+      '| another note here that is also long enough to want wrapping **Gamma<br>Delta** | another long description sentence here to keep this column wide and force the table to shrink overall |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
+
+    const fragments = await page.evaluate(() => {
+      const cell = (document.querySelector('#content table') as HTMLTableElement).tBodies[0].rows[0].cells[0];
+      return (cell.querySelector('strong') as HTMLElement).getClientRects().length;
+    });
+    expect(fragments).toBeGreaterThan(1); // the <br> really did fragment the box
+    const m = await tableInfo(page);
+    expect(m.scrollWidth).toBeLessThanOrEqual(m.clientWidth); // still fits, no scroll
+    expect(await bodyCellWidth(page, 0)).toBeLessThan(350); // kept slack (462 if pinned)
+  });
+
   test('ON: typing into a pinned narrow column re-fits it (debounced) so it grows with content', async ({ page }) => {
-    await page.setViewportSize({ width: 900, height: 600 });
+    // Narrow enough that Σmax-content > budget — genuinely pinned territory (①b/②),
+    // not the US-19.26 bail (plenty of room), which is covered by the next test.
+    await page.setViewportSize({ width: 560, height: 600 });
     // Col A starts tiny ("x") → pinned narrow by fit-mode; col B is long.
     const md = '| A | B |\n| --- | --- |\n| x | ' + 'long filler content keeping column B wide '.repeat(2) + '|\n';
     await openEditor(page, md, { tableFitMode: true });
-    await page.locator('#content table').waitFor();
-    await page.waitForTimeout(300);
+    await expect.poll(async () => (await tableInfo(page)).fit, { timeout: 3000 }).toBe(true);
 
     const colAWidth = (): Promise<number> =>
       page.evaluate(() => Math.round((document.querySelector('#content table tbody td') as HTMLElement).getBoundingClientRect().width));
@@ -246,6 +425,40 @@ test.describe('US-19.25 table fit-mode', () => {
     // The column is frozen (max-width pin) until the debounced re-fit fires; after it,
     // the column has grown to accommodate the typed content.
     await expect.poll(colAWidth, { timeout: 3000 }).toBeGreaterThan(before + 40);
+  });
+
+  test('ON: typing into a column grows it live when the table has room (US-19.26 — no premature pin)', async ({ page }) => {
+    // Plenty of room → US-19.26 bails before pinning any width/max-width at all.
+    await page.setViewportSize({ width: 1400, height: 600 });
+    const md = '| A | B |\n| --- | --- |\n| x | short |\n';
+    await openEditor(page, md, { tableFitMode: true });
+    await page.locator('#content table').waitFor();
+    await page.waitForTimeout(300);
+    expect((await tableInfo(page)).fit).toBe(false); // confirms: bailed, nothing pinned
+
+    const colAWidth = (): Promise<number> =>
+      page.evaluate(() => Math.round((document.querySelector('#content table tbody td') as HTMLElement).getBoundingClientRect().width));
+    const before = await colAWidth();
+
+    await page.evaluate(() => {
+      const cell = document.querySelector('#content table tbody td') as HTMLElement;
+      const r = document.createRange();
+      r.selectNodeContents(cell);
+      r.collapse(false);
+      const s = window.getSelection()!;
+      s.removeAllRanges();
+      s.addRange(r);
+    });
+    await page.keyboard.type(' a fairly long phrase to widen this column');
+
+    // No max-width was ever set on this cell, so the browser's own auto layout grows
+    // the column as the text lands — no polling/waiting for the 200ms debounced
+    // re-fit that the PINNED-column test above depends on. If a stale pin were
+    // applied here, this assertion right after typing (no poll) would still see the
+    // old, narrower width.
+    const after = await colAWidth();
+    expect(after).toBeGreaterThan(before + 60);
+    expect((await tableInfo(page)).fit).toBe(false); // still not pinned into fit-mode
   });
 
   test('command toggles fit-mode on then off (reports back to host)', async ({ page }) => {

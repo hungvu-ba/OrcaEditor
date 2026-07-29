@@ -138,56 +138,20 @@ function headingText(line: string): string {
 }
 
 /**
- * Text of the nearest preceding ATX heading that encloses `lineIndex` — the
- * heading whose section the line sits in (by the "heading -> next same-or-higher
- * heading" rule, the last heading before a line always opens its section).
- * Fenced-code aware: a `#`-looking line inside a ``` / ~~~ fence is NOT a
- * heading. Returns '' when the line sits above any heading.
- *
- * THE named, easy-to-port primitive the webview drill-down (US-21.3) mirrors.
+ * Walks `lines`, tracking fenced-code state and the nearest enclosing ATX
+ * heading in a single forward pass. Fence lines and heading lines are
+ * consumed for their state only; `onLine` fires solely for the lines that are
+ * neither, with the heading text as of that point. Returns the heading text
+ * after the whole walk — what `nearestEnclosingHeading` needs when it wants
+ * the state as of just before a given line (by walking a slice that excludes
+ * it).
  */
-export function nearestEnclosingHeading(lines: string[], lineIndex: number): string {
+function forEachNonFenceLine(lines: string[], onLine: (raw: string, index: number, heading: string) => void): string {
   let inFence = false;
   let fenceMarker = '';
   let heading = '';
-  const end = Math.min(lineIndex, lines.length);
-  for (let i = 0; i < end; i++) {
-    const trimmed = lines[i].trim();
-    const marker = fenceMarkerOf(trimmed);
-    if (inFence) {
-      if (marker === fenceMarker) {
-        inFence = false;
-      }
-      continue;
-    }
-    if (marker) {
-      inFence = true;
-      fenceMarker = marker;
-      continue;
-    }
-    if (headingLevelOfLine(lines[i]) !== null) {
-      heading = headingText(lines[i]);
-    }
-  }
-  return heading;
-}
-
-/**
- * Parse all `caption::` entity declarations from one file's text (fenced-code
- * aware). Each caption token splits into namespace = leading Unicode-letter run,
- * id = the remainder; a token with no letter prefix or an empty id half is
- * skipped (a malformed/empty declaration is not a valid target, per US-21.1's
- * empty-id refusal). `title` = nearest enclosing heading, tracked in the SAME
- * forward pass (no second scan).
- */
-export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
-  const lines = splitLines(text);
-  const out: IndexedEntity[] = [];
-  let inFence = false;
-  let fenceMarker = '';
-  let heading = '';
-  for (let line = 0; line < lines.length; line++) {
-    const raw = lines[line];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const trimmed = raw.trim();
     const marker = fenceMarkerOf(trimmed);
     if (inFence) {
@@ -205,6 +169,37 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       heading = headingText(raw);
       continue;
     }
+    onLine(raw, i, heading);
+  }
+  return heading;
+}
+
+/**
+ * Text of the nearest preceding ATX heading that encloses `lineIndex` — the
+ * heading whose section the line sits in (by the "heading -> next same-or-higher
+ * heading" rule, the last heading before a line always opens its section).
+ * Fenced-code aware: a `#`-looking line inside a ``` / ~~~ fence is NOT a
+ * heading. Returns '' when the line sits above any heading.
+ *
+ * THE named, easy-to-port primitive the webview drill-down (US-21.3) mirrors.
+ */
+export function nearestEnclosingHeading(lines: string[], lineIndex: number): string {
+  const end = Math.min(lineIndex, lines.length);
+  return forEachNonFenceLine(lines.slice(0, end), () => {});
+}
+
+/**
+ * Parse all `caption::` entity declarations from one file's text (fenced-code
+ * aware). Each caption token splits into namespace = leading Unicode-letter run,
+ * id = the remainder; a token with no letter prefix or an empty id half is
+ * skipped (a malformed/empty declaration is not a valid target, per US-21.1's
+ * empty-id refusal). `title` = nearest enclosing heading, tracked in the SAME
+ * forward pass (no second scan).
+ */
+export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
+  const lines = splitLines(text);
+  const out: IndexedEntity[] = [];
+  forEachNonFenceLine(lines, (raw, line, heading) => {
     // Scan the line with inline code spans blanked out so a `caption::` written
     // as example syntax inside backticks is not indexed as a declaration.
     const scan = stripInlineCode(raw);
@@ -240,7 +235,7 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
       const preview = entityFollowingPreview(following);
       out.push({ namespace, id, file: fileUri, line, title: heading, preview, label });
     }
-  }
+  });
   return out;
 }
 

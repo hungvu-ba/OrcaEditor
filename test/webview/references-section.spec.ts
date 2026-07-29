@@ -1,13 +1,14 @@
 /**
  * Req 20 US-20.5 — `/add reference` wired into the real main.js bundle:
  *   - invocation: `/add ref` + pick posts an `addReference` message with docUri;
- *   - broken-nav: a plain click on a ⚠️ References entry scrolls to the first
- *     body occurrence and opens the quick-correct popover there;
- *   - healthy-open: a plain click on a healthy entry posts `openLink` (no scroll).
+ *   - plain click on a References entry (broken ⚠️ or healthy) is a no-op —
+ *     same as any other link in the document, no special navigation;
+ *   - Cmd/Ctrl+Click on a References entry still posts `openLink`, exactly
+ *     like a normal link.
  *
  * The scan/merge itself is host-side + pure (test/roundtrip/references-section.ts);
  * here we only exercise the webview trigger item + the References-entry click
- * navigation, which need real events / Selection API.
+ * behavior, which need real events / Selection API.
  */
 import { test, expect } from '@playwright/test';
 import { openEditor, clearPosted, DEFAULT_DOC_URI } from './_harness';
@@ -55,7 +56,7 @@ test('typing `/add ref` and picking "Add reference" posts addReference with this
   expect(msg?.docUri).toBe(DEFAULT_DOC_URI);
 });
 
-test('plain-clicking a broken (⚠️) References entry navigates to the first body occurrence + opens quick-correct', async ({
+test('plain-clicking a broken (⚠️) References entry does nothing — no navigation, no quick-correct popover', async ({
   page,
 }) => {
   await openEditor(
@@ -71,23 +72,18 @@ test('plain-clicking a broken (⚠️) References entry navigates to the first b
       '',
     ].join('\n')
   );
-
-  // The body link (not the References entry) is the nav target.
-  const bodyAnchor = page.locator('#content p a[href="missing.md"]');
-  await expect(bodyAnchor).toHaveCount(1);
+  await clearPosted(page);
 
   // The References entry is the LAST anchor with that href (inside the <ul>).
   const refEntry = page.locator('#content ul a[href="missing.md"]');
   await refEntry.click();
 
-  await expect(page.locator('.quick-correct-popover')).toBeVisible();
-  // The body occurrence got the transient flash class (removed ~1.2s later).
-  await expect(bodyAnchor).toHaveClass(/ref-nav-flash/);
+  await expect(page.locator('.quick-correct-popover')).toBeHidden();
+  const msgs = await posted(page);
+  expect(msgs.some((m) => m.type === 'openLink')).toBe(false);
 });
 
-test('plain-clicking a healthy References entry opens its target (openLink), no navigation flash', async ({
-  page,
-}) => {
+test('plain-clicking a healthy References entry does nothing — no openLink posted', async ({ page }) => {
   await openEditor(
     page,
     ['[Real](here.md) in the body.', '', '## References', '', '- [Real](here.md)', ''].join('\n')
@@ -97,13 +93,31 @@ test('plain-clicking a healthy References entry opens its target (openLink), no 
   const refEntry = page.locator('#content ul a[href="here.md"]');
   await refEntry.click();
 
+  const msgs = await posted(page);
+  expect(msgs.some((m) => m.type === 'openLink')).toBe(false);
+});
+
+test('Cmd/Ctrl+clicking a References entry still opens its target via openLink, same as any other link', async ({
+  page,
+}) => {
+  await openEditor(
+    page,
+    ['[Real](here.md) in the body.', '', '## References', '', '- [Real](here.md)', ''].join('\n')
+  );
+  await clearPosted(page);
+
+  // Dispatched directly (not Playwright's click({modifiers})) — same technique
+  // broken-ref-marker.spec.ts uses for a Cmd/Ctrl+Click, which reliably fires
+  // the app's own metaKey/ctrlKey branch without invoking a real browser
+  // new-tab gesture.
+  await page.evaluate(() => {
+    const a = document.querySelector('#content ul a[href="here.md"]') as HTMLElement;
+    a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true }));
+  });
+
   await page.waitForFunction(() =>
     (window as unknown as { __posted: Posted[] }).__posted.some((m) => m.type === 'openLink')
   );
   const msg = (await posted(page)).find((m) => m.type === 'openLink');
   expect(msg?.href).toBe('here.md');
-
-  // Healthy path never flashes a body occurrence and the popover stays closed.
-  await expect(page.locator('#content p a[href="here.md"]')).not.toHaveClass(/ref-nav-flash/);
-  await expect(page.locator('.quick-correct-popover')).toBeHidden();
 });

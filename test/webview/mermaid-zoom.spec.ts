@@ -11,6 +11,37 @@
 import { test, expect } from '@playwright/test';
 import { openEditor } from './_harness';
 
+/** True when the lazily-injected engine <script> is present in the page. */
+async function engineRequested(page: import('@playwright/test').Page): Promise<boolean> {
+  return page.evaluate(() => !!document.querySelector('script[src*="mermaid-engine"]'));
+}
+
+test('a document with no Mermaid block never loads the engine (lazy-load, P-1)', async ({ page }) => {
+  test.slow(); // renders a real PlantUML diagram (~8.5 MB WASM engine), same as plantuml.spec.ts
+  await openEditor(page, '# Heading\n\nJust prose, and a plantuml block:\n\n```plantuml\n@startuml\nAlice -> Bob\n@enduml\n```\n');
+  // PlantUML still renders — proving the document fully rendered before we assert.
+  await page.locator('.md-plantuml-chart svg').waitFor({ timeout: 60000 });
+
+  expect(await engineRequested(page)).toBe(false);
+});
+
+test('a ```mermaid fence renders an SVG diagram and requests the engine', async ({ page }) => {
+  await openEditor(page, '```mermaid\ngraph TD; A-->B; B-->C\n```\n');
+  await page.locator('.md-mermaid-chart svg').waitFor();
+  expect(await engineRequested(page)).toBe(true);
+});
+
+test('an engine that fails to load shows an error and falls back to code view (P-1)', async ({ page }) => {
+  await openEditor(page, '```mermaid\ngraph TD; A-->B\n```\n', { mermaidEngineUri: 'does-not-exist-mermaid-engine.js' });
+
+  const chart = page.locator('.md-mermaid-chart');
+  await expect(chart).toHaveClass(/md-mermaid-error/);
+  await expect(chart).toContainText('Failed to render Mermaid diagram');
+  // Fallback to code view so the user sees their source instead of a dead frame.
+  await expect(page.locator('.md-mermaid')).toHaveAttribute('data-mermaid-view', 'code');
+  await expect(page.locator('.md-mermaid-source')).toBeVisible();
+});
+
 test('Zoom button opens the diagram in the lightbox; Esc closes it', async ({ page }) => {
   await openEditor(page, '```mermaid\ngraph TD; A-->B; B-->C\n```\n');
 
