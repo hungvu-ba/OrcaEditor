@@ -270,6 +270,15 @@ const BELONGING_SINGLE_THREAD_MIN_CHARS = 80;
  * threshold. Dropping every non-letter/digit closes that gap: `## Title` and
  * `Title` both reduce to `title`.
  *
+ * A markdown link is collapsed to its label BEFORE that punctuation strip:
+ * `[Bug #1](#a-long-heading-slug)` renders in the DOM (and so is recorded) as
+ * just "Bug #1", but its raw target's slug words would otherwise survive
+ * punctuation-stripping and land INSIDE the normalized text, splitting what
+ * was one contiguous anchored phrase into two pieces neither substring check
+ * below can find (regression, 2026-07-29: a still-present anchored paragraph
+ * was reported as belonging to a foreign document once one of its plain
+ * mentions was turned into a link to its own heading).
+ *
  * Case is folded too. This is a "is it the same document at all" test, not the
  * anchor-precision test US-23.4 performs on real DOM text.
  */
@@ -277,6 +286,7 @@ function toBelongingText(text: string): string {
   return text
     .normalize('NFC')
     .toLowerCase()
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();

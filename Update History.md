@@ -540,3 +540,4 @@
 | 0.10.0 | 2026-07-29 | Fix: a plain click on a `## References` entry no longer navigates (US-20.5) — behaves like any other link, Cmd/Ctrl+Click still opens it. |
 | 0.10.0 | 2026-07-29 | Fix: task-list drag handle no longer overlaps the comment-gutter pin, now covers the checkbox/marker, and stays row-aligned on wrapped items. |
 | 0.10.0 | 2026-07-29 | Fix: the drag-handle hover highlight on a task-list item now extends past the checkbox instead of cutting through its left edge. |
+| 0.10.0 | 2026-07-29 | Fix: a still-present comment was flagged "foreign" once its anchored text got a markdown link, because the link's raw target slug split the belonging match. |

@@ -3814,6 +3814,18 @@ check(
         [withText('Yêu cầu nghiệp vụ chi tiết cho hệ thống quản lý bình luận và thảo luận nhóm dự án'.normalize('NFD'), 'c7')],
         '## Yêu cầu nghiệp vụ chi tiết cho hệ thống quản lý bình luận và thảo luận nhóm dự án'.normalize('NFC')
       ) === 'belongs');
+
+    // Regression (2026-07-29): recorded_text is the DOM's rendered text — a
+    // markdown link renders (and is recorded) as just its label, never its
+    // target. A still-present anchored paragraph must not turn 'foreign'
+    // merely because one of its plain mentions became a link to its own
+    // heading; the target's slug words must not split the match.
+    const linkLabel = 'a comment about this whole entire paragraph and its very own Bug Number One right here today';
+    const linkDoc =
+      '# doc\n\nThis is a comment about this whole entire paragraph and its very own [Bug Number One]' +
+      '(#bug-number-one--a-long-heading-slug-with-many-extra-words-in-it) right here today.\n';
+    check('belonging (single thread): a link-wrapped mention inside the anchored text still matches',
+      sidecarBelongsToDocument([withText(linkLabel, 'c8')], linkDoc) === 'belongs');
   }
 
   // US-23.16 AC7: the orphan-row pill label for each of the 5 orphanable line kinds.
