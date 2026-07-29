@@ -528,4 +528,5 @@
 | 0.10.0 | 2026-07-29 | Fix: annotate a loop-local var in `nearestSrcRange` — TS7022 implicit-any circular inference broke `npm run typecheck`. |
 | 0.10.0 | 2026-07-29 | Fix (perf, Performance Audit P-7): hovering a drag handle no longer marks its block dirty, so it is not re-serialized nor replaced by the next host update. |
 | 0.10.0 | 2026-07-29 | Fix: Comment tab rows showed the anchored text; they now show the comment itself, and the `⚑` toolbar button is retired with its lost-anchor badge moved to Show Comments. |
+| 0.10.0 | 2026-07-29 | Fix: the toast sat below the right dock in the stacking order, so whenever the dock was open every toast — including US-23.8 AC4's deletion notice — was painted behind it. |
 | 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-8): host→webview document updates now ship only the changed region, guarded by rev + seq base checks with a full-push fallback. |

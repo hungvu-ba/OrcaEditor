@@ -775,6 +775,58 @@ test.describe('Req 24 US-23.8 AC4 — reply draft survives a concurrent native C
 
     await expect(page.locator('.comment-popover')).toBeHidden();
     await expect(page.locator('#wysiwyg-toast')).toHaveText('This thread was deleted.');
+    // `.show` is what carries `opacity: 1`, and Playwright's own `toBeVisible()`
+    // ignores opacity entirely — so this, not visibility, is what proves the
+    // toast was actually raised rather than merely populated.
+    await expect(page.locator('#wysiwyg-toast')).toHaveClass(/\bshow\b/);
+  });
+
+  test('with the right dock open, the deletion toast is painted above it rather than behind the panel', async ({
+    page,
+  }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Original comment.');
+    // The dock is the realistic state for this AC: the Reviewer deleting a thread
+    // from the native UI almost always has the Comment tab open beside it, and the
+    // dock is a full-height opaque panel over the toast's own corner.
+    await openCommentTab(page);
+    await clickPin(page, 0);
+    await page.locator('.comment-popover-reply-input').fill('Draft about to be orphaned.');
+
+    await simulate(page, { type: 'commentThreadsSync', docUri: DEFAULT_DOC_URI, threads: [] });
+
+    await expect(page.locator('.comment-popover')).toBeHidden();
+    await expect(page.locator('#wysiwyg-toast')).toHaveText('This thread was deleted.');
+    await expect(page.locator('#wysiwyg-toast')).toHaveClass(/\bshow\b/);
+
+    // None of the assertions above can see occlusion, which is how this shipped
+    // broken: an element painted underneath an opaque sibling still has a box and
+    // is not `display: none`, so `toBeVisible()` passes (it ignores opacity too),
+    // and `elementFromPoint` never returns the toast at all because it is
+    // `pointer-events: none`. Assert instead the three facts that together ARE the
+    // occlusion — the boxes overlap, both nodes share the root stacking context so
+    // their raw z-index values are actually comparable, and the toast wins.
+    const layering = await page.evaluate(() => {
+      const toast = document.getElementById('wysiwyg-toast')!;
+      const dock = document.getElementById('toc-panel')!;
+      const t = toast.getBoundingClientRect();
+      const d = dock.getBoundingClientRect();
+      return {
+        overlaps: t.left < d.right && t.right > d.left && t.top < d.bottom && t.bottom > d.top,
+        sameStackingContext: toast.parentElement === document.body && dock.parentElement === document.body,
+        toastPosition: getComputedStyle(toast).position,
+        toastZ: Number(getComputedStyle(toast).zIndex),
+        dockZ: Number(getComputedStyle(dock).zIndex),
+      };
+    });
+    expect(layering.overlaps).toBe(true);
+    // Re-parenting either node under a transformed/filtered wrapper would make the
+    // comparison below meaningless while it kept passing — pin the precondition.
+    expect(layering.sameStackingContext).toBe(true);
+    // Same reason: `zIndex` still reports its declared value on a `position: static`
+    // element, where it has no effect at all and paint order falls back to flow.
+    expect(layering.toastPosition).toBe('fixed');
+    expect(layering.toastZ).toBeGreaterThan(layering.dockZ);
   });
 
   test('an ordinary Cancel still discards the draft even on a thread that is Closed', async ({ page }) => {

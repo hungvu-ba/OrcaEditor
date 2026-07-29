@@ -2675,7 +2675,15 @@ body.toc-resizing #toolbar {
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
   pointer-events: none;
-  z-index: 60;
+  /* Top of the whole stack — the next layer down is .md-math-edit-popover
+   * (1000). At its previous 60 this sat under the right dock (#toc-panel, 150:
+   * opaque, full height, over exactly this corner), so any toast raised with the
+   * dock open was painted behind it and never seen. That a toast may now cover an
+   * open popover for its few seconds is the accepted trade (PO 2026-07-29): a
+   * toast is often the ONLY feedback for an action taken inside that popover, so
+   * sitting under it is the same silent failure — and pointer-events: none above
+   * means it can never intercept a click on whatever it covers. */
+  z-index: 1100;
 }
 
 #wysiwyg-toast.show {
