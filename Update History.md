@@ -531,3 +531,5 @@
 | 0.10.0 | 2026-07-29 | Fix: the toast sat below the right dock in the stacking order, so whenever the dock was open every toast — including US-23.8 AC4's deletion notice — was painted behind it. |
 | 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-8): host→webview document updates now ship only the changed region, guarded by rev + seq base checks with a full-push fallback. |
 | 0.10.0 | 2026-07-29 | Fix: comment delete now physically rewrites/removes the sidecar's cascade instead of appending a tombstone, and deletes the file once zero threads remain. |
+| 0.10.0 | 2026-07-29 | Feature: clicking a comment's highlighted text opens its thread popover, a second route beside the gutter pin; refused for drag/double-click selections and when Show Comments is off. |
+| 0.10.0 | 2026-07-29 | Feature: the comment popover now anchors to the clicked text instead of the whole block, keeps clear of that text, and can be dragged aside. |

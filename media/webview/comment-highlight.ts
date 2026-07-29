@@ -41,6 +41,13 @@ export interface CommentHighlightController {
   setActiveThread(threadId: string | undefined): void;
   /** Recompute the highlighted ranges — call after a re-render (anchors may have moved to new nodes). */
   refresh(): void;
+  /**
+   * Req 24 US-23.23 AC1: the washed thread covering viewport point (x, y), plus
+   * the client rect the point landed in (what a popover anchors against), or
+   * `undefined` when no wash is there. Owned by this module rather than the
+   * caller because the wash IS the click target — see the implementation.
+   */
+  threadAtPoint(x: number, y: number): { threadId: string; rect: DOMRect } | undefined;
 }
 
 function rangeForAnchor(anchor: ThreadAnchor): Range | null {
@@ -58,6 +65,52 @@ function rangeForAnchor(anchor: ThreadAnchor): Range | null {
   // which inserts no inter-block '\n' and does not skip KaTeX's hidden text.
   // Mixing the two spaces washes the wrong characters — see the helper's doc.
   return rangeWithinOffsets(anchor.carrier, start, end);
+}
+
+/**
+ * The rects of the characters a range actually PAINTS.
+ *
+ * `Range.getClientRects()` cannot be used directly for a hit test: per CSSOM-View
+ * it returns the border box of every element the range **fully contains**, not
+ * just its text runs. A comment spanning more than one block resolves its carrier
+ * to the common ancestor (`#content`, a `<ul>`, a `<blockquote>` — `block-map.ts`),
+ * so every inner block comes back as a full-content-width box and the empty margin
+ * beside a short line reads as "inside the wash" — measured at 1053px past the last
+ * glyph on a three-paragraph anchor. Clipping to text nodes keeps the hit area on
+ * the glyphs, which is what "the clickable region IS the washed region" requires.
+ *
+ * A range confined to one text node reports only line-box rects, so per-node
+ * sub-ranges give exactly the painted geometry, wrapped lines included.
+ */
+function textRectsOf(range: Range): DOMRect[] {
+  const root = range.commonAncestorContainer;
+  const walker = document.createTreeWalker(
+    root.nodeType === Node.TEXT_NODE ? (root.parentNode ?? root) : root,
+    NodeFilter.SHOW_TEXT
+  );
+  const rects: DOMRect[] = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    const text = n as Text;
+    // `comparePoint` rather than the legacy `intersectsNode`, matching the
+    // containment idiom already used in `comment-menu.ts` and `input-rules.ts`.
+    // Every node the walker yields shares the range's root, so it cannot throw.
+    if (range.comparePoint(text, text.data.length) === -1 || range.comparePoint(text, 0) === 1) {
+      continue;
+    }
+    const start = text === range.startContainer ? range.startOffset : 0;
+    const end = text === range.endContainer ? range.endOffset : text.data.length;
+    if (start >= end) {
+      continue;
+    }
+    const part = document.createRange();
+    part.setStart(text, start);
+    part.setEnd(text, end);
+    for (const r of part.getClientRects()) {
+      rects.push(r);
+    }
+  }
+  return rects;
 }
 
 export function initCommentHighlight(resolve: CommentResolveController): CommentHighlightController {
@@ -134,6 +187,67 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
     }
   }
 
+  /**
+   * Req 24 US-23.23 AC1/AC2/AC5: which washed thread sits under (x, y).
+   *
+   * Hit-tests the range's own client rects instead of resolving the point to a
+   * caret. `caretRangeFromPoint` (the pattern `comment-menu.ts` uses to anchor a
+   * NEW comment) snaps to the NEAREST text position, so a click in the blank
+   * space to the right of a line whose text ends inside a wash resolves back into
+   * that wash and would open a thread the reader never clicked on. Client rects
+   * answer the question actually being asked — did the pointer land on painted
+   * characters — and a wrapped or multi-block anchor's several rects come free.
+   *
+   * The layout reads are bounded to one `click`, not a `mousemove`/`scroll`
+   * handler, so CLAUDE.md's rAF-coalescing trap does not apply; caching the rects
+   * instead would go stale on every re-render, reflow and scroll.
+   */
+  function threadAtPoint(x: number, y: number): { threadId: string; rect: DOMRect } | undefined {
+    if (!supportsHighlight || !on) {
+      // AC2: with "Show Comments" off nothing is painted, and an invisible click
+      // target is exactly what the toggle promises not to leave behind. The
+      // active-thread registrations below are deliberately NOT consulted either:
+      // they exist to mark the thread already open, not to add a second target.
+      return undefined;
+    }
+    let best: { threadId: string; rect: DOMRect; span: number } | undefined;
+    for (const anchor of resolve.allThreads()) {
+      // The same gate `recompute()` applies to the passive set, read through the
+      // same helper below: the clickable region IS the washed region, so a reader
+      // can never click text that looks plain.
+      if (anchor.status === 'Closed') {
+        continue;
+      }
+      // Also the AC1 gate for a floating thread (no connected carrier) and a
+      // bare-caret anchor (`offsetStart === offsetEnd`): both return null here,
+      // which is why neither has a click target.
+      const range = rangeForAnchor(anchor);
+      if (!range) {
+        continue;
+      }
+      // AC5 ranks on the range actually PAINTED, not on `offsetEnd - offsetStart`:
+      // `rangeWithinOffsets` clamps both ends to the carrier's live text, and
+      // resolution is debounced, so between an edit and the next pass the stored
+      // offsets can claim a wider span than anything on screen — which would let a
+      // stale-wide thread lose to a genuinely wider one. Measured after
+      // `rangeForAnchor` for the same reason: ranking before it would skip the
+      // hit-test of a candidate whose stored span only looks wider.
+      const span = range.toString().length;
+      if (best !== undefined && span >= best.span) {
+        continue;
+      }
+      // Strict `>=` above keeps the FIRST thread found at a given span, which is
+      // the registry order the AC's tie-break names.
+      const hit = textRectsOf(range).find(
+        (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+      );
+      if (hit !== undefined) {
+        best = { threadId: anchor.threadId, rect: hit, span };
+      }
+    }
+    return best === undefined ? undefined : { threadId: best.threadId, rect: best.rect };
+  }
+
   resolve.onChange(recompute);
 
   return {
@@ -151,5 +265,6 @@ export function initCommentHighlight(resolve: CommentResolveController): Comment
     refresh(): void {
       recompute();
     },
+    threadAtPoint,
   };
 }

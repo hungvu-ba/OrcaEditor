@@ -97,6 +97,7 @@ import { initCommentPopover } from './comment-popover';
 import { initCommentAnchorDialog } from './comment-anchor-dialog';
 import { initCommentUndoGuard } from './comment-undo-guard';
 import { initCommentGutter } from './comment-gutter';
+import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { normalizeHrefKey } from '../../src/references-section';
@@ -294,7 +295,7 @@ const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlig
 const commentPanel = initCommentPanel(
   content,
   commentResolve,
-  (threadId, rect, returnFocusTo) => commentPopover.open(threadId, rect, returnFocusTo),
+  (threadId, rect, returnFocusTo) => commentPopover.open(threadId, rect, { returnFocusTo }),
   vscode
 );
 toc.dock.registerTab(commentPanel.tab);
@@ -310,6 +311,14 @@ initCommentUndoGuard();
 // Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
 const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
   commentPopover.open(threadId, rect)
+);
+// Req 24 US-23.23: the pin's second route — click the washed text itself. Same
+// `openThread` shape as the gutter above, so both land in the popover identically.
+// `rectIsAnchor`: the rect IS the clicked text's live box, so the card is placed
+// beside that phrase and the document is not scrolled (US-23.23 AC7) — unlike the
+// gutter/tab routes above, whose rect is only a launch point.
+initCommentAnchorClick(content, commentHighlight, (threadId, rect) =>
+  commentPopover.open(threadId, rect, { rectIsAnchor: true })
 );
 // Two counts on two surfaces: the "Show Comments" button carries the floating
 // count (the `⚑` button that used to carry it was retired) and the tab strip

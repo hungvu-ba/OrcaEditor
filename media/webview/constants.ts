@@ -224,8 +224,26 @@ export const COMMENT_COPY_MARKDOWN_TIMEOUT_MS = 10_000;
 
 // --- Req 23 US-23.4 AC4: "Unresolved location" panel ---
 
-/** Pointer travel before a mousedown on a card becomes a drag rather than a click. */
+/**
+ * Pointer travel before a mousedown becomes a drag rather than a click — the
+ * comment subsystem's shared slop, used by this panel's draggable card and by
+ * US-23.23's click-a-highlighted-range route, so the two surfaces cannot drift
+ * apart about what counts as a click.
+ */
 export const COMMENT_PANEL_DRAG_THRESHOLD_PX = 4;
+
+/**
+ * Req 24 US-23.23 AC3: how long a click on a comment's highlighted text waits
+ * before opening the thread, so a double-click never opens one.
+ *
+ * The leading click of a double-click is byte-identical to a plain click
+ * (`detail === 1`, zero travel, collapsed selection), so the only way to honour
+ * AC3's "no popover opens" is to wait out the double-click window and cancel on a
+ * second press. The OS threshold is not exposed to JS; 250ms covers the common
+ * case at a latency the reader still perceives as immediate. Raising it buys
+ * slower double-clickers at the cost of every single click feeling laggy.
+ */
+export const COMMENT_ANCHOR_OPEN_DELAY_MS = 250;
 
 /** How many ranked candidates the Re-attach… picker offers under "Suggested". */
 export const COMMENT_PANEL_REATTACH_SUGGESTIONS = 3;

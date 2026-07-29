@@ -34,7 +34,7 @@ import {
   COMMENT_REPLY_INPUT_CLASS,
   COMMENT_REPLY_RESULT_TIMEOUT_MS,
 } from './constants';
-import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
+import { el, makeDraggable, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 import { sameAuthor } from '../../src/comments/sidecar-format';
@@ -46,13 +46,31 @@ import {
 } from '../../src/comments/comment-body-limit';
 import type { CommentStatusAction } from '../../src/shared/messages';
 
+/** How a caller wants `open` to treat the rect it passed, and where focus goes on close. */
+export interface CommentPopoverOpenOptions {
+  /**
+   * Focused when the popover closes — US-23.9's list rows, which would otherwise
+   * orphan focus on a row that is about to be re-rendered.
+   */
+  returnFocusTo?: HTMLElement;
+  /**
+   * Req 24 US-23.23: `anchorRect` is the live on-screen rect of the exact text the
+   * reader just clicked, so place the card against THAT and do not scroll — the
+   * anchor is already under the pointer, and revealing it would move the document
+   * out from under the reader.
+   *
+   * Default (`false`, the gutter-pin and Comment-tab routes): the rect is only a
+   * launch point — the anchor may be off-screen or collapsed — so the card is
+   * placed against the whole anchored block after revealing it.
+   */
+  rectIsAnchor?: boolean;
+}
+
 export interface CommentPopoverController {
   /**
    * Open (or re-focus) the popover for `threadId`, anchored beside `anchorRect`.
-   * `returnFocusTo` is focused when the popover closes — US-23.9's list rows,
-   * which would otherwise orphan focus on a row that is about to be re-rendered.
    */
-  open(threadId: string, anchorRect: DOMRect, returnFocusTo?: HTMLElement): void;
+  open(threadId: string, anchorRect: DOMRect, opts?: CommentPopoverOpenOptions): void;
   /** Close the popover if it is showing one of these now-deleted threads. */
   forgetThreads(threadIds: string[]): void;
   setDocUri(uri: string): void;
@@ -71,6 +89,55 @@ interface StatusAction {
   label: string;
   /** The action the design leads with for this status. */
   primary: boolean;
+}
+
+/**
+ * The least height at which the popover is still usable — header, one message and
+ * the reply row. Below this a cap does more harm than the overlap it avoids, so
+ * `placeClearOfAnchor` stops capping and accepts the overlap (AC8's own exception).
+ */
+const MIN_USABLE_CARD_PX = 200;
+
+/**
+ * Req 24 US-23.23 AC8: place `card` clear of `anchorRect` — a comment must never
+ * cover the text it is about.
+ *
+ * `positionNear` (dom-utils) prefers the band below the anchor and falls back to
+ * above, but it then CLAMPS the result into the viewport, so a card taller than the
+ * band it landed in is pulled back over its own anchor. Measured: an open card
+ * covered the whole next paragraph, which made a neighbouring comment unreachable
+ * by click (only its gutter pin still worked).
+ *
+ * The fix is to cap the card's height to the band it is placed in, so it never has
+ * to overlap; `.comment-popover-list` is already `overflow-y: auto`, so the
+ * messages scroll inside instead. The cap is cleared first, and re-applied every
+ * open, so a previous open's tighter band never sticks.
+ *
+ * When the anchor is taller than the viewport there is no free band at all — the
+ * larger side is used and the overlap is accepted, which the AC states explicitly.
+ */
+function placeClearOfAnchor(card: HTMLElement, anchorRect: DOMRect, gap = 8): void {
+  const margin = 4;
+  const below = window.innerHeight - anchorRect.bottom - gap - margin;
+  const above = anchorRect.top - gap - margin;
+  const band = Math.max(below, above);
+  if (band >= MIN_USABLE_CARD_PX) {
+    // Cap to the band so `positionNear`'s viewport clamp never has to pull the card
+    // back over its own anchor. `.comment-popover-list` is `overflow-y: auto`, so
+    // the messages scroll instead. Re-set on every open, so a tighter band from a
+    // previous open never sticks; `Math.min` keeps the CSS 70vh ceiling in force.
+    card.style.maxHeight = `${Math.min(band, window.innerHeight * 0.7)}px`;
+  } else {
+    // AC8's stated exception. No band can hold a usable card — the anchor is taller
+    // than the space around it, which is the NORMAL case for the gutter-pin and
+    // Comment-tab routes, whose rect is the whole anchored block (a long paragraph,
+    // a table, or a multi-block anchor carried by `#content`). Capping anyway
+    // clipped the reply box and the action bar out of the card entirely, so the
+    // overlap is accepted instead, exactly as the AC says, and the CSS ceiling
+    // governs. Clearing the inline value is what restores it.
+    card.style.maxHeight = '';
+  }
+  positionNear(card, anchorRect, gap);
 }
 
 /**
@@ -187,6 +254,12 @@ export function initCommentPopover(
 
   const card = el('div', COMMENT_POPOVER_CLASS);
   card.hidden = true;
+  // US-23.23 AC9: draggable, so a card that still hides something can be pushed
+  // aside. The shared helper (dom-utils) is the same one the Insert-Link/Image,
+  // cross-file-search and math-edit popups use; its DRAG_IGNORE_SELECTOR already
+  // exempts input/textarea/button/a/contenteditable, so every control inside the
+  // card keeps its normal click and typing behaviour.
+  makeDraggable(card);
   card.setAttribute('role', 'dialog');
 
   const header = el('div', 'comment-popover-header');
@@ -202,10 +275,17 @@ export function initCommentPopover(
   header.append(headerTitle, headerLine, statusPill, anchorStateNote);
 
   const quoteRow = el('div', 'comment-popover-quote');
+  quoteRow.setAttribute('data-no-drag', '');
   const quoteText = el('div', 'comment-popover-quote-text');
   quoteRow.appendChild(quoteText);
 
   const list = el('div', 'comment-popover-list');
+  // AC9: the header is the drag handle; the reading areas are not. `makeDraggable`
+  // `preventDefault`s every mousedown outside `DRAG_IGNORE_SELECTOR`, which
+  // suppressed mouse text-selection — on a card whose whole purpose is reading a
+  // comment, losing select-and-copy costs more than dragging from the body gains.
+  // `[data-no-drag]` is that selector's own documented escape hatch.
+  list.setAttribute('data-no-drag', '');
 
   const replyInput = document.createElement('textarea');
   replyInput.className = COMMENT_REPLY_INPUT_CLASS;
@@ -274,6 +354,9 @@ export function initCommentPopover(
   // independently of the card's own box.
   const confirmDialog = el('div', COMMENT_DELETE_CONFIRM_CLASS);
   confirmDialog.hidden = true;
+  // Without this, pressing the dialog's own message text drags the CARD out from
+  // under the dialog, which keeps its independent `position: fixed` coordinates.
+  confirmDialog.setAttribute('data-no-drag', '');
   confirmDialog.setAttribute('role', 'alertdialog');
   // NESTED_POPUP so Escape cancels this inner dialog, not the card hosting it.
   const confirmDismiss = initPopoverDismiss(
@@ -1104,13 +1187,13 @@ export function initCommentPopover(
   });
 
   return {
-    open(threadId, anchorRect, returnFocusTo): void {
+    open(threadId, anchorRect, opts): void {
       const anchor = resolve.anchorOf(threadId);
       if (!anchor) {
         showToast('That comment no longer exists.');
         return;
       }
-      focusOnClose = returnFocusTo;
+      focusOnClose = opts?.returnFocusTo;
       const isNewThread = currentThreadId !== threadId;
       currentThreadId = threadId;
       if (isNewThread) {
@@ -1145,12 +1228,14 @@ export function initCommentPopover(
       // Reveal BEFORE measuring: `scrollIntoView` moves the document, and the
       // card is `position: fixed`, so positioning against the pre-scroll rect
       // left it detached from (or covering) its own anchor.
+      // US-23.23: a caller that already has the anchor on screen at a known rect
+      // owns the placement. Only the launch-point callers reveal and re-measure.
       let rect = anchorRect;
-      if (anchor.carrier?.isConnected) {
+      if (opts?.rectIsAnchor !== true && anchor.carrier?.isConnected) {
         revealIfNeeded(anchor.carrier);
         rect = anchor.carrier.getBoundingClientRect();
       }
-      positionNear(card, rect);
+      placeClearOfAnchor(card, rect);
       cardDismiss.arm();
       highlight.setActiveThread(threadId);
     },
