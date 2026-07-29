@@ -13,8 +13,8 @@
  */
 import { el, encodeLinkPath, positionNear, relativeLinkPath } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
-import { QUICK_CORRECT_SEARCH_DEBOUNCE_MS } from './constants';
-import { AUTOLINK_PATH_ATTR, ENTITY_REF_CLASS } from './render';
+import { ENTITY_REF_CLASS, QUICK_CORRECT_SEARCH_DEBOUNCE_MS } from './constants';
+import { AUTOLINK_PATH_ATTR } from './render';
 import type { VsCodeApi } from './vscode-api';
 import type { EntitySuggestion, FileSuggestion } from '../../src/shared/messages';
 

@@ -9,7 +9,15 @@
  * dispatch (Plan/WEBVIEW_TEST.md).
  */
 import { test, expect, type Page, type Locator } from '@playwright/test';
-import { openEditor, waitForEdit } from './_harness';
+import { openEditor, waitForEdit, seedCommentThreads } from './_harness';
+
+/** Right-edge padding (px) the li handle adds past the marker/checkbox it covers (bug General #2,
+ * `LI_HANDLE_MARKER_COVER_PAD_PX` in drag-drop.ts) — kept in sync by hand, same as the pre-existing
+ * offset constants below. */
+const MARKER_COVER_PAD_PX = 2;
+/** Breathing-room padding (px) the leaf-`<li>` handle adds above/below the marker/checkbox row
+ * (bug General #2, `LI_HANDLE_ROW_PADDING_PX` in drag-drop.ts). */
+const ROW_PADDING_PX = 3;
 
 const DOC = `# Heading
 
@@ -61,19 +69,18 @@ test('hovering a nested <li> shows only the li handle, never the block handle', 
   await expect(liHandle).toHaveCSS('display', 'flex');
   await expect(page.locator(BLOCK_HANDLE_SELECTOR)).toHaveCSS('display', 'none');
 
-  // Marker clearance for a NESTED item: the handle sits snug just left of the child's OWN
-  // marker (right edge ~LI_HANDLE_MARKER_GAP_PX − LI_HANDLE_SHIFT_RIGHT_PX left of the child's
-  // content edge), and is still inside the inner list's gutter (right of the inner <ul>'s left
+  // Marker coverage for a NESTED item (bug General #2): the handle's right edge now extends
+  // MARKER_COVER_PAD_PX past the child's OWN content edge, covering its marker column instead of
+  // sitting beside it, and is still inside the inner list's gutter (right of the inner <ul>'s left
   // edge) — NOT pushed out to the inner list's left edge (which put it in the parent's marker
-  // column, far from the child's own bullet). 18 = 26 (LI_HANDLE_MARKER_GAP_PX) − 8
-  // (LI_HANDLE_SHIFT_RIGHT_PX), both in drag-drop.ts.
+  // column, far from the child's own bullet).
   const handleBox = await liHandle.boundingBox();
   const nestedBox = await page.locator('li', { hasText: 'Nested item' }).last().boundingBox();
   const innerListBox = await page.locator('ul ul').boundingBox();
   if (!handleBox || !nestedBox || !innerListBox) {
     throw new Error('missing bounding box');
   }
-  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(nestedBox.x - 18));
+  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(nestedBox.x + MARKER_COVER_PAD_PX));
   expect(handleBox.x + handleBox.width).toBeGreaterThan(innerListBox.x);
 });
 
@@ -87,7 +94,7 @@ test('hovering a depth-0 <li> also shows only the li handle (narrows the old bot
   await expect(page.locator(BLOCK_HANDLE_SELECTOR)).toHaveCSS('display', 'none');
 });
 
-test('the li handle sits snug just left of the marker, not out at the list edge', async ({ page }) => {
+test('the li handle covers the marker instead of sitting beside it', async ({ page }) => {
   await openEditor(page, ORDERED_DOC);
   const item = page.locator('li', { hasText: 'Second item' });
   await hoverCenter(page, item);
@@ -100,37 +107,140 @@ test('the li handle sits snug just left of the marker, not out at the list edge'
   if (!handleBox || !itemBox || !listBox) {
     throw new Error('missing bounding box');
   }
-  // Snug: right edge ~LI_HANDLE_MARKER_GAP_PX − LI_HANDLE_SHIFT_RIGHT_PX left of the item's OWN
-  // content edge — just left of the right-aligned number, never on top of it (anchoring at
-  // `li.left` did that). And strictly inside the marker gutter (right of the <ol>'s own left
-  // edge) — NOT pushed out to the list edge (which put a nested item's handle in the parent's
-  // column). 18 = 26 (LI_HANDLE_MARKER_GAP_PX) − 8 (LI_HANDLE_SHIFT_RIGHT_PX), both in drag-drop.ts.
-  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(itemBox.x - 18));
+  // Covers (bug General #2): right edge now MARKER_COVER_PAD_PX PAST the item's OWN content
+  // edge, so the right-aligned number renders under the handle instead of beside it. And still
+  // strictly inside the marker gutter (right of the <ol>'s own left edge) — NOT pushed out to the
+  // list edge (which put a nested item's handle in the parent's column).
+  expect(Math.round(handleBox.x + handleBox.width)).toBe(Math.round(itemBox.x + MARKER_COVER_PAD_PX));
   expect(handleBox.x + handleBox.width).toBeGreaterThan(listBox.x);
 });
 
-test('on a narrow-gutter task list the handle is clamped to the list edge, not flung off-screen', async ({
-  page,
-}) => {
-  // A task list uses a much smaller left padding (~1.2em) than an ordinary list's 40px, so
-  // `li.left - LI_HANDLE_MARKER_GAP_PX` would fall LEFT of the list's own edge — and, at a
-  // small left reserve, off the left of the viewport. `liHandleAnchorLeft` clamps to the
-  // enclosing list's left edge so the handle stays grabbable.
-  await openEditor(page, `# Heading\n\n- [ ] First task\n- [ ] Second task\n`);
-  const item = page.locator('li', { hasText: 'Second task' });
+test('on a 2-digit ordered-list item the handle still reaches past the wider marker column', async ({ page }) => {
+  // A fixed-width gap (the old design) only cleared a single-digit marker — anchoring past the
+  // item's own content edge instead (bug General #2) covers markers up to ~2 digits (bug_Drag &
+  // Drop.md #3), the common case. `.dd-handle`'s fixed 22px width is NOT re-measured per marker,
+  // so this is a known, accepted scope limit, not a general guarantee: a 3+ digit marker (an
+  // ordered list of 100+ items) can still poke out past the handle's left edge — deliberately out
+  // of scope (see spec's Design Notes).
+  const items = Array.from({ length: 11 }, (_, i) => `${i + 1}. Item ${i + 1}`).join('\n');
+  await openEditor(page, `# Heading\n\n${items}\n`);
+  const item = page.locator('li', { hasText: 'Item 11' });
   await hoverCenter(page, item);
 
   const handle = page.locator('.dd-li-handle');
   await expect(handle).toHaveCSS('display', 'flex');
   const handleBox = await handle.boundingBox();
-  const listBox = await page.locator('ul').first().boundingBox();
-  if (!handleBox || !listBox) {
+  const itemBox = await item.boundingBox();
+  if (!handleBox || !itemBox) {
     throw new Error('missing bounding box');
   }
-  // Clamped: right edge at (not left of) the list's own left edge — without the clamp it would
-  // sit ~7px further left (li.left − 26 < list.left for a task list). And on-screen.
-  expect(handleBox.x + handleBox.width).toBeGreaterThanOrEqual(listBox.x - 1);
-  expect(handleBox.x).toBeGreaterThanOrEqual(0);
+  expect(handleBox.x + handleBox.width).toBeGreaterThanOrEqual(itemBox.x);
+});
+
+test('on a genuinely wrapped multi-line leaf <li>, the handle aligns with row 1, not the full block center', async ({
+  page,
+}) => {
+  // The original bug General #2 report: a leaf `<li>` (no nested list) whose own text wraps
+  // across several lines used to center the handle glyph over the WHOLE wrapped block instead of
+  // row 1. A narrow viewport (same pattern as list-handle-zen.spec.ts/table-fit-mode.spec.ts)
+  // forces real multi-line wrapping regardless of font metrics.
+  await page.setViewportSize({ width: 420, height: 700 });
+  const LONG_TEXT =
+    'Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey.';
+  await openEditor(page, `# Heading\n\n- ${LONG_TEXT}\n`);
+  const item = page.locator('li', { hasText: 'Alpha bravo' });
+  const itemBox = await item.boundingBox();
+  if (!itemBox) {
+    throw new Error('missing bounding box');
+  }
+  // Sanity: the text really did wrap (multi-line box is taller than a single line).
+  const lineHeight = await item.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+  expect(itemBox.height).toBeGreaterThan(lineHeight * 1.5);
+
+  await hoverCenter(page, item);
+  const handle = page.locator('.dd-li-handle');
+  await expect(handle).toHaveCSS('display', 'flex');
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) {
+    throw new Error('missing bounding box');
+  }
+  // Row-1 aligned (within one line-height of the item's own top), not centered on the full
+  // multi-line block.
+  expect(handleBox.y).toBeGreaterThanOrEqual(itemBox.y - ROW_PADDING_PX - 1);
+  expect(handleBox.y).toBeLessThan(itemBox.y + lineHeight);
+});
+
+test('a task list stays unaffected in Reading Mode (indent unified with plain lists)', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- [ ] First task\n- [ ] Second task\n`, {
+    readability: { enabled: true, mode: 'standard', fontFamily: '', zen: false },
+  });
+  const item = page.locator('li', { hasText: 'Second task' });
+  const checkbox = item.locator('input[type="checkbox"]');
+  await hoverCenter(page, item);
+
+  const handle = page.locator('.dd-li-handle');
+  await expect(handle).toHaveCSS('display', 'flex');
+  const handleBox = await handle.boundingBox();
+  const checkboxBox = await checkbox.boundingBox();
+  if (!handleBox || !checkboxBox) {
+    throw new Error('missing bounding box');
+  }
+  // Same covering geometry as outside Reading Mode — the unified indent just moves where the
+  // list renders, it doesn't change the handle's own anchor logic.
+  expect(handleBox.x).toBeLessThanOrEqual(checkboxBox.x);
+  expect(handleBox.x + handleBox.width).toBeGreaterThanOrEqual(checkboxBox.x + checkboxBox.width);
+});
+
+test('on a task list the handle covers the real checkbox element', async ({ page }) => {
+  // A task list's own padding (~1.2em) is narrower than an ordinary list's (40px) — the OLD
+  // fixed-gap design clamped to the list edge here; the handle now anchors past the real
+  // checkbox's own rect instead (bug General #2), independent of that padding.
+  await openEditor(page, `# Heading\n\n- [ ] First task\n- [ ] Second task\n`);
+  const item = page.locator('li', { hasText: 'Second task' });
+  const checkbox = item.locator('input[type="checkbox"]');
+  await hoverCenter(page, item);
+
+  const handle = page.locator('.dd-li-handle');
+  await expect(handle).toHaveCSS('display', 'flex');
+  const handleBox = await handle.boundingBox();
+  const checkboxBox = await checkbox.boundingBox();
+  if (!handleBox || !checkboxBox) {
+    throw new Error('missing bounding box');
+  }
+  // The handle's box fully contains the checkbox on every side — it visually covers/replaces
+  // it on hover, with breathing-room padding above/below (ROW_PADDING_PX), not a bare fixed gap.
+  expect(handleBox.x).toBeLessThanOrEqual(checkboxBox.x);
+  expect(handleBox.x + handleBox.width).toBeGreaterThanOrEqual(checkboxBox.x + checkboxBox.width);
+  expect(handleBox.y).toBeLessThan(checkboxBox.y);
+  expect(handleBox.y + handleBox.height).toBeGreaterThan(checkboxBox.y + checkboxBox.height);
+});
+
+test('a task-list handle never overlaps the comment-gutter-pin lane when a thread is attached', async ({
+  page,
+}) => {
+  const TASK_TEXT = 'Epsilon task item text.';
+  await openEditor(page, `# Heading\n\n- [ ] ${TASK_TEXT}\n`, { commentHighlightOn: true });
+  await seedCommentThreads(page, [
+    { threadId: 'thread-1', recordedText: TASK_TEXT, offsetStart: 0, offsetEnd: TASK_TEXT.length, lastKnownLine: 3 },
+  ]);
+  await expect(page.locator('.comment-gutter-pin')).toHaveCount(1);
+  await expect(page.locator('body')).toHaveClass(/comment-gutter-active/);
+
+  await hoverCenter(page, page.locator('li', { hasText: TASK_TEXT }));
+  const handle = page.locator('.dd-li-handle');
+  await expect(handle).toHaveCSS('display', 'flex');
+
+  const handleBox = await handle.boundingBox();
+  const pinBox = await page.locator('.comment-gutter-pin').boundingBox();
+  if (!handleBox || !pinBox) {
+    throw new Error('missing bounding box');
+  }
+  const disjoint =
+    handleBox.x + handleBox.width <= pinBox.x ||
+    pinBox.x + pinBox.width <= handleBox.x ||
+    handleBox.y + handleBox.height <= pinBox.y ||
+    pinBox.y + pinBox.height <= handleBox.y;
+  expect(disjoint).toBe(true);
 });
 
 test('parent and child handles use the identical snug-to-own-marker offset (consistent per-level rhythm)', async ({
@@ -155,16 +265,17 @@ test('parent and child handles use the identical snug-to-own-marker offset (cons
     throw new Error('missing handle box');
   }
 
-  // Each handle sits the SAME gap left of its own item's content edge — so the parent handle is
-  // balanced against its child group exactly as the child handle is against its own marker, one
-  // indent step apart (child handle further right, nearer its own deeper number).
+  // Each handle covers the SAME amount past its own item's content edge (bug General #2) — so
+  // the parent handle is balanced against its child group exactly as the child handle is against
+  // its own marker, one indent step apart (child handle further right, nearer its own deeper
+  // number).
   const parentOffset = parentBox.x - (parentHandle.x + parentHandle.width);
   const childOffset = nestedBox.x - (childHandle.x + childHandle.width);
   expect(Math.round(childOffset)).toBe(Math.round(parentOffset));
   expect(childHandle.x).toBeGreaterThan(parentHandle.x);
 });
 
-test('parent and child handles are a uniform height, each aligned to its own item top (not subtree-tall)', async ({
+test('parent (nestedList branch) and child (leaf branch) handles are each aligned to their own item top, not subtree-tall', async ({
   page,
 }) => {
   await openEditor(page, DOC);
@@ -186,11 +297,14 @@ test('parent and child handles are a uniform height, each aligned to its own ite
     throw new Error('missing handle box');
   }
 
-  // Uniform height, and each handle top-aligned to its OWN item's row — the parent handle no
-  // longer spans its whole subtree (which made its centered glyph float over the children).
-  expect(Math.round(parentHandle.height)).toBe(Math.round(childHandle.height));
+  // Each handle top-aligned to its OWN item's row — the parent handle no longer spans its whole
+  // subtree (which made its centered glyph float over the children). The parent (`nestedList`
+  // branch) is unchanged/unpadded — out of scope for bug General #2, a "do not touch" boundary in
+  // the spec — while the child (leaf branch) gains the new breathing-room padding, so their
+  // heights/tops are no longer expected to match; the delta is exactly the padding added.
   expect(Math.round(parentHandle.y)).toBe(Math.round(parentBox.y));
-  expect(Math.round(childHandle.y)).toBe(Math.round(nestedBox.y));
+  expect(Math.round(childHandle.y)).toBe(Math.round(nestedBox.y - ROW_PADDING_PX));
+  expect(Math.round(childHandle.height)).toBe(Math.round(parentHandle.height) + ROW_PADDING_PX * 2);
   // The parent has a nested child, so its full <li> box is taller than its own-content handle.
   expect(parentHandle.height).toBeLessThan(parentBox.height);
 });
@@ -527,9 +641,10 @@ test('a cursor in the gap between two loose (blank-line-separated) nested list i
   // Must resolve to one of the two nested items (whichever row is vertically nearer), never
   // silently fall back to the ancestor "Parent item" <li> (bug 0716 round 2, #2 resurfacing in
   // the gap band). Handles are now a uniform own-content height at each item's OWN top, so
-  // assert by ROW: the handle sits at a nested item's row (>= the first nested row's top), not
-  // up at the parent's own row above it — a height check no longer discriminates.
-  expect(handleBox.y).toBeGreaterThanOrEqual(Math.round(box1.y) - 1);
+  // assert by ROW: the handle sits at a nested item's row (>= the first nested row's top, minus
+  // the row's own breathing-room padding, bug General #2), not up at the parent's own row above
+  // it — a height check no longer discriminates.
+  expect(handleBox.y).toBeGreaterThanOrEqual(Math.round(box1.y) - ROW_PADDING_PX - 1);
   expect(handleBox.y).toBeLessThan(Math.round(parentBox.y + parentBox.height));
 });
 
@@ -550,7 +665,7 @@ test('leaving #content leftward past the outermost item surfaces the whole-list 
   if (!initialHandleBox) {
     throw new Error('li handle missing after hover');
   }
-  expect(Math.round(initialHandleBox.height)).toBe(Math.round(nestedBox.height));
+  expect(Math.round(initialHandleBox.height)).toBe(Math.round(nestedBox.height) + ROW_PADDING_PX * 2);
 
   // `mousemove` (and findLiAt's own ancestor climb) never fires once the cursor has left
   // #content's own rendered box -- only #content's `mouseleave` does. A point this far left is
@@ -847,6 +962,38 @@ test('hovering the li handle glyph outlines its item, and moving off the glyph c
   // when the exit re-enters #content).
   await hoverCenter(page, sibling);
   await expect(sibling).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('the li-handle hover outline on a task-list item reaches past the checkbox, not through it (bug General #2 follow-up)', async ({
+  page,
+}) => {
+  // The `.dd-hover-outline` wash/accent bar is sized to the <li>'s own box, but a task-list
+  // checkbox sits outside that box (negative-margin pull into the hidden native-marker gutter,
+  // markdown.css) — reported as the highlight's left edge visibly cutting into the checkbox.
+  await openEditor(page, `# Heading\n\n- [ ] First task\n- [x] Second task\n`);
+  const item = page.locator('li', { hasText: 'Second task' });
+  const checkbox = item.locator('input[type="checkbox"]');
+  const checkboxBox = await checkbox.boundingBox();
+  if (!checkboxBox) {
+    throw new Error('missing checkbox bounding box');
+  }
+
+  await hoverCenter(page, item);
+  const liHandle = page.locator('.dd-li-handle');
+  const handleBox = await liHandle.boundingBox();
+  if (!handleBox) {
+    throw new Error('li handle has no bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await expect(item).toHaveClass(/dd-hover-outline/);
+
+  // The highlight's own rendered left edge (li's box left + the `::before` overlay's computed
+  // `left` offset) must sit at/past the checkbox's own left edge, not inside it.
+  const overlayLeft = await item.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return r.left + parseFloat(getComputedStyle(el, '::before').left);
+  });
+  expect(overlayLeft).toBeLessThanOrEqual(checkboxBox.x);
 });
 
 test('hovering the whole-table handle glyph outlines the table, and moving off clears it (bug #3)', async ({

@@ -224,6 +224,153 @@ test('Task List strip on a LOOSE task list item produces a clean paragraph with 
   expect(facts.alphaHasCheckbox).toBe(true);
 });
 
+/**
+ * Bug 2026-07-28: converting a LOOSE bullet item (`<li><p>Bravo</p></li>`, how
+ * markdown-it renders a blank-line-separated list) to a task item put the
+ * checkbox BEFORE the <p> instead of inside it, so turndown emitted an empty
+ * "- [ ]" line followed by a detached indented paragraph — the item's text fell
+ * off the checkbox. `addCheckbox` (media/webview/dom-utils.ts) now uses the same
+ * tight/loose placement as computeTaskifyListRange.
+ */
+test('Task List on a LOOSE bullet item keeps its text on the checkbox line', async ({ page }) => {
+  await openEditor(page, '- Alpha\n\n- Bravo\n\n- Charlie\n');
+  const content = page.locator('#content');
+  // Confirm the list really rendered loose (item content wrapped in a <p>).
+  const isLoose = await content.evaluate(
+    (el) => !![...el.querySelectorAll('li')].find((l) => (l.textContent ?? '').includes('Bravo'))?.querySelector(':scope > p')
+  );
+  expect(isLoose).toBe(true);
+
+  await placeCaretInLi(page, 'Bravo');
+  await clearPosted(page);
+  await page.locator('#fmt-task').click();
+
+  const facts = await content.evaluate((el) => {
+    const li = [...el.querySelectorAll('li')].find((l) => (l.textContent ?? '').includes('Bravo'))!;
+    return {
+      checkboxInsideParagraph: !!li.querySelector(':scope > p > input[type="checkbox"]'),
+      checkboxBeforeParagraph: !!li.querySelector(':scope > input[type="checkbox"]'),
+      checkboxCount: li.querySelectorAll('input[type="checkbox"]').length,
+    };
+  });
+  expect(facts.checkboxInsideParagraph).toBe(true);
+  expect(facts.checkboxBeforeParagraph).toBe(false);
+  expect(facts.checkboxCount).toBe(1);
+
+  const md = await waitForEdit(page);
+  // Checkbox and text on the SAME line — the core of the bug. The bullet char
+  // follows the source style (`-` here), and a loose list keeps trailing spaces.
+  // `[^\S\n]` (not `\s`) so the match cannot straddle the newline of the buggy
+  // "- [ ]\n\n    Bravo" output.
+  expect(md).toMatch(/^[-*][^\S\n]+\[ \][^\S\n]+Bravo[^\S\n]*$/m);
+  // No bare marker line with the text orphaned into its own paragraph below.
+  expect(md).not.toMatch(/^[-*]\s+\[ \]\s*$/m);
+  expect((md.match(/\[ \]/g) ?? []).length).toBe(1);
+  expect(md).toMatch(/^[-*]\s+Alpha\s*$/m);
+  expect(md).toMatch(/^[-*]\s+Charlie\s*$/m);
+});
+
+/**
+ * Review follow-ups to the loose-placement fix — three consumers that still
+ * queried the checkbox tight-only (`:scope > input[type="checkbox"]`) and so
+ * went blind once a loose item's checkbox moved into its <p>.
+ */
+test('Task List over a multi-item LOOSE selection keeps contains-task-list on the resulting list', async ({
+  page,
+}) => {
+  // syncTaskListClass was tight-only: it scanned the rebuilt <ul>, found no
+  // direct-child checkbox and STRIPPED contains-task-list, so the items rendered
+  // with both a bullet marker and a checkbox, at the wrong indent.
+  await openEditor(page, '- Alpha\n\n- Bravo\n\n- Charlie\n');
+  const content = page.locator('#content');
+  await content.evaluate((el) => {
+    const lis = [...el.querySelectorAll('li')];
+    const alpha = lis.find((li) => (li.textContent ?? '').includes('Alpha'))!;
+    const bravo = lis.find((li) => (li.textContent ?? '').includes('Bravo'))!;
+    const r = document.createRange();
+    r.setStart(alpha, 0);
+    r.setEnd(bravo, bravo.childNodes.length);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await clearPosted(page);
+  await page.locator('#fmt-task').click();
+
+  const facts = await content.evaluate((el) => {
+    const li = [...el.querySelectorAll('li')].find((l) => (l.textContent ?? '').includes('Alpha'))!;
+    return {
+      listIsTaskList: !!li.parentElement?.classList.contains('contains-task-list'),
+      // The class drives markdown.css's marker suppression — assert the effect,
+      // not just the class name.
+      markerHidden: getComputedStyle(li).listStyleType === 'none',
+      checkboxPulledIntoGutter: getComputedStyle(li.querySelector('input[type="checkbox"]')!).marginLeft.startsWith('-'),
+    };
+  });
+  expect(facts.listIsTaskList).toBe(true);
+  expect(facts.markerHidden).toBe(true);
+  expect(facts.checkboxPulledIntoGutter).toBe(true);
+
+  const md = await waitForEdit(page);
+  expect((md.match(/\[ \]/g) ?? []).length).toBe(2);
+});
+
+test('Bullet on a LOOSE task item strips the checkbox instead of writing a raw <input> into the .md', async ({
+  page,
+}) => {
+  // setBulletList/setNumberedList decided "does this item have a checkbox?"
+  // tight-only, so a loose task item skipped stripCheckboxFrom and its <input>
+  // was carried verbatim into the unwrapped <p> — raw HTML in the user's file.
+  await openEditor(page, '- Alpha\n\n- Bravo\n\n- Charlie\n');
+  await placeCaretInLi(page, 'Bravo');
+  await clearPosted(page);
+  await page.locator('#fmt-task').click();
+  await waitForEdit(page);
+
+  await placeCaretInLi(page, 'Bravo');
+  await clearPosted(page);
+  await page.locator('#fmt-bullet').click();
+  const md = await waitForEdit(page);
+
+  expect(md).not.toContain('<input');
+  expect(md).not.toContain('task-list-item-checkbox');
+  expect(md).not.toContain('[ ]');
+  expect(md).toMatch(/^[-*][^\S\n]+Bravo[^\S\n]*$/m);
+});
+
+test('Enter inside a LOOSE task item keeps the checkbox ahead of the caret on the new item', async ({ page }) => {
+  // placeCaretAtBlockStart was tight-only, so on a loose item it fell back to
+  // selectNodeContents(li) and parked the caret BEFORE the checkbox — the next
+  // keystroke landed ahead of it and serialized the marker away.
+  await openEditor(page, '- [ ] Alpha\n\n- [ ] Bravo\n');
+  const content = page.locator('#content');
+  await content.evaluate((el) => {
+    const li = [...el.querySelectorAll('li')].find((l) => (l.textContent ?? '').includes('Bravo'))!;
+    const walker = document.createTreeWalker(li, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node && !(node.textContent ?? '').includes('Bravo')) {
+      node = walker.nextNode();
+    }
+    const text = node!;
+    const offset = (text.textContent ?? '').indexOf('Bravo') + 3; // right after "Bra"
+    const r = document.createRange();
+    r.setStart(text, offset);
+    r.collapse(true);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await clearPosted(page);
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('ZZ');
+  const md = await waitForEdit(page);
+
+  // The split item keeps its checkbox, and the typed text lands AFTER it.
+  expect(md).toMatch(/^[-*][^\S\n]+\[ \][^\S\n]*ZZvo[^\S\n]*$/m);
+  expect(md).not.toMatch(/ZZ\[ \]/);
+  expect((md.match(/\[ \]/g) ?? []).length).toBe(3);
+});
+
 test('Task List strip on a lone task item still returns to a plain paragraph (regression guard)', async ({ page }) => {
   await openEditor(page, '- [ ] Solo\n');
   const content = page.locator('#content');

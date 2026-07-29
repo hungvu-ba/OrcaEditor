@@ -12,6 +12,7 @@
 
 import { REBUILD_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
+import { createTabDock, type RightDockTab, type TabDock } from './right-dock';
 import { showTooltip, hideTooltip } from './tooltip';
 import { getDocHeight } from './match-utils';
 import { extractReadableText, countWords, estimateReadMinutes, formatCount } from './reading-stats';
@@ -20,10 +21,17 @@ import type { VsCodeApi } from './vscode-api';
 export interface TocController {
   /** Dựng lại danh sách mục lục (khi nội dung đổi) nếu panel đang mở. Có debounce. */
   refresh(): void;
-  /** Bật/tắt panel mục lục. */
-  toggle(): void;
+  /**
+   * Bật/tắt right dock. `tabId` chọn tab muốn mở (mặc định `toc`); nếu dock đang
+   * mở ở tab khác thì chuyển tab thay vì đóng (US-23.9).
+   */
+  toggle(tabId?: string): void;
+  /** Đóng dock bất kể tab nào đang hiện — dùng cho Escape và auto-hide. */
+  close(): void;
   /** Panel có đang mở không (để đồng bộ trạng thái nút toolbar). */
   isOpen(): boolean;
+  /** The shared tab container, so other modules can register their own tab (US-23.9). */
+  dock: TabDock;
   /** Re-apply the panel width, capped to the current window (call on window resize). */
   reflowWidth(): void;
 }
@@ -62,52 +70,12 @@ const TOC_DEFAULT_WIDTH = 300;
 /** US-10.6: heading-level filter — số heading tối đa (level <= 3, khớp default) trước khi mặc định thu về H2. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-/**
- * US-10.7 reading-progress ring geometry (SVG stroke-dashoffset donut) —
- * matches the design handoff's 54x54 hifi ring (r=24, stroke-width 6,
- * circumference 150.8). The viewBox and the rendered size are both a fixed
- * 54px (#toc-progress-ring in editor.css) — the ring no longer scales with the
- * panel width, since a resizing ring read as unstable.
- */
-const RING_VIEWBOX_SIZE = 54;
-const RING_CENTER = RING_VIEWBOX_SIZE / 2;
-const RING_RADIUS = 24;
-const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
-
-/** Builds the reading-progress ring: a track circle + a fill circle animated via stroke-dashoffset, plus a centered percent label. */
-function createProgressRing(): SVGElement {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.id = 'toc-progress-ring';
-  svg.setAttribute('viewBox', `0 0 ${RING_VIEWBOX_SIZE} ${RING_VIEWBOX_SIZE}`);
-  svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', 'Reading progress: 0%');
-
-  const track = document.createElementNS(SVG_NS, 'circle');
-  track.setAttribute('class', 'toc-progress-track');
-  track.setAttribute('cx', String(RING_CENTER));
-  track.setAttribute('cy', String(RING_CENTER));
-  track.setAttribute('r', String(RING_RADIUS));
-
-  const fill = document.createElementNS(SVG_NS, 'circle');
-  fill.setAttribute('class', 'toc-progress-fill');
-  fill.setAttribute('cx', String(RING_CENTER));
-  fill.setAttribute('cy', String(RING_CENTER));
-  fill.setAttribute('r', String(RING_RADIUS));
-  fill.setAttribute('stroke-dasharray', String(RING_CIRCUMFERENCE));
-  fill.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE));
-
-  const value = document.createElementNS(SVG_NS, 'text');
-  value.setAttribute('class', 'toc-progress-value');
-  value.setAttribute('x', String(RING_CENTER));
-  value.setAttribute('y', String(RING_CENTER + 1));
-  value.textContent = '0%';
-
-  svg.appendChild(track);
-  svg.appendChild(fill);
-  svg.appendChild(value);
-  return svg;
-}
+/** US-10.8: the `⋯` menu's "Outline depth" row labels, indexed by maxLevel. */
+const DEPTH_LABELS: Record<1 | 2 | 3, string> = {
+  1: 'H1',
+  2: 'H1–H2',
+  3: 'H1–H2–H3',
+};
 
 export function initToc(
   content: HTMLElement,
@@ -127,25 +95,33 @@ export function initToc(
   resizer.setAttribute('aria-orientation', 'vertical');
   resizer.setAttribute('aria-label', 'Resize table of contents');
 
-  const header = document.createElement('div');
-  header.id = 'toc-header';
+  // US-10.8: the US-10.7 54px ring + two stacked stat lines are restacked into a
+  // 3px progress bar plus a single 28px meta row (31px total, down from 110px) —
+  // the header no longer reserves toolbar height either, because US-23.7's tab
+  // strip already carries that margin. Presentation only: every US-10.7 value and
+  // visibility rule below is the shipped one, just written to different nodes.
+  const progress = document.createElement('div');
+  progress.id = 'toc-progress';
+  // Decorative, unlike the ring it replaces: the ring's aria-label was the only
+  // place the percent existed, but US-10.8 also puts it in the meta row as real
+  // text — labelling both would announce "Reading progress: 40%" then "40%".
+  progress.setAttribute('aria-hidden', 'true');
+  const progressFill = document.createElement('div');
+  progressFill.className = 'toc-progress-fill';
+  progress.appendChild(progressFill);
 
-  // US-10.7: reading-stats block replaces the "Table of Contents" title —
-  // progress ring + read-time/word-count text, both recomputed in build().
-  const stats = document.createElement('div');
-  stats.id = 'toc-stats';
-  stats.setAttribute('aria-label', 'Document reading statistics');
-  stats.appendChild(createProgressRing());
-  const statsText = document.createElement('div');
-  statsText.id = 'toc-stats-text';
-  const minutesLine = document.createElement('div');
-  minutesLine.className = 'toc-stats-minutes';
-  const wordsLine = document.createElement('div');
-  wordsLine.className = 'toc-stats-words';
-  statsText.appendChild(minutesLine);
-  statsText.appendChild(wordsLine);
-  stats.appendChild(statsText);
-  header.appendChild(stats);
+  const meta = document.createElement('div');
+  meta.id = 'toc-meta';
+  // role=group so the label is honoured — aria-label on a role-less div is
+  // dropped by assistive tech (the retired #toc-stats had the same latent bug).
+  meta.setAttribute('role', 'group');
+  meta.setAttribute('aria-label', 'Document reading statistics');
+  const metaText = document.createElement('span');
+  metaText.id = 'toc-meta-text';
+  const metaPct = document.createElement('span');
+  metaPct.id = 'toc-meta-pct';
+  meta.appendChild(metaText);
+  meta.appendChild(metaPct);
 
   // --- US-10.6: heading-level filter (1=H1 only, 2=H1–H2, 3=H1–H2–H3) ---
   // maxLevel mặc định = 3 (hiện H1–H2–H3); maxLevelInitialized đánh dấu heuristic
@@ -158,57 +134,64 @@ export function initToc(
     maxLevelInitialized = true;
   }
 
-  // Thanh lọc riêng (không nhét chung hàng với title trong #toc-header) — full
-  // width, nằm dưới #toc-header nên không bị #toolbar (overlap band) che mất.
-  // 3 nút pill H1/H2/H3 (design handoff: Wireframe Handoff/design_handoff_orca_editor
-  // — depthBtns) thay cho slider liên tục trước đây (US-10.6 decision 2026-07-19,
-  // xem Requirement - 10 Document Navigation.md — reverses the 2026-07-16 "native
-  // range slider" call now that the reason for it, avoiding a discrete control
-  // clashing with TOC-drag, no longer applies since TOC-drag was removed entirely).
-  const filterBar = document.createElement('div');
-  filterBar.id = 'toc-filter-bar';
-  filterBar.setAttribute('role', 'group');
-  filterBar.setAttribute('aria-label', 'Filter heading levels shown in Table of Contents');
-
-  const depthButtons: HTMLButtonElement[] = [];
-
-  function updateDepthButtons(): void {
-    for (const btn of depthButtons) {
-      const active = Number(btn.dataset.level) === maxLevel;
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', String(active));
-    }
-  }
-
-  // Apply a new depth filter — shared by the depth pills and the empty-state
-  // "Show H1–H2–H3" reset link so both go through one path (persist + rebuild).
+  // Apply a new depth filter — shared by the `⋯` menu's "Outline depth" rows and
+  // the empty-state "Show H1–H2–H3" reset link so both go through one path
+  // (persist + rebuild). US-10.8 removed the in-header pill row, but not this: the
+  // menu rows are rebuilt from `maxLevel` on every open, so there is no separate
+  // control state left to sync.
   function setMaxLevel(level: 1 | 2 | 3): void {
     maxLevel = level;
     maxLevelInitialized = true;
-    updateDepthButtons();
     // merge: giữ tocWidth do resizer ghi.
     vscode?.setState({ ...vscode.getState(), tocMaxLevel: maxLevel });
     build();
   }
 
-  for (const level of [1, 2, 3] as const) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'toc-depth-btn';
-    btn.dataset.level = String(level);
-    btn.textContent = `H${level}`;
-    btn.addEventListener('click', () => setMaxLevel(level));
-    depthButtons.push(btn);
-    filterBar.appendChild(btn);
-  }
-  updateDepthButtons();
-
   const list = document.createElement('nav');
   list.id = 'toc-list';
   list.setAttribute('aria-label', 'Table of Contents');
 
-  panel.append(resizer, header, filterBar, list);
+  // US-23.7: the panel is now a shared right-dock tab container. Everything the
+  // TOC used to append directly moves inside one tabpanel so a second tab
+  // (US-23.9's comment list) can share the dock; the resizer stays a direct child
+  // because it is absolutely positioned against the panel, not tab content.
+  const tocTabPanel = document.createElement('div');
+  tocTabPanel.id = 'toc-tabpanel';
+  tocTabPanel.appendChild(progress);
+  tocTabPanel.appendChild(meta);
+  tocTabPanel.appendChild(list);
+
+  panel.appendChild(resizer);
   document.body.appendChild(panel);
+
+  // createTabDock appends the strip, so it runs before any tab body is added.
+  // US-23.9 introduced this event so a switch made from the strip itself (header
+  // click, ←/→) could reach the toolbar's tab-derived button states. The `⚑`
+  // button that needed it has since been retired and `☰` reads only `isOpen()`,
+  // so nothing in the toolbar listens today — the event is kept as the strip's
+  // one outward signal. A DOM event rather than a wired callback, matching the
+  // `orca-comment-floating-changed` precedent — toc.ts must not know the toolbar.
+  const dock = createTabDock(panel, vscode, () => {
+    document.dispatchEvent(new CustomEvent('orca-dock-tab-changed'));
+  });
+  // US-10.8: the depth control is the first consumer of US-23.7's per-tab menu
+  // API. `menuItems` must be on the object handed to registerTab() — the `⋯`
+  // button's visibility is recomputed in activate(), which registerTab() calls,
+  // so attaching it afterwards would leave the button unrendered.
+  const tocTab: RightDockTab = {
+    id: 'toc',
+    label: 'TOC',
+    body: tocTabPanel,
+    menuTitle: 'Outline depth',
+    menuSelection: 'single',
+    menuItems: () =>
+      ([1, 2, 3] as const).map((level) => ({
+        label: DEPTH_LABELS[level],
+        checked: maxLevel === level,
+        onSelect: () => setMaxLevel(level),
+      })),
+  };
+  dock.registerTab(tocTab);
 
   // --- Bề rộng: khôi phục width đã lưu, cho kéo đổi rộng ---
 
@@ -299,57 +282,45 @@ export function initToc(
   // -------------------------------------------------------------------------
 
   /**
-   * US-10.7: (re)computes the progress-ring percent from the current scroll
-   * position and shows/hides the ring based on whether the document is
-   * scrollable. Cheap (no getBoundingClientRect) — safe to call from the
-   * rAF-throttled scroll path (scheduleUpdateActive → updateActive) with no
-   * new scroll listener. Re-queries the ring node each call (no stale/detached
-   * reference across a header rebuild).
+   * US-10.7 behavior, US-10.8 presentation: (re)computes the reading-progress
+   * percent from the current scroll position and shows/hides the bar and the meta
+   * row's percent based on whether the document is scrollable — a document that
+   * already fits the viewport shows neither, rather than a forced 100%. Cheap (no
+   * getBoundingClientRect) — safe to call from the rAF-throttled scroll path
+   * (scheduleUpdateActive → updateActive) with no new scroll listener.
    */
-  function updateProgressRing(): void {
-    const ring = header.querySelector<SVGElement>('#toc-progress-ring');
-    if (!ring) {
-      return;
-    }
+  function updateProgress(): void {
     const docHeight = getDocHeight();
     const scrollable = docHeight > window.innerHeight;
-    ring.toggleAttribute('hidden', !scrollable);
+    progress.toggleAttribute('hidden', !scrollable);
+    metaPct.toggleAttribute('hidden', !scrollable);
     if (!scrollable) {
-      return;
-    }
-    const fill = ring.querySelector('.toc-progress-fill');
-    const valueText = ring.querySelector('.toc-progress-value');
-    if (!fill || !valueText) {
       return;
     }
     const maxScroll = docHeight - window.innerHeight;
     const fraction = maxScroll <= 0 ? 1 : Math.min(1, Math.max(0, window.scrollY / maxScroll));
     const percent = fraction >= 1 ? 100 : Math.floor(fraction * 100);
-    fill.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE * (1 - percent / 100)));
-    valueText.textContent = `${percent}%`;
-    ring.setAttribute('aria-label', `Reading progress: ${percent}%`);
+    progressFill.style.width = `${percent}%`;
+    metaPct.textContent = `${percent}%`;
   }
 
   /**
-   * US-10.7: recomputes word count + read time from the current document and
-   * updates the ring's initial value. Runs on the same debounced cadence as
-   * the TOC list rebuild (called from build(), which only runs while open).
+   * US-10.7 values, US-10.8 layout: recomputes word count + read time and writes
+   * them as one meta-row line. Runs on the same debounced cadence as the TOC list
+   * rebuild (called from build(), which only runs while open). A document with no
+   * readable prose hides this line only — the percent keeps its own scrollable
+   * rule above.
    */
   function updateReadingStats(): void {
-    const minutesLine = header.querySelector<HTMLElement>('.toc-stats-minutes');
-    const wordsLine = header.querySelector<HTMLElement>('.toc-stats-words');
-    if (!minutesLine || !wordsLine) {
-      return;
-    }
     const words = countWords(extractReadableText(content));
     const hasWords = words > 0;
-    minutesLine.hidden = !hasWords;
-    wordsLine.hidden = !hasWords;
+    metaText.hidden = !hasWords;
     if (hasWords) {
-      minutesLine.textContent = `${estimateReadMinutes(words)} min read`;
-      wordsLine.textContent = `${formatCount(words)} word${words === 1 ? '' : 's'}`;
+      metaText.textContent = `${estimateReadMinutes(words)} min read · ${formatCount(words)} word${
+        words === 1 ? '' : 's'
+      }`;
     }
-    updateProgressRing();
+    updateProgress();
   }
 
   function build(): void {
@@ -366,7 +337,6 @@ export function initToc(
       const defaultLevelCount = allHeadings.filter((h) => headingLevel(h) <= 3).length;
       if (defaultLevelCount > TOC_FILTER_DEFAULT_MAX_COUNT) {
         maxLevel = 2;
-        updateDepthButtons();
       }
       maxLevelInitialized = true;
     }
@@ -420,12 +390,12 @@ export function initToc(
 
       // Only offer the reset when clearing the filter would actually reveal a
       // heading — i.e. one exists at a selectable depth (≤3). A document whose
-      // only headings are H4–H6 is no-match at every pill level, so a reset
+      // only headings are H4–H6 is no-match at every depth level, so a reset
       // would be a dead-end; show the message alone there, no false affordance.
       const canReset = noMatch && allHeadings.some((h) => headingLevel(h) <= 3);
       if (canReset) {
-        // Reset the filter to show all levels, in place — saves the user
-        // reaching back up to the depth pills (design handoff affordance).
+        // Reset the filter to show all levels, in place — saves the user opening
+        // the `⋯` menu, which is where US-10.8 moved the depth control.
         const reset = document.createElement('button');
         reset.type = 'button';
         reset.className = 'toc-empty-reset';
@@ -499,9 +469,9 @@ export function initToc(
   // -------------------------------------------------------------------------
 
   function updateActive(): void {
-    // US-10.7: ring tracks scroll independently of whether the doc has any
-    // headings, so it must update before the entries.length early return.
-    updateProgressRing();
+    // US-10.7: the progress readout tracks scroll independently of whether the
+    // doc has any headings, so it must update before the entries.length return.
+    updateProgress();
     if (entries.length === 0) {
       return;
     }
@@ -716,22 +686,52 @@ export function initToc(
     requestAnimationFrame(step);
   }
 
-  function toggle(): void {
+  /**
+   * US-23.9: one container. `#toc-toggle` asks for `toc`; the Comment tab is
+   * reached from the strip header now that its `⚑` toolbar button is retired,
+   * so no caller passes `'comment'` today. Asking for a tab the container is
+   * already showing closes it (the shipped toggle gesture), asking for another
+   * one switches instead — closing a panel the user is trying to switch inside
+   * of would read as a dropped click.
+   *
+   * Omitting `tabId` means "no explicit target", which is what US-23.7 AC7's
+   * last-tab restore needs: the auto-open paths and the toggle-closed gesture
+   * must not silently re-select TOC, or the restored tab would never survive to
+   * be seen. Only a caller that genuinely means TOC passes 'toc'.
+   */
+  function toggle(tabId?: string): void {
+    if (open && tabId !== undefined && dock.activeId() !== tabId) {
+      dock.activate(tabId);
+      return;
+    }
     // Capture the anchor at the current (pre-reflow) layout, then flip the class
     // so the padding transition starts; the pin loop holds the anchor afterwards.
     pinAnchorAcrossReflow();
     open = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {
+      dock.activate(tabId ?? dock.activeId() ?? 'toc');
       build();
       // padding của body vừa đổi → tính lại vị trí active ở frame kế tiếp
       requestAnimationFrame(updateActive);
+    } else {
+      // The `⋯` menu is a document.body child, so it does not disappear with the
+      // panel. Every close path funnels through here — the toolbar button, the
+      // `openToc` host command, the `/toc` slash command, the narrow-viewport
+      // auto-hide — so this is the one place that can guarantee no orphan menu.
+      dock.closeMenu();
     }
   }
 
   return {
     isOpen: () => open,
     toggle,
+    close(): void {
+      if (open) {
+        toggle();
+      }
+    },
+    dock,
     reflowWidth,
     refresh(): void {
       if (!open) {

@@ -451,3 +451,94 @@
 | 0.9.0 | 2026-07-25 | Fix: "Copy `@file` reference" / "View raw Markdown source" no longer dirty the file on a doc with a pre-existing render/reserialize drift — both are now `viewOnly`, matching Reading Mode/Focus/TOC. |
 | 0.9.0 | 2026-07-25 | Fix (security): bump transitive dev dependency `fast-uri` to 3.1.4, patching a host-confusion parser desync (CVE-2026-16221). |
 | 0.9.0 | 2026-07-25 | Fix (security): pin `brace-expansion` to 5.0.8 via npm `overrides` and bump eslint/eslint-plugin-security, closing a DoS advisory (GHSA-mh99-v99m-4gvg) unreachable via a plain audit fix. |
+| 0.10.0 | 2026-07-25 | Feature: add `check:cross-platform` script (metaKey/ctrlKey symmetry, `⌘`/`Ctrl` labels, CRLF/NFD/Windows-path fixtures) run automatically by `build.sh release`. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.1): right-click "Add Comment" creates a `vscode.comments` thread anchored to the selected node — author, timestamp, no change to the `.md`. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): comment anchors survive edits via four tiers (structural id, fuzzy text, covering block, floating), re-evaluated whenever an edit settles; duplicated anchors are re-minted. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): "Unresolved location" panel lists every floated comment (no cap), with drag-to-reattach, a ranked Re-attach… picker, and a keyboard-equivalent path; toolbar button badges the count. |
+| 0.10.0 | 2026-07-26 | Change: toolbar icon area now extends flush to both screen edges (was inset 26px each side); the "everything collapses to overflow" breakpoint moved accordingly. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.5): comments persist to an append-only `<file>.md.orca-comments.jsonl` sidecar, written before the thread exists and reloaded on reopen; the `.md` is never touched. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.5): renaming a `.md` moves its comment sidecar in the same VS Code operation (atomic, prompts on collision); a case/NFC-drifted sidecar is adopted on open. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.6): comment actions can no longer touch the `.md` — the session-only anchor marker class is stripped before serialize, and undo/redo inside a comment text field never reaches the document stack. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.2): comment gutter pins (with clustering), a "Show Comments" inline highlight toggle, and a thread popover for reply/delete — reachable from both the webview and the native `vscode.comments` UI. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.3): two-step comment resolve — Author marks Resolved, Reviewer Closes, one-step Reopen, a live "text may have changed" hint, and an anchor-lost confirmation. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.7): the right TOC panel becomes a shared tab container — 32px tab strip with the TOC as its first tab, an overflow-menu shell, and Escape-to-close ordering. |
+| 0.10.0 | 2026-07-27 | Feature (US-10.8): TOC header restacked — ring and stat lines become a 3px bar plus one 28px meta row; depth pills move into the keyboard-operable `⋯` menu. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.9): Comment tab beside the TOC lists every thread grouped by status, absorbing the Unresolved-location panel; fixes reloaded threads collapsing onto one anchor. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.11): resolve state machine revised — no author gate on Resolve/Close/Reopen, full transition trail, one-directional drift, illegal status lines skipped at load, anchor-lost dialog becomes a notice. |
+| 0.10.0 | 2026-07-27 | Feature (US-19.26): table fit-mode only caps columns when max-content overflows the panel, hands the freed width back, and ignores empty cells in p75. |
+| 0.10.0 | 2026-07-27 | Fix (US-19.26): fit-mode no longer pins width when there's room — typing into a cell grows it live instead of waiting for the debounced re-fit. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.10): comment create hardened — click-point anchoring, refusals stay inline with retry, up-front document guard, author-name prompt, plain-text rendering everywhere. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.8): reload resolves comment threads through the anchor tiers before drawing, marks non-exact anchor state on all three surfaces, hardens the reply guard with a timeout. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.8): reply draft survives a concurrent native Close (Reopen re-enables it), and the popover's temporary highlight is independent of the "Show Comments" toggle. |
+| 0.10.0 | 2026-07-27 | Feature (US-2.7): front matter redesigned — collapsed one-line row by default, click to expand into a title/badge/grid card or view raw YAML. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.20): sidecar append always writes a leading newline (no more probe); a confirmed-overwrite rename backs up the destination's sidecar instead of deleting it. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.19): a comment/reply/status-change/delete now saves the dirty document first, so its recorded text can never outlive an unsaved buffer. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.13 AC4/AC5): merging two commented paragraphs no longer floats the second thread; verified empty-text anchors already skip tier 2; fixes a stale gutter/highlight refresh after a same-state re-resolve. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.13 AC1/AC2): a manual re-attach or an automatic floating-recovery now persists via a new sidecar line, so it survives a document reload instead of floating again. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.12): "Copy all as Markdown" — a Comment-tab menu item and Command Palette command export the file's review to the clipboard as Markdown. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.13 AC3/AC6): a floating-thread delete re-validates at confirm time; two panels on one document share one authoritative anchor resolver now. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.17): new `@vscode/test-electron` host test track covers the sidecar's rename/adopt/append filesystem paths via an injectable seam — no real modal or permission errors needed. |
+| 0.10.0 | 2026-07-28 | Fix (US-9.3): select-highlight's cached text map now invalidates on any local edit (MutationObserver), not just a full re-render — stops painting the match on unrelated text. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.21): 7 leaking presentation classes and injected UI chrome now strip from raw-HTML `.md` output on every serialize path, not just some. |
+| 0.10.0 | 2026-07-28 | Fix: the Ctrl/Cmd+F find box now sits below the sticky toolbar (offset by the measured `--toolbar-height`) instead of painting over its buttons. |
+| 0.10.0 | 2026-07-28 | Fix: follow-ups to the find-box move — toolbar dropdowns and the image-zoom button now win the band under the toolbar, and a short pane keeps the box on screen. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.14): edit a posted comment or reply via a new append-only `edit` sidecar line, folded latest-wins and marked "edited"; Closed threads locked. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.18): undo/redo pressed in any comment surface now dies there instead of rolling back the document, and a write refuses if the document moved mid-flight. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.16 AC1-AC8): comment sidecar dedup now spans every line type, belonging uses discriminating-length thresholds, delete drops its author gate. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.22): an unregistered `#content` CSS class now fails `npm test`; the scan found and registered three more leaking classes. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.15): the comment sidecar now reloads when it changes on disk — threads added, refreshed and removed — and load losses plus an unshareable sidecar are surfaced. |
+| 0.10.0 | 2026-07-28 | Fix: repo hygiene — typecheck and lint now pass clean, roundtrip skips stale bundles with no source (23/23, was a misleading 27/27), comment-popover.ts no longer binary. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.18 host track): AC6's probe now proves an undo reverts US-23.5's sidecar rename — a confirmed defect; the capability positive control no longer reddens the gate. |
+| 0.10.0 | 2026-07-28 | Fix: test:host was a coin flip — restored windows ran the suite in 10 concurrent hosts, and every case ran with no workspace folder, hiding a false pass. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.18 AC6): a webview undo no longer reverts your last file rename — the provider refuses the global undo command when the document owns no undo step. |
+| 0.10.0 | 2026-07-28 | Fix: the feature-guide screenshot generator moved out of test/webview to scripts/feature-shots — a test run no longer rewrites eight tracked PNGs. |
+| 0.10.0 | 2026-07-28 | Fix: two comments sharing one anchor no longer mask each other's approximate marking — a relocated cluster now shows as misplaced instead of exact. |
+| 0.10.0 | 2026-07-28 | Fix: the native comment reply and thread-create paths now strip bidi/control characters and normalize line endings before writing to the sidecar. |
+| 0.10.0 | 2026-07-28 | Fix: a status change now answers its refusals before the author-name prompt instead of after, and claims its dedup guard ahead of every await. |
+| 0.10.0 | 2026-07-28 | Fix: exclude playwright.shots.config.ts and scripts/ from eslint so npm run lint reports zero errors again. |
+| 0.10.0 | 2026-07-28 | Fix: caption badges, math wrappers and diagram frames inside a raw-HTML-serialized table now write their markdown source instead of editor markup into the .md. |
+| 0.10.0 | 2026-07-28 | Fix: webview test workers no longer share one harness HTML file — the truncate race that made four specs time out waiting for #content is gone. |
+| 0.10.0 | 2026-07-28 | Feature: a unit guard now fails when a webview-posted message type has no case in provider.ts, the gap that hid the editComment bug. |
+| 0.10.0 | 2026-07-28 | Fix: symlinks below the workspace root no longer let asset writes, orphan hard-deletes or sidecar mutations escape the allowed roots (Security Audit S-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): a raw `<meta http-equiv="refresh">` tag in a document can no longer trigger a navigation attempt on open (Security Audit S-2). |
+| 0.10.0 | 2026-07-28 | Fix (security): PlantUML diagram SVGs are now sanitized (script/handler/foreignObject/javascript: stripped) before insertion, matching Mermaid's own sanitization (Security Audit S-4). |
+| 0.10.0 | 2026-07-28 | Fix (security): declared `untrustedWorkspaces` restrictions now actually restrict — customFolderPath and comments.authorName are User-scope only in a restricted workspace (Security Audit S-5). |
+| 0.10.0 | 2026-07-28 | Fix (security): dropped file names that are Windows-reserved device names or end in dots/spaces are now sanitized before saving (Security Audit S-6). |
+| 0.10.0 | 2026-07-28 | Fix (perf): Mermaid engine (~2.8 MB) now lazy-loads only when a document has a mermaid block, shrinking every preview's baseline bundle (Performance Audit P-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): closed a control-character javascript: bypass in the PlantUML SVG sanitizer and a compound-extension gap in the reserved-device-name check, found in review of S-4/S-6. |
+| 0.10.0 | 2026-07-28 | Fix: dropped file names with whitespace before a leading dot (e.g. " .htaccess") were not stripped of the dot — fixed the step order in sanitizeDroppedFileName. |
+| 0.10.0 | 2026-07-28 | Fix (security): paste/insert now also sanitizes raw meta-refresh HTML, closing a second entry point to Security Audit S-2 (defense-in-depth). |
+| 0.10.0 | 2026-07-28 | Fix (perf): serialize no longer rescans the whole cloned document once per block — one index pass replaces the quadratic lookup (Performance Audit P-2). |
+| 0.10.0 | 2026-07-28 | Fix (perf): block, list-item and table row/column drags now compute their drop line once per frame instead of per mousemove (Performance Audit P-3/P-4). |
+| 0.10.0 | 2026-07-28 | Fix (perf): dragging a popup no longer measures it on every mouse move — the move is frame-coalesced, keeping the mid-drag resize behaviour (Performance Audit P-5). |
+| 0.10.0 | 2026-07-28 | Fix (perf): the comment re-attach picker walks the document once on open instead of on every filter keystroke (Performance Audit P-6). |
+| 0.10.0 | 2026-07-28 | Fix (perf review): the re-attach picker now re-walks when the document is rebuilt under it, and a dismissed popup no longer moves off-screen mid-drag. |
+| 0.10.0 | 2026-07-28 | Fix: converting a loose bullet item to a task item keeps its text on the checkbox line instead of leaving an empty "- [ ]" marker. |
+| 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |
+| 0.10.0 | 2026-07-28 | Fix (security S-1 residual): asset paste/drop/undo-restore/orphan-cleanup now refuse a symlinked target file instead of writing or reading through it. |
+| 0.10.0 | 2026-07-28 | Perf: typing re-serializes only the blocks an edit touched via a per-block markdown cache, instead of turndown over the whole document (Performance Audit P-7). |
+| 0.10.0 | 2026-07-28 | Perf: each typing sync now sends only the changed region to the host instead of the whole document, with a revision-checked full resync fallback (Performance Audit P-8). |
+| 0.10.0 | 2026-07-28 | Feature: the gutter comment-group (cluster) pill gets a per-mode outline token --comment-pin-group-border for Standard Light/Dark, Sepia and Paper. |
+| 0.10.0 | 2026-07-28 | Fix: comment-anchor highlight gains contrast in Standard Dark — wash .22 to .30, active .34 to .46, plus a violet underline rule; text colour untouched. |
+| 0.10.0 | 2026-07-28 | Fix: the comment-group pin halo painted the VS Code theme background over Sepia/Paper pages, reading as a thick black ring; it now follows --rp-bg. |
+| 0.10.0 | 2026-07-28 | Fix: gutter comment pins read the VS Code link/description colours directly, showing blue on Sepia/Paper; they now resolve through the per-palette --comment-status-* layer. |
+| 0.10.0 | 2026-07-28 | Fix: table fit-mode measured a column floor over text glyphs only, so a one-token inline code chip broke at a hyphen inside an already-wide column, leaving dead space. |
+| 0.10.0 | 2026-07-29 | Fix: a comment in a loose list item reported the whole list's first line, and gutter pins on nearby-but-different lines merged; pins now cluster per exact line. |
+| 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-9): a host update now splices only changed top-level blocks into the preview instead of rebuilding the whole document via innerHTML. |
+| 0.10.0 | 2026-07-29 | Fix: annotate a loop-local var in `nearestSrcRange` — TS7022 implicit-any circular inference broke `npm run typecheck`. |
+| 0.10.0 | 2026-07-29 | Fix (perf, Performance Audit P-7): hovering a drag handle no longer marks its block dirty, so it is not re-serialized nor replaced by the next host update. |
+| 0.10.0 | 2026-07-29 | Fix: Comment tab rows showed the anchored text; they now show the comment itself, and the `⚑` toolbar button is retired with its lost-anchor badge moved to Show Comments. |
+| 0.10.0 | 2026-07-29 | Fix: the toast sat below the right dock in the stacking order, so whenever the dock was open every toast — including US-23.8 AC4's deletion notice — was painted behind it. |
+| 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-8): host→webview document updates now ship only the changed region, guarded by rev + seq base checks with a full-push fallback. |
+| 0.10.0 | 2026-07-29 | Fix: comment delete now physically rewrites/removes the sidecar's cascade instead of appending a tombstone, and deletes the file once zero threads remain. |
+| 0.10.0 | 2026-07-29 | Feature: clicking a comment's highlighted text opens its thread popover, a second route beside the gutter pin; refused for drag/double-click selections and when Show Comments is off. |
+| 0.10.0 | 2026-07-29 | Fix: the two host-side comment anchor warnings now also reach the "Markdown WYSIWYG" output channel, not just console.warn. |
+| 0.10.0 | 2026-07-29 | Feature: the comment popover now anchors to the clicked text instead of the whole block, keeps clear of that text, and can be dragged aside. |
+| 0.10.0 | 2026-07-29 | Fix: `/` at the start of a bullet line (empty, with text, or a loose `<li><p>` item) now offers Bulleted/Numbered list in the Blocks menu instead of showing none. |
+| 0.10.0 | 2026-07-29 | Fix: the click-to-open-comment deferral is now 500ms, up from 250ms, so a double-click at the common OS interval no longer flashes the popover. |
+| 0.10.0 | 2026-07-29 | Fix: Bullet/Numbered/Task-list on a paragraph next to a sibling blockquote no longer merges the new list into the blockquote. |
+| 0.10.0 | 2026-07-29 | Fix: a plain click on a `## References` entry no longer navigates (US-20.5) — behaves like any other link, Cmd/Ctrl+Click still opens it. |
+| 0.10.0 | 2026-07-29 | Fix: task-list drag handle no longer overlaps the comment-gutter pin, now covers the checkbox/marker, and stays row-aligned on wrapped items. |
+| 0.10.0 | 2026-07-29 | Fix: the drag-handle hover highlight on a task-list item now extends past the checkbox instead of cutting through its left edge. |
+| 0.10.0 | 2026-07-29 | Fix: a still-present comment was flagged "foreign" once its anchored text got a markdown link, because the link's raw target slug split the belonging match. |
+| 1.0.0 | 2026-07-29 | Feature: added Comment feature. |

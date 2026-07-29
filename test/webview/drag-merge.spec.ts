@@ -135,6 +135,11 @@ test('code block (pre) dragged past 2 paragraphs lands flat, content preserved, 
 test('mermaid block actually moves past a trailing paragraph', async ({ page }) => {
   const doc = 'Paragraph One.\n\n```mermaid\ngraph TD; A-->B;\n```\n\nParagraph Two.\n';
   await openEditor(page, doc);
+  // P-1 (Performance — Audit.md): the engine now loads lazily, so the diagram's
+  // height still settles asynchronously after 'ready' — wait for it so the drag's
+  // bounding-box measurements below aren't taken against a pre-render layout that
+  // then shifts mid-drag (same wait mermaid-zoom.spec.ts/mermaid-palette-recolor.spec.ts use).
+  await page.locator('.md-mermaid-chart svg').waitFor();
   const idsBefore = await blockIds(page);
 
   const mermaid = page.locator('.md-mermaid');
@@ -152,6 +157,9 @@ test('mermaid block actually moves past a trailing paragraph', async ({ page }) 
 test('math block dragged next to a mermaid block yields exactly one .md-math-block', async ({ page }) => {
   const doc = '```mermaid\ngraph TD; A-->B;\n```\n\nParagraph.\n\n$$x^2$$\n';
   await openEditor(page, doc);
+  // P-1: mermaid is the drag TARGET here — wait for its render to settle first,
+  // same reasoning as the test above.
+  await page.locator('.md-mermaid-chart svg').waitFor();
   const idsBefore = await blockIds(page);
 
   const math = page.locator('.md-math-block');

@@ -347,6 +347,33 @@ test('typing `/` at the start of a bullet opens the popup (Mention Declare #2)',
   expect(await page.locator('.trigger-popup-item').count()).toBeGreaterThan(0);
 });
 
+test('`/` at the start of a bullet line that ALREADY has text also offers the Blocks group (not just an empty line)', async ({
+  page,
+}) => {
+  await openEditor(page, '- item text\n');
+  await placeCaretIn(page, '#content li', true); // caret before "item text", nothing preceding it
+  await page.keyboard.type('/');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  const groupLabels = await page.locator('.trigger-popup-group-label').allTextContents();
+  expect(groupLabels).toContain('Blocks');
+  const labels = await page.locator('.trigger-popup-item-label').allTextContents();
+  expect(labels).toEqual(expect.arrayContaining(['Bulleted list', 'Numbered list']));
+});
+
+test('picking "Numbered list" from `/` at the start of a bullet with text converts it cleanly, no nested/duplicated markup', async ({
+  page,
+}) => {
+  await openEditor(page, '- item text\n');
+  await placeCaretIn(page, '#content li', true);
+  await page.keyboard.type('/numbered');
+  await page.locator('.trigger-popup-item', { hasText: 'Numbered list' }).first().click();
+
+  await page.waitForFunction(() => !!document.querySelector('#content ol'));
+  expect(await page.locator('#content ul').count()).toBe(0); // fully retagged, not left alongside
+  expect(await page.locator('#content ol li').count()).toBe(1);
+  expect((await page.locator('#content ol li').first().textContent())?.trim()).toBe('item text');
+});
+
 /**
  * Build a genuinely empty `<h1>` (caret inside). The slash command now pre-fills
  * selected "Heading 1" sample text (Bug #9), so the sample is cleared afterwards
@@ -400,7 +427,7 @@ test('picking a convert-block (Heading 2) inside an empty heading converts it in
   expect(await page.locator('#content h2').count()).toBe(1);
 });
 
-test('an empty bullet still offers only the inline group (block picks are out of scope for list items)', async ({
+test('an empty bullet (line-start) offers the Blocks group, narrowed to the list-item-safe subset', async ({
   page,
 }) => {
   await openEditor(page, '');
@@ -413,7 +440,48 @@ test('an empty bullet still offers only the inline group (block picks are out of
   await page.keyboard.type('/');
   await expect(page.locator('.trigger-popup')).toBeVisible();
   const groupLabels = await page.locator('.trigger-popup-group-label').allTextContents();
+  expect(groupLabels).toContain('Blocks');
+  const labels = await page.locator('.trigger-popup-item-label').allTextContents();
+  expect(labels).toEqual(expect.arrayContaining(['Bulleted list', 'Numbered list']));
+  // Heading/Blockquote/Table/etc. stay top-level-only — inside a bare `<li>`
+  // they fall to the uncharacterized-shape execCommand fallback, which wraps
+  // the WHOLE parent list in the target tag instead of converting one line.
+  expect(labels).not.toContain('Heading 1');
+  expect(labels).not.toContain('Blockquote');
+  expect(labels).not.toContain('Table');
+  expect(labels).not.toContain('Code block');
+  expect(labels).not.toContain('Mermaid diagram');
+  expect(labels).not.toContain('PlantUML diagram');
+  expect(labels).not.toContain('Math block');
+  expect(labels).not.toContain('Horizontal rule');
+  expect(labels).not.toContain('Table of Contents');
+});
+
+test('`/` mid-bullet (text before it) still omits the Blocks group', async ({ page }) => {
+  await openEditor(page, '- item\n');
+  await placeCaretIn(page, '#content li', false); // caret at end of existing text
+  await page.keyboard.type(' /');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  const groupLabels = await page.locator('.trigger-popup-group-label').allTextContents();
   expect(groupLabels).not.toContain('Blocks');
+});
+
+test('`/` at the start of a LOOSE bullet (blank line between items, `<li><p>` shape) also offers the Blocks group', async ({
+  page,
+}) => {
+  // A blank line between items makes markdown-it render `<li><p>text</p></li>`
+  // instead of a plain `<li>text</li>` — the trigger's own block gate
+  // (`closest('p, h1, h2, h3, li, blockquote')`) matches the inner `<p>` first,
+  // so triggerBlock is that `<p>`, never the `<li>`.
+  await openEditor(page, '- item one\n\n- item two\n');
+  await placeCaretIn(page, '#content li p', true); // start of the first loose item's paragraph
+  await page.keyboard.type('/');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  const groupLabels = await page.locator('.trigger-popup-group-label').allTextContents();
+  expect(groupLabels).toContain('Blocks');
+  const labels = await page.locator('.trigger-popup-item-label').allTextContents();
+  expect(labels).toEqual(expect.arrayContaining(['Bulleted list', 'Numbered list']));
+  expect(labels).not.toContain('Heading 1');
 });
 
 test('input-rules stand down while the `/` popup is open (no conflicting `#` heading rule)', async ({ page }) => {

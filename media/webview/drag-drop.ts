@@ -29,12 +29,14 @@
  */
 import { readSrcRange } from './block-info';
 import { MERMAID_CLASS, MATH_BLOCK_CLASS } from './pipeline';
+import { DD_HOVER_OUTLINE_CLASS, DD_SOURCE_MUTED_CLASS } from './constants';
 import { isValidSiblingGap, computeSiblingMove, applyBlockMove, applyLiReparentMove } from './sibling-move';
 import { normalizeListDom } from './dom-serialize-prep';
 import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-popup';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
+import { findTaskCheckbox } from './dom-utils';
 
 export interface DragDropDeps {
   scheduleSync: () => void;
@@ -67,20 +69,15 @@ const HANDLE_WIDTH_PX = 22;
 /** Manual tuning knob: shifts the block handle this many px to the right of its default
  * anchor (flush against the block's own left edge). Adjust by hand to taste. */
 const BLOCK_HANDLE_SHIFT_RIGHT_PX = 0;
-/** Gap between the li handle's right edge and the `<li>`'s OWN content-left edge, so the handle
- * sits snug just left of that item's own right-aligned marker (bullet/number) with a balanced
- * gap — not out at the enclosing list's left edge (which pushed a nested item's handle into its
- * PARENT's marker column, far from the child's own number). Tuned by on-screen verification:
- * the marker renders at the sequential position (single-digit for lists under ~10 items),
- * right-aligned toward `li.left`; ~26px lands the handle just left of it with a ~6px gap.
- * Each nesting level uses the same rule, so parent/child handles are one indent step apart. */
-const LI_HANDLE_MARKER_GAP_PX = 26;
 /** Floor for the li handle's own-content height (positionLiHandle) — a parent `<li>` whose only
  * child is its nested list has ~0 own content, so clamp to keep a grabbable handle. */
 const LI_HANDLE_MIN_HEIGHT_PX = 20;
-/** Manual tuning knob: shifts the li handle (and its hitzone, via `liHandleAnchorLeft`) this many
- * px to the right of its default anchor. Adjust by hand to taste. */
-const LI_HANDLE_SHIFT_RIGHT_PX = 8;
+/** Small padding (px) so the li handle's box fully contains the marker/checkbox it covers
+ * (bug General #2) instead of sharing an exact edge with it. Manual tuning knob. */
+const LI_HANDLE_MARKER_COVER_PAD_PX = 2;
+/** Breathing room (px) added above and below the marker/checkbox row's own height so the leaf-`<li>`
+ * handle isn't flush against the row's glyphs (bug General #2). Manual tuning knob. */
+const LI_HANDLE_ROW_PADDING_PX = 3;
 /** Size of the table-level handle's own corner hit zone (bug 0716 round 2, #1) — matches
  * `.dd-handle`'s base 22×24 footprint (editor.css). */
 const TABLE_HANDLE_WIDTH_PX = 22;
@@ -285,7 +282,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     for (const el of blockOutlineSpan(block)) {
-      el.classList.add('dd-hover-outline');
+      el.classList.add(DD_HOVER_OUTLINE_CLASS);
     }
   }
 
@@ -294,7 +291,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       return;
     }
     for (const el of blockOutlineSpan(block)) {
-      el.classList.remove('dd-hover-outline');
+      el.classList.remove(DD_HOVER_OUTLINE_CLASS);
     }
   }
 
@@ -372,7 +369,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (block === hoveredTableBlock) {
       return;
     }
-    hoveredTableBlock?.classList.remove('dd-hover-outline');
+    hoveredTableBlock?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     hoveredTableBlock = block;
   }
 
@@ -585,7 +582,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     menuTargetBlock = block;
     // Outline the whole section a "Move" would carry (bug General #2), reusing the span already
     // computed above — matches the section-spanning handle so the menu targets what it says.
-    span.forEach((el) => el.classList.add('dd-hover-outline'));
+    span.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
   }
 
   document.addEventListener('mousedown', (e) => {
@@ -624,12 +621,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   // ---------------------------------------------------------------------
   // List-item hover handle (US-17.5, M3) — mutually exclusive with the block
   // handle above (onContentHover: `block = li ? null : findBlockAt(...)`), so
-  // they never show at once inside a list. The li handle sits a small fixed gap
-  // (LI_HANDLE_MARKER_GAP_PX) left of the hovered <li>'s OWN content-left edge —
-  // snug just left of that item's own marker — so a deeper item's handle is
-  // further RIGHT (nearer its own, more-indented number), and moving the cursor
-  // LEFT off it enters the parent item's hover zone (climbLiFrom), the parent's
-  // handle sitting snug to the parent's own marker one indent step further left.
+  // they never show at once inside a list. The li handle covers the hovered
+  // <li>'s OWN marker/checkbox column (bug General #2) — so a deeper item's
+  // handle is further RIGHT (nearer its own, more-indented marker), and moving
+  // the cursor LEFT off it enters the parent item's hover zone (climbLiFrom),
+  // the parent's handle covering the parent's own marker one indent step
+  // further left.
   // ---------------------------------------------------------------------
 
   const liHandleEl = document.createElement('div');
@@ -664,7 +661,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (li === hoveredLi) {
       return;
     }
-    hoveredLi?.classList.remove('dd-hover-outline');
+    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     hoveredLi = li;
   }
 
@@ -768,49 +765,76 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     return climbLiFrom(li, clientX);
   }
 
-  /** X of the li handle's right edge: `LI_HANDLE_MARKER_GAP_PX` left of the item's OWN
-   * content-left edge (snug just left of that item's own marker), but clamped to never go left
-   * of the enclosing `<ul>`/`<ol>`'s own left edge — so a narrow-gutter list (e.g. a task list,
-   * `padding: 1.2em`) or a very shallow item can't fling the handle off the left of the viewport;
-   * it then just sits at the list edge (as it did before this change). */
+  /** Right edge (viewport x) of the reserved comment-gutter pin lane, or `null` when no gutter is
+   * reserved (`!body.comment-gutter-active`). Read from the live `#comment-gutter` element's own
+   * rect instead of duplicating its CSS lane-width numbers (`editor.css`'s 60px/132px) — that
+   * element is created once at webview init (`comment-gutter.ts`) regardless of activity, so its
+   * rect is always available to measure. */
+  function commentGutterLaneRight(): number | null {
+    if (!document.body.classList.contains('comment-gutter-active')) {
+      return null;
+    }
+    return document.getElementById('comment-gutter')?.getBoundingClientRect().right ?? null;
+  }
+
+  /** X of the li handle's right edge: covers the item's OWN marker/checkbox column instead of
+   * sitting beside it (bug General #2 — reverses this function's previous "never on top of the
+   * marker" rule; the marker is now meant to visually disappear under the handle on hover, same
+   * as a task-list checkbox already sitting inside the hidden native-marker slot). For a
+   * task-list `<li>`, anchors past the real checkbox element's own right edge (exact, measurable);
+   * for a plain `<li>` (native `::marker`, unmeasurable), anchors past the item's own
+   * content-left edge, where the marker renders. Clamped to never go left of the enclosing
+   * `<ul>`/`<ol>`'s own left edge, and — when a comment gutter is reserved — never inside its pin
+   * lane, so a narrow-gutter list (task list) or an attached comment thread can't pull the handle
+   * into territory it doesn't own. */
   function liHandleAnchorLeft(li: HTMLElement): number {
     const listLeft = (li.parentElement ?? li).getBoundingClientRect().left;
-    return (
-      Math.max(listLeft, li.getBoundingClientRect().left - LI_HANDLE_MARKER_GAP_PX) +
-      LI_HANDLE_SHIFT_RIGHT_PX
-    );
+    const checkbox = findTaskCheckbox(li);
+    const markerRight = checkbox ? checkbox.getBoundingClientRect().right : li.getBoundingClientRect().left;
+    let anchorRight = Math.max(listLeft, markerRight) + LI_HANDLE_MARKER_COVER_PAD_PX;
+    const laneRight = commentGutterLaneRight();
+    if (laneRight !== null) {
+      anchorRight = Math.max(anchorRight, laneRight + HANDLE_WIDTH_PX);
+    }
+    return anchorRight;
   }
 
   /** Covers only the li's OWN content rows (top of the li → top of its first nested list, or the
-   * full li height for a leaf), NOT the whole nested subtree, and sits `LI_HANDLE_MARKER_GAP_PX`
-   * left of the li's OWN content-left edge — snug just left of that item's own marker (clamped,
-   * see `liHandleAnchorLeft`). Sizing to the subtree made a parent handle's (vertically centered)
-   * glyph float down in the MIDDLE of its children; own-content height keeps every level's handle
-   * a uniform size next to its own marker. Same `right`-anchored technique as `positionHandle`. */
+   * marker/checkbox row's own height plus breathing-room padding for a leaf), NOT the whole nested
+   * subtree, and covers the li's OWN marker/checkbox column (clamped, see `liHandleAnchorLeft`).
+   * Sizing to the subtree made a parent handle's (vertically centered) glyph float down in the
+   * MIDDLE of its children; own-content height keeps a parent's handle next to its own marker
+   * (unchanged, out of scope for bug General #2 — only the leaf branch below gained padding).
+   * Same `right`-anchored technique as `positionHandle`. */
   function positionLiHandle(li: HTMLLIElement | null): void {
     if (!li) {
       liHandleEl.style.display = 'none';
       return;
     }
     const r = li.getBoundingClientRect();
-    // Vertical extent = the item's OWN content only: down to the top of its first nested
-    // `<ul>`/`<ol>` (its own line(s)), or the full height for a leaf. A parent whose only child
-    // is its nested list has ~0 own content, so clamp to a grabbable minimum.
-    const nestedList = li.querySelector(':scope > ul, :scope > ol');
-    const ownHeight = nestedList
-      ? Math.max(LI_HANDLE_MIN_HEIGHT_PX, nestedList.getBoundingClientRect().top - r.top)
-      : r.height;
-    // Right edge sits a small fixed gap left of the `<li>`'s OWN content-left edge, landing
-    // just left of that item's own right-aligned marker (bullet/number). Anchoring at `r.left`
-    // itself put the handle on top of the marker; anchoring at the enclosing list's left edge
-    // pushed a nested item's handle all the way into its PARENT's marker column, far from the
-    // child's own number — this keeps it snug to the item's own marker, one indent step per
-    // nesting level (see LI_HANDLE_MARKER_GAP_PX / liHandleAnchorLeft).
-    const anchorLeft = liHandleAnchorLeft(li);
     liHandleEl.style.display = 'flex';
-    liHandleEl.style.top = `${r.top}px`;
-    liHandleEl.style.height = `${ownHeight}px`;
-    liHandleEl.style.right = `${window.innerWidth - anchorLeft}px`;
+    liHandleEl.style.right = `${window.innerWidth - liHandleAnchorLeft(li)}px`;
+    // A parent whose only child is its nested list has ~0 own content, so clamp to a grabbable
+    // minimum; its vertical extent is the item's OWN content only, down to the top of its first
+    // nested `<ul>`/`<ol>` — unchanged from before this change (out of scope, bug General #2).
+    const nestedList = li.querySelector(':scope > ul, :scope > ol');
+    if (nestedList) {
+      liHandleEl.style.top = `${r.top}px`;
+      liHandleEl.style.height = `${Math.max(LI_HANDLE_MIN_HEIGHT_PX, nestedList.getBoundingClientRect().top - r.top)}px`;
+      return;
+    }
+    // A leaf item's own row is its marker/checkbox row's own height instead of the full wrapped
+    // `r.height` — that centered the glyph in the middle of a multi-line wrapped item instead of
+    // next to its marker (bug General #2). Checkbox rect for task lists (exact); the item's own
+    // computed line-height otherwise (a native `::marker` has no queryable box). Breathing-room
+    // padding is added above/below so the box isn't flush against its row's glyphs.
+    const checkbox = findTaskCheckbox(li);
+    const rowTop = checkbox ? checkbox.getBoundingClientRect().top : r.top;
+    const rowHeight = checkbox
+      ? checkbox.getBoundingClientRect().height
+      : parseFloat(getComputedStyle(li).lineHeight) || r.height;
+    liHandleEl.style.top = `${rowTop - LI_HANDLE_ROW_PADDING_PX}px`;
+    liHandleEl.style.height = `${rowHeight + LI_HANDLE_ROW_PADDING_PX * 2}px`;
   }
 
   /** Innermost level under the cursor wins (bug 0716 #3): resolve the `<li>` first, and
@@ -1048,6 +1072,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   function maintainAutoScroll(clientY: number): void {
+    // Performance Audit P-3: this rect read is NOT cached per drag. In Zen mode the toolbar
+    // is `position: fixed` and slides in/out on its own top-edge watcher (readability.ts), so
+    // a drag-start snapshot goes stale by the bar's height and shifts the autoscroll band.
+    // The read is safe because the only caller is the coalesced drag frame — once per frame,
+    // batched with the drop-line reads, which is what the layout-thrash rule asks for.
     const toolbarBottom = document.getElementById('toolbar')?.getBoundingClientRect().bottom ?? 0;
     const nearTop = clientY < toolbarBottom + AUTOSCROLL_EDGE_PX;
     const nearBottom = clientY > window.innerHeight - AUTOSCROLL_EDGE_PX;
@@ -1316,7 +1345,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (kind === 'block') {
       const rect = dragSpan[0].getBoundingClientRect();
       const clone = dragSpan[0].cloneNode(true) as HTMLElement;
-      clone.classList.remove('dd-hover-outline');
+      clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;
       // Height is left auto: the ghost's own padding needs extra room beyond
@@ -1327,22 +1356,22 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
         badge.textContent = String(dragSpan.length);
         ghostEl.appendChild(badge);
       }
-      dragSpan.forEach((el) => el.classList.add('dd-source-muted'));
+      dragSpan.forEach((el) => el.classList.add(DD_SOURCE_MUTED_CLASS));
     } else if (liDragged) {
       const rect = liDragged.getBoundingClientRect();
       const clone = liDragged.cloneNode(true) as HTMLElement;
-      clone.classList.remove('dd-hover-outline');
+      clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;
-      liDragged.classList.add('dd-source-muted');
+      liDragged.classList.add(DD_SOURCE_MUTED_CLASS);
     }
     ghostEl.style.display = 'block';
     document.body.classList.add('dd-dragging');
   }
 
   function cleanupVisuals(): void {
-    dragSpan.forEach((el) => el.classList.remove('dd-source-muted'));
-    liDragged?.classList.remove('dd-source-muted');
+    dragSpan.forEach((el) => el.classList.remove(DD_SOURCE_MUTED_CLASS));
+    liDragged?.classList.remove(DD_SOURCE_MUTED_CLASS);
     ghostEl.style.display = 'none';
     ghostEl.replaceChildren();
     dropLineEl.style.display = 'none';
@@ -1421,6 +1450,48 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
   }
 
+  // Performance Audit P-3: rAF-coalesce the live drag's LAYOUT-READING work. `gapAt` reads a
+  // rect per top-level block (and `updateLiDropLine` per flattened li), then the drop-line
+  // styles are written — uncoalesced, that read-after-write cycle forces one reflow per
+  // mousemove and scales with document size. Same approved pattern as this file's own hover
+  // path. Only the latest coordinates survive the event→frame boundary.
+  let dragRaf = 0;
+  let dragX = 0;
+  let dragY = 0;
+
+  function cancelDragFrame(): void {
+    if (dragRaf !== 0) {
+      cancelAnimationFrame(dragRaf);
+      dragRaf = 0;
+    }
+  }
+
+  /** The coalesced per-frame drag body: drop line (which resolves `currentGap`/
+   * `currentGapValid`) and autoscroll, from the latest coordinates. The ghost's own
+   * left/top write is deliberately NOT in here — see `onDocMouseMove`. */
+  function runDragFrame(): void {
+    if (state !== 'dragging') {
+      return;
+    }
+    if (kind === 'block') {
+      updateBlockDropLine(dragY);
+    } else {
+      updateLiDropLine(dragX, dragY);
+    }
+    maintainAutoScroll(dragY);
+  }
+
+  /** Runs a still-pending drag frame now. Called from mouseup: the drop target is decided by
+   * `updateBlockDropLine`/`updateLiDropLine`, so a release inside the same frame as the last
+   * mousemove must not drop at the previous frame's gap. */
+  function flushDragFrame(): void {
+    if (dragRaf === 0) {
+      return;
+    }
+    cancelDragFrame();
+    runDragFrame();
+  }
+
   function onDocMouseMove(e: MouseEvent): void {
     if (state === 'armed') {
       const dx = e.clientX - startX;
@@ -1433,16 +1504,26 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'dragging') {
       return;
     }
+    // Per-event, not in the frame: it is a pure style write that forces no layout read, so
+    // coalescing it would only add latency — the same call the table drag keeps per-event.
+    // It must also stay on this event: `startDragging()` above flips the ghost to
+    // `display: block`, and a ghost shown before its first left/top write would paint one
+    // frame at its stale (or unset) position.
     updateGhostPosition(e.clientX, e.clientY);
-    if (kind === 'block') {
-      updateBlockDropLine(e.clientY);
-    } else {
-      updateLiDropLine(e.clientX, e.clientY);
+    dragX = e.clientX;
+    dragY = e.clientY;
+    if (dragRaf !== 0) {
+      return;
     }
-    maintainAutoScroll(e.clientY);
+    dragRaf = requestAnimationFrame(() => {
+      dragRaf = 0;
+      // Re-check inside the frame: the drag can end (mouseup/Esc) between the event and here.
+      runDragFrame();
+    });
   }
 
   function onDocMouseUp(): void {
+    flushDragFrame();
     if (state === 'dragging') {
       const shouldMove = currentGapValid;
       const dragKind = kind;
@@ -1502,6 +1583,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   }
 
   function detachDragListeners(): void {
+    cancelDragFrame();
     document.removeEventListener('mousemove', onDocMouseMove);
     document.removeEventListener('mouseup', onDocMouseUp);
     escDisposable?.dispose();
@@ -1535,7 +1617,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     armedBlock = block;
     // Preview the whole span a drag will move (bug General #2) — dragSpan is exactly the section
     // for a heading, or [block] otherwise, so no recompute is needed here.
-    dragSpan.forEach((el) => el.classList.add('dd-hover-outline'));
+    dragSpan.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
     attachDragListeners();
   }
 
@@ -1555,7 +1637,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     liFlatEntries = entries;
     liOrigDepth = liDepth(li);
     currentLiDepth = liOrigDepth;
-    li.classList.add('dd-hover-outline');
+    li.classList.add(DD_HOVER_OUTLINE_CLASS);
     attachDragListeners();
   }
 
@@ -1598,7 +1680,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
-    hoveredLi?.classList.add('dd-hover-outline');
+    hoveredLi?.classList.add(DD_HOVER_OUTLINE_CLASS);
   });
 
   liHandleEl.addEventListener('mousedown', (e) => {
@@ -1645,7 +1727,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // only re-targets which handle shows (a bare gutter band is not a glyph, so it
     // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
     // return-to-#content path — so clear it unconditionally here.
-    hoveredLi?.classList.remove('dd-hover-outline');
+    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (
@@ -1678,13 +1760,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (state !== 'idle') {
       return;
     }
-    hoveredTableBlock?.classList.add('dd-hover-outline');
+    hoveredTableBlock?.classList.add(DD_HOVER_OUTLINE_CLASS);
   });
   tableHandleEl.addEventListener('mouseleave', () => {
     if (state !== 'idle' || isMenuOpen()) {
       return;
     }
-    hoveredTableBlock?.classList.remove('dd-hover-outline');
+    hoveredTableBlock?.classList.remove(DD_HOVER_OUTLINE_CLASS);
   });
 
   function refresh(): void {

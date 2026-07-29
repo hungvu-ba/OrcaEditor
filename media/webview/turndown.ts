@@ -8,6 +8,7 @@
 import TurndownService from 'turndown';
 import { tables, taskListItems } from 'turndown-plugin-gfm';
 import {
+  CAPTION_CLASS,
   FRONT_MATTER_CLASS,
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
@@ -29,6 +30,21 @@ import {
   HR_STYLE_ATTR,
   TABLE_SEP_STYLE_ATTR,
 } from './block-style';
+import { COMMENT_ANCHOR_ATTR } from './block-map';
+import {
+  COMMENT_ANCHOR_ACTIVE_CLASS,
+  COMMENT_ANCHOR_STATE_ATTR,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+  DD_DROP_TARGET_CELL_CLASS,
+  MD_TABLE_FIT_CLASS,
+  MD_CODE_WRAPPED_CLASS,
+  ENTITY_REF_CLASS,
+  ENTITY_REVEAL_FLASH_CLASS,
+  BROKEN_REF_CLASS,
+  MD_CHROME_MARKER_ATTR,
+} from './constants';
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -183,6 +199,10 @@ export function createTurndown(): TurndownService {
   });
 
   // --- <img> HTML thô có attribute ngoài src/alt/title → giữ nguyên HTML ---
+  //     US-23.21 AC3: một attribute/class sẽ bị safeOuterHtml strip sạch
+  //     (TRANSIENT_ATTRS, hoặc `class` chỉ toàn token TRANSIENT_CLASSES) không
+  //     được tính là "extra" — nếu không thì kết quả đã stripped-về-không vẫn
+  //     đi đường raw HTML thay vì rule ảnh mặc định (![]()).
   td.addRule('htmlImgWithAttrs', {
     filter: (node) => {
       if (node.nodeName !== 'IMG') {
@@ -190,13 +210,31 @@ export function createTurndown(): TurndownService {
       }
       const attrs = (node as Element).attributes;
       for (let i = 0; i < attrs.length; i++) {
-        if (!['src', 'alt', 'title'].includes(attrs[i].name)) {
-          return true;
+        const name = attrs[i].name;
+        if (['src', 'alt', 'title'].includes(name)) {
+          continue;
         }
+        if (TRANSIENT_ATTRS.includes(name)) {
+          continue;
+        }
+        if (name === 'class') {
+          // .every() on an empty array is vacuously true, so a present-but-empty
+          // class="" (no real tokens) discounts the same as an all-transient one —
+          // both leave nothing for stripTransientClasses to strip.
+          const tokens = attrs[i].value.trim().split(/\s+/).filter(Boolean);
+          if (tokens.every((t) => TRANSIENT_CLASSES.includes(t))) {
+            continue;
+          }
+        }
+        return true;
       }
       return false;
     },
-    replacement: (_content, node) => (node as HTMLElement).outerHTML ?? '',
+    // safeOuterHtml, not raw outerHTML: this is the third raw-HTML emitter, and
+    // an editor-session attribute/class landing on the <img> would otherwise be
+    // written into the `.md` here while the other two strip it (US-23.6).
+    replacement: (_content, node) =>
+      typeof (node as HTMLElement).outerHTML === 'string' ? safeOuterHtml(node as HTMLElement) : '',
   });
 
   // --- strikethrough: markdown-it chỉ parse ~~ (2 dấu) ---
@@ -571,7 +609,9 @@ export function createTurndown(): TurndownService {
       const el = node as HTMLElement;
       const align = getBlockAlign(el);
       const tag = el.nodeName.toLowerCase();
-      const inner = collapseBlankLines(el.innerHTML ?? '');
+      // US-23.21 AC1: route through cloneAndStrip like every other raw-HTML
+      // emitter — this rule used to read live el.innerHTML unstripped.
+      const inner = collapseBlankLines(cloneAndStrip(el).innerHTML ?? '');
       return `\n\n<${tag} align="${align}">${inner}</${tag}>\n\n`;
     },
   });
@@ -678,13 +718,16 @@ function collapseBlankLines(html: string): string {
 /**
  * Editor-session metadata that must never leak into `.md` through raw-HTML
  * serialization paths (complex tables, kept/unknown tags): Block Map ids,
- * gutter line numbers, and the US-18.4 per-block style attributes — all
- * stamped on live DOM or the serialize clone, none of them document content.
+ * gutter line numbers, Req 23 comment-anchor ids, and the US-18.4 per-block
+ * style attributes — all stamped on live DOM or the serialize clone, none of
+ * them document content.
  */
 const TRANSIENT_ATTRS = [
   'data-block-id',
   'data-line',
   'data-line-end',
+  COMMENT_ANCHOR_ATTR,
+  COMMENT_ANCHOR_STATE_ATTR,
   HEADING_STYLE_ATTR,
   BULLET_STYLE_ATTR,
   CODE_STYLE_ATTR,
@@ -694,25 +737,254 @@ const TRANSIENT_ATTRS = [
   TABLE_SEP_STYLE_ATTR,
 ];
 
-function safeOuterHtml(el: HTMLElement): string {
+/**
+ * Same idea as TRANSIENT_ATTRS, for CLASSES — which the attribute loop cannot
+ * reach, since it can only delete `class` wholesale. Req 23 US-23.6: a comment
+ * action must never occupy a slot in the document's undo stack, so the marker
+ * comment-menu.ts puts on the anchored node while the composer is open must not
+ * survive into `.md` if a sync happens to serialize that node through a
+ * raw-HTML path. Every future comment class belongs here too (see the same
+ * warning at comment-panel.ts's drop-overlay).
+ *
+ * US-23.21 AC2/AC4/AC6: every other presentation class stamped on live
+ * `#content` nodes registers here too, one exported constant per owning
+ * feature (Req 21's entity-ref marker, Req 20's cross-reference nav flash,
+ * Req 17's drag-drop hover/mute states, Req 04's code-wrap marker, and
+ * `md-table-fit`, folded in from `stripTablePresentation`'s own former rival
+ * strip list so there is exactly one place a class is registered).
+ *
+ * US-23.21 AC5: every name below is a RESERVED name — a user-authored class
+ * in hand-written HTML that happens to collide with one of these is removed
+ * exactly like the editor-stamped one, since by the time this list runs there
+ * is no way to tell them apart (`postProcessEntityRefs` re-stamps `md-entity-ref`
+ * on every render, so a user's own `class="md-entity-ref"` is indistinguishable
+ * from the editor's). A class NOT in this list, whatever its name, always
+ * survives serialization untouched.
+ *
+ * US-23.22: forgetting to add a name here is a test failure, not a silent leak
+ * — `test/transient-class-scan.ts` (driven from `test/unit.ts`) scans every
+ * class stamped in `media/webview/*.ts` and fails on any name that is neither
+ * registered below nor listed in that file's `OUTSIDE_CONTENT_CLASSES`. Adding
+ * a name here also requires an exported constant in `constants.ts` and a strip
+ * case in `test/roundtrip/style-preservation.ts`.
+ *
+ * Exported because the list also answers "can this class change the `.md`?" for
+ * a second caller: main.ts's P-7 dirty tracker skips a `class` mutation whose
+ * only difference is tokens from here (Performance Audit P-7 deferred item 3).
+ */
+export const TRANSIENT_CLASSES = [
+  COMMENT_ANCHOR_ACTIVE_CLASS,
+  ENTITY_REF_CLASS,
+  ENTITY_REVEAL_FLASH_CLASS,
+  DD_HOVER_OUTLINE_CLASS,
+  DD_HOVER_OUTLINE_CELL_CLASS,
+  DD_DROP_TARGET_CELL_CLASS,
+  DD_SOURCE_MUTED_CLASS,
+  BROKEN_REF_CLASS,
+  MD_CODE_WRAPPED_CLASS,
+  MD_TABLE_FIT_CLASS,
+];
+
+/**
+ * Clones `el`, restores every editor-only wrapper to its `.md` source form and
+ * strips every TRANSIENT_ATTRS/TRANSIENT_CLASSES token, the table-fit
+ * presentation and any editor-injected UI chrome — shared by every raw-HTML
+ * emitter (US-23.21 AC1/AC1b) so a strip fix lands once instead of per call
+ * site. Operates on the clone only; the live #content DOM is never touched.
+ */
+function cloneAndStrip(el: HTMLElement): HTMLElement {
   const copy = el.cloneNode(true) as HTMLElement;
+  restoreWrapperSourceForms(copy);
   for (const attr of TRANSIENT_ATTRS) {
     copy.removeAttribute(attr);
     for (const child of Array.from(copy.querySelectorAll(`[${attr}]`))) {
       child.removeAttribute(attr);
     }
   }
+  stripTransientClasses(copy);
   stripTablePresentation(copy);
-  return collapseBlankLines(copy.outerHTML);
+  stripInjectedChrome(copy);
+  return copy;
+}
+
+/**
+ * Editor-only WRAPPERS: DOM the post-process passes build around a piece of
+ * markdown source, which therefore has a source form to be restored to. Each is
+ * owned by a turndown RULE on the normal path (`mathBlock`/`mathInline`/
+ * `mermaidDiagram`/`plantumlDiagram`, and turndown's SPAN default for
+ * `.md-caption`); `restoreWrapperSourceForms` is the raw-HTML path's equivalent.
+ */
+const WRAPPER_SELECTOR = [
+  CAPTION_CLASS,
+  MATH_INLINE_CLASS,
+  MATH_BLOCK_CLASS,
+  MERMAID_CLASS,
+  PLANTUML_CLASS,
+]
+  .map((cls) => `.${cls}`)
+  .join(', ');
+
+/**
+ * Replaces every editor-only wrapper in the clone with the `.md` source form it
+ * was built from, BEFORE the clone is serialized as raw HTML.
+ *
+ * On the normal path a turndown RULE does this, but a rule never runs inside
+ * `complexTableAsHtml` / `outerHtmlFallback` / `alignedBlock` — those emit the
+ * DOM verbatim. Without this, a `caption::NS_ID` badge or a formula inside a
+ * table that needs HTML serialization wrote the wrapper, its `md-*` classes,
+ * its `contenteditable="false"` and (for math) the entire rendered KaTeX
+ * subtree straight into the user's file (US-23.22 deferred item 1, measured
+ * 2026-07-28). Registering the class names would not have helped: the wrapper
+ * ELEMENT is what has to go, not just its class attribute. It also removes
+ * `.md-math-render` and the diagram `md-*-error` chart container by ownership —
+ * both carry `contenteditable="false"` with no `MD_CHROME_MARKER_ATTR`, so
+ * `stripInjectedChrome` never reached them and must not be widened to the bare
+ * attribute (see its doc comment).
+ *
+ * `querySelector` returns document order, so the first match is always the
+ * OUTERMOST wrapper and any nested one goes with it — that is what makes the
+ * loop terminate: every pass replaces one matching element with a replacement
+ * that never matches. `copy` itself is never a wrapper: turndown consults the
+ * dedicated rules before `keepReplacement`/`defaultReplacement`, and
+ * `.md-caption` is a SPAN, which `defaultReplacement` unwraps to its content.
+ */
+function restoreWrapperSourceForms(copy: HTMLElement): void {
+  const doc = copy.ownerDocument;
+  if (!doc) {
+    return;
+  }
+  for (let wrapper = copy.querySelector(WRAPPER_SELECTOR); wrapper; wrapper = copy.querySelector(WRAPPER_SELECTOR)) {
+    const parent = wrapper.parentNode;
+    if (!parent) {
+      return; // detached mid-walk — nothing left to replace it in.
+    }
+    parent.replaceChild(wrapperSourceForm(wrapper, doc), wrapper);
+  }
+}
+
+/**
+ * The `.md` source form `wrapper` was built from — see WRAPPER_SELECTOR.
+ *
+ * Everything here must survive turndown's own whitespace collapse, because the
+ * emitted HTML is re-parsed and re-serialized on the NEXT save: a newline in a
+ * plain text node comes back as a space, so a source form that needs newlines
+ * would churn the user's bytes on every pass. `<pre>` is the one element that
+ * collapse leaves alone, so anything whose newlines are load-bearing is carried
+ * in one: a diagram's source `<pre>` ELEMENT (which the next render also re-wraps
+ * into a working frame) instead of fence text, and a `%`-commented multi-line
+ * formula. Every other formula folds to the one-line `$…$` / `$$…$$` spelling,
+ * where whitespace is insignificant.
+ */
+function wrapperSourceForm(wrapper: Element, doc: Document): Node {
+  const cl = wrapper.classList;
+  if (cl.contains(CAPTION_CLASS)) {
+    // fillCaptionBadge deliberately keeps textContent === the literal
+    // `caption::NS_ID` token, split across hidden-prefix/ns/id child spans
+    // purely for display (dom-postprocess.ts).
+    return doc.createTextNode(wrapper.textContent ?? '');
+  }
+  if (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS)) {
+    const delimiter = cl.contains(MATH_BLOCK_CLASS) ? '$$' : '$';
+    const tex = (wrapper.getAttribute('data-tex') ?? '').trim();
+    if (!tex) {
+      // Nothing to write. A bare `$$`/`$` would be an unterminated math opener
+      // the day this cell stops needing HTML serialization.
+      return doc.createTextNode('');
+    }
+    // A `%` comments to end of line in TeX, so folding a MULTI-LINE formula onto
+    // one line moves everything after the comment INTO it and deletes it: `a %
+    // first term\n+ b` folded to `$$a % first term + b$$` loses `+ b` from the
+    // user's file, unrecoverably (measured 2026-07-28, US-23.22 review). Only
+    // that combination needs the `<pre>` carrier — folding preserves meaning for
+    // every other formula, and a `<pre>` would break an inline one out of its
+    // sentence. Chained appendChild: domino has no ParentNode.append.
+    if (tex.includes('%') && tex.includes('\n')) {
+      const carrier = doc.createElement('pre');
+      carrier.appendChild(doc.createTextNode(`${delimiter}\n${tex}\n${delimiter}`));
+      return carrier;
+    }
+    return doc.createTextNode(`${delimiter}${tex.replace(/\s+/g, ' ')}${delimiter}`);
+  }
+  const spec = cl.contains(MERMAID_CLASS) ? MERMAID_FRAME : PLANTUML_FRAME;
+  const source = wrapper.querySelector(`.${spec.sourceClass}`);
+  if (!source) {
+    // Never happens for a frame postProcessDiagramDom built, and with no source
+    // <pre> there is nothing to preserve — only the rendered chart, which is
+    // presentation. Emits NOTHING, not a fence: `diagramSource` reads the source
+    // <pre> too, so it could only ever produce an EMPTY fence here, and a fence
+    // in a text node is exactly what this function must not write (its newlines
+    // would collapse on the next save).
+    return doc.createTextNode('');
+  }
+  source.parentNode?.removeChild(source);
+  source.classList.remove(spec.sourceClass);
+  // Also the frame class, for the hand-authored `<pre class="md-mermaid
+  // md-mermaid-source">` shape: without this the restored element still matches
+  // WRAPPER_SELECTOR, re-enters the loop, finds no source and is dropped.
+  // Two calls, not `remove(a, b)` — domino's DOMTokenList is the narrow one.
+  source.classList.remove(spec.wrapperClass);
+  if (source.getAttribute('class') === '') {
+    source.removeAttribute('class');
+  }
+  return source;
+}
+
+/**
+ * Removes every editor-injected UI control from the clone — the code-block
+ * header (language label, Copy/Wrap buttons) and the diagram/math toolbar
+ * toggles, all stamped with `MD_CHROME_MARKER_ATTR` in `dom-postprocess.ts`.
+ * Ownership-based (any marked descendant is chrome), not an enumerated
+ * TRANSIENT_CLASSES entry, so a future injected control is covered by
+ * stamping the one shared marker rather than a per-control registration.
+ * Matches the marker, not the bare `contenteditable="false"` attribute those
+ * controls also carry: that attribute alone is not ownership — a user's own
+ * `<span contenteditable="false">` holds real content, and Req 21's
+ * `.md-caption` badge carried the attribute for the same reason before
+ * `restoreWrapperSourceForms` started restoring it by source form. A blanket
+ * match would delete both (US-23.21 AC1b, caught in review 2026-07-28).
+ */
+function stripInjectedChrome(copy: HTMLElement): void {
+  for (const chrome of Array.from(copy.querySelectorAll(`[${MD_CHROME_MARKER_ATTR}]`))) {
+    chrome.remove();
+  }
+}
+
+function safeOuterHtml(el: HTMLElement): string {
+  return collapseBlankLines(cloneAndStrip(el).outerHTML);
+}
+
+/**
+ * Removes every TRANSIENT_CLASSES token from the clone, self and descendants.
+ * Walks `[class]` and tests `classList` rather than querying `.${token}`: a
+ * token interpolated into a selector must be a valid CSS identifier, and a
+ * future entry that isn't one would throw `SyntaxError` in the middle of
+ * serialize — silently stopping the document from syncing at all.
+ */
+function stripTransientClasses(copy: HTMLElement): void {
+  const carriers: HTMLElement[] = copy.hasAttribute('class') ? [copy] : [];
+  for (const found of Array.from(copy.querySelectorAll('[class]'))) {
+    carriers.push(found as HTMLElement);
+  }
+  for (const carrier of carriers) {
+    for (const token of TRANSIENT_CLASSES) {
+      carrier.classList.remove(token);
+    }
+    // A node whose ONLY class was the marker would otherwise serialize as
+    // `class=""` — still a change to the `.md`, which is the whole point.
+    if (carrier.getAttribute('class') === '') {
+      carrier.removeAttribute('class');
+    }
+  }
 }
 
 /**
  * US-19.25: gỡ mọi tàn dư TRÌNH BÀY bề rộng cột (do fitTableColumns/fit-mode ghi
- * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `md-table-fit`
- * class + `width` trên <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML.
- * Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp (vd lồng
- * list trong ô) sẽ đi đường raw-HTML và rò các style/class này vào `.md`. Chỉ gỡ
- * các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
+ * inline: `min-width`/`width`/`max-width`/`box-sizing` trên ô + `width` trên
+ * <table>) khỏi bản clone TRƯỚC khi serialize raw-HTML. `md-table-fit` class đã
+ * chuyển sang TRANSIENT_CLASSES chung (US-23.21 AC4, không strip riêng ở đây
+ * nữa). Không thì một bảng đã fit lúc còn đơn giản, sau bị sửa thành phức tạp
+ * (vd lồng list trong ô) sẽ đi đường raw-HTML và rò các style này vào `.md`.
+ * Chỉ gỡ các thuộc tính bề rộng — GIỮ `text-align` (căn cột US-6.3 vẫn cần).
  */
 function stripTablePresentation(copy: HTMLElement): void {
   const tables = copy.tagName === 'TABLE' ? [copy] : [];
@@ -720,10 +992,6 @@ function stripTablePresentation(copy: HTMLElement): void {
     tables.push(t as HTMLElement);
   }
   for (const t of tables) {
-    t.classList.remove('md-table-fit');
-    if (t.getAttribute('class') === '') {
-      t.removeAttribute('class');
-    }
     t.style.removeProperty('width');
     if (t.getAttribute('style') === '') {
       t.removeAttribute('style');
@@ -865,10 +1133,15 @@ function outerHtmlFallback(el: HTMLElement, content: string): string {
  * container are presentation, never part of the `.md`.
  */
 function diagramFence(node: HTMLElement, spec: DiagramFrameSpec): string {
+  return `\n\n${diagramSource(node, spec)}\n\n`;
+}
+
+/** The frame's fenced block on its own — also the raw-HTML path's source form. */
+function diagramSource(node: HTMLElement, spec: DiagramFrameSpec): string {
   const code = node.querySelector(`.${spec.sourceClass} code`);
   const text = (code?.textContent ?? '').replace(/\n$/, '');
   const fence = pickFence(text);
-  return `\n\n${fence}${spec.language}\n${text}\n${fence}\n\n`;
+  return `${fence}${spec.language}\n${text}\n${fence}`;
 }
 
 // Pick a code fence long enough that `text` cannot close it early.

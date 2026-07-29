@@ -76,6 +76,23 @@ const BLOCK_ITEMS: { id: TriggerDefineBlockId; label: string; detail?: string; a
  */
 const MENU_HIDDEN_BLOCK_IDS = new Set<TriggerDefineBlockId>(['heading-4', 'heading-5', 'heading-6']);
 
+/**
+ * Bug: `/` at the start of a bullet/numbered list item was reading as
+ * mid-line (see isTriggerAtLineStart) because a list item is never a
+ * top-level P/H1-3. A list item IS now treated as line-start, but only this
+ * safe subset of BLOCK_ITEMS shows there. Verified by hand: setBulletList/
+ * setNumberedList have dedicated list-item-aware handling (getListSelection +
+ * computeUnwrapListRange/computeRetagListRange) and convert a single `<li>`
+ * cleanly. Heading/Blockquote were tried too but fall to the "uncharacterized
+ * shape" execCommand('formatBlock') fallback for a bare `<li>` (no ancestor
+ * p/h1-6), which wraps the WHOLE parent `<ul>`/`<ol>` in the target tag
+ * (`<h2><ul>…</ul></h2>` — invalid nesting) instead of converting just the
+ * current line — so they're excluded here. Table/code-block/mermaid/
+ * PlantUML/math-block/hr/toc stay top-level-only for the same reason (never
+ * verified safe nested inside a list item).
+ */
+const SAFE_LIST_ITEM_BLOCK_IDS = new Set<TriggerDefineBlockId>(['bullet', 'numbered']);
+
 /** ID prefixes disambiguate what a picked TriggerPopupItem.id means to handlePick(). */
 const BLOCK_PREFIX = 'block:';
 const INLINE_DATE_ID = 'inline:insert-date';
@@ -404,6 +421,29 @@ export function initTriggerSlash(
   }
 
   /**
+   * The `<li>` a line-start check applies to, whether `triggerBlock` IS the
+   * `<li>` itself (a tight list item with no wrapping `<p>`) or a LOOSE list's
+   * first `<p>` child — markdown-it renders `<li><p>text</p></li>` for any
+   * list with a blank line between items, and `closestElement(...).closest(
+   * 'p, h1, h2, h3, li, blockquote')` (openTrigger/beforeinput's block gate)
+   * matches that inner `<p>` before its `<li>` ancestor, so `triggerBlock` is
+   * the `<p>` there, never the `<li>`. Only the item's OWN first paragraph
+   * counts — a later loose paragraph within the same `<li>` is mid-item
+   * content, not the bullet's line-start. Returns undefined outside a list
+   * item (any `<p>`/heading not inside an `<li>`, any non-first loose
+   * paragraph).
+   */
+  function triggerListItem(): HTMLElement | undefined {
+    if (!triggerBlock) return undefined;
+    if (triggerBlock.nodeName === 'LI') return triggerBlock;
+    const parent = triggerBlock.parentElement;
+    if (triggerBlock.nodeName === 'P' && parent?.tagName === 'LI' && parent.firstElementChild === triggerBlock) {
+      return parent;
+    }
+    return undefined;
+  }
+
+  /**
    * Bug #10 (bug_General.md) — the `/` sits at the START of a top-level
    * paragraph OR heading that may ALREADY hold text: nothing is left of the
    * `/`+filter run. On a formatted line (e.g. a heading) the `#` markers are
@@ -413,13 +453,19 @@ export function initTriggerSlash(
    * isTriggerParagraphEmpty, which also requires the `after` half empty), so it
    * is a superset: an empty line is line-start too. Block set matches the
    * trigger open-gate (US-20.1: P/H1–H3; H4–H6 excluded there).
+   *
+   * A list item counts as line-start the same way — `/` with nothing before it
+   * inside the item's own line reads as "beginning of this bullet line" too,
+   * even though an `<li>` (or its loose `<p>`) isn't a top-level child of
+   * `content`. buildGroups then narrows the menu to SAFE_LIST_ITEM_BLOCK_IDS
+   * for a list item (not the full BLOCK_ITEMS) — see triggerListItem().
    */
   function isTriggerAtLineStart(): boolean {
     if (!triggerBlock || !triggerRange) return false;
     const nn = triggerBlock.nodeName;
     const isTopLevelParagraphOrHeading =
       triggerBlock.parentElement === content && (nn === 'P' || nn === 'H1' || nn === 'H2' || nn === 'H3');
-    if (!isTopLevelParagraphOrHeading) return false;
+    if (!isTopLevelParagraphOrHeading && !triggerListItem()) return false;
     const before = document.createRange();
     before.selectNodeContents(triggerBlock);
     before.setEnd(triggerRange.startContainer, triggerRange.startOffset);
@@ -430,9 +476,11 @@ export function initTriggerSlash(
     // Bug #10: block items show whenever `/` is at line-start (nothing before it)
     // of a top-level P/H1–H3 — the SAME full list as a fresh empty line, whether
     // or not the line already holds text. Heading 4–6 are hidden from the menu
-    // (MENU_HIDDEN_BLOCK_IDS) though they remain in BLOCK_ITEMS.
+    // (MENU_HIDDEN_BLOCK_IDS) though they remain in BLOCK_ITEMS. A list item at
+    // line-start narrows further to SAFE_LIST_ITEM_BLOCK_IDS (see its comment).
+    const inListItem = !!triggerListItem();
     const blockSource = isTriggerAtLineStart()
-      ? BLOCK_ITEMS.filter((b) => !MENU_HIDDEN_BLOCK_IDS.has(b.id))
+      ? BLOCK_ITEMS.filter((b) => !MENU_HIDDEN_BLOCK_IDS.has(b.id) && (!inListItem || SAFE_LIST_ITEM_BLOCK_IDS.has(b.id)))
       : [];
     const blockItems: TriggerPopupItem[] = gateByMode(blockSource)
       .filter((b) => matchesFilter(b.label, q))

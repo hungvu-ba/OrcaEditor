@@ -67,15 +67,7 @@ interface LinkMatch {
  * folded, body verbatim), so existing pure-module tests stay valid.
  */
 export function normalizeHrefKey(href: string, caseInsensitive = false): string {
-  let s = href;
-  const hashIdx = s.indexOf('#');
-  if (hashIdx !== -1) {
-    s = s.slice(0, hashIdx);
-  }
-  const qIdx = s.indexOf('?');
-  if (qIdx !== -1) {
-    s = s.slice(0, qIdx);
-  }
+  const s = fileSegmentOf(href);
   let decoded: string;
   try {
     decoded = decodeURIComponent(s);

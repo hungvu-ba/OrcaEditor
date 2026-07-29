@@ -21,6 +21,7 @@ import { canonicalEntityId, scanEntityOccurrences } from './occurrence-scan';
 import {
   classifyLink,
   computeMinimalEdit,
+  documentStateKey,
   imageNamePrefix,
   driveMismatchHint,
   isPathTooLongError,
@@ -29,15 +30,34 @@ import {
   normalizeEol,
   normalizeForSearch,
   orphanAssetNames,
+  rebuildFromEditDiff,
   referencedAssetBasenames,
   relativePath,
   sameDocumentUri,
   sanitizeDroppedFileName,
 } from './text-utils';
+import { pathSegmentsContainSymlink } from './fs-guard';
 import { findTextMatches, type MatchOptions } from './shared/text-match';
 import { rankFileGroups } from './shared/rank-utils';
 import { isWindowsDrivePath, isWindowsUncPath } from './shared/link-scheme';
 import { planReferences, renderReferences, type RefCandidate } from './references-section';
+import { createCommentSupport, type CommentSupport, type EditableComment } from './comments/commentController';
+import {
+  copyConfirmationMessage,
+  nextAuthoritativePanel,
+  resolveCommentAuthor,
+  safeOsUsername,
+} from './comments/comment-utils';
+import { createSidecarStore } from './comments/sidecar-store';
+import { mdNameForSidecar, sidecarNameFor, SIDECAR_WATCH_GLOB } from './comments/sidecar-format';
+import {
+  canForwardUndo,
+  emptyUndoLedger,
+  recordUndoLedgerChange,
+  undoLedgerReasonOf,
+  type UndoLedger,
+  type UndoLedgerReason,
+} from './undo-ledger';
 
 /**
  * Chờ tối đa bao lâu cho edit của undo/redo thực sự áp vào document trước khi
@@ -56,6 +76,15 @@ const UNDO_SETTLE_MS = 500;
  * case-sensitive, so no fold there.
  */
 const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+/**
+ * Req 24 US-23.12 AC1: how long `copyActiveCommentsAsMarkdown` waits for the
+ * active panel's `requestCommentsMarkdownExport` reply before giving up. Same
+ * value as the webview's own `COMMENT_COPY_MARKDOWN_TIMEOUT_MS`
+ * (`media/webview/constants.ts`) — not imported across the host/webview
+ * bundle boundary, so kept as a mirrored constant instead.
+ */
+const COMMENT_COPY_MARKDOWN_HOST_TIMEOUT_MS = 10_000;
 
 /**
  * Promise resolve khi `document` đổi lần kế tiếp, hoặc sau `timeoutMs` nếu không
@@ -117,6 +146,51 @@ interface WorkspaceFileEntry {
 }
 
 /**
+ * Req 23 US-23.2: the shared body of the two native `vscode.comments` context
+ * commands (reply, delete). Both resolve the native thread back to its registry
+ * handle, run one `CommentSupport` mutation, surface its failure, then broadcast
+ * — only the mutation and the optional confirmation differ, so the surrounding
+ * steps live here once instead of being copied per command.
+ *
+ * The `reply?.thread` guard matters: the commands are context-menu-only
+ * (`package.json` hides them from the Command Palette with `when: false`), but a
+ * bare invocation — a keybinding, another extension, `executeCommand` — would
+ * otherwise throw on `undefined`.
+ */
+async function runNativeCommentCommand(
+  support: CommentSupport | undefined,
+  reply: vscode.CommentReply,
+  mutate: (
+    support: CommentSupport,
+    threadId: string,
+    document: vscode.TextDocument
+  ) => Promise<{ ok: boolean; error?: string }>,
+  sync: (document: vscode.TextDocument) => void,
+  confirm?: { message: string; confirmLabel: string }
+): Promise<void> {
+  if (!reply?.thread || !support) {
+    return;
+  }
+  const threadId = support.threadIdFor(reply.thread);
+  if (!threadId) {
+    return;
+  }
+  if (confirm) {
+    const answer = await vscode.window.showWarningMessage(confirm.message, { modal: true }, confirm.confirmLabel);
+    if (answer !== confirm.confirmLabel) {
+      return;
+    }
+  }
+  const document = await vscode.workspace.openTextDocument(reply.thread.uri);
+  const outcome = await mutate(support, threadId, document);
+  if (!outcome.ok) {
+    void vscode.window.showWarningMessage(outcome.error ?? 'That comment action failed.');
+    return;
+  }
+  sync(document);
+}
+
+/**
  * Custom text editor: hiển thị markdown dạng WYSIWYG (render giống VS Code
  * Markdown Preview) và đồng bộ hai chiều với TextDocument.
  *
@@ -159,6 +233,141 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       vscode.commands.registerCommand('orcaEditor.toggleTableFitMode', () =>
         provider.postToActivePanel({ type: 'runCommand', command: 'toggleTableFitMode' })
       ),
+      // Req 23 US-23.2: reply/delete reachable from the NATIVE `vscode.comments`
+      // UI in a plain text editor too, not just the webview — both surfaces call
+      // the exact same `CommentSupport.reply`/`deleteComment`, so they can never
+      // disagree. Contributed to `comments/commentThread/context` (package.json),
+      // invoked with a `vscode.CommentReply` ({ thread, text }); `threadIdFor`
+      // reverses the native thread object back to the registry key these
+      // functions need, since the native UI has no notion of it at all.
+      vscode.commands.registerCommand('orcaEditor.replyComment', (reply: vscode.CommentReply) =>
+        runNativeCommentCommand(
+          provider.comments,
+          reply,
+          (support, threadId, document) =>
+            support.reply(
+              { type: 'replyToComment', requestId: 0, docUri: document.uri.toString(), threadId, body: reply.text },
+              document
+            ),
+          (document) => provider.syncCommentThreads(document)
+        )
+      ),
+      // US-23.2 PO decision: confirmation-gated, cascading (removes every reply
+      // under the thread in one action) — enforced here since the native UI has
+      // no dialog of its own for this, unlike the webview's popover.
+      vscode.commands.registerCommand('orcaEditor.deleteComment', (reply: vscode.CommentReply) =>
+        runNativeCommentCommand(
+          provider.comments,
+          reply,
+          (support, threadId, document) =>
+            support.deleteComment({ type: 'deleteComment', requestId: 0, docUri: document.uri.toString(), threadId }, document),
+          (document) => provider.syncCommentThreads(document),
+          { message: 'Delete this comment thread and all its replies?', confirmLabel: 'Delete' }
+        )
+      ),
+      // US-23.14 AC1: Edit reachable from the NATIVE `vscode.comments` UI too.
+      // Argument is the specific `EditableComment` VS Code hands back verbatim
+      // (not a `vscode.CommentReply` — `comments/comment/title` is a
+      // per-comment contribution point, unlike `comments/commentThread/context`),
+      // carrying the `orcaThreadId`/`orcaReplyId`/`orcaDocUri` bookkeeping
+      // `asNativeComment` stamped on it (mirrors the official `comments-sample`
+      // extension's `NoteComment.parent` pattern — the base `Comment` type has
+      // no thread backreference). No sidecar write here — flips ONE comment's
+      // live `mode` to `Editing`, mirroring how Cancel below writes nothing.
+      vscode.commands.registerCommand('orcaEditor.editComment', (comment?: EditableComment) => {
+        if (!comment?.orcaThreadId || !provider.comments) {
+          return;
+        }
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, true);
+      }),
+      // US-23.14 AC1/AC2: Save — VS Code copies the live-edited text into
+      // `comment.body` before invoking this, the standard native
+      // comment-editing convention. A refused edit is reported and the field
+      // stays in `Editing` mode with the user's typed text intact for retry; a
+      // successful one is rebuilt back to `Preview` by `editComment` itself
+      // (`nativeCommentsFor` never sets `mode`, so it defaults there), so no
+      // separate flip-back is needed here.
+      vscode.commands.registerCommand('orcaEditor.saveEditComment', async (comment?: EditableComment) => {
+        // Both bookkeeping fields are validated, not just the thread id: a
+        // command can be invoked with any argument (`when: false` hides an entry
+        // from the palette, it does not make the command unreachable), and
+        // `Uri.parse(undefined)` would throw inside an async command as an
+        // unhandled rejection with nothing shown to the user.
+        if (!comment?.orcaThreadId || !comment.orcaDocUri || !provider.comments) {
+          return;
+        }
+        let document: vscode.TextDocument;
+        try {
+          document = await vscode.workspace.openTextDocument(vscode.Uri.parse(comment.orcaDocUri));
+        } catch {
+          void vscode.window.showWarningMessage('That edit could not be saved — its document could not be opened.');
+          return;
+        }
+        const body = typeof comment.body === 'string' ? comment.body : comment.body.value;
+        const outcome = await provider.comments.editComment(
+          {
+            type: 'editComment',
+            requestId: 0,
+            docUri: document.uri.toString(),
+            threadId: comment.orcaThreadId,
+            targetReplyId: comment.orcaReplyId,
+            body,
+          },
+          document
+        );
+        if (!outcome.ok) {
+          // AC2: the field deliberately stays in `Editing` mode with the typed
+          // text intact so the user can retry.
+          void vscode.window.showWarningMessage(outcome.error ?? 'That edit could not be saved.');
+          return;
+        }
+        // Flipped back explicitly rather than relying on `editComment`'s own
+        // rebuild: the unchanged-text branch (AC2's "Save on unchanged text is
+        // Cancel") returns ok WITHOUT rebuilding `thread.comments`, so without
+        // this the native field would sit open in `Editing` mode forever after
+        // saving a body the user did not actually change.
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, false);
+        provider.syncCommentThreads(document);
+      }),
+      // US-23.14 AC1: Cancel — writes nothing; flips the field back to
+      // `Preview`, discarding whatever was typed (mirrors the webview's own
+      // Cancel restoring the displayed text with no write).
+      vscode.commands.registerCommand('orcaEditor.cancelEditComment', (comment?: EditableComment) => {
+        if (!comment?.orcaThreadId || !provider.comments) {
+          return;
+        }
+        provider.comments.setEditingMode(comment.orcaThreadId, comment.orcaReplyId, false);
+      }),
+      // Req 23 US-23.3: the same two-step resolve state machine from the NATIVE
+      // `vscode.comments` UI. No confirmation dialog on any of the three — every
+      // transition is reversible by the Reviewer's Reopen (the PO decision's own
+      // correction path), unlike a delete. Which of the three is even offered is
+      // gated per thread by the `status-*` half of `contextValue` in package.json,
+      // and re-validated host-side against the freshly-folded status in
+      // `statusChangeRejection` (US-23.11 AC5) — a stale menu surfaces its reason
+      // as a warning here. No identity is consulted anywhere (US-23.11 AC1).
+      ...(['resolve', 'close', 'reopen'] as const).map((action) =>
+        vscode.commands.registerCommand(
+          `orcaEditor.${action}Comment`,
+          (reply: vscode.CommentReply) =>
+            runNativeCommentCommand(
+              provider.comments,
+              reply,
+              (support, threadId, document) =>
+                support.changeStatus(
+                  { type: 'changeCommentStatus', requestId: 0, docUri: document.uri.toString(), threadId, action },
+                  document
+                ),
+              (document) => provider.syncCommentThreads(document)
+            )
+        )
+      ),
+      // Req 24 US-23.12 AC1: Palette-visible (unlike the five commands above,
+      // all `when: false`) — targets `activePanel`, the same "focused Orca
+      // panel" `postToActivePanel` uses.
+      vscode.commands.registerCommand('orcaEditor.copyCommentsAsMarkdown', () =>
+        provider.copyActiveCommentsAsMarkdown()
+      ),
     ];
     // Req 21 US-21.2: keep the workspace-wide entity index (`caption::`
     // declarations) live. Provider-level (not per-panel) so it covers every
@@ -175,6 +384,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         // O(doc) parse on every keystroke; reindexFile reads the open buffer
         // at fire time so unsaved edits are still captured.
         provider.scheduleReindex(e.document.uri);
+        // Req 24 US-23.18 AC6: track this document's own undo/redo depth. Only real
+        // content changes count — this event also fires with an empty
+        // `contentChanges` for dirty-state transitions, and counting those would
+        // inflate the depth into forwarding an undo the document cannot satisfy.
+        if (e.contentChanges.length > 0) {
+          provider.recordUndoLedger(e.document, undoLedgerReasonOf(e.reason));
+        }
+      }
+    });
+    // AC6: a closed document has no undo history left to spend.
+    const docCloseSub = vscode.workspace.onDidCloseTextDocument((document) => {
+      if (isMarkdownUri(document.uri)) {
+        provider.forgetUndoLedger(document.uri);
       }
     });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.{md,markdown}');
@@ -195,11 +417,117 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // proactive crawl, never persisted).
     const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => provider.scheduleOccurrenceScan(doc));
     void provider.buildEntityIndex();
-    return vscode.Disposable.from(providerDisposable, ...commandDisposables, docChangeSub, docOpenSub, ...watcherSubs);
+    // Req 23 US-23.1: one CommentController for the whole extension (threads are
+    // per-document, the controller is not) — created here so it is disposed with
+    // the provider registration.
+    // Req 23 US-23.5: it persists through the sidecar store. Every write is routed
+    // through the same isInsideAllowedRoots check the other writers use — a
+    // defence-in-depth invariant, not a filter on attacker-controlled input: the
+    // sidecar path is derived from the document uri alone, so no field of the
+    // `createComment` payload can steer it. The gate is what keeps that true if the
+    // derivation ever grows a payload-dependent part.
+    const sidecarStore = createSidecarStore(
+      (docUri, target) => provider.isUriInsideAllowedRoots(docUri, target, { forWrite: true }),
+      (message, err) => MarkdownWysiwygProvider.log(message, err),
+      CASE_INSENSITIVE_FS
+    );
+    provider.comments = createCommentSupport(
+      sidecarStore,
+      (message, err) => MarkdownWysiwygProvider.log(message, err),
+      CASE_INSENSITIVE_FS
+    );
+    // Req 23 US-23.5 AC5: carry a `.md`'s comment sidecar along when the file is
+    // renamed or moved. onWillRenameFiles (not onDidRenameFiles) is what pairs
+    // them — contributing the sidecar's rename to the SAME WorkspaceEdit means VS
+    // Code applies the two together. A file rename is not a text edit, so this adds
+    // nothing to any undo stack (US-23.6).
+    //
+    // A folder rename fires ONE event for the folder, with no child entries, so
+    // the `.md` files inside are absent here — correctly so: the sidecar is a
+    // sibling INSIDE that folder and moves with it for free.
+    const renameSub = vscode.workspace.onWillRenameFiles((event) => {
+      const markdownRenames = event.files.filter((file) => isMarkdownUri(file.oldUri));
+      if (markdownRenames.length === 0) {
+        return;
+      }
+      event.waitUntil(
+        (async (): Promise<vscode.WorkspaceEdit> => {
+          const edit = new vscode.WorkspaceEdit();
+          for (const file of markdownRenames) {
+            if (event.token.isCancellationRequested) {
+              // VS Code bounds rename participants (`files.participants.timeout`)
+              // and abandons a slow one, discarding this edit. Stop planning and
+              // tell the user which sidecars did NOT move, so the one path that
+              // strands comments is not also the silent one.
+              MarkdownWysiwygProvider.log(
+                'Comment sidecar: rename participant cancelled; remaining sidecars were not moved'
+              );
+              void vscode.window.showWarningMessage(
+                'The rename finished before its comment sidecars could be moved. Their comments stayed under the old file names.'
+              );
+              break;
+            }
+            try {
+              await sidecarStore.planRename(edit, file.oldUri, file.newUri);
+            } catch (err) {
+              // Per file: one failure must not discard the renames already planned
+              // for its siblings, which is what throwing out of this loop would do.
+              MarkdownWysiwygProvider.log(
+                `Comment sidecar: could not plan the move for ${file.oldUri.toString()}`,
+                err
+              );
+            }
+          }
+          return edit;
+        })()
+      );
+    });
+    // Req 24 US-23.15 AC1/AC2: a second window, a `git pull`, a sync client or a
+    // hand edit changes the sidecar underneath us. Its own watcher (the `.md` glob
+    // above cannot match a `.jsonl`) reloads the document's threads and re-syncs
+    // every surface; the DELETE event is separate because a change event never
+    // fires for a file that no longer exists, so a branch switch that removes the
+    // sidecar would otherwise leave every thread on screen, stale.
+    const sidecarWatcher = vscode.workspace.createFileSystemWatcher(SIDECAR_WATCH_GLOB);
+    const sidecarSubs = [
+      sidecarWatcher.onDidChange((uri) => provider.scheduleSidecarReload(uri)),
+      sidecarWatcher.onDidCreate((uri) => provider.scheduleSidecarReload(uri)),
+      sidecarWatcher.onDidDelete((uri) => provider.dropSidecarThreads(uri)),
+      sidecarWatcher,
+      // An armed reload outliving the watcher would fire against a disposed
+      // controller — rebuilding threads and spawning `git` during teardown.
+      new vscode.Disposable(() => provider.clearPendingSidecarReloads()),
+    ];
+    // Req 23 US-23.5 AC5: once the rename has happened, the old uri's threads are
+    // bound to a path that no longer resolves. Dropping them lets the reopened
+    // document rebuild from the moved sidecar instead of showing each comment
+    // twice — once against the dead uri.
+    const renamedSub = vscode.workspace.onDidRenameFiles((event) => {
+      for (const file of event.files) {
+        if (isMarkdownUri(file.oldUri)) {
+          provider.comments?.forgetDocument(file.oldUri);
+        }
+      }
+    });
+    return vscode.Disposable.from(
+      providerDisposable,
+      ...commandDisposables,
+      docChangeSub,
+      docCloseSub,
+      docOpenSub,
+      renameSub,
+      renamedSub,
+      ...watcherSubs,
+      ...sidecarSubs,
+      provider.comments
+    );
   }
 
   /** Req 21 US-21.2: the live workspace entity index (`caption::` declarations). */
   public readonly entityIndex = new EntityIndex();
+
+  /** Req 23 US-23.1: the shared `vscode.comments` CommentController — assigned in register(). */
+  public comments: CommentSupport | undefined;
 
   /**
    * Req 21 US-21.3: session-only entity-reference occurrence cache, keyed by
@@ -307,6 +635,170 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     this.notifyEntityIndexUpdated();
   }
 
+  /**
+   * Req 24 US-23.15 AC1: pending sidecar reloads, keyed by sidecar uri. Separate
+   * from `reindexTimers` (same debounce window, different unit of work) so a
+   * `.md` reindex and a sidecar reload for the same file never cancel each other.
+   */
+  private readonly sidecarReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Req 24 US-23.18 AC6: per-document undo/redo depth, keyed the same normalized way as
+   * every other per-document map here. Provider-level rather than per-panel on purpose —
+   * two panels on one document must share one count, and a per-panel subscription would
+   * record every change twice.
+   */
+  private readonly undoLedgers = new Map<string, UndoLedger>();
+
+  /** AC6: fold one change event into the document's undo/redo depth. */
+  private recordUndoLedger(document: vscode.TextDocument, reason: UndoLedgerReason): void {
+    const key = documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS);
+    this.undoLedgers.set(key, recordUndoLedgerChange(this.undoLedgers.get(key) ?? emptyUndoLedger(), reason));
+  }
+
+  /**
+   * AC6: may a webview `undo`/`redo` message be answered with the GLOBAL
+   * `executeCommand`? Only when this document owns such a step. Otherwise the command
+   * reaches the workspace undo stack and reverts the user's last file rename — measured,
+   * and stock VS Code behaviour for an unscoped `undo`, so the only fix is not to issue it.
+   */
+  private mayForwardUndo(document: vscode.TextDocument, action: 'undo' | 'redo'): boolean {
+    return canForwardUndo(this.undoLedgers.get(documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS)), action);
+  }
+
+  /**
+   * AC6: closing a document discards its undo history, so the ledger must forget it too.
+   * A stale non-zero count would forward the very command this guard exists to withhold.
+   */
+  private forgetUndoLedger(uri: vscode.Uri): void {
+    this.undoLedgers.delete(documentStateKey(uri.toString(), CASE_INSENSITIVE_FS));
+  }
+
+  /**
+   * Req 24 US-23.15 AC1/AC2: the OPEN document a sidecar belongs to, or undefined
+   * when nothing on screen depends on it. Everything below is a no-op for a
+   * sidecar whose `.md` has no live panel — the load already happens on open, so
+   * reloading a document nobody is looking at buys nothing.
+   *
+   * Matched through `documentStateKey`, not `sameDocumentUri` (CLAUDE.md's
+   * cross-platform trap): the sidecar's on-disk name can differ from the derived
+   * one by Unicode form as well as case, and only the former folds NFC — a
+   * teammate's NFC-named sidecar beside an NFD-named `.md` percent-encodes
+   * differently, so a case-only fold drops every event for it (review finding).
+   *
+   * The returned document is preferentially the one registered under the panel
+   * key itself: `syncCommentThreads` looks its panels up by that exact string, so
+   * handing back a differently-cased sibling document would update the host
+   * registry and post nothing (review finding).
+   */
+  private documentForSidecar(sidecarUri: vscode.Uri): vscode.TextDocument | undefined {
+    const mdName = mdNameForSidecar(sidecarUri.path.split('/').pop() ?? '');
+    if (mdName === null) {
+      return undefined;
+    }
+    const mdKey = documentStateKey(vscode.Uri.joinPath(sidecarUri, '..', mdName).toString(), CASE_INSENSITIVE_FS);
+    for (const [docUriStr, panels] of this.panelsByUri) {
+      if (panels.size === 0 || documentStateKey(docUriStr, CASE_INSENSITIVE_FS) !== mdKey) {
+        continue;
+      }
+      const documents = vscode.workspace.textDocuments;
+      return (
+        documents.find((d) => d.uri.toString() === docUriStr) ??
+        documents.find((d) => documentStateKey(d.uri.toString(), CASE_INSENSITIVE_FS) === mdKey)
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Req 24 US-23.15 AC1: debounced sidecar change/create → reload + re-sync. The
+   * debounce is what collapses a `git pull`/rebase burst (many events for one
+   * file) into ONE reload, the same per-URI coalescing `scheduleReindex` applies
+   * to the `.md` watcher.
+   *
+   * No `WATCHER_EXCLUDE_DIRS` skip, deliberately unlike `scheduleReindex`: that
+   * list stops the entity index from crawling build output, but everything here is
+   * already gated on a live panel, so the only documents it could exclude are ones
+   * the user explicitly opened and commented on (review finding) — and the delete
+   * route below has no such filter either, which would make AC1 dead and AC2 live
+   * for the very same file.
+   */
+  private scheduleSidecarReload(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const existing = this.sidecarReloadTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.sidecarReloadTimers.set(
+      key,
+      setTimeout(() => {
+        this.sidecarReloadTimers.delete(key);
+        const document = this.documentForSidecar(uri);
+        if (document === undefined || !this.comments) {
+          return;
+        }
+        void this.comments
+          .reloadThreads(document)
+          .then(() => this.syncCommentThreads(document))
+          .catch((err: unknown) => MarkdownWysiwygProvider.log(`Comment sidecar: reload of ${key} failed`, err));
+      }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
+    );
+  }
+
+  /**
+   * Req 24 US-23.15 AC2: the sidecar itself is gone (branch switch, `git rm`, or
+   * by hand). `forgetDocument` drops every thread for that document and releases
+   * the load claim, so a sidecar that comes back (switching branches again, and
+   * the create event that follows) rebuilds from disk.
+   *
+   * Since the comment-delete-sidecar-rewrite change, this can also fire for a
+   * legitimate reason: `store.removeComment` `unlink`s the sidecar itself when
+   * deleting a thread leaves zero threads behind. That is harmless here —
+   * `deleteComment` already pruned its own in-memory registry down to empty
+   * for that document before this event ever arrives, so `forgetDocument`
+   * finds nothing left to drop.
+   */
+  private dropSidecarThreads(uri: vscode.Uri): void {
+    const key = uri.toString();
+    const pending = this.sidecarReloadTimers.get(key);
+    if (pending !== undefined) {
+      // A reload armed by the change event that preceded the delete would read a
+      // file that is no longer there.
+      clearTimeout(pending);
+      this.sidecarReloadTimers.delete(key);
+    }
+    const document = this.documentForSidecar(uri);
+    if (document === undefined) {
+      return;
+    }
+    // A delete event does NOT prove the comments are gone (review finding): an
+    // atomic-save editor or a sync client writes a temp file and renames it over
+    // the sidecar, and `store.adoptDrifted` renames a case/NFC-drifted sidecar to
+    // the canonical name during the load itself — both surface as delete + create.
+    // Dropping every thread on the delete alone makes the panel flash empty in the
+    // first case and, if the paired create is coalesced away or lands first, lose
+    // them for the session. So: re-check the file the DOCUMENT derives, and treat
+    // "still there" as a change instead.
+    const live = this.comments?.sidecarPathFor(document);
+    // The path is derived from the open document's own uri by the store, never
+    // from the watcher payload — no attacker-controlled component reaches it.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    if (live !== undefined && fs.existsSync(live)) {
+      this.scheduleSidecarReload(uri);
+      return;
+    }
+    this.comments?.forgetDocument(document.uri);
+    this.syncCommentThreads(document);
+  }
+
+  /** Req 24 US-23.15 AC1: drop every armed reload — a timer that fires after teardown would rebuild threads on a disposed controller. */
+  private clearPendingSidecarReloads(): void {
+    for (const timer of this.sidecarReloadTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.sidecarReloadTimers.clear();
+  }
+
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
   private async reindexFile(uri: vscode.Uri): Promise<void> {
     try {
@@ -374,6 +866,129 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     void this.activePanel?.webview.postMessage(message);
   }
 
+  /**
+   * Req 24 US-23.12 AC1: `orcaEditor.copyCommentsAsMarkdown` from the Command
+   * Palette has no document context of its own — `activePanel` (above) is the
+   * same "focused Orca panel" target `postToActivePanel` uses, which also
+   * gives AC1's two-panel case for free (the active one is the one Palette
+   * commands run against) and its no-panel case (`undefined` → unavailable).
+   *
+   * Request ids for this host-initiated round trip are minted strictly
+   * NEGATIVE (`nextMarkdownExportRequestId` counts up, the id sent is its
+   * negation) so they can never collide with a webview panel's own
+   * independently-minted, strictly-positive `requestId` for its menu-triggered
+   * `copyCommentsAsMarkdown` (`comment-panel.ts`'s `copyRequestSeq`) — both
+   * counters otherwise start at 1 on every fresh panel/session, which without
+   * this split let one flow's reply resolve the other's pending promise
+   * (review finding, 2026-07-28). The sign alone is what the dispatch switch
+   * below uses to route a reply to the right flow, not map presence.
+   */
+  private pendingMarkdownExportRequests = new Map<
+    number,
+    (msg: Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }> | undefined) => void
+  >();
+  private nextMarkdownExportRequestId = 1;
+
+  public async copyActiveCommentsAsMarkdown(): Promise<void> {
+    const panel = this.activePanel;
+    if (panel === undefined) {
+      void vscode.window.showInformationMessage('No Orca editor is active to copy comments from.');
+      return;
+    }
+    const requestId = -(this.nextMarkdownExportRequestId++);
+    const result = await new Promise<Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }> | undefined>(
+      (resolve) => {
+        this.pendingMarkdownExportRequests.set(requestId, resolve);
+        setTimeout(() => {
+          // A late reply for this id after this fires is still unambiguously
+          // routed by the dispatch switch below (negative id, this map no
+          // longer holds it) — dropped silently, never mistaken for a fresh
+          // menu-triggered flow (review finding, 2026-07-28).
+          if (this.pendingMarkdownExportRequests.delete(requestId)) {
+            resolve(undefined);
+          }
+        }, COMMENT_COPY_MARKDOWN_HOST_TIMEOUT_MS);
+        void panel.webview.postMessage({ type: 'requestCommentsMarkdownExport', requestId } satisfies HostToWebview);
+      }
+    );
+    if (result === undefined) {
+      void vscode.window.showWarningMessage('Copying comments as Markdown timed out.');
+      return;
+    }
+    await this.finishCopyCommentsAsMarkdown(result);
+  }
+
+  /**
+   * Shared by the menu-triggered flow (`case 'copyCommentsAsMarkdown'` below,
+   * which also releases the webview's own in-flight guard) and the command
+   * path above (which has no such guard to release — `webviewPanel` omitted).
+   */
+  private async finishCopyCommentsAsMarkdown(
+    msg: Extract<WebviewToHost, { type: 'copyCommentsAsMarkdown' }>,
+    webviewPanel?: vscode.WebviewPanel
+  ): Promise<void> {
+    if (!msg.exportable) {
+      // AC1: the command path's own equivalent of the disabled menu item —
+      // never a silent no-op, never an empty clipboard write.
+      void vscode.window.showInformationMessage(msg.reason);
+      return;
+    }
+    try {
+      await vscode.env.clipboard.writeText(msg.markdown);
+      vscode.window.setStatusBarMessage(copyConfirmationMessage(msg.threadCount, msg.hiddenClosedCount), 4000);
+      void webviewPanel?.webview.postMessage({ type: 'copyCommentsAsMarkdownResult', requestId: msg.requestId, ok: true });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      void vscode.window.showWarningMessage(`Could not copy comments as Markdown: ${reason}`);
+      void webviewPanel?.webview.postMessage({
+        type: 'copyCommentsAsMarkdownResult',
+        requestId: msg.requestId,
+        ok: false,
+        error: reason,
+      });
+    }
+  }
+
+  /**
+   * Req 23 US-23.2: the `context.workspaceState` key for this document's "Show
+   * Comments" toggle — first use of `workspaceState` anywhere in this codebase.
+   * Keyed by docUri (not global) since the AC asks for per-file persistence.
+   */
+  private commentHighlightStateKey(docUri: string): string {
+    return `orcaEditor.comments.showComments:${documentStateKey(docUri, CASE_INSENSITIVE_FS)}`;
+  }
+
+  /**
+   * Req 23 US-23.2: push the full live thread snapshot to every panel this
+   * document has open — the host-side half of the reload/live-sync bridge.
+   * Called after the initial sidecar load settles and after every
+   * create/reply/delete/anchor-update mutation. A no-op if no panel of this
+   * document is registered yet (nothing to push to) or comments are unavailable.
+   */
+  private syncCommentThreads(document: vscode.TextDocument): void {
+    if (!this.comments) {
+      return;
+    }
+    const docUriStr = document.uri.toString();
+    const panels = this.panelsByUri.get(docUriStr);
+    if (!panels || panels.size === 0) {
+      return;
+    }
+    const threads = this.comments.listThreads(document);
+    // US-23.9: the sidecar's health travels with every snapshot, not only the
+    // first — a webview that reloads mid-session must still be able to explain
+    // an empty list, and it holds no state of its own across that reload.
+    const sidecar = this.comments.sidecarStateFor(document);
+    for (const panel of panels) {
+      void panel.webview.postMessage({
+        type: 'commentThreadsSync',
+        docUri: docUriStr,
+        threads,
+        sidecar,
+      } satisfies HostToWebview);
+    }
+  }
+
   /** Req 20 US-20.3 membership list: ids from `contributes.orcaEditorExecuteCommands`. */
   private triggerExecuteCommandIds(): string[] {
     return (this.context.extension.packageJSON.contributes?.orcaEditorExecuteCommands as string[] | undefined) ?? [];
@@ -406,6 +1021,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * gửi thẳng 'scrollToPosition' tới panel đó thay vì mở lại (vscode.openWith).
    */
   private panelsByUri = new Map<string, Set<vscode.WebviewPanel>>();
+
+  /**
+   * Req 24 US-23.13 AC6: which panel's resolution pass is authoritative for a
+   * document, when two or more panels have it open at once. Only the
+   * authoritative panel's `commentAnchorUpdate` is applied and persisted; the
+   * other panels' own passes are dropped, so a same-document race between two
+   * DOMs/registries never lets "whichever posts last" decide the anchor.
+   * Assigned to the first panel that registers for a `docUriStr` (`case
+   * 'ready'`) and transferred to a survivor on dispose — no handling for the
+   * simultaneous-open race or a non-clean crash, both out of scope per this
+   * story's Open Questions.
+   */
+  private authoritativePanelByUri = new Map<string, vscode.WebviewPanel>();
 
   /**
    * US-19.19: Zen/Focus mode là trạng thái GLOBAL — bật/tắt ở 1 tab lan sang
@@ -520,6 +1148,46 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // editor open does not always surface as onDidOpenTextDocument.
     this.scheduleOccurrenceScan(document);
 
+    // Req 24 US-23.15 AC1/AC2: the provider-level sidecar watcher uses a bare
+    // workspace-relative glob, which VS Code only applies INSIDE workspace
+    // folders. A file opened on its own (File → Open File, no folder) would
+    // therefore never receive a change/create/delete event at all (review
+    // finding), so it gets its own `RelativePattern` watcher scoped to exactly its
+    // sidecar, for this panel's lifetime.
+    const sidecarFallbackWatcher =
+      vscode.workspace.getWorkspaceFolder(document.uri) === undefined && document.uri.scheme === 'file'
+        ? vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(documentDir, sidecarNameFor(path.basename(document.uri.fsPath)))
+          )
+        : undefined;
+    if (sidecarFallbackWatcher !== undefined) {
+      sidecarFallbackWatcher.onDidChange((uri) => this.scheduleSidecarReload(uri));
+      sidecarFallbackWatcher.onDidCreate((uri) => this.scheduleSidecarReload(uri));
+      sidecarFallbackWatcher.onDidDelete((uri) => this.dropSidecarThreads(uri));
+    }
+
+    // Req 23 US-23.5 AC4: rebuild this document's persisted comment threads from
+    // its sidecar. Fire-and-forget: it only populates the native comments UI, so
+    // nothing below waits on disk I/O, and loadThreads is idempotent for a second
+    // panel on the same file. A read failure is logged inside the store, never
+    // surfaced as a broken open.
+    // Req 23 US-23.2: once the load settles, push the full thread snapshot to
+    // whichever panels of this document are registered by then — the bridge that
+    // seeds the webview's gutter pins/highlight for a thread it didn't mint this
+    // session. Chained onto THIS SAME call (not a second `loadThreads` call) so
+    // the existing single-flight `loaded` guard is never asked to make a second
+    // caller wait for an in-flight first one, which it isn't built to do. The
+    // 'ready' handler below also syncs once the webview registers, covering the
+    // case where this load finishes before that registration happens.
+    // Req 24 US-23.15 AC1: an already-loaded document goes through the RELOAD, not
+    // the one-shot load — a `git pull` that landed while this document had no panel
+    // open reached no watcher event (nothing was listening), so trusting the claim
+    // would show the list as it was on disk the first time (review finding).
+    void (this.comments?.isLoaded(document) === true
+      ? this.comments.reloadThreads(document)
+      : this.comments?.loadThreads(document)
+    )?.then(() => this.syncCommentThreads(document));
+
     // C6b: đăng ký panel này vào registry theo uri, để openCrossFileSearchResult
     // có thể tìm lại và nhắm 'scrollToPosition' đúng panel khi file .md đã mở sẵn.
     // Bug 0716 #1: lookup-or-create + add() đều dời vào case 'ready' bên dưới
@@ -563,10 +1231,125 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'plantuml-engine.js')
       )
       .toString();
+    // P-1 (Performance — Audit.md): same lazy-engine contract as plantumlEngineUri
+    // above, reusing scriptNonce for the injected <script>.
+    const mermaidEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'mermaid-engine.js')
+      )
+      .toString();
     webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
     let lastTextFromWebview: string | undefined;
+    /**
+     * Performance Audit P-8: the host's mirror of the webview's `currentText` —
+     * the base a diff-shaped 'edit' indexes into. It models the WEBVIEW's text,
+     * not the document's: an `applyEdit` that fails leaves the document behind
+     * but the webview still holding what it sent, so the mirror is right to
+     * follow the webview. `mirrorRev` is the push rev that mirror text is
+     * anchored to; an incoming diff whose `baseRev` disagrees is refused rather
+     * than applied at guessed offsets.
+     */
+    let mirrorText = '';
+    let mirrorRev = 0;
+    /**
+     * P-8 (reverse half): the webview's own advance counter (`localSeq` in
+     * main.ts) as last RECEIVED here. Where `mirrorRev` tracks divergence the
+     * host caused, this tracks divergence the webview caused: it is bumped by
+     * the webview on every advance of its `currentText` and rides on every
+     * message carrying webview-authored text, so `mirrorSeq !== localSeq` means
+     * an 'edit' is still in flight and the mirror is behind. Stamped onto a
+     * diff-shaped push as `baseSeq`; a mismatch there makes the webview refuse
+     * the diff rather than splice at offsets computed against a text it has
+     * already moved past.
+     */
+    let mirrorSeq = 0;
+    /**
+     * Read a webview-reported seq off the wire. Every message boundary here gets
+     * the SAME treatment: a missing or non-numeric seq must leave the mirror
+     * UNABLE to claim agreement, rather than silently keeping a stale count that
+     * would authorize a diff push against text the webview has already moved past.
+     * -1 never equals a real `localSeq`, and `updateMessage` reads that sentinel to
+     * send full text directly instead of spending a refusal first.
+     *
+     * The realistic producer is a stale `dist/webview/main.js` running against a
+     * rebuilt host (CLAUDE.md's test-infra trap), or a future post site that
+     * forgets the field.
+     */
+    const seqOf = (msg: { seq?: number }): number =>
+      typeof msg.seq === 'number' ? msg.seq : -1;
+    /**
+     * The caret the most recent push carried, if any (only undo/redo sends one).
+     * Replayed by `case 'requestFullPush'` so a refused undo push does not silently
+     * become a caret-less one — see `updateMessage`.
+     */
+    let lastPushCaret: { line: number; col: number } | undefined;
+    /** Monotonic push counter — bumped by `pushDocumentText` for every 'init'/'update'. */
+    let pushRev = 0;
+    /**
+     * The single place a document text is pushed to the webview: stamps the next
+     * rev and re-anchors the mirror onto it. Every 'update'/'init' post MUST go
+     * through here — a push that skips it leaves the mirror describing text the
+     * webview no longer holds, which is precisely what `baseRev` exists to catch.
+     */
+    const pushDocumentText = (text: string): number => {
+      pushRev++;
+      mirrorText = text;
+      mirrorRev = pushRev;
+      return pushRev;
+    };
+    /**
+     * P-8 (reverse half): compose an 'update' for `pushed` — the diff-shaped
+     * variant against the mirror when there is a base to diff against, else the
+     * full text. MUST be called (and its result posted) before anything else
+     * mutates the mirror: `pushDocumentText` re-anchors the mirror onto this very
+     * push, so the base has to be captured first.
+     *
+     * The diff is emitted whenever the text changed at all — even a whole-file
+     * rewrite, where `newText` is the document plus ~60 bytes of guard fields.
+     * That costs nothing measurable and keeps one code path instead of a
+     * size-heuristic branch nothing would exercise.
+     */
+    const updateMessage = (
+      pushed: string,
+      caret?: { line: number; col: number }
+    ): HostToWebview => {
+      const diff = computeMinimalEdit(mirrorText, pushed);
+      const baseRev = mirrorRev;
+      const baseLength = mirrorText.length;
+      const baseSeq = mirrorSeq;
+      const caretLine = caret?.line;
+      const caretCol = caret?.col;
+      // Only a DIFF can be refused, and only the undo/redo push carries a caret,
+      // so the healing full push in `case 'requestFullPush'` would otherwise drop
+      // it — leaving the caret wherever the pre-undo DOM had it instead of at the
+      // undone edit. Remember it for that reply; a later caret-less push clears it.
+      lastPushCaret = caret;
+      if (!diff || mirrorSeq < 0) {
+        // `!diff`: nothing changed against the mirror — the webview already holds
+        // this text, so a diff would save nothing, and the full-text variant is
+        // what its "same text, adopt the rev" branch is written against.
+        //
+        // `mirrorSeq < 0`: the sentinel set when a webview-authored advance
+        // reached us WITHOUT its seq (see case 'undo'/'redo'). The mirror cannot
+        // claim agreement, so a diff is guaranteed to be refused — sending one
+        // would spend a refusal plus a full push where one full push does.
+        return { type: 'update', text: pushed, caretLine, caretCol, rev: pushDocumentText(pushed) };
+      }
+      return {
+        type: 'update',
+        start: diff.start,
+        oldEnd: diff.oldEnd,
+        newText: diff.newText,
+        baseLength,
+        baseRev,
+        baseSeq,
+        caretLine,
+        caretCol,
+        rev: pushDocumentText(pushed),
+      };
+    };
     /** Serializes webview-originated document mutations — see case 'edit'. */
     let editChain: Promise<void> = Promise.resolve();
     /**
@@ -641,7 +1424,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       }
       updateTimer = setTimeout(() => {
         updateTimer = undefined;
-        void postToWebview({ type: 'update', text: document.getText() });
+        void postToWebview(updateMessage(document.getText()));
       }, UPDATE_DEBOUNCE_MS);
     });
 
@@ -652,6 +1435,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         return;
       }
       void this.cleanupOrphanImages(saved);
+      // Req 23 US-23.10 AC7: an untitled document that was just saved to disk
+      // (or one that moved into the allowed workspace roots) may now be able
+      // to hold a sidecar where it previously could not — re-check the guard
+      // and push a fresh snapshot so "Add Comment" enables without reopening
+      // the editor. A no-op when nothing was ever refused for this document.
+      void this.comments?.revalidateAfterSave(saved).then(() => this.syncCommentThreads(saved));
     });
 
     // Áp dụng ngay autoOpenToc/showLineNumbers khi người dùng đổi setting, không
@@ -676,6 +1465,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         // need live propagation (visibility gate, not just a seed) — dateFormat/
         // executeCommands stay init-only, unchanged behavior.
         triggerMode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
+        // Req 23 US-23.3 AC6: also live, for the same reason — the host resolves
+        // this name again on every comment action, so the webview's copy must not
+        // go stale or its Resolve/Close/Reopen gating disagrees with the host's.
+        commentAuthorName: resolveCommentAuthor(
+          wysiwygCfg.get<string>('comments.authorName'),
+          safeOsUsername()
+        ),
       });
     });
 
@@ -693,6 +1489,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             this.panelsByUri.set(docUriStr, panelsForUri);
           }
           panelsForUri.add(webviewPanel);
+          // Req 24 US-23.13 AC6: the first panel to register for this document
+          // becomes its authoritative resolver; a second/third panel opening
+          // later stays non-authoritative (see 'commentAnchorUpdate' below).
+          if (!this.authoritativePanelByUri.has(docUriStr)) {
+            this.authoritativePanelByUri.set(docUriStr, webviewPanel);
+          }
           const cfg = vscode.workspace.getConfiguration('markdown.preview', document.uri);
           const editorCfg = vscode.workspace.getConfiguration('editor', document.uri);
           const wysiwygCfg = vscode.workspace.getConfiguration('orcaEditor', document.uri);
@@ -703,9 +1505,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           if (reveal) {
             this.pendingReveal.delete(docUriStr);
           }
+          const initialText = document.getText();
+          // P-8 (reverse half): 'init' is always full text — there is no base to
+          // diff against. It also RESETS the seq mirror: a webview reload restarts
+          // `localSeq` at 0 while this closure survives with whatever count the
+          // previous incarnation reached, and a mirror claiming a higher seq than
+          // the webview will ever report would refuse every diff push forever.
+          mirrorSeq = 0;
           void postToWebview({
             type: 'init',
-            text: document.getText(),
+            text: initialText,
+            rev: pushDocumentText(initialText),
             docUri: docUriStr,
             ...(reveal ? { reveal } : {}),
             config: {
@@ -720,8 +1530,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
               showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
-              // X-12: same value drives host dedup + webview ref-nav so both fold identically.
-              caseInsensitiveFs: CASE_INSENSITIVE_FS,
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
               // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
@@ -730,18 +1538,73 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               // host đưa sẵn cả hai để plantuml.ts nạp engine khi cần.
               plantumlEngineUri,
               scriptNonce,
+              // P-1: same mechanism, for mermaid.ts (see mermaidEngineUri above).
+              mermaidEngineUri,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
                 executeCommands: this.triggerExecuteCommands(),
                 mode: wysiwygCfg.get<TriggerMode>('triggerActions.mode', 'advanced'),
               },
+              // Req 23 US-23.1: shown in the comment composer so the Reviewer
+              // sees which identity is about to be recorded. Display only — the
+              // host resolves the author again when the thread is created.
+              commentAuthorName: resolveCommentAuthor(
+                wysiwygCfg.get<string>('comments.authorName'),
+                safeOsUsername()
+              ),
+              // Req 24 US-23.12 AC4: seeded once, like the rest of this config —
+              // the export builds synchronously webview-side (AC2), so it cannot
+              // round-trip to the host mid-build for the header's own path.
+              docRelativePath: vscode.workspace.asRelativePath(document.uri, false),
+              // Req 23 US-23.2: per-file persisted "Show Comments" toggle —
+              // defaults off until the Author first turns it on for this file.
+              commentHighlightOn: this.context.workspaceState.get<boolean>(
+                this.commentHighlightStateKey(docUriStr),
+                false
+              ),
             },
           });
+          // Req 23 US-23.2: best-effort immediate sync for this now-registered
+          // panel (covers the case where the sidecar load already settled before
+          // 'ready' arrived); the load's own `.then()` continuation delivers the
+          // full list here regardless, so this is never the only delivery.
+          this.syncCommentThreads(document);
           break;
         }
         case 'edit': {
-          const text = msg.text;
+          // Performance Audit P-8: two wire shapes, one behaviour — resolve both
+          // to the webview's full new text HERE, synchronously, so that two
+          // 'edit's arriving in the same frame reconstruct in arrival order
+          // (the second diff's base is the first's result). Everything below
+          // this block is untouched by P-8 and still works on a full text.
+          let text: string;
+          if ('text' in msg) {
+            // Full-text variant (a resync reply): authoritative on its own, and
+            // it re-anchors the mirror onto the rev the webview is really on —
+            // without that the two sides could never agree again and every
+            // subsequent edit would resync forever.
+            text = msg.text;
+            mirrorText = text;
+            mirrorRev = msg.baseRev;
+            mirrorSeq = seqOf(msg);
+          } else {
+            // A diff is only sound against the exact base it was computed from.
+            const rebuilt =
+              msg.baseRev === mirrorRev ? rebuildFromEditDiff(mirrorText, msg) : null;
+            if (rebuilt === null) {
+              // Refuse wholesale — never a partial or best-effort application.
+              // The webview answers with the full-text variant above.
+              void postToWebview({ type: 'requestFullSync' });
+              break;
+            }
+            text = rebuilt;
+            mirrorText = text;
+            // Only on acceptance: a refused diff leaves the mirror describing the
+            // older text, so it must keep claiming that text's seq too — the
+            // webview is ahead of us until its full-text resync reply lands.
+            mirrorSeq = seqOf(msg);
+          }
           // Chain, don't apply directly: the webview can post two 'edit's in
           // the SAME frame (invokeAction: flush of pending typing + the
           // action's own sync — two deliberate undo units, bug 0717), and
@@ -787,8 +1650,50 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           await editChain;
           break;
         }
+        case 'requestFullPush': {
+          // P-8 (reverse half): the webview refused a diff-shaped 'update'
+          // because it does not hold the base we diffed against. Re-push the
+          // CURRENT document in full — a full text needs no base, so it always
+          // lands and cannot start a refusal loop. Deliberately the latest text
+          // rather than the refused push's: the point is agreement now, not
+          // replaying a stale rev.
+          //
+          // `await editChain` for the same reason case 'undo'/'redo' does: an
+          // accepted 'edit' updates the mirror SYNCHRONOUSLY at receipt but
+          // applies to the document on the chain, so reading document.getText()
+          // ahead of it would answer with a snapshot that edit is about to
+          // overwrite — and that overwrite is echo-suppressed, so the final text
+          // would never be pushed.
+          await editChain;
+          const pushed = document.getText();
+          // Replay the refused push's caret (undo/redo only): without it a refused
+          // undo lands the caret at the pre-render snapshot instead of the edit.
+          void postToWebview({
+            type: 'update',
+            text: pushed,
+            caretLine: lastPushCaret?.line,
+            caretCol: lastPushCaret?.col,
+            rev: pushDocumentText(pushed),
+          });
+          break;
+        }
         case 'undo':
         case 'redo': {
+          // P-8 INVARIANT: every mirror mutation happens SYNCHRONOUSLY at
+          // message-receipt time, in arrival order — never after an `await`.
+          // `takePendingSync` already advanced the webview's currentText to this
+          // text without sending an 'edit', so the mirror must follow it now: an
+          // 'edit' delivered while this handler is suspended below would
+          // otherwise rebuild against the pre-flush text, and the rev gate is
+          // blind to it (rev is unchanged — this is webview-authored, not a host
+          // push), leaving only `baseLength` — which passes whenever the pending
+          // serialize was length-preserving, e.g. overtyping a selection with
+          // equal-length text. That splices at wrong offsets into the user's file.
+          if (msg.pendingText !== undefined) {
+            mirrorText = msg.pendingText;
+            // The seq of that same advance (P-8 reverse half) — see `seqOf`.
+            mirrorSeq = seqOf({ seq: msg.pendingSeq });
+          }
           // Any in-flight chained 'edit' must commit first — its undo unit
           // precedes this undo/redo chronologically (bug 0717).
           await editChain;
@@ -799,7 +1704,34 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             lastTextFromWebview = normalizeEol(msg.pendingText, document.eol === vscode.EndOfLine.CRLF);
             await this.applyMinimalEdit(document, msg.pendingText);
           }
+          // Req 24 US-23.18 AC6: refuse BEFORE issuing the command, not after. The
+          // `after === before` check further down is post-hoc — by the time it runs the
+          // global command has already executed, and if this document had nothing to
+          // undo it has already reverted whatever WAS on the workspace undo stack. A
+          // 2026-07-28 probe measured that to be the user's last file rename: rename an
+          // `.md`, open it, press Ctrl+Z having typed nothing, and the rename is undone.
+          // The same probe reverted a renamed `.txt`, which no participant of ours ever
+          // sees, so this is stock behaviour of an unscoped `undo` rather than anything
+          // wrong with US-23.5's sidecar-rename edit — which leaves exactly one fix:
+          // do not issue the command unless this document owns the step.
+          //
+          // The ledger counts changes from EVERY source, not just this extension's, so a
+          // document also edited in a side-by-side text editor still forwards correctly.
+          // `pendingText` above is applied through `applyEdit`, which fires the change
+          // event synchronously, so a keystroke still awaiting its debounce has already
+          // raised the depth by the time this reads it.
+          if (!this.mayForwardUndo(document, msg.type)) {
+            break;
+          }
           const before = document.getText();
+          // Req 24 US-23.18 AC5: `executeCommand` below is a GLOBAL command — it
+          // acts on whatever editor VS Code currently considers active, which
+          // need not be this document at all when the webview panel is the
+          // active tab and no `TextEditor` for it is visible. This document's own
+          // monotonic `version` is therefore the only sound success signal;
+          // anything derived from a global "did an edit happen" would accept a
+          // bump in some other, last-active editor as our undo having worked.
+          const versionBefore = document.version;
           // executeCommand('undo') có thể resolve TRƯỚC khi edit thực sự áp vào
           // document → CHỜ đúng sự kiện đổi rồi mới đọc trạng thái cuối (không
           // đọc getText() ngay sau await, sẽ ra "before" và tưởng là no-op).
@@ -815,9 +1747,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           } finally {
             undoRedoInProgress = false;
           }
+          // AC5: the command did not touch THIS document — either there was
+          // nothing left on its stack, or it acted on another editor entirely.
+          // Either way there is nothing of ours to report; never re-render off a
+          // change that belongs to a different uri.
+          if (document.version === versionBefore) {
+            break;
+          }
           const after = document.getText();
           if (after === before) {
-            break; // không còn gì để undo/redo
+            break; // applied to this document, but the text is unchanged — nothing to re-render
           }
           // Gửi THẲNG trạng thái cuối, bỏ debounce updateTimer: mỗi Ctrl+Z/Y =
           // đúng một lần render nên undo và redo đối xứng (không còn redo "hiện
@@ -830,7 +1769,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           lastTextFromWebview = undefined;
           const diff = computeMinimalEdit(before, after);
           const caret = diff ? sourceLineCol(after, diff.start + diff.newText.length) : undefined;
-          void postToWebview({ type: 'update', text: after, caretLine: caret?.line, caretCol: caret?.col });
+          void postToWebview(updateMessage(after, caret));
           break;
         }
         case 'openLink': {
@@ -989,6 +1928,212 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           }
           break;
         }
+        case 'createComment': {
+          // Req 23 US-23.1: create the native CommentThread for the webview's
+          // structural anchor. createThread validates the whole payload
+          // (document identity, non-empty body, well-formed anchor) and returns
+          // the refusal reason — a rejected request must surface to the
+          // Reviewer, never fail silently. Nothing here edits the document.
+          // Req 23 US-23.5: it now awaits the sidecar append, so a failed write
+          // reaches the Reviewer as this request's error instead of creating a
+          // thread that would not survive the next reopen.
+          const outcome = this.comments
+            ? await this.comments.createThread(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'createCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            // Req 23 US-23.4: the recorded author/timestamp travel back so the
+            // webview can render this thread's card if its anchor ever floats.
+            ...(outcome.ok ? { author: outcome.author, timestamp: outcome.timestamp } : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            // Req 23 US-23.2: push the fresh snapshot so every open panel of
+            // this document (including this one) can pin/highlight it.
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'commentAnchorUpdate': {
+          // Req 23 US-23.4: a tier relocated (or floated) a thread — follow it
+          // with the native Range. updateAnchor validates the whole payload
+          // (document identity, known thread, usable line, known state). No
+          // reply for an in-memory-only relocation: the webview has already
+          // applied its own resolution, and a refused update only leaves the
+          // native Range stale, never wrong-way edited. Nothing here touches
+          // the document (US-23.6).
+          //
+          // Req 24 US-23.13 AC1/AC2: when `msg.origin` is set, this same
+          // update is also meant to be PERSISTED — a failure there DOES need a
+          // reply, since the Reviewer's re-attach (or an automatic promotion)
+          // would otherwise silently fail to survive a reload with no way to
+          // know it needs a retry.
+          //
+          // Req 24 US-23.13 AC6: two panels open on the same document each run
+          // their own resolution pass and would each post a `commentAnchorUpdate`
+          // for the same thread handle — only the authoritative panel's is
+          // applied. `webviewPanel` is this handler's own closure (there is one
+          // `onDidReceiveMessage` per panel), so the sender's identity is already
+          // known without a client-sent field.
+          //
+          // Review fix: an in-memory-only relocation (`msg.origin === undefined`)
+          // is dropped silently, same as any other refused update below — the
+          // webview already applied its own resolution, so a refused update only
+          // leaves that ONE panel's native Range stale. But a PERSIST-worthy
+          // update (`msg.origin` set — a manual re-attach or an automatic
+          // promotion) must still reply on rejection: dropping it silently here
+          // would reintroduce exactly the bug AC1/AC2's comment above this one
+          // exists to prevent, just from the non-authoritative panel instead of a
+          // write failure — the Reviewer's re-attach looks like it worked (the
+          // webview already applied it optimistically) but never survives a
+          // reload, with no toast telling them to retry.
+          if (this.authoritativePanelByUri.get(docUriStr) !== webviewPanel) {
+            const warning = `orca-editor: comment anchor update from a non-authoritative panel dropped for ${docUriStr}`;
+            console.warn(warning);
+            MarkdownWysiwygProvider.log(warning);
+            if (msg.origin !== undefined) {
+              void postToWebview({
+                type: 'commentAnchorUpdateResult',
+                docUri: msg.docUri,
+                threadId: msg.threadId,
+                ok: false,
+                error: 'Another panel is the resolver of record for this document — nothing was persisted here.',
+              });
+            }
+            break;
+          }
+          const error = await this.comments?.updateAnchor(msg, document);
+          if (error) {
+            const warning = `orca-editor: comment anchor update refused — ${error}`;
+            console.warn(warning);
+            MarkdownWysiwygProvider.log(warning);
+            if (msg.origin !== undefined) {
+              void postToWebview({
+                type: 'commentAnchorUpdateResult',
+                docUri: msg.docUri,
+                threadId: msg.threadId,
+                ok: false,
+                error,
+              });
+            }
+            // Nothing changed, so nothing to broadcast. Syncing here anyway made
+            // every refused update push a full N-thread snapshot back, which the
+            // webview then re-applied — pure amplification of a no-op.
+            break;
+          }
+          this.syncCommentThreads(document);
+          break;
+        }
+        case 'replyToComment': {
+          // Req 23 US-23.2: append a reply — reply() validates the whole
+          // payload (document identity, non-empty body, thread not Closed).
+          // Nothing here edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.reply(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'replyResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok
+              ? { replyId: outcome.replyId, author: outcome.author, timestamp: outcome.timestamp }
+              : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'deleteComment': {
+          // Req 23 US-23.2 PO decision: confirmation is enforced webview-side
+          // (the popover's own dialog) — this only re-validates ownership
+          // host-side, since a webview message is untrusted input like any other.
+          const outcome = this.comments
+            ? await this.comments.deleteComment(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'deleteCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'editComment': {
+          // Req 24 US-23.14: editComment() validates the whole payload
+          // (document identity, non-empty body within the shared length bound,
+          // live target, thread not Closed) — a webview message is untrusted
+          // input like any other. Appends an `edit` sidecar line; nothing here
+          // edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.editComment(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'editCommentResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'changeCommentStatus': {
+          // Req 23 US-23.3: changeStatus() validates the whole payload (document
+          // identity, known action, and legality from the thread's live status —
+          // US-23.11 AC1 removed the identity check). Appends a `status-change`
+          // sidecar line; nothing here edits the document (US-23.6).
+          const outcome = this.comments
+            ? await this.comments.changeStatus(msg, document)
+            : ({ ok: false, error: 'Comments are not available in this window.' } as const);
+          void postToWebview({
+            type: 'changeCommentStatusResult',
+            requestId: msg.requestId,
+            ok: outcome.ok,
+            ...(outcome.ok ? {} : { error: outcome.error }),
+          });
+          if (outcome.ok) {
+            this.syncCommentThreads(document);
+          }
+          break;
+        }
+        case 'copyCommentsAsMarkdown': {
+          // Req 24 US-23.12: a NEGATIVE requestId is always a reply to a
+          // host-initiated `requestCommentsMarkdownExport` (Command Palette
+          // path) — `copyActiveCommentsAsMarkdown` mints those, a webview
+          // panel's own menu-triggered flow mints only positive ones, so the
+          // sign alone disambiguates without relying on the map still holding
+          // the entry. A negative id arriving after its own timeout already
+          // deleted the pending resolver is dropped silently here — it must
+          // never fall through to the menu-triggered write below, which would
+          // clobber the clipboard with a stale export after the user was
+          // already told the request timed out (review finding, 2026-07-28).
+          if (msg.requestId < 0) {
+            const pending = this.pendingMarkdownExportRequests.get(msg.requestId);
+            if (pending !== undefined) {
+              this.pendingMarkdownExportRequests.delete(msg.requestId);
+              pending(msg);
+            }
+            break;
+          }
+          await this.finishCopyCommentsAsMarkdown(msg, webviewPanel);
+          break;
+        }
+        case 'commentHighlightToggled': {
+          // Req 23 US-23.2: per-file persistence — first use of
+          // `context.workspaceState` in this codebase. Not broadcast to other
+          // panels of the same document: this is a per-file UI preference, not
+          // a global one (unlike zenChanged/readingModeChanged).
+          if (msg.docUri === docUriStr) {
+            void this.context.workspaceState.update(this.commentHighlightStateKey(docUriStr), msg.on);
+          }
+          break;
+        }
         case 'entitySearch': {
           // Req 21 US-21.2: entity search, mirroring searchFiles ->
           // fileSearchResult's requestId echo. `ready` carries the indexing
@@ -1040,6 +2185,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       messageSubscription.dispose();
       viewStateSubscription.dispose();
       existCheckTokenSource?.dispose();
+      // US-23.15 AC1: only this panel's no-workspace-folder fallback watcher, if
+      // it needed one — the provider-level watcher lives as long as the extension.
+      sidecarFallbackWatcher?.dispose();
       if (this.activePanel === webviewPanel) {
         this.activePanel = undefined;
       }
@@ -1051,6 +2199,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         panels.delete(webviewPanel);
         if (panels.size === 0) {
           this.panelsByUri.delete(docUriStr);
+        }
+      }
+
+      // Req 24 US-23.13 AC6: authority transfers to a survivor when the
+      // authoritative panel is disposed. Only a clean dispose is handled — a
+      // hang/crash without one leaves the document unresolved until the user
+      // closes and reopens it, accepted per this story's Open Questions.
+      if (this.authoritativePanelByUri.get(docUriStr) === webviewPanel) {
+        const survivor = nextAuthoritativePanel(panels ?? []);
+        if (survivor) {
+          this.authoritativePanelByUri.set(docUriStr, survivor);
+        } else {
+          this.authoritativePanelByUri.delete(docUriStr);
         }
       }
     });
@@ -1299,9 +2460,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     });
   }
 
-  /** Thư mục không bao giờ chứa file đáng để link tới từ tài liệu markdown. */
+  /**
+   * Thư mục không bao giờ chứa file đáng để link tới từ tài liệu markdown.
+   * Req 23 US-23.5: cũng loại `*.orca-comments.jsonl` — sidecar là dữ liệu máy đi
+   * kèm 1 file .md, không phải file người dùng muốn link tới, và nó nằm ngay cạnh
+   * mọi file .md nên sẽ làm nhiễu picker `@` và ăn quota FILE_SEARCH_MAX_SCAN.
+   */
   private static readonly FILE_SEARCH_EXCLUDE =
-    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}';
+    '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**,**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
 
   private static readonly FILE_SEARCH_MAX_SCAN = 5000;
   private static readonly FILE_SEARCH_MAX_RESULTS = 20;
@@ -1324,7 +2490,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     '**/*.pdf,**/*.zip,**/*.gz,**/*.tar,**/*.7z,**/*.rar,' +
     '**/*.woff,**/*.woff2,**/*.ttf,**/*.eot,**/*.otf,' +
     '**/*.mp4,**/*.mp3,**/*.mov,**/*.avi,**/*.wav,' +
-    '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar}';
+    '**/*.exe,**/*.dll,**/*.so,**/*.bin,**/*.class,**/*.jar,' +
+    // Req 23 US-23.5: comment sidecars are machine JSONL — searching them would
+    // return raw `{"schema_version":1,...}` lines instead of document text.
+    // US-23.20 AC8: its timestamped `.bak` sibling is the same machine data.
+    '**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
@@ -1632,7 +2802,38 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    */
   private async resolveAllowedAssetsDir(document: vscode.TextDocument): Promise<vscode.Uri | undefined> {
     const dir = this.resolveAssetsDir(document);
-    return (await this.isInsideAllowedRoots(document, dir)) ? dir : undefined;
+    return (await this.isInsideAllowedRoots(document, dir, { forWrite: true })) ? dir : undefined;
+  }
+
+  /**
+   * Security Audit S-1 residual: resolveAllowedAssetsDir guards the assets
+   * DIRECTORY, so nothing checks the FINAL segment — a file-symlink committed
+   * at `assets/<name>` is followed by writeFile/readFile and the bytes land
+   * (or are read from) outside the workspace. uniqueAssetUri does not catch it
+   * either: its `stat` follows the link, and a DANGLING link makes `stat`
+   * throw, which reads as "the name is free".
+   *
+   * Measures ONLY the leaf — passing the already-guarded dir as the root
+   * leaves exactly one segment below it. Re-running the full containment guard
+   * on the file uri instead would refuse a legitimate `assets ->
+   * ../shared-assets` layout: that layout passes only through the realpath
+   * fallback, and realpath throws ENOENT on a file that does not exist yet.
+   *
+   * A leaf symlink is refused even when it resolves back inside the workspace
+   * — writing through it would corrupt whatever it points at. The check is not
+   * atomic with the write (a link planted in the check→write window is still
+   * followed), so this is a barrier against committed repo content, which is
+   * S-1's trust boundary, not against a concurrent local process.
+   *
+   * Every asset flow that dereferences `<assetsDir>/<name>` must call this
+   * first: savePastedImage / saveDroppedFile / restoreUndoneImageDeletions
+   * (write) and deleteOrphanImage (read-then-hard-delete).
+   */
+  private isAllowedAssetLeaf(dir: vscode.Uri, target: vscode.Uri): boolean {
+    if (dir.scheme !== 'file' || target.scheme !== 'file') {
+      return true;
+    }
+    return !pathSegmentsContainSymlink(dir.fsPath, target.fsPath, CASE_INSENSITIVE_FS);
   }
 
   /**
@@ -1701,6 +2902,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const prefix = this.imagePrefixFor(document);
     const fileName = `${prefix ? prefix + '-' : ''}${MarkdownWysiwygProvider.PASTE_IMAGE_MARKER}${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
     const targetUri = vscode.Uri.joinPath(targetDir, fileName);
+    if (!this.isAllowedAssetLeaf(targetDir, targetUri)) {
+      return { error: `Cannot save the pasted image: "${fileName}" already exists as a symbolic link.` };
+    }
 
     try {
       await vscode.workspace.fs.createDirectory(targetDir);
@@ -1744,6 +2948,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     try {
       await vscode.workspace.fs.createDirectory(targetDir);
       const targetUri = await this.uniqueAssetUri(targetDir, sanitizeDroppedFileName(name));
+      if (!this.isAllowedAssetLeaf(targetDir, targetUri)) {
+        return { error: `Cannot save the dropped file: "${path.basename(targetUri.path)}" already exists as a symbolic link.` };
+      }
       await vscode.workspace.fs.writeFile(targetUri, Buffer.from(dataBase64, 'base64'));
       this.trackDroppedAsset(document, path.basename(targetUri.path));
       return { relativePath: relativePath(documentDir.path, targetUri.path, CASE_INSENSITIVE_FS) };
@@ -1945,6 +3152,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   /** Đọc bytes vào recentlyDeletedImages trước khi xoá cứng, để undo sau đó có thể khôi phục (xem restoreUndoneImageDeletions). */
   private async deleteOrphanImage(imagesDir: vscode.Uri, fileName: string): Promise<void> {
     const fileUri = vscode.Uri.joinPath(imagesDir, fileName);
+    // S-1 residual, read half: readFile FOLLOWS a leaf symlink, so a link at
+    // `assets/<tracked name>` would pull outside-workspace bytes into
+    // recentlyDeletedImages, from where an undo can materialize them inside
+    // the workspace. Leave the link alone entirely.
+    if (!this.isAllowedAssetLeaf(imagesDir, fileUri)) {
+      MarkdownWysiwygProvider.log(`cleanupOrphanImages: skipped ${fileName} (symbolic link)`);
+      return;
+    }
     try {
       const bytes = await vscode.workspace.fs.readFile(fileUri);
       this.rememberDeletedImage(fileName, bytes);
@@ -1982,10 +3197,19 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;
       }
+      // Refuse BEFORE dropping the cache entry: these bytes are the only copy
+      // left (cleanupOrphanImages already hard-deleted the file), so evicting
+      // them on a refusal would be unrecoverable loss — the same reason the
+      // dir-level refusal above returns without touching the cache.
+      const targetUri = vscode.Uri.joinPath(imagesDir, fileName);
+      if (!this.isAllowedAssetLeaf(imagesDir, targetUri)) {
+        MarkdownWysiwygProvider.log(`restoreUndoneImageDeletions: refused to restore ${fileName} (target is a symbolic link)`);
+        continue;
+      }
       this.recentlyDeletedImages.delete(fileName);
       try {
         await vscode.workspace.fs.createDirectory(imagesDir);
-        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(imagesDir, fileName), bytes);
+        await vscode.workspace.fs.writeFile(targetUri, bytes);
         // File kéo-thả (không có marker ảnh dán) vừa khôi phục qua undo → theo
         // dõi lại để lần xoá link kế tiếp vẫn dọn được; ảnh dán tự nhận diện
         // qua marker nên không cần.
@@ -1998,12 +3222,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     }
   }
 
-  /**
-   * S4: chống thoát khỏi allowed roots qua symlink. Trước khi so path, phân
-   * giải symlink bằng fs.promises.realpath cho cả target và root. File không
-   * tồn tại (broken link) → realpath ném lỗi → fallback về path đã chuẩn hóa
-   * (vẫn chặn được traversal qua ../..).
-   */
   /**
    * Req 20 US-20.9: existence check for a batch of broken-reference candidate
    * targets (file/heading links only — same-document `#heading`-only anchors
@@ -2176,9 +3394,33 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     return missing;
   }
 
-  private async isInsideAllowedRoots(document: vscode.TextDocument, target: vscode.Uri): Promise<boolean> {
+  private async isInsideAllowedRoots(
+    document: vscode.TextDocument,
+    target: vscode.Uri,
+    opts?: { forWrite?: boolean }
+  ): Promise<boolean> {
+    return this.isUriInsideAllowedRoots(document.uri, target, opts);
+  }
+
+  /**
+   * Same guard keyed on a document's uri alone — Req 23 US-23.5's rename path
+   * runs while the `.md` is only about to move, so there is no TextDocument for
+   * the destination to hand in.
+   *
+   * `forWrite` (Security Audit S-1): mutating callers (asset write, orphan
+   * hard-delete, sidecar append/rename/adopt) additionally refuse when any
+   * path segment below the matched root is a symlink — a repo-committed
+   * `assets` → outside-dir link passes the lexical check, and without this a
+   * write/delete would follow it out of the workspace. Read-only callers keep
+   * lexical-only acceptance (see the OneDrive rationale below).
+   */
+  private async isUriInsideAllowedRoots(
+    docUri: vscode.Uri,
+    target: vscode.Uri,
+    opts?: { forWrite?: boolean }
+  ): Promise<boolean> {
     const roots = [
-      vscode.Uri.joinPath(document.uri, '..'),
+      vscode.Uri.joinPath(docUri, '..'),
       ...(vscode.workspace.workspaceFolders ?? []).map((f) => f.uri),
     ];
 
@@ -2192,23 +3434,41 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       return CASE_INSENSITIVE_FS ? withForwardSlashes.toLowerCase() : withForwardSlashes;
     };
 
-    // Kiểm tra lexical (không đụng filesystem): candidate luôn được dựng qua
-    // vscode.Uri.joinPath (xem relativeTargetCandidates), nên các đoạn `..`
-    // đã được chuẩn hóa ở tầng Uri — đây là hàng rào chính chặn traversal ra
-    // ngoài workspace, và không bị ảnh hưởng bởi reparse point/junction
-    // (OneDrive Files On-Demand, Known Folder Move...) làm fs.realpath()
-    // trả về một path khác cấu trúc so với root dù file vẫn nằm trong cây
-    // workspace thật.
+    // Symlink walk for mutating callers only. The root itself is never
+    // lstat-checked (OneDrive/junction tolerance); non-file schemes cannot be
+    // lstat'ed, and lexical containment already passed for them.
+    const writeSafe = (root: vscode.Uri): boolean => {
+      if (!opts?.forWrite || root.scheme !== 'file' || target.scheme !== 'file') {
+        return true;
+      }
+      // Same case policy as the lexical compare below: a folded match followed
+      // by a case-sensitive walk would abstain and let the write through.
+      return !pathSegmentsContainSymlink(root.fsPath, target.fsPath, CASE_INSENSITIVE_FS);
+    };
+
+    // Lexical check (no filesystem access): candidates are always built via
+    // vscode.Uri.joinPath (see relativeTargetCandidates), so `..` segments are
+    // already normalized at the Uri layer — this is the main fence against
+    // traversal out of the workspace, and it is unaffected by reparse
+    // points/junctions (OneDrive Files On-Demand, Known Folder Move...) that
+    // make fs.realpath() return a structurally different path even though the
+    // file still sits inside the real workspace tree.
     const lexicalPath = (uri: vscode.Uri): string => forCompare(uri.fsPath.replace(/[/\\]+$/, '') + '/');
     const targetLexical = lexicalPath(target);
-    if (roots.some((root) => targetLexical.startsWith(lexicalPath(root)))) {
+    // Every matching root gets its own walk: a workspace folder that is itself
+    // a symlink is tolerated when it is the root being measured from, so
+    // refusing on the first match (always the document's own dir) would reject
+    // a write the workspace-folder root allows. A refusal here is not final —
+    // the realpath fallback below can still prove genuine containment.
+    const matchedRoots = roots.filter((root) => targetLexical.startsWith(lexicalPath(root)));
+    if (matchedRoots.some((root) => writeSafe(root))) {
       return true;
     }
 
-    // Fallback: symlink thật sự có thể khiến path lexical rơi ra ngoài root
-    // dù sau khi resolve vẫn nằm trong workspace (hoặc ngược lại) — thử
-    // realpath() như một kiểm tra bổ sung, best-effort (không bắt buộc phải
-    // thành công, vì OneDrive/junction có thể khiến nó lệch hoặc lỗi).
+    // Fallback: a genuine symlink can make the lexical path fall outside a
+    // root while resolving inside the workspace (or vice versa) — try
+    // realpath() as a best-effort extra check (allowed to fail, since
+    // OneDrive/junctions can skew it or error out).
     const canonical = async (uri: vscode.Uri): Promise<string | null> => {
       if (uri.scheme !== 'file') {
         return null;
@@ -2228,6 +3488,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     for (const root of roots) {
       const rootReal = await canonical(root);
       if (rootReal !== null && targetReal.startsWith(rootReal)) {
+        // No symlink walk here, for writes either: realpath has just proved
+        // the target resolves inside the root, so a symlink on the way is one
+        // that stays within the workspace. Reaching this line after a refused
+        // walk is exactly that case; an escaping link fails the compare above.
         return true;
       }
     }

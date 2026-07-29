@@ -18,7 +18,7 @@
  * (main.ts's Shift+Tab handler) as of Phase 2.1 and indent (Tab handler) as of
  * Phase 2.2, both via commitListOpDirect; the rest are not.
  */
-import { getOffsetWithin } from './dom-utils';
+import { getOffsetWithin, taskCheckboxHost } from './dom-utils';
 
 /**
  * Direct-child lookup by tag name (never a descendant) — used instead of
@@ -286,7 +286,7 @@ export function computeToList(blocks: Element[], ordered: boolean): ListOpPlan {
  */
 const CONVERTIBLE_ITEM_TAGS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL']);
 
-function isConvertibleBlock(el: Element): boolean {
+export function isConvertibleBlock(el: Element): boolean {
   return CONVERTIBLE_ITEM_TAGS.has(el.tagName);
 }
 
@@ -502,10 +502,9 @@ export function computeTaskifyListRange(list: Element, targets: Element[]): List
     // one findTaskCheckbox (dom-utils.ts) and turndown's taskCheckbox rule accept
     // as a task item; a checkbox placed as a direct <li> child before the <p>
     // serializes to a stray "[ ] " marker line + a detached "Bravo" paragraph
-    // (checkbox lost, "[ ]" shown as literal text on reload). `addCheckbox` uses
-    // the tight placement unconditionally, so we do NOT mirror it for loose here.
-    const firstEl = clone.firstElementChild;
-    const host = firstEl && firstEl.tagName === 'P' ? firstEl : clone;
+    // (checkbox lost, "[ ]" shown as literal text on reload). `taskCheckboxHost`
+    // is shared with `addCheckbox`, which applies the same split for <ul>.
+    const host = taskCheckboxHost(clone);
     host.insertBefore(input, host.firstChild);
     return clone.outerHTML;
   };

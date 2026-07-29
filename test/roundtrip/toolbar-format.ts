@@ -19,6 +19,15 @@ interface DomCase {
   name: string;
   html: string;
   expect: (md: string) => boolean;
+  /**
+   * true: the stability compare collapses runs of spaces. markdown-it inserts
+   * one extra space between checkbox and text when re-rendering "- [ ] x"
+   * → "<input …> x", so any task-list DOM whose text does NOT already start
+   * with that space serializes stably except for that one space. Same
+   * pipeline quirk test/roundtrip/input-rules.ts documents as quirk #1 —
+   * unrelated to what these cases assert.
+   */
+  looseSpacing?: boolean;
 }
 
 const domCases: DomCase[] = [
@@ -93,8 +102,9 @@ const domCases: DomCase[] = [
   // -------------------------------------------------------------------------
   // setBulletList/setNumberedList/toggleTaskItem + stripCheckboxFrom/
   // syncTaskListClass/addCheckbox (dom-utils.ts) — hình <li> chính xác:
-  // addCheckbox() insertBefore input.task-list-item-checkbox làm CON ĐẦU
-  // TIÊN của <li>, gắn class "task-list-item" lên <li> và
+  // addCheckbox() insertBefore input.task-list-item-checkbox vào
+  // taskCheckboxHost(li) — con ĐẦU TIÊN của <li> với item TIGHT, hoặc con đầu
+  // của <p> con với item LOOSE — gắn class "task-list-item" lên <li> và
   // "contains-task-list" lên <ul>/<ol> cha.
   // -------------------------------------------------------------------------
   {
@@ -115,6 +125,26 @@ const domCases: DomCase[] = [
       '<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" checked> đã xong</li>' +
       '</ul>',
     expect: (md) => /^\*\s+\[ \]\s+chưa xong$/m.test(md) && /^\*\s+\[x\]\s+đã xong$/m.test(md),
+  },
+  {
+    // Bug 2026-07-28: một list LOOSE (item cách nhau dòng trắng → markdown-it
+    // render <li><p>…</p></li>) khi bấm Task List. addCheckbox chèn checkbox
+    // vào <p> (taskCheckboxHost), KHÔNG phải trước <p> — hình cũ serialize ra
+    // "* [ ]" trơ + đoạn văn thụt lề rời, và vòng render lại biến "[ ]" thành
+    // text thường (mất checkbox). List hỗn hợp: chỉ Bravo thành task item.
+    name: 'taskify item LOOSE (checkbox nằm TRONG <p>) → "[ ]" cùng dòng với text, không đẻ ra marker trơ',
+    html:
+      '<ul class="contains-task-list">' +
+      '<li><p>Alpha</p></li>' +
+      '<li class="task-list-item"><p><input type="checkbox" class="task-list-item-checkbox">Bravo</p></li>' +
+      '<li><p>Charlie</p></li>' +
+      '</ul>',
+    expect: (md) =>
+      /^\*[^\S\n]+\[ \][^\S\n]+Bravo$/m.test(md) &&
+      /^\*[^\S\n]+Alpha$/m.test(md) &&
+      /^\*[^\S\n]+Charlie$/m.test(md) &&
+      !/^\*[^\S\n]+\[ \][^\S\n]*$/m.test(md),
+    looseSpacing: true,
   },
   {
     name: 'task item bỏ checkbox (stripCheckboxFrom: xoá input + cắt whitespace ĐẦU text node còn lại) → về bullet thường, không dư khoảng trắng đầu dòng',
@@ -192,7 +222,8 @@ for (const c of domCases) {
       problems.push(`Kết quả không như kỳ vọng: ${JSON.stringify(md)}`);
     }
     const md2 = serializeHtml(renderer.render(md).html);
-    if (md2 !== md) {
+    const collapse = (s: string): string => (c.looseSpacing ? s.replace(/[ \t]+/g, ' ') : s);
+    if (collapse(md2) !== collapse(md)) {
       ok = false;
       problems.push(`Không ổn định: md=${JSON.stringify(md)} md2=${JSON.stringify(md2)}`);
     }

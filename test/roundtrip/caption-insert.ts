@@ -15,7 +15,7 @@
  *
  * Run standalone: npm run test:roundtrip:caption-insert
  */
-import { Runner, serializeHtml, renderer, domino } from './_lib';
+import { Runner, serializeHtml, renderer, domino, COMPLEX_CELL } from './_lib';
 import { postProcessCaptions } from '../../media/webview/pipeline';
 
 const runner = new Runner();
@@ -159,6 +159,42 @@ for (const md of ['caption::123 no letters', 'caption::UC no id half here', 'pla
     'split: concatenated textContent is still the literal token',
     (parts?.prefix ?? '') + (parts?.ns ?? '') + (parts?.id ?? '') === 'caption::UC01',
     JSON.stringify(parts)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 8. RAW-HTML serialize path (US-23.22 deferred item 1, fixed 2026-07-28): a
+//    badge inside a table that needs HTML serialization (`td li li` →
+//    complexTableAsHtml) is emitted through outerHTML, where no turndown rule
+//    runs — so the badge ELEMENT itself must already be back to its
+//    `caption::NS_ID` source text before serialize. Section 1 only covers the
+//    rule path (turndown's SPAN default), which is why this leaked unnoticed:
+//    the wrapper, its `md-caption*` classes and `contenteditable="false"` went
+//    into the user's `.md` verbatim.
+// ---------------------------------------------------------------------------
+{
+  const tableWithBadge = transform(
+    '<table><thead><tr><th>A</th></tr></thead><tbody><tr>' +
+      `<td>see caption::UC02</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'raw-HTML: fixture really carries a badge inside the cell',
+    inspectBadges(tableWithBadge).length === 1,
+    tableWithBadge
+  );
+  const md = serializeHtml(tableWithBadge);
+  runner.check(
+    'raw-HTML: the table really took the raw-HTML path (complexTableAsHtml)',
+    md.trimStart().startsWith('<table'),
+    JSON.stringify(md)
+  );
+  runner.check('raw-HTML: the .md carries the `caption::UC02` source token', md.includes('caption::UC02'), md);
+  runner.check('raw-HTML: no md-caption* class leaks into the .md', !md.includes('md-caption'), md);
+  runner.check('raw-HTML: no contenteditable leaks into the .md', !md.includes('contenteditable'), md);
+  runner.check(
+    'raw-HTML: stable on a 2nd render→transform→serialize pass',
+    serializeHtml(transform(renderer.render(md).html)) === md,
+    `\n  md2: ${JSON.stringify(serializeHtml(transform(renderer.render(md).html)))}\n  md1: ${JSON.stringify(md)}`
   );
 }
 

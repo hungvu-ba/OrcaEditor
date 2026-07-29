@@ -1,0 +1,251 @@
+/**
+ * Req 24 US-23.18 — the two probes the story's Sizing note requires before any
+ * gate is built, written as regression locks.
+ *
+ * The story's discipline (its own PO decision on AC6): "reproduce before
+ * building anything… If it is not reachable, AC6 is met by a regression test
+ * that locks that behaviour in — no gate is built. If it *is* reachable, that's
+ * a confirmed bug at that point, and the fix is scoped and built then, against
+ * the actual failure mode observed — not designed speculatively now."
+ *
+ * **The probe ran, and AC6's answer was yes — reachable.** An undo issued from a
+ * renamed `.md` with no text edit of its own reverts the rename. A follow-up probe
+ * then renamed a `.txt`, which `onWillRenameFiles` filters out so nothing of ours
+ * is on the undo stack, and VS Code reverted that too: the behaviour is stock for
+ * an unscoped `undo`, not a property of US-23.5's `WorkspaceEdit`. The fix that
+ * followed is therefore in `provider.ts` — it no longer issues the global command
+ * for a document that owns no undo step — and is proven in `test/unit.ts`, since
+ * no public API can open a custom editor's webview to post a message to it. What
+ * the AC6 case below locks is the invariant this extension does own: an undo that
+ * reverts a rename must move the `.md` and its sidecar together.
+ *
+ * The Sizing note also asks for the probe on **Windows** as well as macOS (CLAUDE.md's
+ * cross-platform rule); that run is still outstanding.
+ *
+ * ## What AC1's probe here does and does not cover — read before trusting it
+ *
+ * AC1 wants the keystroke proven harmless **on the document**. Half of that is
+ * reachable and half is not, and the split is a property of the public API, not
+ * an omission:
+ *
+ *  - **Covered here:** the document-level baseline — `document.version`,
+ *    `onDidChangeTextDocument` and the text itself, measured around a real
+ *    `undo` command. This is the measurement AC1 names.
+ *  - **Covered in `test/webview/comment-undo-safety.spec.ts`:** that the guard
+ *    actually consumes the chord, asserted on `defaultPrevented` — the guard's
+ *    own observable effect, which fails if `initCommentUndoGuard()` is removed.
+ *  - **Not covered anywhere, and not coverable:** dispatching a real keystroke
+ *    *into the rendered webview* and following it through VS Code's keybinding
+ *    layer to the document. The host API cannot open the custom editor's webview
+ *    and synthesize input into it, and the Playwright harness has no keybinding
+ *    layer at all. The two bullets above bracket that gap from either side; the
+ *    middle link is asserted by construction (`preventDefault()` suppresses the
+ *    webview's unhandled-key forwarding), not by a test.
+ */
+import * as assert from 'assert';
+import * as fs from 'fs';
+import * as vscode from 'vscode';
+import pkg from '../../package.json';
+import { createSidecarStore } from '../../src/comments/sidecar-store';
+import { buildCommentLine, sidecarNameFor } from '../../src/comments/sidecar-format';
+import { allowAllGuard, noopLog, openTempMdFile, withTempWorkspace, HostTestRunner } from './_harness';
+
+function sidecarUriFor(mdUri: vscode.Uri): vscode.Uri {
+  const base = mdUri.path.split('/').pop() ?? '';
+  return vscode.Uri.joinPath(mdUri, '..', sidecarNameFor(base));
+}
+
+/** Same activation the rename track uses — the real `onWillRenameFiles` subscription must be live. */
+async function activateExtensionUnderTest(): Promise<void> {
+  const extension = vscode.extensions.getExtension(`${pkg.publisher}.${pkg.name}`);
+  assert.ok(extension, `extension ${pkg.publisher}.${pkg.name} must be discoverable in this Extension Host`);
+  if (!extension.isActive) {
+    await extension.activate();
+  }
+}
+
+/**
+ * Does `executeCommand('undo')` actually revert a document edit in THIS harness?
+ * Duplicated deliberately from `comment-undo-routes.test.ts` rather than shared
+ * via `_harness.ts`: each `*.test.ts` file on this track is self-contained, and
+ * the AC6 case below must be able to state its own capability finding even when
+ * run in isolation.
+ *
+ * Nondeterministic per run, not a fixed property of the harness: `undo` is routed
+ * to the ACTIVE editor and a `@vscode/test-electron` window's focus is not
+ * reliably real. On the 2026-07-28 run the suite re-entered 9 times and this came
+ * back true in 1 of them — and in that run the AC6 case below RAN and failed. Do
+ * not simplify this to a constant.
+ */
+async function undoActsOnDocuments(root: vscode.Uri): Promise<boolean> {
+  const probe = await openTempMdFile(root, 'undo-capability-probe.md', '# doc\n\nAlpha paragraph.\n');
+  const editor = await vscode.window.showTextDocument(probe, { preview: false });
+  await editor.edit((b) => b.insert(new vscode.Position(0, 0), 'PROBE '));
+  if (!probe.getText().includes('PROBE ')) {
+    return false;
+  }
+  await vscode.commands.executeCommand('undo');
+  await new Promise<void>((r) => setTimeout(r, 50));
+  return !probe.getText().includes('PROBE ');
+}
+
+export async function run(): Promise<void> {
+  const runner = new HostTestRunner();
+
+  // ONE workspace for both probes. Each `withTempWorkspace` adds the first folder
+  // to an otherwise-empty workspace, which restarts the Extension Host —
+  // `@vscode/test-electron` then re-loads the entry point and re-runs the suite
+  // from the top while the previous run's `fs.rmSync` cleanup deletes temp
+  // directories a later run is still inside. On the 2026-07-28 run that produced
+  // repeated PASS lines, an ENOENT flood, and one AC6 failure indistinguishable
+  // from a genuine defect. Sharing one workspace keeps this file to one restart.
+  await withTempWorkspace(async (root) => {
+    await activateExtensionUnderTest();
+    const undoWorks = await undoActsOnDocuments(root);
+
+    await runner.case(
+      'AC1 probe (document-level baseline): an undo command against a document with an empty undo stack mutates nothing',
+      async () => {
+        const document = await openTempMdFile(root, 'probe-untouched.md', '# doc\n\nAlpha paragraph.\n');
+        await vscode.window.showTextDocument(document, { preview: false });
+
+        const versionBefore = document.version;
+        const textBefore = document.getText();
+        let changeEvents = 0;
+        const sub = vscode.workspace.onDidChangeTextDocument((e) => {
+          if (e.document.uri.toString() === document.uri.toString()) {
+            changeEvents++;
+          }
+        });
+        try {
+          await vscode.commands.executeCommand('undo');
+          await new Promise<void>((r) => setTimeout(r, 50));
+        } finally {
+          sub.dispose();
+        }
+
+        // AC1 asserts on the DOCUMENT, not on whether a webview handler fired —
+        // its whole point is that the webview-side assertion proves nothing for
+        // a body-mounted field. These are that document-level assertion.
+        assert.strictEqual(document.version, versionBefore, 'document.version must not move');
+        assert.strictEqual(document.getText(), textBefore, 'document text must not change');
+        assert.strictEqual(changeEvents, 0, 'no onDidChangeTextDocument event may fire');
+      }
+    );
+
+    // AC6 is UNANSWERED when the harness cannot revert an edit, and must say so
+    // rather than pass. Its question is "can an undo consume US-23.5's rename
+    // `WorkspaceEdit`?" — a green assertion would then only mean the undo never
+    // ran, which is exactly the false negative the story's probe-first PO
+    // decision exists to avoid.
+    //
+    // Written as `if/else` rather than an early `return`: `return` here exits
+    // only the `withTempWorkspace` callback, not `run()`, so the trailing
+    // `runner.finish()` still executed and the skip tally printed twice per run
+    // (16 tally lines across 9 Extension Host re-entries on the 2026-07-28 log —
+    // the miscount that first drew attention to it).
+    if (!undoWorks) {
+      runner.skip(
+        "AC6 probe: an undo does not consume US-23.5's sidecar-rename WorkspaceEdit",
+        "executeCommand('undo') does not revert a document edit in this Extension Host " +
+          '(no focused editor in a @vscode/test-electron window), so a green result would ' +
+          'only prove the undo never ran — AC6 stays unanswered and needs a manual check ' +
+          'in a real VS Code window'
+      );
+      return;
+    }
+
+    await runner.case(
+      'AC6: an undo that reverts a rename moves the .md and its sidecar as one unit, never splitting them',
+      async () => {
+        // Seed a real .md + sidecar pair, then rename it the way US-23.5 AC5
+        // does — through `applyEdit`, so provider.ts's live `onWillRenameFiles`
+        // contributes the sidecar half and the rename lands on the undo stack as
+        // one WorkspaceEdit.
+        const oldMd = vscode.Uri.joinPath(root, 'probe-rename-src.md');
+        fs.writeFileSync(oldMd.fsPath, '# doc\n', 'utf8');
+        const seeded = await vscode.workspace.openTextDocument(oldMd);
+        const store = createSidecarStore(allowAllGuard, noopLog, false);
+        assert.strictEqual(
+          await store.append(
+            seeded,
+            buildCommentLine({
+              id: 'probe-comment',
+              author: 'Host Test Author',
+              timestamp: '2026-01-01T00:00:00.000Z',
+              body: 'survives the undo probe',
+              anchor: { offset_start: 0, offset_end: 4, recorded_text: 'doc', last_known_line: 1, nearest_heading: '' },
+            })
+          ),
+          null
+        );
+
+        const newMd = vscode.Uri.joinPath(root, 'probe-rename-dst.md');
+        const edit = new vscode.WorkspaceEdit();
+        edit.renameFile(oldMd, newMd);
+        assert.ok(await vscode.workspace.applyEdit(edit));
+        assert.ok(fs.existsSync(newMd.fsPath), 'precondition: the rename must have applied');
+        assert.ok(fs.existsSync(sidecarUriFor(newMd).fsPath), 'precondition: the sidecar must have moved with it');
+
+        // Open the renamed file — no text edit of its own — and undo. AC6's
+        // question is whether the next undo element reachable from here is the
+        // rename above.
+        const renamed = await vscode.workspace.openTextDocument(newMd);
+        await vscode.window.showTextDocument(renamed, { preview: false });
+        await vscode.commands.executeCommand('undo');
+        await new Promise<void>((r) => setTimeout(r, 100));
+
+        // Order matters here, and it is the whole point of this block. Two very
+        // different things make "the renamed .md is no longer at its destination"
+        // true, and the 2026-07-28 run hit this assertion without being able to
+        // say which: (a) the undo really did consume the rename — the defect AC6
+        // exists to detect — or (b) a concurrent Extension Host re-entry ran
+        // `fs.rmSync` over this temp workspace while this case was still inside
+        // it (that run logged an ENOENT flood and `Watcher shutdown because
+        // watched path got deleted` for exactly these directories). So rule (b)
+        // out first.
+        assert.ok(
+          fs.existsSync(root.fsPath),
+          'harness race, not an AC6 result: the temp workspace itself was deleted mid-case by a ' +
+            'concurrent Extension Host re-entry, so nothing below can be attributed to the undo'
+        );
+
+        // What this case asserts, and why it is NOT "the rename survived".
+        //
+        // The 2026-07-28 probe answered AC6's question: yes, an undo issued from a
+        // document with no text edit of its own DOES revert the rename. But a follow-up
+        // probe renamed a `.txt` — a path `provider.ts`'s `onWillRenameFiles` filters out
+        // entirely, so no sidecar edit is contributed and nothing of ours is on the stack
+        // — and VS Code reverted that too. The rename-revert is therefore stock behaviour
+        // of an unscoped `undo`, not a property of US-23.5's `WorkspaceEdit`; pinning "the
+        // rename survived" here would assert against VS Code itself and stay red forever.
+        //
+        // The fix lives where AC6 points: `provider.ts` no longer issues the global
+        // command for a document that owns no undo step (`mayForwardUndo`). That decision
+        // is proven in `test/unit.ts` — the ledger's state machine directly, plus a
+        // mutation-verified source tripwire for its presence at the call site — because no
+        // public API can open a custom editor's webview and post a message to it.
+        //
+        // What IS ours to guarantee, and what no undo may break, is that the pair moves as
+        // a unit: US-23.5 AC5 puts the `.md` and its sidecar in ONE `WorkspaceEdit`
+        // precisely so nothing can strand comments under a name the document no longer
+        // has. So assert consistency, not direction — both at the destination, or both
+        // back at the source, never one of each.
+        const mdAtNew = fs.existsSync(newMd.fsPath);
+        const mdAtOld = fs.existsSync(oldMd.fsPath);
+        const sidecarAtNew = fs.existsSync(sidecarUriFor(newMd).fsPath);
+        const sidecarAtOld = fs.existsSync(sidecarUriFor(oldMd).fsPath);
+        console.log(
+          `[test:host] AC6: after the undo the pair sits at ${mdAtOld ? 'the SOURCE' : 'the DESTINATION'} ` +
+            '— VS Code reverts a file rename on an unscoped undo, recorded here rather than asserted'
+        );
+
+        assert.strictEqual(mdAtNew, sidecarAtNew, 'the .md and its sidecar must agree at the destination');
+        assert.strictEqual(mdAtOld, sidecarAtOld, 'the .md and its sidecar must agree at the source');
+        assert.ok(mdAtNew !== mdAtOld, 'the .md must exist at exactly one of the two paths, never both or neither');
+      }
+    );
+  });
+
+  runner.finish();
+}

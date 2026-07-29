@@ -8,13 +8,14 @@
  * Run `node esbuild.js` before these tests (see npm run test:webview) so
  * dist/webview/main.js and its CSS exist.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Page } from '@playwright/test';
+import * as url from 'url';
+import { expect, type Page } from '@playwright/test';
 import type { InitConfig } from '../../src/shared/messages';
 
 const DIST_WEBVIEW = path.join(__dirname, '..', '..', 'dist', 'webview');
-const HARNESS_FILE = path.join(DIST_WEBVIEW, '_harness.html');
 
 const DEFAULT_CONFIG: InitConfig = {
   breaks: false,
@@ -25,15 +26,19 @@ const DEFAULT_CONFIG: InitConfig = {
   fontFamily: 'sans-serif',
   autoOpenToc: false,
   showLineNumbers: false,
-  caseInsensitiveFs: false,
   crossFileSearchScope: 'markdown',
   tableFitMode: false,
   readability: { enabled: false, mode: 'standard', fontFamily: '', zen: false },
   trigger: { dateFormat: 'YYYY-MM-DD', executeCommands: [], mode: 'advanced' },
+  commentAuthorName: 'harness-user',
+  docRelativePath: 'harness.md',
+  commentHighlightOn: false,
   // US-2.8: the harness serves dist/webview over file://, so the engine bundle
   // sits right beside main.js; no nonce is enforced here (no CSP meta).
   plantumlEngineUri: 'plantuml-engine.js',
   scriptNonce: '',
+  // P-1: same file:// contract as plantumlEngineUri above.
+  mermaidEngineUri: 'mermaid-engine.js',
 };
 
 /** Default docUri echoed back to the harness's fake acquireVsCodeApi (Req 20 US-20.3). */
@@ -78,9 +83,92 @@ function harnessHtml(readability: InitConfig['readability']): string {
 <title>webview test harness</title>
 <script>
   window.__posted = [];
-  let __state = {};
+  // Performance Audit P-8: an 'edit' now carries only the CHANGED REGION, so the
+  // full serialized markdown every spec asserts on only exists once someone
+  // reconstructs it. Model the host's half here — mirror of the webview's
+  // currentText, re-anchored by each push — and record the reconstruction as
+  // 'text' on the message, which is what waitForEdit / __posted readers expect.
+  // Registered before main.js loads, so it sees every push the webview does.
+  window.__mirror = '';
+  window.__mirrorRev = 0;
+  window.__mirrorDesync = 0;
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m && (m.type === 'init' || m.type === 'update')) {
+      if ('text' in m) {
+        window.__mirror = m.text ?? '';
+      } else if (
+        // P-8 reverse half: a diff-shaped 'update' carries only the changed
+        // region, so the mirror has to be RECONSTRUCTED here exactly as the
+        // webview reconstructs it — the host diffs against its own mirror, which
+        // is this same string. Taking m.text (what this did before the reverse
+        // half existed) blanks the mirror instead, and every following webview
+        // diff then fails its baseLength check — sending the spec down the resync
+        // path rather than the one it is testing.
+        //
+        // Gated on EXACTLY what src/text-utils.ts rebuildFromEditDiff refuses on,
+        // for the same reason the 'edit' branch below is: JS slice() clamps
+        // out-of-range indices and truncates fractional ones, so an ungated stub
+        // reconstructs plausible-but-wrong text from a payload the real webview
+        // would have refused outright, and the spec stays green.
+        // NOTE: this whole stub lives inside a template literal, so no backticks
+        // in these comments — one would close it and break the parse.
+        typeof m.newText === 'string' &&
+        m.baseLength === window.__mirror.length &&
+        Number.isInteger(m.start) && Number.isInteger(m.oldEnd) &&
+        m.start >= 0 && m.oldEnd >= m.start && m.oldEnd <= window.__mirror.length
+      ) {
+        window.__mirror =
+          window.__mirror.slice(0, m.start) + m.newText + window.__mirror.slice(m.oldEnd);
+      } else {
+        // Unreconstructable: leave the mirror alone and record it, so a spec that
+        // later reads a stale mirror fails loudly instead of quietly.
+        window.__mirrorDesync++;
+      }
+      // Same '?? 0' the webview's own appliedRev uses, so a spec that posts a
+      // rev-less update (most of them) keeps both sides on one consistent rev.
+      window.__mirrorRev = m.rev ?? 0;
+    }
+  });
+  // Seeded by presetWebviewState() through addInitScript, which runs before this
+  // stub — the only way a spec can reach code that reads persisted webview state
+  // (rightDockTab, tocWidth, tocMaxLevel) on the very first boot.
+  let __state = window.__presetState ?? {};
   window.acquireVsCodeApi = () => ({
-    postMessage: (msg) => { window.__posted.push(msg); },
+    postMessage: (msg) => {
+      if (msg && msg.type === 'edit') {
+        if ('text' in msg) {
+          window.__mirror = msg.text;
+          window.__mirrorRev = msg.baseRev;
+        } else if (
+          // Must refuse on EXACTLY what src/text-utils.ts rebuildFromEditDiff
+          // refuses on. A looser stub is worse than none: JS slice() clamps
+          // out-of-range and truncates fractional indices, so a webview
+          // regression emitting bad offsets would still reconstruct plausible
+          // text here and keep the suite green, while the real host refused
+          // every edit and resync-looped.
+          msg.baseRev === window.__mirrorRev &&
+          typeof msg.newText === 'string' &&
+          msg.baseLength === window.__mirror.length &&
+          Number.isInteger(msg.start) && Number.isInteger(msg.oldEnd) &&
+          msg.start >= 0 && msg.oldEnd >= msg.start && msg.oldEnd <= window.__mirror.length
+        ) {
+          window.__mirror = window.__mirror.slice(0, msg.start) + msg.newText + window.__mirror.slice(msg.oldEnd);
+        } else {
+          // Record the refusal, leave 'text' off so a spec reading a stale
+          // mirror fails loudly, and then do what the real host does next —
+          // ask for a resync. Without this the webview's own 'requestFullSync'
+          // handler is unreachable from any spec.
+          window.__mirrorDesync++;
+          window.__posted.push(msg);
+          window.postMessage({ type: 'requestFullSync' }, '*');
+          return;
+        }
+        window.__posted.push({ ...msg, text: window.__mirror });
+        return;
+      }
+      window.__posted.push(msg);
+    },
     getState: () => __state,
     setState: (s) => { __state = s; },
   });
@@ -109,23 +197,136 @@ function harnessHtml(readability: InitConfig['readability']): string {
 </html>`;
 }
 
-function ensureHarnessFile(readability: InitConfig['readability']): void {
+/** Per-process counter so two temp files from this process never collide. */
+let tmpSeq = 0;
+
+/**
+ * Write the harness page and return its path.
+ *
+ * Content-addressed on purpose. This used to write one shared
+ * `dist/webview/_harness.html` on every `openBlankHarness`, which made the
+ * harness itself the flakiest thing in the suite: `fs.writeFileSync` truncates
+ * before it writes, so with the suite's parallel workers one worker could be
+ * inside `page.goto('file://.../_harness.html')` during another worker's
+ * zero-length window. Chromium then loaded an EMPTY document — `readyState`
+ * "complete", no stylesheets, no `#content`, the inline `acquireVsCodeApi` stub
+ * never run — and the next `#content` wait could only sit there until the test
+ * timeout killed it, which is why four unrelated specs all died at that one
+ * line. Raising the timeout could never have helped: `#content` was never going
+ * to appear on that page.
+ *
+ * Hashing the HTML fixes a second bug in the same code: the file's content
+ * depends on `readability` (`bakedMarkup`), so a worker that wrote a Zen/Reading
+ * variant could hand it to a worker expecting the plain shell. Distinct configs
+ * are now distinct files, and identical configs produce byte-identical ones.
+ *
+ * `rename` rather than a plain write, because two workers can still land on the
+ * same new path at once: rename(2) is atomic, so a concurrent reader sees either
+ * no file or the whole file, never a partial one.
+ */
+function ensureHarnessFile(readability: InitConfig['readability']): string {
   if (!fs.existsSync(path.join(DIST_WEBVIEW, 'main.js'))) {
     throw new Error('dist/webview/main.js not found — run `node esbuild.js` before webview tests.');
   }
-  fs.writeFileSync(HARNESS_FILE, harnessHtml(readability), 'utf8');
+  const html = harnessHtml(readability);
+  const hash = crypto.createHash('sha1').update(html).digest('hex').slice(0, 12);
+  const file = path.join(DIST_WEBVIEW, `_harness-${hash}.html`);
+  if (!fs.existsSync(file)) {
+    const tmp = `${file}.${process.pid}.${tmpSeq++}.tmp`;
+    fs.writeFileSync(tmp, html, 'utf8');
+    try {
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      // `existsSync` above is advisory, so two workers can both reach this. On
+      // POSIX the loser's rename just replaces byte-identical content; on Windows
+      // it fails with a sharing violation if another worker's Chromium already
+      // holds the destination open. Losing the race is always fine here — the
+      // name is a hash of the content — so the only thing to check is that
+      // somebody won it.
+      if (!fs.existsSync(file)) { throw err; }
+    } finally {
+      // A worker killed mid-run (Ctrl-C, --max-failures) would otherwise leave
+      // its temp behind forever; nothing else prunes dist/webview.
+      fs.rmSync(tmp, { force: true });
+    }
+  }
+  return file;
+}
+
+/**
+ * Seed the fake `vscode.getState()` record BEFORE the page boots. Must be called
+ * before `openEditor`; anything the webview persists (`rightDockTab`, `tocWidth`,
+ * `tocMaxLevel`) can be restored this way, which is the only route to the
+ * "reopened with a remembered choice" branch — the stub's state is per-page.
+ */
+export async function presetWebviewState(page: Page, state: Record<string, unknown>): Promise<void> {
+  await page.addInitScript((seed) => {
+    (window as unknown as { __presetState: unknown }).__presetState = seed;
+  }, state);
+}
+
+/** Read the fake `vscode.setState()` record — what the webview persisted so far. */
+export async function readWebviewState(page: Page): Promise<Record<string, unknown>> {
+  return page.evaluate(() => (window as unknown as { acquireVsCodeApi: () => { getState(): Record<string, unknown> } }).acquireVsCodeApi().getState());
+}
+
+/**
+ * Req 24 US-23.8 AC6: open the harness page WITHOUT posting 'init' — for a spec
+ * that needs to control exactly when the first render happens (e.g. racing a
+ * `commentThreadsSync` against it, the way the host's own best-effort immediate
+ * sync can race the webview's first paint). Pair with `postInit` below once the
+ * race has been set up.
+ */
+export async function openBlankHarness(page: Page, configOverrides: Partial<InitConfig> = {}): Promise<InitConfig> {
+  const config = { ...DEFAULT_CONFIG, ...configOverrides };
+  // pathToFileURL, not `'file://' + path`: the concat is the raw path-as-text
+  // construct CLAUDE.md's cross-platform rule forbids — it leaves a Windows
+  // `C:\…` path and any `#`/`?` in the repo path to chance (a `#` would silently
+  // truncate the URL at the fragment). This repo's own path already has a space.
+  await page.goto(url.pathToFileURL(ensureHarnessFile(config.readability)).href);
+  return config;
+}
+
+/**
+ * Post the host's 'init' message and wait for the first render — the other
+ * half of `openEditor`. `docUri` defaults to `DEFAULT_DOC_URI`; a spec racing
+ * a pre-init `commentThreadsSync` (AC6, see `seedCommentThreads`'s own
+ * `docUri` param) must pass the SAME `''` here too — `main.ts`'s 'init'
+ * handler treats an actual docUri change as switching documents and prunes
+ * every resolver thread via `syncAll([])` before rendering, which would
+ * wipe the very thread the race is trying to observe.
+ */
+export async function postInit(
+  page: Page,
+  markdown: string,
+  config: InitConfig,
+  docUri: string = DEFAULT_DOC_URI
+): Promise<void> {
+  await page.evaluate(
+    ({ text, cfg, docUri }) => {
+      // Re-arm the gate below: a spec may post 'init' more than once, and a
+      // marker left over from the previous one would satisfy the wait instantly.
+      delete document.body.dataset.triggerMode;
+      window.postMessage({ type: 'init', text, docUri, config: cfg }, '*');
+    },
+    { text: markdown, cfg: config, docUri }
+  );
+  // Gate on a stamp the 'init' handler itself writes (`applyTriggerMode` in
+  // main.ts), so this really does wait for the message to be consumed. The old
+  // `#content` wait could not: editor.css gives `#content` `min-height: 60vh`,
+  // so it is already "visible" — measured 432px tall with zero children — on a
+  // page where no init has run at all, and the wait returned in ~9ms having
+  // asserted nothing.
+  // `attached`, not the default `visible`: presence of the stamp is the whole
+  // signal, and the default would additionally require `<body>` to have a
+  // non-empty box — an unrelated condition to hang on.
+  await page.locator('body[data-trigger-mode]').waitFor({ state: 'attached' });
 }
 
 /** Open the harness page and bootstrap it with the given markdown, like the host's 'init' message. */
 export async function openEditor(page: Page, markdown: string, configOverrides: Partial<InitConfig> = {}): Promise<void> {
-  const config = { ...DEFAULT_CONFIG, ...configOverrides };
-  ensureHarnessFile(config.readability);
-  await page.goto('file://' + HARNESS_FILE);
-  await page.evaluate(
-    ({ text, cfg, docUri }) => window.postMessage({ type: 'init', text, docUri, config: cfg }, '*'),
-    { text: markdown, cfg: config, docUri: DEFAULT_DOC_URI }
-  );
-  await page.locator('#content').waitFor();
+  const config = await openBlankHarness(page, configOverrides);
+  await postInit(page, markdown, config);
 }
 
 /**
@@ -151,13 +352,178 @@ export async function clearPosted(page: Page): Promise<void> {
   });
 }
 
-/** Wait for the next 'edit' message posted to the host (scheduleSync debounces ~250ms) and return its markdown text. */
+/**
+ * Wait for the next 'edit' message posted to the host (scheduleSync debounces
+ * ~250ms) and return its markdown text — the harness stub's reconstruction of
+ * the P-8 diff, i.e. exactly the full document the host would have applied.
+ */
 export async function waitForEdit(page: Page, timeoutMs = 2000): Promise<string> {
   const handle = await page.waitForFunction(
     () => (window as unknown as { __posted: Array<{ type: string; text: string }> }).__posted.filter((m) => m.type === 'edit').at(-1),
     undefined,
     { timeout: timeoutMs }
   );
-  const msg = (await handle.jsonValue()) as { text: string };
+  const msg = (await handle.jsonValue()) as { text?: string };
+  if (typeof msg.text !== 'string') {
+    // P-8: the stub could not rebuild this diff (the base it mirrors no longer
+    // matches) — the real host would answer 'requestFullSync'. Never let this
+    // surface as a confusing `undefined` in the spec's own assertion.
+    throw new Error(
+      `waitForEdit: the harness could not reconstruct the edit — its mirror desynced from the webview. Got: ${JSON.stringify(msg)}`
+    );
+  }
   return msg.text;
+}
+
+/**
+ * Req 23 US-23.9: one thread as the host would push it, with everything but the
+ * interesting fields defaulted. Specs that only care about status/anchor state
+ * should not have to restate the whole `CommentSyncThread` envelope.
+ */
+export interface SeedThread {
+  threadId: string;
+  status?: 'Open' | 'Resolved' | 'Closed';
+  author?: string;
+  timestamp?: string;
+  body?: string;
+  recordedText?: string;
+  /** Defaults to a bare-caret anchor (0, 0) — override both to give the thread a real washable range. */
+  offsetStart?: number;
+  offsetEnd?: number;
+  lastKnownLine?: number;
+  /** US-23.11 AC2: the applied transition trail, oldest first. */
+  statusChanges?: Array<{ toStatus: 'Open' | 'Resolved' | 'Closed'; author: string; timestamp: string }>;
+}
+
+/** What the host reports about the sidecar behind a snapshot (US-23.9 AC12/AC13). */
+export interface SeedSidecar {
+  foreign?: boolean;
+  problem?: string;
+  orphans?: Array<{ id: string; kind: 'reply' | 'status-change'; author: string; timestamp: string; detail: string }>;
+  /** Req 24 US-23.15 AC3: how many sidecar lines the load discarded. */
+  skipped?: number;
+  /** Req 24 US-23.15 AC4: the sidecar holds git conflict markers. */
+  conflicted?: boolean;
+}
+
+/**
+ * Push a `commentThreadsSync` snapshot, exactly as `provider.syncCommentThreads`
+ * does. This is the ONLY way to reach a Closed thread or a foreign sidecar from
+ * a spec: neither can be produced by driving the webview's own UI.
+ *
+ * `docUri` defaults to `DEFAULT_DOC_URI` (the normal case, matching whatever
+ * `openEditor`/`postInit` set as `currentDocUri`). Req 24 US-23.8 AC6: a spec
+ * racing this against the first render (via `openBlankHarness`, before any
+ * 'init') must pass `''` instead — before 'init', the webview's `currentDocUri`
+ * is still its `''` default, and the sync handler drops anything that doesn't
+ * match it.
+ */
+export async function seedCommentThreads(
+  page: Page,
+  threads: SeedThread[],
+  sidecar?: SeedSidecar,
+  docUri: string = DEFAULT_DOC_URI
+): Promise<void> {
+  await page.evaluate(
+    ({ list, docUri, side }) =>
+      window.postMessage(
+        {
+          type: 'commentThreadsSync',
+          docUri,
+          sidecar: side,
+          threads: list.map((t) => ({
+            threadId: t.threadId,
+            status: t.status ?? 'Open',
+            author: t.author ?? 'reviewer',
+            timestamp: t.timestamp ?? '2026-07-20T09:00:00.000Z',
+            body: t.body ?? 'Body.',
+            recordedText: t.recordedText ?? '',
+            offsetStart: t.offsetStart ?? 0,
+            offsetEnd: t.offsetEnd ?? 0,
+            lastKnownLine: t.lastKnownLine ?? 1,
+            nearestHeading: '',
+            replies: [],
+            statusChanges: t.statusChanges ?? [],
+          })),
+        },
+        '*'
+      ),
+    { list: threads, docUri, side: sidecar }
+  );
+}
+
+/**
+ * Answer away every anchor-lost confirmation currently queued, with "Later" —
+ * the exit that decides nothing and writes nothing.
+ *
+ * Needed by any spec that floats a thread without being ABOUT the dialog: since
+ * US-23.11 AC1 dropped the identity filter, whoever is at the keyboard is asked
+ * about every floating thread, and the dialog's scrim swallows clicks meant for
+ * the dock or the gutter underneath it.
+ */
+export async function dismissAnchorLost(page: Page): Promise<void> {
+  const dialog = page.locator('.comment-anchor-lost');
+  // Bounded: one pass per thread a spec could plausibly float, so a dialog that
+  // refuses to close fails the spec instead of hanging the run. Each pass waits
+  // out ANCHOR_REEVAL_DEBOUNCE_MS first — a thread does not float, and the next
+  // queued question does not open, until a resolution pass has run, so polling
+  // `isVisible()` straight away sees nothing and lets the dialog appear over
+  // whatever the spec does next.
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(300);
+    if (!(await dialog.isVisible())) {
+      return;
+    }
+    await page.locator('.comment-anchor-lost-later').click();
+  }
+  await expect(dialog).toBeHidden();
+}
+
+/**
+ * Open the right dock on the Comment tab and wait for the panel to finish
+ * widening. The tab header is the only route: the `⚑` toolbar button that used
+ * to open this tab has been retired.
+ */
+export async function openCommentTab(page: Page): Promise<void> {
+  // force: toolbar overflow math can transiently report #toc-toggle as offscreen.
+  await page.locator('#toc-toggle').click({ force: true });
+  // The dock animates its width open; measuring a row mid-transition would give
+  // a box that has moved by the time the pointer gets there.
+  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
+  await expect(page.locator('#comment-tabpanel')).toBeVisible();
+}
+
+/**
+ * US-10.8: the TOC's heading-depth control lives in the dock's `⋯` overflow menu,
+ * so every spec that drives the depth filter goes through the same three steps
+ * (open the menu, click the row for `level`, wait for the menu to close). Shared
+ * here rather than copied per spec — the rows carry no `data-level`, so the level
+ * is positional and the mapping belongs in one place.
+ */
+export const DEPTH_MENU_LABELS = { 1: 'H1', 2: 'H1–H2', 3: 'H1–H2–H3' } as const;
+
+/** Open the dock's `⋯` menu and assert it is the TOC tab's "Outline depth" section. */
+export async function openDepthMenu(page: Page): Promise<void> {
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu-title')).toHaveText('Outline depth');
+  await expect(page.locator('.right-dock-menu-item')).toHaveCount(3);
+}
+
+/** Set the TOC heading-depth filter to `level` via the `⋯` menu. */
+export async function setDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
+  await openDepthMenu(page);
+  await page.locator('.right-dock-menu-item').nth(level - 1).click();
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
+}
+
+/** Assert exactly one depth row is checked, and it is `level`. Leaves the menu closed. */
+export async function expectActiveDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
+  await openDepthMenu(page);
+  const checked = page.locator('.right-dock-menu-item[aria-checked="true"]');
+  await expect(checked).toHaveCount(1);
+  // Suffix match: the label shares its button with the ✓ check column.
+  await expect(checked).toHaveText(new RegExp(`${DEPTH_MENU_LABELS[level]}$`));
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu')).toBeHidden();
 }

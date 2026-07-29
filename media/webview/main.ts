@@ -12,6 +12,7 @@
  */
 import {
   MarkdownRenderer,
+  TRANSIENT_CLASSES,
   createTurndown,
   findOrphanNestedListPair,
   normalizeMarkdown,
@@ -24,29 +25,44 @@ import {
   postProcessEntityRefs,
   postProcessEmptyLinks,
   prepareDomForSerialize,
+  hasSiblingSensitiveBlock,
+  serializeChildren,
+  serializeFull,
+  stampBlockStyle,
+  stampBlockStyles,
+  type BlockMarkdownCache,
+  type BlockSerializeOptions,
   CAPTION_CLASS,
   AUTOLINK_PATH_ATTR,
   MD_CODE_COPY_CLASS,
   MD_CODE_LANG_CLASS,
   MD_CODE_WRAP_CLASS,
-  MD_CODE_WRAPPED_CLASS,
+  initFrontMatterToggle,
+  applyFrontMatterViewState,
+  MERMAID_CLASS,
+  MERMAID_CHART_CLASS,
+  PLANTUML_CLASS,
+  PLANTUML_CHART_CLASS,
+  type LineRange,
 } from './pipeline';
 import { initSearch } from './search';
 import { initSelectHighlight } from './select-highlight';
 import { initCrossFileSearch } from './cross-file-search';
 import { initToc } from './toc';
+import { ESCAPE_PRIORITY, registerEscapeHandler } from './escape-stack';
 import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './broken-ref';
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
-import { initMermaid } from './mermaid';
+import { initMermaid, setMermaidEngineConfig } from './mermaid';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
+import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
-import { buildBlockMap, BLOCK_ID_ATTR, type BlockEntry } from './block-map';
+import { buildBlockMap, type BlockEntry } from './block-map';
 import { readSrcRange } from './block-info';
-import { detectBlockStyle, stampStyleOverride, LANG_SWITCHED_ATTR } from './block-style';
+import { copySrcLines, lineAgnosticKey, planBlockPatch, RENDER_GENERATION_ATTR } from './block-patch';
 import { initDragDrop, computeHeadingSectionSpan, headingLevel } from './drag-drop';
-import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
+import { closestElement, createDomHelpers, emptyParagraph, encodeLinkPath, getOffsetWithin, ownsNativeTextHistory, scrollBehavior, textAfterCaret, textBeforeCaret } from './dom-utils';
 import { computeIndent, computeOutdent, commitListOpDirect } from './list-ops';
 import { initPasteImage } from './paste-image';
 import { initExternalDrop } from './external-drop';
@@ -54,9 +70,11 @@ import { initReadability } from './readability';
 import { initImageZoom } from './image-zoom';
 import {
   initToolbar,
+  syncCommentHighlightButton,
   syncTocButton,
   syncReadingButtons,
   toggleInlineCode,
+  toggleCommentHighlight,
   isPopoverOpen,
   openCodeLangSwitcher,
   initBrokenRefBadge,
@@ -71,10 +89,19 @@ import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
 import { initTriggerSlash } from './trigger-slash';
 import { initTriggerAt } from './trigger-at';
 import { initEntityScope } from './entity-scope';
+import { initCommentMenu } from './comment-menu';
+import { initCommentResolve } from './comment-resolve';
+import { initCommentPanel } from './comment-panel';
+import { initCommentHighlight } from './comment-highlight';
+import { initCommentPopover } from './comment-popover';
+import { initCommentAnchorDialog } from './comment-anchor-dialog';
+import { initCommentUndoGuard } from './comment-undo-guard';
+import { initCommentGutter } from './comment-gutter';
+import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
-import { normalizeHrefKey } from '../../src/references-section';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS } from './constants';
+import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
+import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS } from './constants';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -99,14 +126,36 @@ const dom = createDomHelpers(content);
 // initToc needs placeCaretIn to set the caret at a heading on TOC-link click
 // (so closing the panel reveals that heading, not the stale document-top caret).
 const toc = initToc(content, vscode, dom.placeCaretIn);
+// US-23.7 AC6: Escape closes the right-dock container — but only "when the
+// container has focus", which the AC states as its own precondition and which is
+// what keeps this handler out of everyone else's way. The escape stack's listener
+// is capture-phase on `document` and calls stopPropagation the moment a handler
+// consumes, so an unconditional "the panel is open" handler would swallow Escape
+// from every listener not yet migrated to the stack (the Ctrl+F box, the TeX
+// editor, toolbar popovers, the drag-handle menu) — and the panel auto-opens on
+// most documents, so that would be the default state, not an edge case.
+// Registered here rather than in toc.ts so the close pairs with syncTocButton(),
+// exactly like every other toc.toggle() call site in this file.
+registerEscapeHandler(ESCAPE_PRIORITY.DOCK, () => {
+  const panel = document.getElementById('toc-panel');
+  if (!toc.isOpen() || panel === null || !panel.contains(document.activeElement)) {
+    return false;
+  }
+  // Focus lives inside a panel that is about to collapse and then go
+  // visibility:hidden — hand it back before it is orphaned there.
+  content.focus();
+  // close(), not toggle(): Escape must dismiss the dock whichever tab is
+  // showing, and toggle() with no id would switch to TOC from the Comment tab.
+  toc.close();
+  syncTocButton();
+  return true;
+});
 const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
+initFrontMatterToggle(content);
 const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
-// X-12: filesystem case-sensitivity, from InitConfig — folds the ref-nav key so
-// a case-differing body occurrence matches on Windows/macOS. Host default off.
-let caseInsensitiveFs = false;
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
@@ -220,6 +269,62 @@ const readability = initReadability({
     plantumlView.refreshTheme();
   },
 });
+// Req 23 US-23.4: four-tier anchor re-resolution. Created before the menu — a
+// thread created there registers with this resolver as soon as the host
+// confirms it.
+const commentResolve = initCommentResolve(content, vscode);
+// Req 23 US-23.2: the "Show Comments" inline highlight overlay — created
+// before the popover (which needs it to light up the open thread's range) and
+// before the toolbar (whose button toggles it).
+const commentHighlight = initCommentHighlight(commentResolve);
+// Req 23 US-23.2: the thread popover — opened from a gutter pin (or a cluster
+// row). Created before the gutter, which needs its `open` as a callback.
+const commentPopover = initCommentPopover(vscode, commentResolve, commentHighlight);
+// Req 23 US-23.9: the Comment tab in the shared right dock — every thread in
+// the file, and the absorbed US-23.4 re-attach affordances for the floating
+// ones. Created AFTER the popover, which its rows hand threads to.
+const commentPanel = initCommentPanel(
+  content,
+  commentResolve,
+  (threadId, rect, returnFocusTo) => commentPopover.open(threadId, rect, { returnFocusTo }),
+  vscode
+);
+toc.dock.registerTab(commentPanel.tab);
+// Req 23 US-23.3 AC3, revised by US-23.11 AC4: tells whoever is at the keyboard
+// that a thread lost its anchor, once per floating episode. Self-driven off
+// commentResolve's change notifications — no other module opens it and nothing
+// configures it, so it is constructed for its side effect alone.
+initCommentAnchorDialog(commentResolve);
+// Req 24 US-23.18 AC1/AC2/AC8: keeps an undo/redo chord pressed in any comment
+// surface out of the document's undo stack. Body-mounted fields never reach
+// `#content`'s keydown handler, so `ownsNativeUndo` below cannot cover them.
+initCommentUndoGuard();
+// Req 23 US-23.2: gutter pins, mounted beside gutter.ts's numbered line gutter.
+const commentGutter = initCommentGutter(content, commentResolve, (threadId, rect) =>
+  commentPopover.open(threadId, rect)
+);
+// Req 24 US-23.23: the pin's second route — click the washed text itself. Same
+// `openThread` shape as the gutter above, so both land in the popover identically.
+// `rectIsAnchor`: the rect IS the clicked text's live box, so the card is placed
+// beside that phrase and the document is not scrolled (US-23.23 AC7) — unlike the
+// gutter/tab routes above, whose rect is only a launch point.
+initCommentAnchorClick(content, commentHighlight, (threadId, rect) =>
+  commentPopover.open(threadId, rect, { rectIsAnchor: true })
+);
+// Two counts on two surfaces: the "Show Comments" button carries the floating
+// count (the `⚑` button that used to carry it was retired) and the tab strip
+// carries the thread count, so both have to follow the resolver even while the
+// dock is closed. AC1: the strip badge appears only when the file has threads.
+function syncCommentCounts(): void {
+  syncCommentHighlightButton();
+  const threads = commentPanel.threadCount();
+  toc.dock.setBadge('comment', threads === 0 ? undefined : String(threads));
+}
+document.addEventListener('orca-comment-floating-changed', syncCommentCounts);
+// No `orca-dock-tab-changed` listener: it existed to keep `⚑`'s active state
+// honest when the strip switched tabs. `☰` is all that is left, and it reflects
+// `toc.isOpen()` — which a tab switch never changes (toc.ts's `toggle` returns
+// after `dock.activate` without touching `open`).
 initImageZoom(content, toolbarEl);
 initToolbar(content, toolbarEl, {
   vscode,
@@ -228,13 +333,20 @@ initToolbar(content, toolbarEl, {
   syncNow,
   // Same host-delegation contract as the Ctrl+Z/Y keydown path below: one
   // single TextDocument undo stack, never the browser's native one.
-  requestUndo: () => postToHost({ type: 'undo', pendingText: takePendingSync() }),
-  requestRedo: () => postToHost({ type: 'redo', pendingText: takePendingSync() }),
+  requestUndo: () => postToHost({ type: 'undo', ...takePendingSync() }),
+  requestRedo: () => postToHost({ type: 'redo', ...takePendingSync() }),
   dom,
   toc,
+  commentPanel,
+  commentHighlight,
+  onCommentHighlightToggle: (on) => postToHost({ type: 'commentHighlightToggled', docUri: currentDocUri, on }),
   readability,
   insertMarkdown: insertMarkdownAtCaret,
 });
+// Req 23 US-23.4 AC4: stamp the counts once the toolbar exists, so the lost-
+// anchor badge has a `data-count` from the first paint instead of a frame with
+// the attribute missing.
+syncCommentCounts();
 initInputRules(content, { scheduleSync, dom });
 
 // Req 20 US-20.1/20.2/20.3: ONE shared trigger-popup shell — created LAZILY on
@@ -290,6 +402,9 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
   scheduleSync();
   brokenRef.refresh();
 });
+// Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
+// only contextmenu handler.
+const commentMenu = initCommentMenu(content, vscode, commentResolve);
 const brokenRef = initBrokenRef({
   content,
   vscode,
@@ -333,9 +448,45 @@ syncToolbarHeightVar();
 
 /** Markdown hiện tại mà webview đã biết (đã render hoặc đã gửi lên). */
 let currentText = '';
+/**
+ * Performance Audit P-8: the `rev` of the last host push whose text this webview
+ * ACTUALLY adopted into `currentText`. Echoed on every 'edit' as `baseRev` so the
+ * host can tell whether its mirror of `currentText` — the base a diff-shaped edit
+ * indexes into — is still the same document. A push that was deferred (a trigger
+ * popup owning the keyboard) or dropped as stale must NOT bump this: saying "I am
+ * on rev N" while holding rev N-1's text is exactly the lie that would let a diff
+ * apply at the wrong offsets.
+ */
+let appliedRev = 0;
+/**
+ * Performance Audit P-8 (reverse half): how many times THIS webview has advanced
+ * `currentText` on its own (see `serializeIfChanged`). Rides to the host on every
+ * message carrying webview-authored text — both 'edit' shapes and undo/redo's
+ * `pendingText` — and comes back on a diff-shaped 'update' as `baseSeq`.
+ *
+ * It exists because `appliedRev` cannot see this direction of divergence: a
+ * webview-authored advance bumps no rev, so an 'edit' still in flight leaves
+ * `appliedRev === baseRev` while `currentText` has already moved past the base
+ * the host diffed against. `baseLength` does not close it either — overtyping a
+ * selection with equal-length text keeps the length — and there the wrong
+ * offsets would be spliced into the user's file.
+ */
+let localSeq = 0;
+/** Req 23 US-23.2: `document.uri.toString()` echoed back on `commentHighlightToggled`/`replyToComment`/`deleteComment`. */
+let currentDocUri = '';
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
 /** Block Map (HLR mục 18, US-18.1) — chỉ mục block cấp cao nhất, dựng lại ở cuối mỗi renderDocument(). */
 let blockMap: BlockEntry[] = [];
+/** Performance Audit P-7: `BlockEntry` by id, so stamping ONE block's style is O(1). */
+let blockById = new Map<string, BlockEntry>();
+/**
+ * Performance Audit P-7: the document holds a block that depends on its
+ * neighbours, so no block in it may be serialized on its own (see
+ * hasSiblingSensitiveBlock). Only ever changes with blockMap in renderDocument:
+ * the "indented" style comes from mdSlice alone, so it cannot appear between two
+ * renders.
+ */
+let siblingSensitiveDocument = false;
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -413,7 +564,6 @@ window.addEventListener('message', (event) => {
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
-      caseInsensitiveFs = cfg.caseInsensitiveFs === true;
       crossFileSearch.setDefaultScope(cfg.crossFileSearchScope ?? 'markdown');
       // US-2.8: engine PlantUML nạp lười lúc chạy — webview không tự dựng được
       // URI webview lẫn nonce CSP, nên nhận sẵn từ host. Phải set TRƯỚC
@@ -423,6 +573,13 @@ window.addEventListener('message', (event) => {
       if (cfg.plantumlEngineUri) {
         setPlantumlEngineConfig({
           engineUri: cfg.plantumlEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      // P-1 (Performance — Audit.md): same lazy-load contract as PlantUML above.
+      if (cfg.mermaidEngineUri) {
+        setMermaidEngineConfig({
+          engineUri: cfg.mermaidEngineUri,
           scriptNonce: cfg.scriptNonce ?? '',
         });
       }
@@ -440,6 +597,35 @@ window.addEventListener('message', (event) => {
       // Req 21 bug fix: the quick-correct popover needs docUri to relativize a
       // corrected entity's declaring-file href (else it keeps the old file).
       quickCorrect.setDocUri(msg.docUri);
+      // Req 23 US-23.1: the composer echoes docUri back on 'createComment' so a
+      // thread is never created against the wrong document, and shows the
+      // author name the host will record.
+      commentMenu.setDocUri(msg.docUri);
+      commentResolve.setDocUri(msg.docUri);
+      // Req 24 US-23.12: the export header needs the workspace-relative display
+      // path — seeded once here like the rest of `InitConfig`, never round-tripped.
+      commentPanel.setDocument(msg.docUri, cfg.docRelativePath ?? '');
+      commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
+      // Req 23 US-23.2: the popover echoes docUri back on reply/delete, and
+      // needs the author name for its own-authorship delete gating.
+      // US-23.9: a document switch invalidates the tab's whole picture — the
+      // previous file's rows, its sidecar report, and any armed re-attach. Back
+      // to the loading state until this document's own snapshot arrives, so the
+      // tab never flashes "No comments in this file" at a file it has not read.
+      if (currentDocUri !== msg.docUri) {
+        // Drop the previous document's threads before anything renders: they are
+        // not this document's, and every comment surface (pins, highlight, the
+        // tab's rows with their old line numbers) would otherwise show them as
+        // live and clickable until the new snapshot's own `syncAll` prunes them.
+        commentPopover.forgetThreads(commentResolve.syncAll([]));
+        commentPanel.beginLoad();
+      }
+      currentDocUri = msg.docUri;
+      commentPopover.setDocUri(msg.docUri);
+      commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
+      // Req 23 US-23.2: per-file persisted "Show Comments" state.
+      commentHighlight.setToggle(cfg.commentHighlightOn === true);
+      syncCommentHighlightButton();
       // Req 21 US-21.5: also seed the `@` popup's gate.
       applyTriggerMode(cfg.trigger?.mode ?? 'advanced');
       // US-19.25: seed Fit-mode TRƯỚC render đầu để bảng dựng thẳng ở fit-mode
@@ -458,6 +644,8 @@ window.addEventListener('message', (event) => {
         );
       }
       renderDocument(msg.text ?? '');
+      // P-8: this text IS now currentText — adopt its rev as the diff base.
+      appliedRev = msg.rev ?? 0;
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
       // scroll tới đúng vị trí match đó thay vì khôi phục scrollTop cũ đã
       // lưu — chỉ fallback về restoreScroll() cho luồng mở file bình thường.
@@ -478,7 +666,30 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'update': {
-      if (msg.text === currentText) {
+      // P-8 (reverse half): resolve the two wire shapes to ONE full text before
+      // anything below looks at it, exactly as the host resolves the two 'edit'
+      // shapes. `undefined` = the diff was refused (see resolveUpdateText) and
+      // NOTHING is applied — ask for a full push, which needs no base.
+      const nextText = resolveUpdateText(msg);
+      if (nextText === undefined) {
+        postToHost({ type: 'requestFullPush' });
+        break;
+      }
+      if (nextText === currentText) {
+        // P-8: nothing to render, but this rev's text IS what we hold — adopting
+        // it keeps the host's mirror and ours on the same rev, so the next edit
+        // stays a diff instead of forcing a pointless full resync. Same `?? 0`
+        // fallback as the two sibling adoption sites below; they must not
+        // disagree, or a rev-less push leaves the two branches on different revs.
+        appliedRev = msg.rev ?? 0;
+        // A queued deferred update is now STALE: this newer rev's text is what
+        // we already hold, so rendering the older pending text on release would
+        // put back content the document has moved past — and drag `appliedRev`
+        // BACKWARDS to that older rev. The flush's own guard only compares
+        // `baseText`, which is unchanged here, so it cannot catch this.
+        if (pendingUpdate && pendingUpdate.rev <= appliedRev) {
+          pendingUpdate = undefined;
+        }
         break;
       }
       // Bug #3 (filter leak): while a trigger popup (`/`/`@`) owns the editor
@@ -488,10 +699,35 @@ window.addEventListener('message', (event) => {
       // text typed next then leaks into the editor (+ a stray newline on Enter).
       // Defer the render until the popup releases input ownership (commit/cancel).
       if (hasInputOwner()) {
-        pendingUpdate = { text: msg.text ?? '', caretLine: msg.caretLine, caretCol: msg.caretCol, baseText: currentText };
+        // P-8: deliberately NOT adopting msg.rev — the text is only stashed, not
+        // rendered, so currentText still belongs to `appliedRev`. The host's
+        // mirror is now ahead of us and every edit until this flushes (or is
+        // dropped) resyncs in full; that is the safe direction.
+        pendingUpdate = {
+          text: nextText,
+          caretLine: msg.caretLine,
+          caretCol: msg.caretCol,
+          baseText: currentText,
+          rev: msg.rev ?? 0,
+        };
         break;
       }
-      applyDocumentUpdate(msg.text ?? '', msg.caretLine, msg.caretCol);
+      applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
+      appliedRev = msg.rev ?? 0;
+      break;
+    }
+    case 'requestFullSync': {
+      // Performance Audit P-8: the host dropped a diff-shaped 'edit' because its
+      // mirror of currentText no longer describes the same document — resend the
+      // whole state so it can re-anchor on what we actually hold.
+      //
+      // This restores AGREEMENT, not the dropped edit: if the divergence came
+      // from a host push we had already rendered by the time this arrives, the
+      // refused keystroke is gone from currentText and is not resent. Pre-P-8
+      // that keystroke reached the document for an instant — and then lost to
+      // the next sync anyway, while leaving document and webview divergent. The
+      // race is documented in deferred-work.md; converging is the better half.
+      postToHost({ type: 'edit', text: currentText, baseRev: appliedRev, seq: localSeq });
       break;
     }
     case 'fileSearchResult': {
@@ -501,6 +737,96 @@ window.addEventListener('message', (event) => {
       // waiting for), so no new host message shape.
       quickCorrect.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
       triggerAt.notifyFileSearchResult(Number(msg.requestId ?? 0), msg.files ?? []);
+      break;
+    }
+    case 'createCommentResult': {
+      // Req 23 US-23.1: releases the composer's in-flight guard; a refusal is
+      // surfaced to the Reviewer rather than failing silently.
+      commentMenu.notifyCreateResult(msg.requestId, msg.ok, msg.error, msg.author, msg.timestamp);
+      break;
+    }
+    case 'commentThreadsSync': {
+      // Req 23 US-23.2: full per-document thread snapshot — the bridge that
+      // lets a thread this session did not itself mint (persisted from a
+      // previous session, or reached from the native `vscode.comments` UI)
+      // still get a gutter pin/highlight/popover. A thread already known to
+      // the resolver only has its status/replies refreshed; a new one is
+      // registered with `anchorId: ''` so the very next pass starts at tier 2
+      // (US-23.4's own reload rule — a fresh parse has no live id to name).
+      if (msg.docUri !== currentDocUri) {
+        break;
+      }
+      // `syncAll`, not `syncThread` per thread: the snapshot is authoritative, so
+      // a thread missing from it was deleted host-side and must lose its pin,
+      // its highlight and its popover — and the whole batch costs one resolve.
+      const pruned = commentResolve.syncAll(
+        msg.threads.map((t) => ({
+          threadId: t.threadId,
+          anchorId: '',
+          offsetStart: t.offsetStart,
+          offsetEnd: t.offsetEnd,
+          recordedText: t.recordedText,
+          lastKnownLine: t.lastKnownLine,
+          nearestHeading: t.nearestHeading,
+          body: t.body,
+          author: t.author,
+          createdAt: t.timestamp,
+          editedAt: t.editedAt,
+          status: t.status,
+          replies: t.replies,
+          // `?? []`: the field is required on the wire, but this is the untrusted
+          // boundary and every consumer reads `.length` — a producer that misses it
+          // would take the whole Comment tab down rather than one blank cell.
+          statusChanges: t.statusChanges ?? [],
+        }))
+      );
+      commentPopover.forgetThreads(pruned);
+      commentGutter.refresh();
+      // US-23.9: the snapshot also carries what only the host can know — a
+      // foreign or unreadable sidecar, a refusal, orphaned lines — so the tab
+      // can say WHY a list is empty instead of showing "no comments" for four
+      // different causes. This also ends its loading state and rebuilds it; the
+      // rows themselves come from the same resolver registry the pins read.
+      commentPanel.setSidecarState(msg.sidecar);
+      // Req 23 US-23.10 AC7: the SAME field disables "Add Comment" up front —
+      // not a new channel, `sidecar.problem` while `loading` is still undefined
+      // (not yet settled), same as the tab above.
+      commentMenu.setDocumentGuard(msg.sidecar?.problem);
+      break;
+    }
+    case 'replyResult': {
+      commentPopover.notifyReplyResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'deleteCommentResult': {
+      commentPopover.notifyDeleteResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'editCommentResult': {
+      commentPopover.notifyEditResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'changeCommentStatusResult': {
+      // Req 23 US-23.3: only the failure needs surfacing here — a successful
+      // transition arrives as its own `commentThreadsSync` push, which is what
+      // re-renders every surface (pin, popover, panel).
+      commentPopover.notifyStatusResult(msg.requestId, msg.ok, msg.error);
+      break;
+    }
+    case 'commentAnchorUpdateResult': {
+      // Req 24 US-23.13 AC1/AC2: keyed by threadId, not requestId — the
+      // `commentAnchorUpdate` this replies to carries none.
+      commentResolve.notifyAnchorUpdateResult(msg.threadId, msg.ok, msg.error);
+      break;
+    }
+    case 'requestCommentsMarkdownExport': {
+      // Req 24 US-23.12: the `orcaEditor.copyCommentsAsMarkdown` command asked
+      // THIS panel for its current export — reply carries the same requestId.
+      commentPanel.handleExportRequest(msg.requestId);
+      break;
+    }
+    case 'copyCommentsAsMarkdownResult': {
+      commentPanel.notifyCopyResult(msg.requestId, msg.ok, msg.error);
       break;
     }
     case 'namespaceListResult': {
@@ -571,6 +897,13 @@ window.addEventListener('message', (event) => {
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
+      // Req 23 US-23.2: the identity the delete-ownership nudge reads must track
+      // the setting live — the host re-reads it per action, so a stale copy here
+      // disagrees with what the host allows. US-23.11 AC1 removed the identity
+      // gate from the status actions and from the anchor-lost dialog, so neither
+      // needs the name any more.
+      commentPopover.setAuthorName(msg.commentAuthorName ?? '');
+      commentMenu.setAuthorName(msg.commentAuthorName ?? '');
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
       if (lineNumbersEnabled) {
@@ -620,7 +953,9 @@ window.addEventListener('message', (event) => {
       } else if (msg.command === 'toggleZen') {
         readability.toggleZen();
       } else if (msg.command === 'openToc') {
-        toc.toggle();
+        // Named for the TOC, so it means the TOC — same explicit target as the
+        // `☰` button, not "whatever tab was last selected".
+        toc.toggle('toc');
         syncTocButton();
       } else if (msg.command === 'toggleTableFitMode') {
         // US-19.25: lật cờ, apply cục bộ + báo host để nhớ global + broadcast
@@ -647,7 +982,9 @@ window.addEventListener('resize', () => {
   toc.reflowWidth();
   const narrow = isNarrowViewport();
   if (narrow && !wasNarrowViewport && toc.isOpen()) {
-    toc.toggle();
+    // close(), not toggle(): auto-hide means "get out of the way" for whichever
+    // tab is showing, never "switch to TOC" (US-23.9).
+    toc.close();
     syncTocButton();
   }
   wasNarrowViewport = narrow;
@@ -673,26 +1010,188 @@ function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
 // Render
 // ---------------------------------------------------------------------------
 
+/**
+ * The passes every fresh render must go through before it is shown or diffed.
+ * Runs on the live #content for a full rebuild and on the detached staging
+ * container for a P-9 block patch — every pass takes a plain root and reads no
+ * layout. First entry is US-2.7: reapply the last known collapsed/expanded/raw
+ * state onto the fresh `.md-front-matter` node — that state is in-memory only
+ * (no extension-host persistence), so it must run on every render, not just
+ * cold-open, and it must run before the snapshot/diff so both sides key the
+ * front-matter block at the same stage.
+ */
+function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): void {
+  applyFrontMatterViewState(root);
+  postProcessMathDom(root, document, mathRanges);
+  postProcessMermaidDom(root, document);
+  postProcessPlantumlDom(root, document);
+  postProcessCodeHeaders(root, document);
+  postProcessRelativePathLinks(root, document);
+  postProcessCaptions(root, document);
+  postProcessEntityRefs(root);
+  postProcessEmptyLinks(root);
+}
+
+/**
+ * Performance Audit P-9: each live top-level node's render-time key (the
+ * lineAgnosticKey of its post-postprocess DOM). A local mutation overwrites
+ * the node's entry with NO_RENDER_KEY via markDirtyFrom (the same
+ * MutationObserver feed P-7 uses), so a REAL key always means "this node still
+ * shows exactly what its render produced" — only such a node may be kept by
+ * the next host update; a poisoned node stays in the diff and always lands in
+ * the replaced run. Caret-trap <p>s are created after the snapshot and get a
+ * key only if a local mutation later touches them.
+ *
+ * "Exactly" holds for everything the `.md` can see. A kept node may additionally
+ * carry TRANSIENT_CLASSES tokens its render did not produce, since
+ * isTransientClassChange deliberately does not poison for those — so this key is
+ * not a live-DOM equality claim, and nothing may diff live `outerHTML` against a
+ * re-render on the strength of it.
+ */
+let renderKeyByBlock = new WeakMap<Element, string>();
+let hasRenderSnapshot = false;
+/** Key stand-in for a poisoned live block — never equal to any real key (keys are outerHTML, starting with '<'). */
+const NO_RENDER_KEY = ' ';
+/** Monotonic render counter behind RENDER_GENERATION_ATTR (see block-patch.ts). */
+let renderGeneration = 0;
+
+function snapshotRenderKeys(): void {
+  renderKeyByBlock = new WeakMap();
+  for (const child of Array.from(content.children)) {
+    renderKeyByBlock.set(child, lineAgnosticKey(child));
+  }
+  hasRenderSnapshot = true;
+}
+
+/** `cls` present on or under any of the freshly inserted top-level nodes. */
+function insertedHas(inserted: Element[], cls: string): boolean {
+  return inserted.some((el) => el.classList.contains(cls) || el.querySelector(`.${cls}`) !== null);
+}
+
+/**
+ * P-9 review (iter 1): a KEPT diagram can be stuck on its "Rendering…"
+ * placeholder — its in-flight pass was discarded by a newer renderSeq (manual
+ * code→chart toggle) and nothing landed, so its render key is intact and the
+ * scoped renderAll below would never retry it. Pre-P-9 the unconditional
+ * renderAll healed this on the next update; detect it instead: a rendered
+ * chart holds an element child (SVG/img), a placeholder or error chart holds
+ * only text (retrying an errored chart on update is also pre-P-9 parity).
+ */
+function hasUnrenderedChart(chartCls: string): boolean {
+  return Array.from(content.querySelectorAll(`.${chartCls}`)).some((chart) => chart.childElementCount === 0);
+}
+
+/** All <table> elements on or under the given top-level nodes. */
+function tablesWithin(els: Element[]): HTMLTableElement[] {
+  const out: HTMLTableElement[] = [];
+  for (const el of els) {
+    if (el.tagName === 'TABLE') {
+      out.push(el as HTMLTableElement);
+    }
+    for (const t of Array.from(el.querySelectorAll('table'))) {
+      out.push(t as HTMLTableElement);
+    }
+  }
+  return out;
+}
+
+/**
+ * Performance Audit P-9: render the update into a DETACHED container, keep
+ * every live block whose key still matches pairwise from both ends, and splice
+ * only the middle run into #content — kept blocks retain node identity (ids,
+ * rendered diagram SVGs, inline styles) and only adopt the new render's line
+ * attrs. Returns the inserted top-level elements (possibly none, for a pure
+ * line shift), or null when there is no snapshot to diff against yet and the
+ * caller must rebuild in full. Runs with the MutationObserver disconnected
+ * (renderDocument brackets it), so the splice marks nothing dirty.
+ */
+function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null {
+  if (!hasRenderSnapshot) {
+    return null;
+  }
+  const staging = document.createElement('div');
+  staging.innerHTML = html;
+  postProcessRenderedDom(staging, mathRanges);
+  const fresh = Array.from(staging.children);
+  const freshKeys = fresh.map((el) => lineAgnosticKey(el));
+  // Live blocks that take part in the diff: keyed (pristine since their
+  // render) or at least a real markdown block (poisoned → NO_RENDER_KEY →
+  // always lands in the replaced run). Everything else (caret-trap <p>s) is
+  // swept together with whichever run it sits in.
+  const live = Array.from(content.children).filter((el) => renderKeyByBlock.has(el) || readSrcRange(el) !== null);
+  const liveKeys = live.map((el) => renderKeyByBlock.get(el) ?? NO_RENDER_KEY);
+  const { prefix, suffix } = planBlockPatch(liveKeys, freshKeys);
+
+  // Remove the live changed run — anchored on the KEPT neighbours, so
+  // interleaved caret-traps and stray text nodes inside the run go with it.
+  const liveStop: ChildNode | null = suffix > 0 ? live[live.length - suffix] : null;
+  let cursor: ChildNode | null = prefix === 0 ? content.firstChild : live[prefix - 1].nextSibling;
+  while (cursor && cursor !== liveStop) {
+    const next: ChildNode | null = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
+
+  // Move the fresh changed run in (same anchoring, keeping text nodes).
+  const inserted = fresh.slice(prefix, fresh.length - suffix);
+  const freshStop: ChildNode | null = suffix > 0 ? fresh[fresh.length - suffix] : null;
+  let src: ChildNode | null = prefix === 0 ? staging.firstChild : fresh[prefix - 1].nextSibling;
+  const frag = document.createDocumentFragment();
+  while (src && src !== freshStop) {
+    const next: ChildNode | null = src.nextSibling;
+    frag.appendChild(src);
+    src = next;
+  }
+  content.insertBefore(frag, liveStop);
+
+  // Kept blocks: adopt the new render's line attrs (an edit above or below
+  // moved them even though their content did not change) and re-key.
+  for (let i = 0; i < prefix; i++) {
+    copySrcLines(fresh[i], live[i]);
+    renderKeyByBlock.set(live[i], freshKeys[i]);
+  }
+  for (let k = 1; k <= suffix; k++) {
+    copySrcLines(fresh[fresh.length - k], live[live.length - k]);
+    renderKeyByBlock.set(live[live.length - k], freshKeys[freshKeys.length - k]);
+  }
+  for (let i = 0; i < inserted.length; i++) {
+    renderKeyByBlock.set(inserted[i], freshKeys[prefix + i]);
+  }
+  return inserted;
+}
+
 function renderDocument(markdown: string): void {
   if (!renderer) {
     return;
   }
   currentText = markdown;
+  // Performance Audit P-7: the rebuild below replaces every node, so its records
+  // would only mark blocks that are about to be dropped from the cache anyway.
+  contentMutations.disconnect();
+  resetBlockSerializeState();
   const scrollTop = window.scrollY;
   const { html } = renderer.render(markdown);
-  content.innerHTML = html;
-  postProcessMathDom(content, document, renderer.getLastMathBlockRanges());
-  postProcessMermaidDom(content, document);
-  postProcessPlantumlDom(content, document);
-  postProcessCodeHeaders(content, document);
-  postProcessRelativePathLinks(content, document);
-  postProcessCaptions(content, document);
-  postProcessEntityRefs(content);
-  postProcessEmptyLinks(content);
+  const cleanHtml = stripMetaRefresh(html);
+  const mathRanges = renderer.getLastMathBlockRanges();
+  // Performance Audit P-9: splice only the blocks this update changed; null =
+  // nothing to diff against yet (first render) → full innerHTML rebuild.
+  const inserted = tryPatchRender(cleanHtml, mathRanges);
+  if (!inserted) {
+    content.innerHTML = cleanHtml;
+    postProcessRenderedDom(content, mathRanges);
+    snapshotRenderKeys();
+  }
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
-  mermaidView.renderAll();
-  plantumlView.renderAll();
+  // P-9: diagram re-render and table fitting are the async/layout-heavy halves
+  // of the old full rebuild — after a patch, run them only for inserted nodes
+  // (kept diagrams still hold their live SVG; kept tables their fitted widths).
+  if (!inserted || insertedHas(inserted, MERMAID_CLASS) || hasUnrenderedChart(MERMAID_CHART_CLASS)) {
+    mermaidView.renderAll();
+  }
+  if (!inserted || insertedHas(inserted, PLANTUML_CLASS) || hasUnrenderedChart(PLANTUML_CHART_CLASS)) {
+    plantumlView.renderAll();
+  }
   table.hideTableToolbar();
   // The rebuild above destroyed any row the row-menu was anchored to — close it (and release
   // its scroll lock), mirroring dragDrop.refresh() below for the block menu (bug General R2).
@@ -703,8 +1202,18 @@ function renderDocument(markdown: string): void {
   // Co từng cột bảng vừa dựng về vừa nội dung (cột ngắn không bị ép rộng bằng
   // sàn 14ch của cột dài nhất) — phải chạy TRƯỚC stickyTableHeader.refresh() vì
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
-  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
+  const freshTables = inserted ? tablesWithin(inserted) : (Array.from(content.querySelectorAll('table')) as HTMLTableElement[]);
+  freshTables.forEach((t) => fitTableColumns(t));
   blockMap = buildBlockMap(content, markdown, blockMap);
+  blockById = new Map(blockMap.map((entry) => [entry.id, entry]));
+  siblingSensitiveDocument = hasSiblingSensitiveBlock(blockMap);
+  // P-9: a patched render keeps untouched nodes, so "my cached node detached"
+  // no longer signals "a render happened" — consumers holding a cached DOM
+  // walk (the re-attach picker) compare this stamp instead.
+  content.setAttribute(RENDER_GENERATION_ATTR, String(++renderGeneration));
+  // Watch again only now: buildBlockMap stamps data-block-id on every block, and
+  // those attribute writes are not edits.
+  observeContentMutations();
   window.scrollTo({ top: scrollTop });
   saveScrollSoon();
   // Nội dung vừa dựng lại — range highlight cũ đã hỏng, tìm lại nếu đang mở.
@@ -725,6 +1234,29 @@ function renderDocument(markdown: string): void {
   stickyTableHeader.refresh();
   // US-17.3: drop any in-flight drag / hover handle referencing now-stale nodes.
   dragDrop.refresh();
+  // Req 24 US-23.8 AC6/AC7: #content just finished this render pass — flip the
+  // ready gate (releasing a `commentThreadsSync` that raced this render and
+  // deferred its resolution rather than read an empty/stale DOM) and bump the
+  // generation stamp a still-running chunked load pass checks. Must run BEFORE
+  // the debounced `refresh()` below so a fresh reload's deferred pass isn't
+  // itself immediately stamped stale by that debounce's own later generation bump.
+  commentResolve.notifyContentRendered();
+  // Req 24 US-23.18 AC7: the render just dropped every session-only anchor id, so
+  // an open composer may now be pointing at nothing — tell the Reviewer now and
+  // hold Submit, rather than refusing them after they press it.
+  commentMenu.refreshTarget();
+  // Req 23 US-23.4 AC5: the document just changed (edit, undo, redo or reload) —
+  // re-run every comment through the tiers once it settles, so a thread whose
+  // node or text reappeared is promoted back out of the floating list.
+  commentResolve.refresh();
+  // Req 23 US-23.2: #content was just rebuilt from scratch — every anchor's
+  // carrier element reference is stale until the debounced re-resolution above
+  // runs, but the pins/highlight need to reflect whatever the resolver knows
+  // RIGHT NOW too (same "refresh after rebuild" convention as search.refresh()/
+  // selectHighlight.refresh() above), so a resolve-driven refresh doesn't have
+  // to be the only path — `resolve.onChange` still covers the debounced pass.
+  commentGutter.refresh();
+  commentHighlight.refresh();
 }
 
 /**
@@ -739,8 +1271,35 @@ interface PendingUpdate {
   caretLine?: number;
   caretCol?: number;
   baseText: string;
+  /** P-8: the push's rev — adopted into `appliedRev` only if this update is actually rendered. */
+  rev: number;
 }
 let pendingUpdate: PendingUpdate | undefined;
+
+/**
+ * Performance Audit P-8 (reverse half): resolve either 'update' wire shape to the
+ * full text it means — the full-text variant as-is, a diff by splicing it onto
+ * `currentText`. Returns `undefined` for "refuse, ask for a full push"; the
+ * caller applies NOTHING in that case.
+ *
+ * A diff is sound only against the exact base the host computed it from, and the
+ * two guards below are not redundant — they catch opposite directions of
+ * divergence (see `baseSeq` in `src/shared/messages.ts`): `baseRev` catches a
+ * push this webview deferred or dropped, `baseSeq` catches an 'edit' of ours the
+ * host has not received yet. `rebuildFromEditDiff` then rejects a base-length or
+ * bounds mismatch, which would mean a mirror bug rather than a legitimate
+ * divergence. Every refusal is total: splicing at guessed offsets would corrupt
+ * the user's file, and the render below writes straight back to it.
+ */
+function resolveUpdateText(msg: HostToWebview & { type: 'update' }): string | undefined {
+  if ('text' in msg) {
+    return msg.text ?? '';
+  }
+  if (msg.baseRev !== appliedRev || msg.baseSeq !== localSeq) {
+    return undefined;
+  }
+  return rebuildFromEditDiff(currentText, msg) ?? undefined;
+}
 
 /** Render a host document 'update' and restore the caret (undo/redo carries an
  * explicit caretLine; a caret-less update snapshots the source caret and restores
@@ -768,6 +1327,8 @@ onInputOwnerRelease(() => {
     return;
   }
   applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  // P-8: rendered at last — only now does currentText belong to that push's rev.
+  appliedRev = u.rev;
 });
 
 /**
@@ -1031,6 +1592,13 @@ function serializeIfChanged(): string | undefined {
     lineGutter.refreshFromMarkdown(markdown);
   }
   currentText = markdown;
+  // Performance Audit P-8 (reverse half): the ONE place the webview advances
+  // `currentText` itself (renderDocument, the only other writer, adopts a host
+  // push). Every such advance rides to the host as `seq`, and a diff-shaped
+  // 'update' is refused unless the host echoes back the count we are on — which
+  // is what makes an 'edit' still in flight visible to us instead of splicing
+  // against a text the host has not received yet.
+  localSeq++;
   return markdown;
 }
 
@@ -1045,10 +1613,29 @@ function syncNow(): void {
     clearTimeout(syncTimer);
   }
   syncTimer = undefined;
+  // Performance Audit P-8: capture the PRE-edit text before serializeIfChanged
+  // overwrites currentText — that is the base the host mirrors and the offsets
+  // below index into.
+  const prevText = currentText;
   const markdown = serializeIfChanged();
-  if (markdown !== undefined) {
-    postToHost({ type: 'edit', text: markdown });
+  if (markdown === undefined) {
+    return;
   }
+  // serializeIfChanged only returns non-undefined when markdown !== prevText,
+  // so computeMinimalEdit never returns its equal-strings null here.
+  const diff = computeMinimalEdit(prevText, markdown);
+  if (!diff) {
+    return;
+  }
+  postToHost({
+    type: 'edit',
+    start: diff.start,
+    oldEnd: diff.oldEnd,
+    newText: diff.newText,
+    baseLength: prevText.length,
+    baseRev: appliedRev,
+    seq: localSeq,
+  });
 }
 
 /**
@@ -1057,63 +1644,221 @@ function syncNow(): void {
  * cho undo/redo: gắn kèm markdown này vào message để host commit lần gõ mới nhất
  * thành 1 undo-unit rồi mới undo — atomic trong một handler ở host. Trả undefined
  * khi không có gì đang chờ (nội dung đã đồng bộ).
+ *
+ * Performance Audit P-8 (reverse half): returns the undo/redo message FIELDS, not
+ * a bare string, so `pendingSeq` cannot be forgotten at one of the five post
+ * sites — this is the only advance of `currentText` the host learns about without
+ * an 'edit', so it is also the only place its seq can go missing.
  */
-function takePendingSync(): string | undefined {
+function takePendingSync(): { pendingText?: string; pendingSeq?: number } {
   if (syncTimer === undefined) {
-    return undefined;
+    return {};
   }
   clearTimeout(syncTimer);
   syncTimer = undefined;
-  return serializeIfChanged();
-}
-
-function serialize(): string {
-  const clone = content.cloneNode(true) as HTMLElement;
-  // cloneNode không copy property 'checked' — đồng bộ từ DOM thật sang attribute.
-  const liveInputs = content.querySelectorAll('input[type="checkbox"]');
-  const cloneInputs = clone.querySelectorAll('input[type="checkbox"]');
-  liveInputs.forEach((live, i) => {
-    const c = cloneInputs[i];
-    if (!c) {
-      return;
-    }
-    c.toggleAttribute('checked', (live as HTMLInputElement).checked);
-  });
-  prepareDomForSerialize(clone, document);
-  applyBlockStyleOverrides(clone);
-  const md = turndown.turndown(clone);
-  return normalizeMarkdown(md);
+  const pendingText = serializeIfChanged();
+  return pendingText === undefined ? {} : { pendingText, pendingSeq: localSeq };
 }
 
 /**
- * US-18.4a: before turndown runs, stamp each block's ORIGINAL style override onto
- * the clone so serialize keeps every block's initial `.md` syntax variant instead
- * of forcing the global style. Blocks are matched via `data-block-id` (stamped on
- * the live DOM by the Block Map, preserved by cloneNode) and the variant is
- * detected from `mdSlice`. A block with no mdSlice (new content) or an axis not
- * yet supported gets nothing stamped and falls through to the default. This is
- * shared infrastructure: US-18.4b extends detectBlockStyle/stampStyleOverride, it
- * does not rebuild this loop.
+ * Performance Audit P-7: the serialized markdown of each top-level block, keyed by
+ * the live node itself — a node detached by a re-render drops out of the WeakMap on
+ * its own, so nothing has to be swept.
  */
-function applyBlockStyleOverrides(clone: HTMLElement): void {
-  for (const entry of blockMap) {
-    if (!entry.mdSlice) {
-      continue;
-    }
-    const el = clone.querySelector(`[${BLOCK_ID_ATTR}="${entry.id}"]`);
-    if (!el) {
-      continue;
-    }
-    const style = detectBlockStyle(entry.mdSlice, entry.type);
-    // US-4.28: a block whose language the user switched in place must not be
-    // re-forced back to its ORIGINAL indented syntax — indented code can't carry
-    // a language, so turndown would drop the pick. Drop the code axis so it
-    // serializes as a fence (only indented needs this; tilde fences keep a lang).
-    if (el.hasAttribute(LANG_SWITCHED_ATTR) && (style.code === 'indented' || style.code === 'indented-tab')) {
-      style.code = null;
-    }
-    stampStyleOverride(el, style);
+let blockMarkdownCache: BlockMarkdownCache = new WeakMap();
+/** Blocks changed since the last serialize — filled by the MutationObserver below. */
+const dirtyBlocks = new Set<Node>();
+
+/** The direct child of #content holding `node` (itself when already a direct child). */
+function topLevelBlockOf(node: Node): Node | null {
+  let cur: Node | null = node;
+  while (cur && cur.parentNode !== content) {
+    cur = cur.parentNode;
   }
+  return cur;
+}
+
+function markDirtyFrom(node: Node): void {
+  const block = topLevelBlockOf(node);
+  if (block) {
+    dirtyBlocks.add(block);
+    // Performance Audit P-9: the block no longer shows what its render
+    // produced — poison its render key so the next host update replaces it
+    // instead of keeping stale local DOM over the document's text. SET the
+    // sentinel, never delete: a deleted entry drops a LINE-LESS block (raw
+    // html_block, e.g. a top-level <img>/<div>) out of the patch diff
+    // entirely, and an update deleting it from the source would then leave it
+    // alive in the DOM to be serialized back (review finding, iter 1).
+    if (block instanceof Element) {
+      renderKeyByBlock.set(block, NO_RENDER_KEY);
+    }
+  }
+}
+
+/** `value`'s class tokens minus every serialization-invisible one, order preserved. */
+function significantClassSignature(value: string | null): string {
+  return (value ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token !== '' && !TRANSIENT_CLASSES.includes(token))
+    .join(' ');
+}
+
+/**
+ * Performance Audit P-7 (deferred item 3): drag-drop.ts and table.ts stamp
+ * DD_HOVER_OUTLINE_CLASS & co. straight onto live #content elements, so merely
+ * hovering a drag handle used to mark that block dirty — a re-serialize, and
+ * since P-9 a render-key poisoning that makes the next host update REPLACE the
+ * block, dropping its node identity and whatever transient DOM state it was
+ * showing, for a class the `.md` never sees. Also silences `brokenRef.refresh()`
+ * (which runs after every render): its no-op `classList.toggle(cls, false)`
+ * rewrites the attribute all the same, and so used to poison every block holding
+ * a reference on every single render.
+ *
+ * Filtered by TOKEN, never by attribute name: a MutationObserver `attributeFilter`
+ * excluding `class` outright would be wrong, because a class CAN be content —
+ * turndown's taskListItems plugin reads back `contains-task-list`, stamped on a
+ * live <ul> by toolbar.ts/dom-utils.ts, and a user's own class inside a
+ * hand-written HTML block belongs to the file.
+ *
+ * Why TRANSIENT_CLASSES tokens are safe to drop: no turndown rule reads one, and
+ * every raw-HTML emitter strips them from its clone first. That strip is also
+ * what hides the two NORMALIZATIONS the signature cannot see, and it is a real
+ * dependency rather than a coincidence — removing the last token leaves a
+ * present-but-empty `class=""`, and rewriting the attribute collapses whitespace
+ * inside it, yet `stripTransientClasses` deletes an emptied `class` and
+ * `htmlImgWithAttrs` counts an empty token list as discountable.
+ *
+ * Soundness against a MISSED change: per target the records CHAIN — record i+1's
+ * oldValue is the value after change i — so skipping every record of a batch
+ * requires the pre-batch signature to equal the current one, i.e. a net-zero
+ * significant change. Any real net change leaves at least the first record's
+ * oldValue disagreeing with the live attribute, and `serialize()` reads that same
+ * DOM immediately after draining the queue.
+ *
+ * NOT covered: presentation written as `style`, or as a class outside the
+ * registry (fit-mode column widths and their measure classes, the mermaid /
+ * plantuml error classes), still marks its block dirty — see the P-7 deferred
+ * remainder.
+ */
+function isTransientClassChange(record: MutationRecord): boolean {
+  if (
+    record.type !== 'attributes' ||
+    record.attributeName !== 'class' ||
+    // getAttribute resolves by QUALIFIED name, so a namespaced attribute whose
+    // localName is `class` would be compared against the unrelated plain one.
+    record.attributeNamespace !== null ||
+    !(record.target instanceof Element)
+  ) {
+    return false;
+  }
+  return (
+    significantClassSignature(record.oldValue) === significantClassSignature(record.target.getAttribute('class'))
+  );
+}
+
+function markDirtyFromRecord(record: MutationRecord): void {
+  if (isTransientClassChange(record)) {
+    return;
+  }
+  markDirtyFrom(record.target);
+  if (record.type === 'childList') {
+    // A block can be BUILT while detached and only then inserted (list-ops,
+    // drag-drop, the browser's own undo): mutations made while it was detached
+    // produced no record at all, so every inserted node counts as dirty — this
+    // record's target is #content and maps to no block of its own.
+    record.addedNodes.forEach(markDirtyFrom);
+    // Removing a node changes what its former neighbours sit next to, and a few
+    // turndown rules read a sibling (indented code checks previousElementSibling).
+    // The removed node itself is simply no longer iterated.
+    if (record.previousSibling) {
+      markDirtyFrom(record.previousSibling);
+    }
+    if (record.nextSibling) {
+      markDirtyFrom(record.nextSibling);
+    }
+  }
+}
+
+/**
+ * Performance Audit P-7: watch EVERY change inside #content to know which block
+ * needs re-serializing — the DOM-mutating call sites are spread across
+ * main.ts/table.ts/list-ops.ts/drag-drop.ts, so hooking each one is not an option
+ * (same reasoning as select-highlight.ts). `attributes` is needed too: clicking a
+ * task-list checkbox changes only an attribute (the 'click' handler below).
+ * `attributeOldValue` feeds `isTransientClassChange` — without the old value a
+ * hover class is indistinguishable from a real class edit.
+ */
+const contentMutations = new MutationObserver((records) => {
+  records.forEach(markDirtyFromRecord);
+});
+
+function observeContentMutations(): void {
+  contentMutations.observe(content, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeOldValue: true,
+  });
+}
+observeContentMutations();
+
+/**
+ * Performance Audit P-7: a re-render replaces every node in #content, so nothing
+ * cached or marked before it can still apply. Called from renderDocument, which
+ * also stops the observer for the duration of the rebuild — recording the
+ * innerHTML assignment and all eight postprocess passes would be pure cost for a
+ * cache that is empty afterwards anyway.
+ */
+function resetBlockSerializeState(): void {
+  blockMarkdownCache = new WeakMap();
+  dirtyBlocks.clear();
+}
+
+const serializeOptions: BlockSerializeOptions = {
+  doc: document,
+  turndown,
+  // US-18.4a/b: reproduce each block's ORIGINAL `.md` syntax variant — whole
+  // document for the full pass, a single Block Map entry for one block.
+  stampAll: (clone) => stampBlockStyles(clone, blockMap),
+  stampBlock: (clone, id) => {
+    const entry = blockById.get(id);
+    if (entry) {
+      stampBlockStyle(clone, entry);
+    }
+  },
+};
+
+/**
+ * A checkbox toggled through its `checked` PROPERTY produces no MutationRecord, and
+ * with a cache "picked up by the next serialize" no longer holds — the block would
+ * keep serving stale markdown for the rest of the session. Reconcile against the
+ * attribute (the same query the whole-document pass has always run) and mark any
+ * block that drifted. Today's click handler writes the attribute itself, so this is
+ * a guard for every other path that could set the property.
+ */
+function markCheckboxDrift(): void {
+  content.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    if ((box as HTMLInputElement).checked !== box.hasAttribute('checked')) {
+      markDirtyFrom(box);
+    }
+  });
+}
+
+function serialize(): string {
+  // The MutationObserver callback runs in a microtask, while syncNow() is called
+  // RIGHT IN the same task as execCommand (invokeAction in toolbar.ts) — take the
+  // pending records here, or the block just edited still counts as clean.
+  contentMutations.takeRecords().forEach(markDirtyFromRecord);
+  markCheckboxDrift();
+  if (siblingSensitiveDocument) {
+    // Keep the dirty marks, like serializeChildren's own fallback: the full pass
+    // fills no cache, so dropping them could serve stale markdown if the document
+    // ever returned to the per-block path.
+    return serializeFull(content, serializeOptions);
+  }
+  return serializeChildren(content, serializeOptions, blockMarkdownCache, dirtyBlocks);
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,6 +1903,12 @@ content.addEventListener('input', (e) => {
   if (!inputType || ORPHAN_LIST_INPUT_TYPES.has(inputType)) {
     fixOrphanNestedListItems();
   }
+  // Req 23 US-23.4 AC5: a locally typed edit is echo-suppressed host-side, so it
+  // never comes back as a render — without this the tiers would only ever re-run
+  // for host-driven updates and a paragraph deleted by typing would leave its
+  // comment claiming an exact anchor that is gone. Debounced, and a no-op while
+  // the document carries no comments.
+  commentResolve.refresh();
   scheduleSync();
   // Commit một undo-checkpoint ở ranh giới TỪ (space/Enter): mỗi từ thành 1 edit
   // = 1 bước undo (giống mọi editor), thay vì cả cụm gõ liên tục dồn thành một
@@ -1566,7 +2317,18 @@ function renderPasteHtml(text: string): string {
   }
   const { html } = renderer.render(text);
   const tmp = document.createElement('div');
-  tmp.innerHTML = html;
+  // Review finding (step-04 iteration 2, edge case hunter): this feeds the SAME
+  // html:true markdown-it renderer as renderDocument, and its result reaches
+  // the live, connected #content via this function's two callers' own
+  // execCommand('insertHTML', ...) — the same S-2 shape (a raw <meta
+  // http-equiv="refresh">), through paste/insert instead of opening the
+  // document. Pasted text is not necessarily the user's own. Defense-in-depth:
+  // empirically, Chromium's execCommand('insertHTML') already drops a <meta>
+  // on its own before it reaches the DOM here, so this is not a proven-active
+  // hole (no regression test exists for it — one would pass identically with
+  // or without this line) — but relying on that undocumented, legacy-API
+  // behavior as the actual security boundary is not something to build on.
+  tmp.innerHTML = stripMetaRefresh(html);
   postProcessMathDom(tmp, document, renderer.getLastMathBlockRanges());
   postProcessMermaidDom(tmp, document);
   postProcessPlantumlDom(tmp, document);
@@ -1609,13 +2371,6 @@ content.addEventListener('click', (e) => {
   if (anchor) {
     e.preventDefault();
     e.stopPropagation();
-    // US-20.5: a plain click on a `## References` entry is navigation, not
-    // link-open — broken (⚠️) → jump to first body occurrence; healthy → open
-    // its target. Cmd/Ctrl+Click on a References entry still opens normally.
-    if (!e.metaKey && !e.ctrlKey && referencesSectionAnchors().has(anchor)) {
-      navigateReferenceEntry(anchor);
-      return;
-    }
     if (e.metaKey || e.ctrlKey) {
       openLink(anchor.getAttribute('href') ?? '');
     }
@@ -1669,61 +2424,6 @@ function scrollToAnchor(fragment: string): void {
   }
 }
 
-/**
- * US-20.5: anchors inside the rendered `## References` section — the run of
- * sibling blocks from the References `<h2>` up to the next H1/H2. Returned as a
- * Set so a clicked anchor can be classified as a References entry AND so the
- * first-body-occurrence search can SKIP them (a broken entry must never
- * navigate to itself).
- */
-function referencesSectionAnchors(): Set<HTMLAnchorElement> {
-  const anchors = new Set<HTMLAnchorElement>();
-  const h2 = Array.from(content.children).find(
-    (child) => child.tagName === 'H2' && /^references$/i.test((child.textContent ?? '').trim())
-  );
-  if (!h2) {
-    return anchors;
-  }
-  for (let sib = h2.nextElementSibling; sib; sib = sib.nextElementSibling) {
-    if (sib.tagName === 'H1' || sib.tagName === 'H2') {
-      break;
-    }
-    for (const a of Array.from(sib.querySelectorAll('a[href]'))) {
-      anchors.add(a as HTMLAnchorElement);
-    }
-  }
-  return anchors;
-}
-
-/**
- * US-20.5: handle a plain click on a References-section entry. A broken (`⚠️`)
- * entry scrolls to + flashes the FIRST body occurrence of the same link and
- * opens the quick-correct fix surface there (the entry itself is only a
- * listing — the real fix is in the body); a healthy entry opens its target
- * file via the normal open flow (no line-jump). Resolves US-20.5's open
- * question for both cases.
- */
-function navigateReferenceEntry(anchor: HTMLAnchorElement): void {
-  const li = anchor.closest('li');
-  const broken = (li?.textContent ?? '').trimStart().startsWith('⚠️');
-  if (!broken) {
-    openLink(anchor.getAttribute('href') ?? '');
-    return;
-  }
-  const key = normalizeHrefKey(anchor.getAttribute('href') ?? '', caseInsensitiveFs);
-  const sectionAnchors = referencesSectionAnchors();
-  const bodyAnchor = (Array.from(content.querySelectorAll('a[href]')) as HTMLAnchorElement[]).find(
-    (a) => !sectionAnchors.has(a) && normalizeHrefKey(a.getAttribute('href') ?? '', caseInsensitiveFs) === key
-  );
-  if (!bodyAnchor) {
-    return;
-  }
-  bodyAnchor.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-  bodyAnchor.classList.add('ref-nav-flash');
-  setTimeout(() => bodyAnchor.classList.remove('ref-nav-flash'), 1200);
-  quickCorrect.open(bodyAnchor);
-}
-
 // ---------------------------------------------------------------------------
 // Phím tắt định dạng
 // ---------------------------------------------------------------------------
@@ -1772,6 +2472,45 @@ function jumpHeading(dir: 1 | -1): void {
   sel?.addRange(range);
 }
 
+/**
+ * Req 23 US-23.6 AC2: a text field has its own native undo history, so the
+ * platform undo/redo shortcut pressed inside one must stay there and never be
+ * delegated to the document's TextDocument stack — otherwise correcting a typo
+ * in a comment reply would silently roll back the Author's last document edit.
+ *
+ * Comment surfaces are mounted on `document.body` today, outside `#content`, so
+ * this handler never sees them; the guard is what keeps AC2 true when a later
+ * story (US-23.2's reply box) mounts one inside the editor instead — as a
+ * `<textarea>`, an `<input>`, or a nested `contenteditable`, all three of which
+ * carry their own undo history. A task-list checkbox (US-7.x) is an `<input>`
+ * with no text history of its own and must keep delegating, so only text-entry
+ * types count.
+ *
+ * Deliberately a stateless target test rather than input-ownership.ts's
+ * `setInputOwner()` flag: that flag stands the WHOLE handler down and has to be
+ * released on every exit path, which the trigger popups have got wrong before.
+ * A field that forgets to release it would disable the editor's shortcuts for
+ * the rest of the session; a target test cannot get stuck.
+ */
+function ownsNativeUndo(target: EventTarget | null): boolean {
+  if (ownsNativeTextHistory(target)) {
+    return true;
+  }
+  // A `contenteditable` nested inside `#content` never becomes
+  // `document.activeElement` — the OUTER editing host keeps focus, so `e.target`
+  // is `#content` and a target test cannot see the inner surface at all
+  // (measured, not assumed). The caret is the only thing that says which surface
+  // is being typed into. Such a field shares the outer host's native history, so
+  // the keystroke lands as AC2's permitted no-op rather than a true field undo —
+  // still the right outcome, since the alternative is rolling back the Author's
+  // last document edit. US-23.2 should prefer a real `<textarea>`/`<input>`,
+  // which does get its own undo.
+  const anchor = window.getSelection()?.anchorNode ?? null;
+  const el = anchor === null ? null : anchor.nodeType === Node.ELEMENT_NODE ? (anchor as Element) : anchor.parentElement;
+  const host = el?.closest('[contenteditable=""], [contenteditable="true"]') ?? null;
+  return host !== null && host !== content;
+}
+
 content.addEventListener('keydown', (e) => {
   // Req 20 US-20.2: while a trigger overlay owns the keyboard, the editor's
   // shortcut/undo/redo/arrow handling must not fire — the overlay handles the key.
@@ -1785,6 +2524,17 @@ content.addEventListener('keydown', (e) => {
     jumpHeading(e.key === 'ArrowDown' ? 1 : -1);
     return;
   }
+  // Req 23 US-23.2: Alt+Shift+C toggles "Show Comments" (design handoff).
+  // `e.code`, not `e.key`: Option is a composition modifier on macOS, so
+  // Option+Shift+C reports `e.key === 'Ç'` there. Matching on `e.key` left the
+  // branch dead on macOS AND let the composed character fall through into
+  // `#content` — a document edit from a view-only toggle. The Alt+Arrow
+  // precedent above is layout-immune, so this is the first Alt+letter shortcut.
+  if (e.altKey && e.shiftKey && !mod && e.code === 'KeyC') {
+    e.preventDefault();
+    toggleCommentHighlight();
+    return;
+  }
   if (mod && !e.shiftKey && !e.altKey) {
     switch (e.key.toLowerCase()) {
       case 's':
@@ -1796,12 +2546,18 @@ content.addEventListener('keydown', (e) => {
       // native. Gắn kèm pendingText (nếu còn thay đổi chờ debounce) để host
       // commit lần gõ mới nhất thành undo-unit TRƯỚC khi undo.
       case 'z':
+        if (ownsNativeUndo(e.target)) {
+          return; // US-23.6 AC2 — the field's own undo, not the document's.
+        }
         e.preventDefault();
-        postToHost({ type: 'undo', pendingText: takePendingSync() });
+        postToHost({ type: 'undo', ...takePendingSync() });
         return;
       case 'y':
+        if (ownsNativeUndo(e.target)) {
+          return;
+        }
         e.preventDefault();
-        postToHost({ type: 'redo', pendingText: takePendingSync() });
+        postToHost({ type: 'redo', ...takePendingSync() });
         return;
       case 'b':
         applyInlineFormat(e, () => document.execCommand('bold'));
@@ -1836,8 +2592,11 @@ content.addEventListener('keydown', (e) => {
   // !e.altKey: chặn AltGr+Shift+Z (ctrl+alt trên Windows/Linux) kích hoạt redo
   // phá huỷ khi người dùng chỉ đang gõ một ký tự AltGr.
   if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z') {
+    if (ownsNativeUndo(e.target)) {
+      return; // US-23.6 AC2, same as the mod-only z/y branch above.
+    }
     e.preventDefault();
-    postToHost({ type: 'redo', pendingText: takePendingSync() });
+    postToHost({ type: 'redo', ...takePendingSync() });
     return;
   }
   // Lưới an toàn giữa phiên: nếu block cuối là khối "bẫy caret" (Mermaid/code/

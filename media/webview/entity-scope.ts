@@ -37,7 +37,8 @@ import { entityFollowingLabel, entityFollowingPreview, normalizeForSearch } from
 import { runAtInsertLink } from './toolbar';
 import { postProcessEntityRefs } from './dom-postprocess';
 import { showTooltip, hideTooltip } from './tooltip';
-import { BROKEN_REF_CLASS, pointerOverBrokenTriangle } from './broken-ref';
+import { pointerOverBrokenTriangle } from './broken-ref';
+import { BROKEN_REF_CLASS } from './constants';
 import type { TriggerPopupController, TriggerPopupGroup, TriggerPopupItem } from './trigger-popup';
 
 const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6';

@@ -22,8 +22,11 @@ import {
   computeToList,
   computeToListAroundAtoms,
   computeUnwrapListRange,
+  isConvertibleBlock,
 } from './list-ops';
 import { insertTable } from './table';
+import type { CommentPanelController } from './comment-panel';
+import type { CommentHighlightController } from './comment-highlight';
 import type { TocController } from './toc';
 import type { VsCodeApi } from './vscode-api';
 import { type ReadabilityController } from './readability';
@@ -45,6 +48,12 @@ export interface ToolbarContext {
   requestRedo: () => void;
   dom: DomHelpers;
   toc: TocController;
+  /** Req 23 US-23.4 AC4: the "Unresolved location" panel this toolbar button opens. */
+  commentPanel: CommentPanelController;
+  /** Req 23 US-23.2: the inline anchor-range highlight overlay this toolbar button toggles. */
+  commentHighlight: CommentHighlightController;
+  /** Req 23 US-23.2: persist the "Show Comments" toggle for this file (main.ts posts the host message). */
+  onCommentHighlightToggle: (on: boolean) => void;
   /** Reading Mode / Zen (US-19.1/19.9) — nút toolbar lái controller này. */
   readability: ReadabilityController;
   /** Render markdown thật (renderer.render) rồi chèn tại caret — dùng cho Math (US-4.11)/Mermaid (US-4.12). */
@@ -63,6 +72,11 @@ const TOC_ICON = svgIcon(
   `<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.75" ${FMT_STROKE}/>` +
     `<path d="M9.75 2.75v10.5" ${FMT_STROKE}/>` +
     '<path d="M3.75 6.25h3.5M3.75 8.75h3.5" stroke="currentColor" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.55"/>'
+);
+
+/** Req 23 US-23.2: plain speech bubble — the "Show Comments" inline-highlight toggle. */
+const SHOW_COMMENTS_ICON = svgIcon(
+  `<path d="M13.25 8.5a4.75 4.75 0 0 1-4.75 4.75H5.5L2.75 15v-3.6A4.75 4.75 0 0 1 6.5 3.25h2a4.75 4.75 0 0 1 4.75 4.75z" ${FMT_STROKE}/>`
 );
 
 /** Icon Reading Mode (US-19.1): quyển sách mở — gợi chế độ đọc. */
@@ -287,6 +301,56 @@ interface ToolbarItem {
   dropdown?: ToolbarDropdownEntry[];
   /** Tooltip riêng cho nút caret — mặc định "<title> — more options". */
   dropdownTitle?: string;
+}
+
+/**
+ * Req 23 US-23.2: "Show Comments" — latching toggle for the inline anchor-
+ * range highlight overlay. Gutter pins are unaffected by this toggle (always
+ * visible); only the CSS Custom Highlight wash is gated by it.
+ *
+ * It also HOSTS the lost-anchor count badge (US-23.4 AC4's contract, moved here
+ * when the `⚑` button that used to carry it was retired): the badge stays the
+ * UNRESOLVED count, since the dock strip's own tab badge already carries the
+ * total and two badges showing the same number would say nothing. Zero is
+ * hidden by the `[data-count='0']` CSS rule. This button is always present, so
+ * unlike `⚑` it never appears/disappears and never needs `recalcOverflow()`.
+ */
+function updateCommentHighlightButton(): void {
+  const button = document.getElementById('comment-highlight-toggle');
+  if (!button) {
+    return;
+  }
+  const on = ctx.commentHighlight.isOn();
+  button.setAttribute('aria-pressed', String(on));
+  button.classList.toggle('active', on);
+  const floating = ctx.commentPanel.floatingCount();
+  button.setAttribute('data-count', String(floating));
+  // The badge itself is a CSS `::after` reading data-count, which the a11y tree
+  // never sees — so the number has to travel in the accessible name too, not
+  // only in the hover text. The label is informational: it must not promise a
+  // route this button does not have (clicking toggles the wash, never a tab).
+  const label =
+    floating === 0
+      ? 'Show Comments — Alt+Shift+C'
+      : `Show Comments — Alt+Shift+C · ${floating} comment${floating === 1 ? '' : 's'} lost their anchor`;
+  // setTooltip, not `title`: this webview's native title is unreliable and every
+  // other toolbar button reads `data-tooltip` (see tooltip.ts's header).
+  setTooltip(button, label);
+  button.setAttribute('aria-label', label);
+}
+
+/** Called from main.ts once the host's persisted per-file value has been applied,
+ *  and again whenever the floating set changes — one button, one updater. */
+export function syncCommentHighlightButton(): void {
+  updateCommentHighlightButton();
+}
+
+/** Shared by the toolbar button's click and the Alt+Shift+C shortcut (main.ts). */
+export function toggleCommentHighlight(): void {
+  const next = !ctx.commentHighlight.isOn();
+  ctx.commentHighlight.setToggle(next);
+  ctx.onCommentHighlightToggle(next);
+  updateCommentHighlightButton();
 }
 
 /** Đồng bộ trạng thái "đang bật" của nút mục lục trên toolbar. */
@@ -760,13 +824,34 @@ const toolbarItems: ToolbarItem[] = [
     icon: TOC_ICON,
     title: 'Show/hide Table of Contents',
     action: () => {
-      ctx.toc.toggle();
+      // US-23.9 retired the mutual exclusion: there is one dock now, and the two
+      // panels are two tabs inside it. The explicit 'toc' is US-23.7 AC4 —
+      // `#toc-toggle` always opens the container on the TOC tab, whatever tab
+      // the last session left selected.
+      ctx.toc.toggle('toc');
       updateTocButton();
     },
     id: 'toc-toggle',
     // Chỉ đổi hiển thị — không được sync/dirty file (xem ToolbarItem.viewOnly).
     viewOnly: true,
     collapsePriority: 21,
+  },
+  {
+    label: 'Show Comments',
+    icon: SHOW_COMMENTS_ICON,
+    // updateCommentHighlightButton() rewrites this to append the lost-anchor
+    // count once there is one; this is the zero-floating form.
+    title: 'Show Comments — Alt+Shift+C',
+    action: () => toggleCommentHighlight(),
+    id: 'comment-highlight-toggle',
+    // Display-only — must not sync/dirty the file (see ToolbarItem.viewOnly).
+    viewOnly: true,
+    // 24 > reading-toggle's 22, so this outlives the button that carries the
+    // group's `toolbar-push-right` anchor: at a width that collapses 22 but not
+    // 24, the right group loses its anchor and this button slides left. Known
+    // and pre-existing (it also applied to the retired `⚑` at 23) — noted here
+    // because this is now the highest-priority item in that group.
+    collapsePriority: 24,
   },
 ];
 
@@ -1682,9 +1767,11 @@ function stripCheckboxFrom(li: HTMLLIElement): void {
 }
 
 function syncTaskListClass(list: HTMLElement): void {
-  const hasCheckbox = Array.from(list.children).some(
-    (c) => c.tagName === 'LI' && c.querySelector(':scope > input[type="checkbox"]')
-  );
+  // findTaskCheckbox, not a tight-only ':scope > input' query: addCheckbox puts
+  // a loose item's checkbox inside its <p>, and missing it here would strip
+  // `contains-task-list` off a list that IS a task list (bullet marker + checkbox
+  // both rendered, wrong indent).
+  const hasCheckbox = Array.from(list.children).some((c) => c.tagName === 'LI' && findTaskCheckbox(c));
   list.classList.toggle('contains-task-list', hasCheckbox);
 }
 
@@ -1728,7 +1815,10 @@ function setBulletList(): void {
     return;
   }
   const { list, items } = current;
-  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox: a loose task item carries its checkbox inside the <li>'s
+  // <p>, and a tight-only query here would skip stripCheckboxFrom and carry the
+  // raw <input> into the unwrapped <p> (raw HTML written into the .md).
+  const hasCheckbox = items.some((item) => findTaskCheckbox(item));
   // Tracks whichever <li> set is the LIVE target for the retag/unwrap below --
   // `replaceListItems` detaches the original `items` nodes once it runs, so
   // after checkbox stripping the live set is `inserted`, not `items`.
@@ -1785,7 +1875,10 @@ function setNumberedList(): void {
     return;
   }
   const { list, items } = current;
-  const hasCheckbox = items.some((item) => item.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox: a loose task item carries its checkbox inside the <li>'s
+  // <p>, and a tight-only query here would skip stripCheckboxFrom and carry the
+  // raw <input> into the unwrapped <p> (raw HTML written into the .md).
+  const hasCheckbox = items.some((item) => findTaskCheckbox(item));
   // Tracks the LIVE <li> set for the retag/unwrap below -- replaceListItems
   // detaches the original `items` nodes once it runs (same note as setBulletList).
   let targets = items;
@@ -1883,7 +1976,29 @@ function resolveTopLevelBlocks(): Element[] | null {
   // and keeps them verbatim) instead — never dropping/mangling them. A blank
   // <p> IS P/UL/OL-listable, so blank-line dropping still happens cleanly here
   // via computeToList (bug 0717 round3 #5, Group ListVerbBlankDrop).
-  return resolveSelectionBlockRun((el) => el.tagName === 'P' || el.tagName === 'UL' || el.tagName === 'OL');
+  const blocks = resolveSelectionBlockRun((el) => el.tagName === 'P' || el.tagName === 'UL' || el.tagName === 'OL');
+  if (!blocks) {
+    return null;
+  }
+  // Even a clean P/UL/OL span can sit directly next to an atom OUTSIDE the
+  // span (a <blockquote>, most commonly). commitListOp's execCommand('insertHTML')
+  // then runs right at that boundary, and Chromium's ReplaceSelectionCommand
+  // merges the newly-inserted list INTO the adjacent blockquote instead of
+  // leaving two sibling blocks — every serialized line then leaks the
+  // blockquote's `> ` prefix. Bail to null here too so the caller falls back
+  // to computeToListAroundAtoms/commitListOpDirect, which never touches
+  // execCommand and leaves an untouched neighbor exactly where it was.
+  // Reuses computeToListAroundAtoms's own atom/convertible split (isConvertibleBlock)
+  // instead of a narrower inline check, so a heading neighbor (convertible, not
+  // an atom there) doesn't needlessly lose the fast path for the common
+  // paragraph-next-to-heading case.
+  const before = blocks[0].previousElementSibling;
+  const after = blocks[blocks.length - 1].nextElementSibling;
+  const isAtom = (el: Element | null) => el !== null && !isConvertibleBlock(el);
+  if (isAtom(before) || isAtom(after)) {
+    return null;
+  }
+  return blocks;
 }
 
 /**
@@ -2402,7 +2517,10 @@ function runTriggerBlockAction(id: TriggerDefineBlockId): void {
     case 'toc':
       // No standalone "insert a TOC block into the document" feature exists —
       // this reuses the existing sidebar TOC panel toggle (fmt id 'toc-toggle').
-      ctx.toc.toggle();
+      // Explicit 'toc' for the same reason that button passes it: the action is
+      // named for the outline, so it must not open whichever tab was last used.
+      ctx.toc.toggle('toc');
+      updateTocButton();
       return;
   }
 }
@@ -2678,7 +2796,9 @@ function recomputeActiveFormatting(): void {
   // selectionchange (mỗi lần di caret) nên tránh phần dò thừa đó.
   const li = anchorEl?.closest('li') ?? null;
   const liInContent = !!li && content.contains(li);
-  setActive('fmt-task', liInContent && !!li.querySelector(':scope > input[type="checkbox"]'));
+  // findTaskCheckbox, not a tight-only query — a loose task item's checkbox
+  // sits in its <p>, and the button must not deny a state it just produced.
+  setActive('fmt-task', liInContent && !!findTaskCheckbox(li));
 
   const list = liInContent ? li.parentElement : null;
   setActive('fmt-bullet', list?.tagName === 'UL');

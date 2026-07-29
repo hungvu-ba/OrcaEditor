@@ -71,4 +71,4 @@ A lightweight cross-document linking model built on a `caption::` declaration.
 
 _See `Update History.md` / `CHANGELOG.md` [0.9.0] for the full line-by-line list._
 
-_Screenshots regenerate from the live UI via `npx playwright test test/webview/zz-feature-shots.spec.ts` (run `node esbuild.js` first) → `docs/features-0.9.0/`._
+_Screenshots regenerate from the live UI via `npm run shots` → `docs/features-0.9.0/`. The generator lives in `scripts/feature-shots/` with its own Playwright config, deliberately outside `test/webview/`, so a test run never rewrites these files._

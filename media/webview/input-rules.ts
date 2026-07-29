@@ -8,7 +8,7 @@
  * Trong ô bảng (td/th), heading/quote/hr/code không áp dụng (không hợp lý ở
  * đó) nhưng bullet/số/task list vẫn gõ được — xem applyCellListInputRule.
  */
-import { addCheckbox, closestElement, emptyParagraph, type DomHelpers } from './dom-utils';
+import { addCheckbox, closestElement, emptyParagraph, findTaskCheckbox, type DomHelpers } from './dom-utils';
 import { hasInputOwner } from './input-ownership';
 
 export interface InputRulesContext {
@@ -231,7 +231,9 @@ function removeStrayEmptyParagraphAfter(list: Element | null): void {
 function finishTaskItem(li: HTMLLIElement, task: RegExpExecArray): void {
   addCheckbox(li);
   if (task[1] === 'x' || task[1] === 'X') {
-    li.querySelector(':scope > input[type="checkbox"]')?.setAttribute('checked', 'checked');
+    // findTaskCheckbox, not a ':scope > input' query: addCheckbox places the
+    // checkbox inside a loose item's <p>, which a tight-only query would miss.
+    findTaskCheckbox(li)?.setAttribute('checked', 'checked');
   }
   placeCaretAtBlockStart(li);
 }
@@ -584,8 +586,11 @@ function isEmptyDeletableBlock(el: Element): boolean {
 /** Đặt caret (đã collapse) về đầu nội dung `el` — với task item thì ngay sau checkbox. */
 function placeCaretAtBlockStart(el: Element): void {
   const range = document.createRange();
-  const checkbox =
-    el.nodeName === 'LI' ? el.querySelector(':scope > input[type="checkbox"]') : null;
+  // findTaskCheckbox, not a tight-only query: on a loose task item the checkbox
+  // lives in the <li>'s <p>, and falling back to selectNodeContents(li) would
+  // park the caret BEFORE it — the next keystroke then lands ahead of the
+  // checkbox and serializes the marker away.
+  const checkbox = el.nodeName === 'LI' ? findTaskCheckbox(el) : null;
   if (checkbox) {
     range.setStartAfter(checkbox);
   } else {

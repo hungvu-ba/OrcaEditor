@@ -14,12 +14,12 @@
 import { INPUT_DEBOUNCE_MS, REFRESH_DEBOUNCE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
 import {
+  attachViewportBandScroll,
   buildOverviewTicks,
-  collectHaystack,
+  createHaystackCache,
   createViewportBand,
   findMatches,
   updateViewportBand,
-  type Haystack,
 } from './match-utils';
 import { buildMatchOptionToggles } from './match-options';
 import type { MatchOptions } from '../../src/shared/text-match';
@@ -136,18 +136,7 @@ export function initSearch(content: HTMLElement): SearchController {
   // Cache kết quả TreeWalker giữa các lần gõ TỪ KHÓA (haystack không đổi khi
   // chỉ query đổi). Chỉ invalidate khi nội dung tài liệu đổi — qua hook
   // refresh() bên dưới (được gọi mỗi khi content thay đổi).
-  let haystackCache: Haystack | undefined;
-
-  function invalidateHaystack(): void {
-    haystackCache = undefined;
-  }
-
-  function collect(): Haystack {
-    if (!haystackCache) {
-      haystackCache = collectHaystack(content);
-    }
-    return haystackCache;
-  }
+  const { collect, invalidate: invalidateHaystack } = createHaystackCache(content);
 
   function computeMatches(q: string): Range[] {
     if (!q) {
@@ -428,20 +417,7 @@ export function initSearch(content: HTMLElement): SearchController {
 
   // Cập nhật vị trí viewport band theo scroll, coalesce về 1 lần/khung hình (giống
   // 'selectionchange' của select-highlight.ts) — rẻ vì chỉ tính lại top/height %, không đụng DOM tick.
-  let viewportRafId: number | undefined;
-  window.addEventListener(
-    'scroll',
-    () => {
-      if (viewportBand.hidden || viewportRafId !== undefined) {
-        return;
-      }
-      viewportRafId = requestAnimationFrame(() => {
-        viewportRafId = undefined;
-        updateViewportBand(viewportBand);
-      });
-    },
-    { passive: true }
-  );
+  attachViewportBandScroll(viewportBand);
 
   return {
     refresh(): void {

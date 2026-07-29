@@ -9,7 +9,7 @@
  *
  * Chạy riêng: npm run test:roundtrip:plantuml
  */
-import { Runner, renderer, turndown, domino } from './_lib';
+import { Runner, renderer, turndown, domino, COMPLEX_CELL } from './_lib';
 import {
   postProcessMermaidDom,
   postProcessPlantumlDom,
@@ -127,6 +127,98 @@ const SIMPLE = '```plantuml\n@startuml\nAlice -> Bob : Hello\n@enduml\n```\n';
     'both fences round-trip, each keeping its own language tag',
     md.includes('```mermaid\ngraph TD; A-->B;\n```') && md.includes('```plantuml\n@startuml'),
     `  nhận: ${JSON.stringify(md)}`
+  );
+}
+
+// US-23.22 deferred item 1 (fixed 2026-07-28): a frame inside a table that needs
+// HTML serialization (`td li li` → complexTableAsHtml) is emitted through
+// outerHTML, where the `plantumlDiagram` rule never runs — the whole frame
+// (toolbar, chart container, `md-plantuml-error` on a failed render, rendered
+// SVG) used to land in the user's `.md`. cloneAndStrip now rebuilds the fence.
+{
+  const html = renderer.render(SIMPLE).html;
+  const doc = domino.createDocument(
+    '<div id="content"><table><thead><tr><th>A</th></tr></thead><tbody><tr>' +
+      `<td>${html}</td>${COMPLEX_CELL}</tr></tbody></table></div>`,
+    true
+  );
+  const root = doc.getElementById('content');
+  if (!root) {
+    throw new Error('no root');
+  }
+  postProcessPlantumlDom(root, doc);
+  runner.check('raw-HTML: fixture really carries a frame in the cell', !!root.querySelector('.md-plantuml'));
+  const md = serialize(root, doc);
+  runner.check(
+    'raw-HTML: the table really took the raw-HTML path (complexTableAsHtml)',
+    md.trimStart().startsWith('<table'),
+    `  got: ${JSON.stringify(md)}`
+  );
+  runner.check(
+    'raw-HTML: a frame in a table cell serializes back to its source <pre>, no class/chrome leak',
+    // Restored to the source <pre> ELEMENT, not fence text: turndown's own
+    // whitespace collapse would turn a text-node fence's newlines into spaces on
+    // the NEXT save and destroy the diagram. This is byte-identical to what
+    // markdown-it emits for the fence, so the next render re-wraps a real frame.
+    // `Alice -> Bob` is text, so `>` comes back HTML-escaped — the browser
+    // decodes it on that render.
+    md.includes(
+      '<pre><code class="language-plantuml">@startuml\nAlice -&gt; Bob : Hello\n@enduml\n</code></pre>'
+    ) &&
+      !md.includes('md-plantuml') &&
+      !md.includes('contenteditable'),
+    `  got: ${JSON.stringify(md)}`
+  );
+  const md2 = (() => {
+    const d2 = domino.createDocument(`<div id="content">${renderer.render(md).html}</div>`, true);
+    const r2 = d2.getElementById('content');
+    if (!r2) {
+      throw new Error('no root');
+    }
+    postProcessPlantumlDom(r2, d2);
+    return serialize(r2, d2);
+  })();
+  runner.check('raw-HTML: stable on a 2nd pass', md2 === md, `  md2: ${JSON.stringify(md2)}\n  md1: ${JSON.stringify(md)}`);
+}
+
+// A BLANK LINE inside the diagram source is the shape that would break the
+// emitted HTML block — markdown-it ends an html_block at the first blank line,
+// which would leave the <pre>/<td>/<table> unclosed and let the browser fix them
+// up arbitrarily, mangling the cell a little more on every save. `collapseBlankLines`
+// is what prevents it (blank line -> `\n&#10;`, decoded back to a blank line on
+// render). The case above deliberately has no blank line, so it proves nothing
+// here; pinned separately (US-23.22 review, edge raised by the blind hunter).
+{
+  const BLANKY = '```plantuml\n@startuml\n\nAlice -> Bob : Hello\n\n@enduml\n```\n';
+  /** Serialize `innerHtml` as-is — pass 1 wraps the fence in a complex table, pass 2 must NOT re-wrap. */
+  const serializeInner = (innerHtml: string): string => {
+    const doc = domino.createDocument(`<div id="content">${innerHtml}</div>`, true);
+    const root = doc.getElementById('content');
+    if (!root) {
+      throw new Error('no root');
+    }
+    postProcessPlantumlDom(root, doc);
+    return serialize(root, doc);
+  };
+  const md = serializeInner(
+    '<table><thead><tr><th>A</th></tr></thead><tbody><tr>' +
+      `<td>${renderer.render(BLANKY).html}</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(
+    'raw-HTML: a blank line in the source does NOT cut the html_block (becomes &#10;)',
+    !/\n[ \t]*\n/.test(md.trim()) && md.includes('&#10;'),
+    `  got: ${JSON.stringify(md)}`
+  );
+  runner.check(
+    'raw-HTML: a source with blank lines survives intact',
+    md.includes('@startuml') && md.includes('Alice') && md.includes('@enduml'),
+    `  got: ${JSON.stringify(md)}`
+  );
+  const md2 = serializeInner(renderer.render(md).html);
+  runner.check(
+    'raw-HTML: a source with blank lines is stable on a 2nd pass',
+    md2 === md,
+    `  md2: ${JSON.stringify(md2)}\n  md1: ${JSON.stringify(md)}`
   );
 }
 

@@ -41,12 +41,11 @@ import {
 } from './pipeline';
 import { collectHaystack, rangeAt, findMatches } from './match-utils';
 import { CAPTION_CLASS } from './render';
+import { ENTITY_REVEAL_FLASH_CLASS } from './constants';
 import { ownOrNestedAttr } from './block-info';
 import { scrollBehavior } from './dom-utils';
 
-/** Transient highlight class flashed on a revealed caption badge (see markdown.css). */
-const REVEAL_FLASH_CLASS = 'entity-reveal-flash';
-/** How long the reveal flash stays on, ms (mirrors ref-nav-flash's ~1.2s window). */
+/** How long the reveal flash stays on, ms. */
 const REVEAL_FLASH_MS = 1200;
 
 export interface LineGutter {
@@ -391,7 +390,7 @@ export function initLineGutter(
    * entity links instead of line-based reveal because the target file is often
    * outside the workspace (not indexed) and this is immune to line↔DOM drift.
    * The declaration renders as a contenteditable=false atom, so a text Selection
-   * can't land inside it — a transient flash stands in (like ref-nav-flash).
+   * can't land inside it — a transient flash stands in.
    * Case-insensitive so a differently-cased link fragment still matches.
    */
   function scrollToText(query: string): boolean {
@@ -409,8 +408,8 @@ export function initLineGutter(
     window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
     const badge = (r.startContainer.parentElement?.closest(`.${CAPTION_CLASS}`) as HTMLElement | null) ?? undefined;
     if (badge) {
-      badge.classList.add(REVEAL_FLASH_CLASS);
-      setTimeout(() => badge.classList.remove(REVEAL_FLASH_CLASS), REVEAL_FLASH_MS);
+      badge.classList.add(ENTITY_REVEAL_FLASH_CLASS);
+      setTimeout(() => badge.classList.remove(ENTITY_REVEAL_FLASH_CLASS), REVEAL_FLASH_MS);
     }
     return true;
   }

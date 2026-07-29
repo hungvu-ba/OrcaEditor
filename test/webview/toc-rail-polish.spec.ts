@@ -3,14 +3,14 @@
  *  1. Resize-drag lag bug — while body.toc-resizing, #toc-panel's transition must
  *     drop `width` so a live drag is 1:1 with the cursor (the open/close slide,
  *     driven by body.toc-open only, keeps its width easing).
- *  3. Reading-palette theming — under a reading-palette-* class the depth pills
- *     and the progress ring must adopt the palette accent (--rp-link), not the
- *     fixed VS Code blue.
+ *  3. Reading-palette theming — under a reading-mode-* palette the progress bar
+ *     and the `⋯` menu's depth rows (US-10.8's home for the former depth pills)
+ *     must adopt the palette accent, not the fixed VS Code blue.
  *  4. Empty state — "no match" shows a clickable reset link that restores all
  *     levels in place; "headless" shows a muted hint and no reset link.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openEditor } from './_harness';
+import { openEditor, setDepth } from './_harness';
 import type { InitConfig } from '../../src/shared/messages';
 
 function filler(section: string, lines = 8): string {
@@ -64,10 +64,6 @@ const SEPIA: InitConfig['readability'] = {
 async function openToc(page: Page, markdown = DOC, cfg: Partial<InitConfig> = {}): Promise<void> {
   await openEditor(page, markdown, cfg);
   await page.locator('#toc-toggle').click({ force: true });
-}
-
-async function setDepth(page: Page, level: 1 | 2 | 3): Promise<void> {
-  await page.locator(`.toc-depth-btn[data-level="${level}"]`).click();
 }
 
 // --- Item 1: resize-drag lag ---------------------------------------------
@@ -125,7 +121,11 @@ test('no-match empty state shows a reset link that restores all levels in place'
   await expect(page.locator('#toc-empty')).toHaveCount(0);
   // Show H1–H2–H3 → all three headings (H2, H3, H2) now render.
   await expect(page.locator('.toc-item')).toHaveCount(3);
-  await expect(page.locator('.toc-depth-btn.active')).toHaveAttribute('data-level', '3');
+  // US-10.8: the link still resets in ONE click (it does not merely open the `⋯`
+  // menu) — the menu is only where the depth control now lives, and it must come
+  // up already reflecting the reset.
+  await page.locator('.right-dock-menu-btn').click();
+  await expect(page.locator('.right-dock-menu-item[aria-checked="true"]')).toHaveText(/H1–H2–H3$/);
 });
 
 test('headless empty state shows a hint and no reset link', async ({ page }) => {
@@ -137,8 +137,8 @@ test('headless empty state shows a hint and no reset link', async ({ page }) => 
 });
 
 test('a document with only H4+ headings shows no reset link (reset to H1–H3 would be a dead-end)', async ({ page }) => {
-  // Headings exist but none are selectable (pills only reach H3), so a reset
-  // could never reveal them — the message must stand alone, no dead affordance.
+  // Headings exist but none are selectable (the depth rows only reach H3), so a
+  // reset could never reveal them — the message stands alone, no dead affordance.
   await openToc(page, `#### Deep A\n\n${filler('A')}\n\n##### Deeper B\n\n${filler('B')}`);
 
   await expect(page.locator('#toc-empty')).toBeVisible();
@@ -169,12 +169,48 @@ test('a long heading title is truncated with ellipsis, not clipped flush', async
   expect(clipped).toBe(true);
 });
 
+// --- US-10.8: the restacked header's vertical budget ----------------------
+
+test('the restacked header costs 31px above the outline list, 63px with the tab strip', async ({ page }) => {
+  await openToc(page);
+
+  // The 110px the budget came down from was #toc-header + #toc-filter-bar; assert
+  // they are gone, or a future zero-height #toc-header would keep the px math
+  // green while the AC is violated.
+  await expect(page.locator('#toc-header')).toHaveCount(0);
+  await expect(page.locator('#toc-filter-bar')).toHaveCount(0);
+
+  const { headerPx, stripPx, clearsToolbar } = await page.evaluate(() => {
+    const tabpanel = document.getElementById('toc-tabpanel')!.getBoundingClientRect();
+    const list = document.getElementById('toc-list')!.getBoundingClientRect();
+    const strip = document.querySelector('.right-dock-tabs')!.getBoundingClientRect();
+    const toolbar = document.getElementById('toolbar')!.getBoundingClientRect();
+    return {
+      headerPx: Math.round(list.top - tabpanel.top),
+      stripPx: Math.round(strip.height),
+      clearsToolbar: strip.top >= toolbar.bottom - 1,
+    };
+  });
+
+  // 3px progress bar + 28px meta row. Measured to the list, not to the first
+  // .toc-item, so #toc-list's own row padding isn't counted as header chrome.
+  expect(headerPx).toBe(31);
+  expect(stripPx).toBe(32);
+  // Both figures above are margin-independent, so they would still hold if the
+  // strip lost the toolbar clearance that US-10.8 moved onto it and the whole
+  // restacked header rendered behind the sticky #toolbar. Assert the clearance
+  // directly — it is what makes the 63px budget real rather than arithmetic.
+  expect(clearsToolbar).toBe(true);
+});
+
 // --- Item 3: reading-palette theming --------------------------------------
 
-test('depth pills and progress ring adopt the palette accent under a reading palette', async ({ page }) => {
+test('progress bar, meta row and the depth menu adopt the palette under a reading palette', async ({ page }) => {
   await openToc(page, DOC, { readability: SEPIA });
+  // The depth rows only exist while the menu is open (built on each open).
+  await page.locator('.right-dock-menu-btn').click();
 
-  const { accent, btnColor, ringStroke } = await page.evaluate(() => {
+  const { accent, muted, track, barFill, checkColor, metaColor } = await page.evaluate(() => {
     const mk = (v: string) => {
       const p = document.createElement('span');
       p.style.color = v;
@@ -183,21 +219,26 @@ test('depth pills and progress ring adopt the palette accent under a reading pal
       p.remove();
       return c;
     };
-    const accent = mk('var(--toc-accent)');
-    const btn = document.querySelector('.toc-depth-btn.active') as HTMLElement;
-    const fill = document.querySelector('#toc-progress-ring .toc-progress-fill') as SVGElement;
+    const check = document.querySelector('.right-dock-menu-item[aria-checked="true"] .right-dock-menu-check');
     return {
-      accent,
-      btnColor: getComputedStyle(btn).color,
-      ringStroke: fill ? getComputedStyle(fill).stroke : '',
+      accent: mk('var(--toc-accent)'),
+      muted: mk('var(--toc-muted)'),
+      track: mk('var(--toc-progress-track)'),
+      barFill: getComputedStyle(document.querySelector('.toc-progress-fill')!).backgroundColor,
+      checkColor: check ? getComputedStyle(check).color : '',
+      metaColor: getComputedStyle(document.getElementById('toc-meta')!).color,
     };
   });
 
   const VSCODE_BLUE = 'rgb(55, 148, 255)'; // #3794ff — the non-palette fallback
   expect(accent).not.toBe('');
   expect(accent).not.toBe(VSCODE_BLUE);
-  // Borderless-filter design: active pill text = --toc-accent on a --toc-pill-bg
-  // fill; the progress ring fill re-tints to the palette accent.
-  expect(btnColor).toBe(accent);
-  expect(ringStroke).toBe(accent);
+  // AC4: bar fill and the checked depth row both ride --toc-accent; the meta row
+  // rides --toc-muted; and the bar's track is its own per-palette token, which
+  // must resolve (an unset var would collapse the 3px bar to transparent).
+  expect(barFill).toBe(accent);
+  expect(checkColor).toBe(accent);
+  expect(metaColor).toBe(muted);
+  expect(track).not.toBe('');
+  expect(track).not.toBe(VSCODE_BLUE);
 });

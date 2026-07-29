@@ -95,4 +95,47 @@ function inject(mdSrc: string): { root: Element; doc: Document } {
   );
 }
 
+// US-23.21 AC7: md-code-wrapped is re-stamped on every render pass (owning
+// feature's re-stamp path), so registering it for strip in turndown.ts's
+// TRANSIENT_CLASSES never leaves a fenced block permanently unwrapped.
+{
+  const { root } = inject('```js\nconst a = 1;\n```\n');
+  runner.check(
+    'US-23.21 AC7: md-code-wrapped is stamped on the <pre> by the real render pass',
+    root.querySelector('pre')?.classList.contains('md-code-wrapped') === true
+  );
+}
+
+/** Same real post-process passes as inject(), starting from hand-built HTML instead of markdown (for a DOM shape — nested list in a table cell — markdown source cannot express). */
+function injectHtml(html: string): { root: Element; doc: Document } {
+  const doc = domino.createDocument(`<div id="content">${html}</div>`, true);
+  const root = doc.getElementById('content');
+  if (!root) {
+    throw new Error('no root');
+  }
+  postProcessMermaidDom(root, doc);
+  postProcessCodeHeaders(root, doc);
+  return { root, doc };
+}
+
+// US-23.21 AC1b: the REAL injected header (not a hand-written fixture) must
+// not leak when the table it sits in is forced onto the raw-HTML path by an
+// unrelated complex cell (nested list, per COMPLEX_CELL elsewhere in the
+// roundtrip suite).
+{
+  const complexCell = '<td><ul><li>x<ul><li>x.1</li></ul></li></ul></td>';
+  const codeCell = '<td><pre><code class="language-js">const x = 1;</code></pre></td>';
+  const { root, doc } = injectHtml(
+    `<table><thead><tr><th>A</th></tr></thead><tbody><tr>${codeCell}${complexCell}</tr></tbody></table>`
+  );
+  runner.check('real header injected before serialize', root.querySelectorAll('.md-code-header').length === 1);
+  prepareDomForSerialize(root, doc);
+  const md = normalizeMarkdown(turndown.turndown(root as HTMLElement));
+  runner.check(
+    'US-23.21 AC1b: real injected header never leaks on the raw-HTML table path',
+    md.includes('const x = 1;') && !md.includes('<button') && !md.includes('md-code-header') && !md.includes('Copy'),
+    `  nhận: ${JSON.stringify(md)}`
+  );
+}
+
 runner.finish('code-header');
