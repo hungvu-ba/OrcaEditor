@@ -177,6 +177,15 @@ body.dd-dragging .dd-handle {
   background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
 }
 
+/* Task-list counterpart of the muted-drag tint above — the base `.dd-hover-outline` background
+ * for a task-list `<li>` lives on a `::before` overlay instead of the element itself (see that
+ * rule further down), so the muted tint needs its own, higher-specificity `::before` override
+ * here to still apply while a task-list item is the dragged source. */
+li.task-list-item.dd-source-muted.dd-hover-outline::before {
+  background-color: var(--vscode-editor-selectionBackground, rgba(0, 122, 204, 0.35));
+  box-shadow: none;
+}
+
 /* --- Handle menu (HLR section 17, US-17.7, M5; merged into the handle click
  * by bug 0716 #5) — a click (not a drag) on the block handle opens "Move up /
  * Move down / Move to <heading>…", a mouse-only shortcut for long-distance
@@ -385,6 +394,29 @@ body.dd-dragging .dd-handle {
   outline: 1px solid var(--vscode-focusBorder, #007acc);
   outline-offset: -1px;
   background-color: color-mix(in srgb, var(--vscode-focusBorder, #007acc) 12%, transparent);
+}
+
+/* A task-list checkbox sits outside the <li>'s own box — pulled left by its own negative
+ * margin into the hidden native-marker gutter (`margin-left: -1.2em`, markdown.css) — so
+ * `.dd-hover-outline`'s wash/accent bar above, sized to the li's own border-box, cuts across
+ * the checkbox instead of covering it (bug General #2 follow-up). A `::before` overlay lets the
+ * highlight extend further left without moving the li's own box (which would shift real
+ * content/layout); `z-index: -1` keeps it behind the checkbox and text so neither their paint
+ * order nor their hit-testing changes. */
+li.task-list-item.dd-hover-outline {
+  position: relative;
+  background-color: transparent;
+  box-shadow: none;
+}
+li.task-list-item.dd-hover-outline::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  left: calc(-1.2em + 4px);
+  z-index: -1;
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--rp-accent, var(--vscode-focusBorder, #007acc)) 7%, transparent);
+  box-shadow: -3px 0 0 0 var(--rp-accent, var(--vscode-focusBorder, #007acc));
 }
 
 /* Số dòng KẾT THÚC — dùng cho block bị "chuyển đổi" sang trình bày khác hẳn
@@ -3481,6 +3513,10 @@ body[class*='reading-mode-'] .dd-hover-outline-cell {
  * (it has to stand out as a selection color), so diluted by .dd-source-muted's
  * opacity:0.4 it lands back around the same visual strength as the rule above. */
 body[class*='reading-mode-'] .dd-source-muted.dd-hover-outline {
+  background-color: var(--rp-selection-bg);
+}
+/* Task-list counterpart (see the base `::before` overlay rule near .dd-hover-outline-cell). */
+body[class*='reading-mode-'] li.task-list-item.dd-source-muted.dd-hover-outline::before {
   background-color: var(--rp-selection-bg);
 }
 body[class*='reading-mode-'] .dd-ghost {

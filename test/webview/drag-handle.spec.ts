@@ -964,6 +964,38 @@ test('hovering the li handle glyph outlines its item, and moving off the glyph c
   await expect(sibling).not.toHaveClass(/dd-hover-outline/);
 });
 
+test('the li-handle hover outline on a task-list item reaches past the checkbox, not through it (bug General #2 follow-up)', async ({
+  page,
+}) => {
+  // The `.dd-hover-outline` wash/accent bar is sized to the <li>'s own box, but a task-list
+  // checkbox sits outside that box (negative-margin pull into the hidden native-marker gutter,
+  // markdown.css) — reported as the highlight's left edge visibly cutting into the checkbox.
+  await openEditor(page, `# Heading\n\n- [ ] First task\n- [x] Second task\n`);
+  const item = page.locator('li', { hasText: 'Second task' });
+  const checkbox = item.locator('input[type="checkbox"]');
+  const checkboxBox = await checkbox.boundingBox();
+  if (!checkboxBox) {
+    throw new Error('missing checkbox bounding box');
+  }
+
+  await hoverCenter(page, item);
+  const liHandle = page.locator('.dd-li-handle');
+  const handleBox = await liHandle.boundingBox();
+  if (!handleBox) {
+    throw new Error('li handle has no bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await expect(item).toHaveClass(/dd-hover-outline/);
+
+  // The highlight's own rendered left edge (li's box left + the `::before` overlay's computed
+  // `left` offset) must sit at/past the checkbox's own left edge, not inside it.
+  const overlayLeft = await item.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return r.left + parseFloat(getComputedStyle(el, '::before').left);
+  });
+  expect(overlayLeft).toBeLessThanOrEqual(checkboxBox.x);
+});
+
 test('hovering the whole-table handle glyph outlines the table, and moving off clears it (bug #3)', async ({
   page,
 }) => {
