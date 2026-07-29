@@ -768,8 +768,12 @@ const TRANSIENT_ATTRS = [
  * registered below nor listed in that file's `OUTSIDE_CONTENT_CLASSES`. Adding
  * a name here also requires an exported constant in `constants.ts` and a strip
  * case in `test/roundtrip/style-preservation.ts`.
+ *
+ * Exported because the list also answers "can this class change the `.md`?" for
+ * a second caller: main.ts's P-7 dirty tracker skips a `class` mutation whose
+ * only difference is tokens from here (Performance Audit P-7 deferred item 3).
  */
-const TRANSIENT_CLASSES = [
+export const TRANSIENT_CLASSES = [
   COMMENT_ANCHOR_ACTIVE_CLASS,
   ENTITY_REF_CLASS,
   REF_NAV_FLASH_CLASS,

@@ -526,4 +526,5 @@
 | 0.10.0 | 2026-07-29 | Fix: a comment in a loose list item reported the whole list's first line, and gutter pins on nearby-but-different lines merged; pins now cluster per exact line. |
 | 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-9): a host update now splices only changed top-level blocks into the preview instead of rebuilding the whole document via innerHTML. |
 | 0.10.0 | 2026-07-29 | Fix: annotate a loop-local var in `nearestSrcRange` — TS7022 implicit-any circular inference broke `npm run typecheck`. |
+| 0.10.0 | 2026-07-29 | Fix (perf, Performance Audit P-7): hovering a drag handle no longer marks its block dirty, so it is not re-serialized nor replaced by the next host update. |
 | 0.10.0 | 2026-07-29 | Fix: Comment tab rows showed the anchored text; they now show the comment itself, and the `⚑` toolbar button is retired with its lost-anchor badge moved to Show Comments. |

@@ -12,6 +12,7 @@
  */
 import {
   MarkdownRenderer,
+  TRANSIENT_CLASSES,
   createTurndown,
   findOrphanNestedListPair,
   normalizeMarkdown,
@@ -1018,6 +1019,12 @@ function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): voi
  * the next host update; a poisoned node stays in the diff and always lands in
  * the replaced run. Caret-trap <p>s are created after the snapshot and get a
  * key only if a local mutation later touches them.
+ *
+ * "Exactly" holds for everything the `.md` can see. A kept node may additionally
+ * carry TRANSIENT_CLASSES tokens its render did not produce, since
+ * isTransientClassChange deliberately does not poison for those — so this key is
+ * not a live-DOM equality claim, and nothing may diff live `outerHTML` against a
+ * re-render on the strength of it.
  */
 let renderKeyByBlock = new WeakMap<Element, string>();
 let hasRenderSnapshot = false;
@@ -1627,7 +1634,72 @@ function markDirtyFrom(node: Node): void {
   }
 }
 
+/** `value`'s class tokens minus every serialization-invisible one, order preserved. */
+function significantClassSignature(value: string | null): string {
+  return (value ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token !== '' && !TRANSIENT_CLASSES.includes(token))
+    .join(' ');
+}
+
+/**
+ * Performance Audit P-7 (deferred item 3): drag-drop.ts and table.ts stamp
+ * DD_HOVER_OUTLINE_CLASS & co. straight onto live #content elements, so merely
+ * hovering a drag handle used to mark that block dirty — a re-serialize, and
+ * since P-9 a render-key poisoning that makes the next host update REPLACE the
+ * block, dropping its node identity and whatever transient DOM state it was
+ * showing, for a class the `.md` never sees. Also silences `brokenRef.refresh()`
+ * (which runs after every render): its no-op `classList.toggle(cls, false)`
+ * rewrites the attribute all the same, and so used to poison every block holding
+ * a reference on every single render.
+ *
+ * Filtered by TOKEN, never by attribute name: a MutationObserver `attributeFilter`
+ * excluding `class` outright would be wrong, because a class CAN be content —
+ * turndown's taskListItems plugin reads back `contains-task-list`, stamped on a
+ * live <ul> by toolbar.ts/dom-utils.ts, and a user's own class inside a
+ * hand-written HTML block belongs to the file.
+ *
+ * Why TRANSIENT_CLASSES tokens are safe to drop: no turndown rule reads one, and
+ * every raw-HTML emitter strips them from its clone first. That strip is also
+ * what hides the two NORMALIZATIONS the signature cannot see, and it is a real
+ * dependency rather than a coincidence — removing the last token leaves a
+ * present-but-empty `class=""`, and rewriting the attribute collapses whitespace
+ * inside it, yet `stripTransientClasses` deletes an emptied `class` and
+ * `htmlImgWithAttrs` counts an empty token list as discountable.
+ *
+ * Soundness against a MISSED change: per target the records CHAIN — record i+1's
+ * oldValue is the value after change i — so skipping every record of a batch
+ * requires the pre-batch signature to equal the current one, i.e. a net-zero
+ * significant change. Any real net change leaves at least the first record's
+ * oldValue disagreeing with the live attribute, and `serialize()` reads that same
+ * DOM immediately after draining the queue.
+ *
+ * NOT covered: presentation written as `style`, or as a class outside the
+ * registry (fit-mode column widths and their measure classes, the mermaid /
+ * plantuml error classes), still marks its block dirty — see the P-7 deferred
+ * remainder.
+ */
+function isTransientClassChange(record: MutationRecord): boolean {
+  if (
+    record.type !== 'attributes' ||
+    record.attributeName !== 'class' ||
+    // getAttribute resolves by QUALIFIED name, so a namespaced attribute whose
+    // localName is `class` would be compared against the unrelated plain one.
+    record.attributeNamespace !== null ||
+    !(record.target instanceof Element)
+  ) {
+    return false;
+  }
+  return (
+    significantClassSignature(record.oldValue) === significantClassSignature(record.target.getAttribute('class'))
+  );
+}
+
 function markDirtyFromRecord(record: MutationRecord): void {
+  if (isTransientClassChange(record)) {
+    return;
+  }
   markDirtyFrom(record.target);
   if (record.type === 'childList') {
     // A block can be BUILT while detached and only then inserted (list-ops,
@@ -1653,6 +1725,8 @@ function markDirtyFromRecord(record: MutationRecord): void {
  * main.ts/table.ts/list-ops.ts/drag-drop.ts, so hooking each one is not an option
  * (same reasoning as select-highlight.ts). `attributes` is needed too: clicking a
  * task-list checkbox changes only an attribute (the 'click' handler below).
+ * `attributeOldValue` feeds `isTransientClassChange` — without the old value a
+ * hover class is indistinguishable from a real class edit.
  */
 const contentMutations = new MutationObserver((records) => {
   records.forEach(markDirtyFromRecord);
@@ -1664,6 +1738,7 @@ function observeContentMutations(): void {
     childList: true,
     characterData: true,
     attributes: true,
+    attributeOldValue: true,
   });
 }
 observeContentMutations();

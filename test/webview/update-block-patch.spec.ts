@@ -161,6 +161,77 @@ test('a [ref]: definition edit re-renders the paragraph that uses it', async ({ 
   expect(blocks[1]).toEqual(['Middle', '3', 1]);
 });
 
+test('a hover-outlined block is still kept by the next update (P-7 deferred item 3)', async ({ page }) => {
+  // drag-drop.ts stamps `dd-hover-outline` on the live #content block, which used
+  // to mark it dirty and poison its render key — so merely resting on a drag
+  // handle made the next host update REPLACE that block. The class is in
+  // turndown.ts's TRANSIENT_CLASSES (never reaches the `.md`), so the P-7
+  // MutationObserver now ignores a class change made only of such tokens.
+  await openEditor(page, 'Alpha\n\nBravo\n\nCharlie\n');
+  await markBlocks(page);
+
+  // Hover the paragraph's CONTENT to reveal its handle, then the handle GLYPH —
+  // the production path that adds the outline without any mousedown.
+  const alpha = page.locator('#content p').first();
+  const alphaBox = await alpha.boundingBox();
+  const handle = page.locator('.dd-handle:not(.dd-li-handle):not(.dd-row-handle):not(.dd-col-handle):not(.dd-table-handle)');
+  if (!alphaBox) {
+    throw new Error('missing bounding box');
+  }
+  await page.mouse.move(alphaBox.x + alphaBox.width / 2, alphaBox.y + alphaBox.height / 2);
+  // positionHandle runs inside drag-drop's rAF-coalesced hover handler, and
+  // boundingBox() does NOT retry on an attached-but-hidden element — read the box
+  // only once the handle is actually displayed (drag-handle.spec.ts's idiom).
+  await expect(handle).toHaveCSS('display', 'flex');
+  const handleBox = await handle.boundingBox();
+  if (!handleBox) {
+    throw new Error('block handle has no bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await expect(alpha).toHaveClass(/dd-hover-outline/);
+
+  await pushUpdate(page, 'Alpha\n\nBravo EDITED\n\nCharlie\n');
+  await expect(page.locator('#content p').nth(1)).toHaveText('Bravo EDITED');
+
+  const blocks = await readBlocks(page);
+  expect(blocks).toEqual([
+    ['Alpha', '1', 0], // kept despite the hover class — marker survived
+    ['Bravo EDITED', '3', null],
+    ['Charlie', '5', 2],
+  ]);
+  // The update's own hover reset clears the outline off the KEPT node, leaving a
+  // bare `class=""` — which the tracker also reads as no significant change, so
+  // the cleanup does not dirty the block it just spared either.
+  await expect(page.locator('#content p').first()).not.toHaveClass(/dd-hover-outline/);
+});
+
+test('a SIGNIFICANT class change still poisons its block (P-7 deferred item 3, false-negative side)', async ({
+  page,
+}) => {
+  // The counterpart of the case above, and the one that guards the `.md`: the skip
+  // must fire ONLY for registry tokens. A class outside TRANSIENT_CLASSES can be
+  // content (a user's own class in a hand-written HTML block; `contains-task-list`,
+  // which turndown reads back as `- [ ]`), so widening the filter or comparing
+  // token SETS instead of the ordered signature would make a real class edit
+  // invisible and serve stale cached markdown — with every other test still green.
+  await openEditor(page, 'Intro\n\n<div class="note">boxed</div>\n\nOutro\n');
+  await markBlocks(page);
+
+  await page.evaluate(() => {
+    (document.querySelector('#content div.note') as HTMLElement).classList.add('extra');
+  });
+
+  // An unrelated push: the div's own source text did not change, so ONLY the
+  // poisoning can move it out of the kept set.
+  await pushUpdate(page, 'Intro EDITED\n\n<div class="note">boxed</div>\n\nOutro\n');
+  await expect(page.locator('#content p').first()).toHaveText('Intro EDITED');
+
+  const marker = await page.evaluate(
+    () => (document.querySelector('#content div.note') as HTMLElement & { __p9?: number }).__p9 ?? null
+  );
+  expect(marker).toBeNull(); // replaced, not kept — the local class edit counted
+});
+
 test('typing after a patched update serializes the pushed text plus the edit', async ({ page }) => {
   await openEditor(page, 'First\n\nSecond\n');
 
