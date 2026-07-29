@@ -538,3 +538,4 @@
 | 0.10.0 | 2026-07-29 | Fix: the click-to-open-comment deferral is now 500ms, up from 250ms, so a double-click at the common OS interval no longer flashes the popover. |
 | 0.10.0 | 2026-07-29 | Fix: Bullet/Numbered/Task-list on a paragraph next to a sibling blockquote no longer merges the new list into the blockquote. |
 | 0.10.0 | 2026-07-29 | Fix: a plain click on a `## References` entry no longer navigates (US-20.5) — behaves like any other link, Cmd/Ctrl+Click still opens it. |
+| 0.10.0 | 2026-07-29 | Fix: task-list drag handle no longer overlaps the comment-gutter pin, now covers the checkbox/marker, and stays row-aligned on wrapped items. |
