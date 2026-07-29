@@ -1991,9 +1991,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           // webview already applied it optimistically) but never survives a
           // reload, with no toast telling them to retry.
           if (this.authoritativePanelByUri.get(docUriStr) !== webviewPanel) {
-            console.warn(
-              `orca-editor: comment anchor update from a non-authoritative panel dropped for ${docUriStr}`
-            );
+            const warning = `orca-editor: comment anchor update from a non-authoritative panel dropped for ${docUriStr}`;
+            console.warn(warning);
+            MarkdownWysiwygProvider.log(warning);
             if (msg.origin !== undefined) {
               void postToWebview({
                 type: 'commentAnchorUpdateResult',
@@ -2007,7 +2007,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
           }
           const error = await this.comments?.updateAnchor(msg, document);
           if (error) {
-            console.warn(`orca-editor: comment anchor update refused — ${error}`);
+            const warning = `orca-editor: comment anchor update refused — ${error}`;
+            console.warn(warning);
+            MarkdownWysiwygProvider.log(warning);
             if (msg.origin !== undefined) {
               void postToWebview({
                 type: 'commentAnchorUpdateResult',

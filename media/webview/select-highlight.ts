@@ -20,12 +20,12 @@
 
 import { MIN_SELECT_LENGTH, SELECT_OVERVIEW_THROTTLE_MS } from './constants';
 import {
+  attachViewportBandScroll,
   buildOverviewTicks,
-  collectHaystack,
+  createHaystackCache,
   createViewportBand,
   findMatches,
   updateViewportBand,
-  type Haystack,
 } from './match-utils';
 
 export interface SelectHighlightController {
@@ -81,18 +81,7 @@ export function initSelectHighlight(
   // không đổi khi chỉ selection đổi). Invalidate khi content đổi — qua refresh()
   // bên dưới (renderDocument()) hoặc qua MutationObserver bên dưới (mọi chỉnh
   // sửa local khác không đi qua renderDocument()).
-  let haystackCache: Haystack | undefined;
-
-  function invalidateHaystack(): void {
-    haystackCache = undefined;
-  }
-
-  function collect(): Haystack {
-    if (!haystackCache) {
-      haystackCache = collectHaystack(content);
-    }
-    return haystackCache;
-  }
+  const { collect, invalidate: invalidateHaystack } = createHaystackCache(content);
 
   function clear(): void {
     if (supportsHighlight) {
@@ -242,20 +231,7 @@ export function initSelectHighlight(
 
   // Cập nhật vị trí viewport band theo scroll, coalesce về 1 lần/khung hình — độc lập với throttle
   // rebuild tick (SELECT_OVERVIEW_THROTTLE_MS) vì chỉ tính lại top/height %, không đụng DOM tick.
-  let viewportRafId: number | undefined;
-  window.addEventListener(
-    'scroll',
-    () => {
-      if (viewportBand.hidden || viewportRafId !== undefined) {
-        return;
-      }
-      viewportRafId = requestAnimationFrame(() => {
-        viewportRafId = undefined;
-        updateViewportBand(viewportBand);
-      });
-    },
-    { passive: true }
-  );
+  attachViewportBandScroll(viewportBand);
 
   return {
     refresh(): void {

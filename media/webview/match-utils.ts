@@ -207,3 +207,44 @@ export function updateViewportBand(band: HTMLElement): void {
   band.style.top = `${top}%`;
   band.style.height = `${Math.max(height, 0)}%`;
 }
+
+/**
+ * Cache TreeWalker giữa các lần gọi liên tiếp (nội dung `content` không đổi giữa hai lần gõ
+ * TỪ KHÓA/selectionchange) — dùng chung bởi search.ts (Ctrl+F) và select-highlight.ts (Feature A).
+ * Caller tự gọi `invalidate()` khi nội dung tài liệu đổi (refresh()/MutationObserver...).
+ */
+export function createHaystackCache(content: HTMLElement): { collect(): Haystack; invalidate(): void } {
+  let cache: Haystack | undefined;
+  return {
+    collect(): Haystack {
+      if (!cache) {
+        cache = collectHaystack(content);
+      }
+      return cache;
+    },
+    invalidate(): void {
+      cache = undefined;
+    },
+  };
+}
+
+/**
+ * Gắn listener 'scroll' cập nhật `band` theo vị trí cuộn, coalesce về 1 lần/khung hình (rẻ vì chỉ
+ * tính lại top/height %, không đụng DOM tick) — dùng chung bởi search.ts và select-highlight.ts.
+ */
+export function attachViewportBandScroll(band: HTMLElement): void {
+  let rafId: number | undefined;
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (band.hidden || rafId !== undefined) {
+        return;
+      }
+      rafId = requestAnimationFrame(() => {
+        rafId = undefined;
+        updateViewportBand(band);
+      });
+    },
+    { passive: true }
+  );
+}

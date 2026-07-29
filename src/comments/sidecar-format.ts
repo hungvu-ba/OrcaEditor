@@ -508,6 +508,53 @@ function isAnchor(value: unknown): value is SidecarAnchor {
   );
 }
 
+function isCommentLine(value: unknown): value is CommentLine {
+  const line = value as Record<string, unknown>;
+  return line.type === 'comment' && isString(line.body) && isAnchor(line.anchor);
+}
+
+function isReplyLine(value: unknown): value is ReplyLine {
+  const line = value as Record<string, unknown>;
+  return (
+    line.type === 'reply' &&
+    isString(line.parent_comment_id) &&
+    line.parent_comment_id !== '' &&
+    isString(line.body)
+  );
+}
+
+function isStatusChangeLine(value: unknown): value is StatusChangeLine {
+  const line = value as Record<string, unknown>;
+  return (
+    line.type === 'status-change' &&
+    isString(line.parent_comment_id) &&
+    line.parent_comment_id !== '' &&
+    isStatus(line.from_status) &&
+    isStatus(line.to_status)
+  );
+}
+
+function isDeleteLine(value: unknown): value is DeleteLine {
+  const line = value as Record<string, unknown>;
+  return line.type === 'delete' && isString(line.target_id) && line.target_id !== '';
+}
+
+function isEditLine(value: unknown): value is EditLine {
+  const line = value as Record<string, unknown>;
+  return line.type === 'edit' && isString(line.target_id) && line.target_id !== '' && isString(line.body);
+}
+
+function isAnchorUpdateLine(value: unknown): value is AnchorUpdateLine {
+  const line = value as Record<string, unknown>;
+  return (
+    line.type === 'anchor-update' &&
+    isString(line.parent_comment_id) &&
+    line.parent_comment_id !== '' &&
+    isAnchorOrigin(line.origin) &&
+    isAnchor(line.anchor)
+  );
+}
+
 /**
  * Narrow one parsed JSON value to a known line, or null when it is not one.
  * The sidecar is committed to git and can arrive hand-edited or merged, so a
@@ -532,31 +579,17 @@ function asSidecarLine(value: unknown): SidecarLine | null {
   }
   switch (line.type) {
     case 'comment':
-      return isString(line.body) && isAnchor(line.anchor) ? (line as unknown as CommentLine) : null;
+      return isCommentLine(line) ? line : null;
     case 'reply':
-      return isString(line.parent_comment_id) && line.parent_comment_id !== '' && isString(line.body)
-        ? (line as unknown as ReplyLine)
-        : null;
+      return isReplyLine(line) ? line : null;
     case 'status-change':
-      return isString(line.parent_comment_id) &&
-        line.parent_comment_id !== '' &&
-        isStatus(line.from_status) &&
-        isStatus(line.to_status)
-        ? (line as unknown as StatusChangeLine)
-        : null;
+      return isStatusChangeLine(line) ? line : null;
     case 'delete':
-      return isString(line.target_id) && line.target_id !== '' ? (line as unknown as DeleteLine) : null;
+      return isDeleteLine(line) ? line : null;
     case 'edit':
-      return isString(line.target_id) && line.target_id !== '' && isString(line.body)
-        ? (line as unknown as EditLine)
-        : null;
+      return isEditLine(line) ? line : null;
     case 'anchor-update':
-      return isString(line.parent_comment_id) &&
-        line.parent_comment_id !== '' &&
-        isAnchorOrigin(line.origin) &&
-        isAnchor(line.anchor)
-        ? (line as unknown as AnchorUpdateLine)
-        : null;
+      return isAnchorUpdateLine(line) ? line : null;
     default:
       return null;
   }
