@@ -933,3 +933,105 @@ export function foldSidecarRecords(lines: readonly SidecarLine[]): FoldedSidecar
 
   return { threads, orphans, warnings };
 }
+
+/**
+ * Physically removes `targetId`'s cascade from `lines` — the delete path's
+ * rewrite operation (`Local Test/bug_Comment.md` Bug #1;
+ * `_bmad-output/quick-dev/inprogress-comment-delete-sidecar-rewrite.md`), used
+ * instead of appending a `delete` tombstone. Scope mirrors the cascade
+ * `foldSidecarRecords` already applies above (`deletedComments`/
+ * `deletedReplies`, 825-846) exactly, just as a line filter instead of a
+ * fold-time exclude: naming a `comment` line removes it plus every
+ * `reply`/`status-change`/`anchor-update` line under it and every `edit` line
+ * targeting the comment or any of those replies; naming a `reply` line
+ * removes only that reply's own line and its own `edit` lines. An id that
+ * names neither is a no-op — the same tolerance a stray or racing delete
+ * already gets at fold time.
+ */
+export function removeSidecarLineCascade(lines: readonly SidecarLine[], targetId: string): SidecarLine[] {
+  const isCommentTarget = lines.some((line) => line.type === 'comment' && line.id === targetId);
+  if (isCommentTarget) {
+    const replyIds = new Set(
+      lines
+        .filter((line): line is ReplyLine => line.type === 'reply' && line.parent_comment_id === targetId)
+        .map((line) => line.id)
+    );
+    return lines.filter((line) => {
+      switch (line.type) {
+        case 'comment':
+          return line.id !== targetId;
+        case 'reply':
+        case 'status-change':
+        case 'anchor-update':
+          return line.parent_comment_id !== targetId;
+        case 'edit':
+          return line.target_id !== targetId && !replyIds.has(line.target_id);
+        default:
+          return true;
+      }
+    });
+  }
+  const isReplyTarget = lines.some((line) => line.type === 'reply' && line.id === targetId);
+  if (isReplyTarget) {
+    return lines.filter((line) => {
+      if (line.type === 'reply') {
+        return line.id !== targetId;
+      }
+      if (line.type === 'edit') {
+        return line.target_id !== targetId;
+      }
+      return true;
+    });
+  }
+  // Unknown target — no-op, same tolerance `foldSidecarRecords` gives a stray
+  // or racing delete naming an id nothing resolves to.
+  return lines.slice();
+}
+
+/**
+ * Legacy-GC pass for `removeComment`'s rewrite (Patch 2,
+ * `inprogress-comment-delete-sidecar-rewrite.md`): since ANY delete already
+ * reads+parses+rewrites the whole file, also drop every line that is already
+ * dead under the EXISTING fold semantics — not just the target currently
+ * being deleted (`removeSidecarLineCascade`'s job, kept focused on that one
+ * target). Without this, a `delete` tombstone written before this feature
+ * shipped (or by an older extension version) is preserved byte-for-byte
+ * forever, so a file that already has tombstone bloat never shrinks even as
+ * new deletes happen.
+ *
+ * Reuses `foldSidecarRecords` to learn which comment/reply ids are already
+ * tombstoned (a raw `comment`/`reply` line whose id never made it into the
+ * fold's `threads` is dead — either directly tombstoned or cascade-dead
+ * because its parent comment was), then reuses `removeSidecarLineCascade`
+ * itself to physically remove each one — so there is exactly one place
+ * (`removeSidecarLineCascade`) that knows the cascade rule, not a second copy
+ * of it here. A reply whose parent comment never existed at all is a genuine
+ * orphan, not a dead line — `foldSidecarRecords` preserves those in
+ * `orphans` today, and this pass leaves them untouched the same way.
+ */
+export function pruneDeadSidecarLines(lines: readonly SidecarLine[]): SidecarLine[] {
+  const folded = foldSidecarRecords(lines);
+  const liveCommentIds = new Set(folded.threads.map((thread) => thread.id));
+  const liveReplyIds = new Set(folded.threads.flatMap((thread) => thread.replies.map((reply) => reply.id)));
+  const knownCommentIds = new Set(
+    lines.filter((line): line is CommentLine => line.type === 'comment').map((line) => line.id)
+  );
+
+  const deadCommentIds = [...knownCommentIds].filter((id) => !liveCommentIds.has(id));
+  const deadReplyIds = lines
+    .filter(
+      (line): line is ReplyLine =>
+        line.type === 'reply' && !liveReplyIds.has(line.id) && knownCommentIds.has(line.parent_comment_id)
+    )
+    .map((line) => line.id);
+
+  // All `delete`-type lines are dead weight under this feature: nothing ever
+  // reads them back (US-23.5's fold already resolves the cascade physically
+  // now), so every tombstone — old or new — is dropped outright (a), on top
+  // of each already-tombstoned id's own cascade (b).
+  let result: SidecarLine[] = lines.filter((line) => line.type !== 'delete');
+  for (const id of [...deadCommentIds, ...deadReplyIds]) {
+    result = removeSidecarLineCascade(result, id);
+  }
+  return result;
+}

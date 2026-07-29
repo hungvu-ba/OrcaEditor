@@ -86,6 +86,8 @@ import {
   foldSidecarRecords,
   isSidecarName,
   mdNameForSidecar,
+  pruneDeadSidecarLines,
+  removeSidecarLineCascade,
   sidecarBelongsToDocument,
   parseSidecarText,
   serializeSidecarLine,
@@ -3610,6 +3612,136 @@ check(
     foldSidecarRecords([comment(), editLine({ body: 'first' }), editLine({ body: 'second' })]).threads[0].comment.body === 'first');
   check('sidecar: a duplicate edit id is flagged',
     foldSidecarRecords([comment(), editLine(), editLine()]).warnings.length === 1);
+
+  // removeSidecarLineCascade: the delete path's physical line-filter, sharing
+  // foldSidecarRecords's own cascade scope (825-846) as a filter instead of a
+  // fold-time exclude (_bmad-output/quick-dev/inprogress-comment-delete-sidecar-rewrite.md).
+  {
+    // Thread delete: comment + its replies + status-changes + anchor-updates +
+    // every edit line targeting the comment or one of its replies, all removed.
+    const threadLines = [
+      comment(),
+      reply({ id: 'r1' }),
+      reply({ id: 'r2' }),
+      statusChange(),
+      anchorUpdate(),
+      editLine({ id: 'e1', target_id: 'c1' }),
+      editLine({ id: 'e2', target_id: 'r1' }),
+    ];
+    const threadRemoved = removeSidecarLineCascade(threadLines, 'c1');
+    check('removeSidecarLineCascade: a thread delete removes the comment line',
+      threadRemoved.some((l) => l.type === 'comment') === false);
+    check('removeSidecarLineCascade: a thread delete removes every reply under it',
+      threadRemoved.some((l) => l.type === 'reply') === false);
+    check('removeSidecarLineCascade: a thread delete removes its status-change lines',
+      threadRemoved.some((l) => l.type === 'status-change') === false);
+    check('removeSidecarLineCascade: a thread delete removes its anchor-update lines',
+      threadRemoved.some((l) => l.type === 'anchor-update') === false);
+    check('removeSidecarLineCascade: a thread delete removes edits targeting the comment or its replies',
+      threadRemoved.some((l) => l.type === 'edit') === false);
+    check('removeSidecarLineCascade: a thread delete leaves nothing behind for a file with only that thread',
+      threadRemoved.length === 0);
+
+    // Reply-only delete: only that reply's own line (+ its own edit lines) is
+    // removed — the comment, other replies, status-changes and anchor-updates
+    // for the thread all survive untouched.
+    const replyOnlyLines = [
+      comment(),
+      reply({ id: 'r1' }),
+      reply({ id: 'r2' }),
+      statusChange(),
+      anchorUpdate(),
+      editLine({ id: 'e1', target_id: 'r1' }),
+      editLine({ id: 'e2', target_id: 'r2' }),
+    ];
+    const replyRemoved = removeSidecarLineCascade(replyOnlyLines, 'r1');
+    check('removeSidecarLineCascade: a reply-only delete removes just that reply',
+      replyRemoved.some((l) => l.type === 'reply' && l.id === 'r1') === false &&
+        replyRemoved.some((l) => l.type === 'reply' && l.id === 'r2'));
+    check('removeSidecarLineCascade: a reply-only delete removes only that reply\'s own edit line',
+      replyRemoved.some((l) => l.type === 'edit' && l.target_id === 'r1') === false &&
+        replyRemoved.some((l) => l.type === 'edit' && l.target_id === 'r2'));
+    check('removeSidecarLineCascade: a reply-only delete leaves the comment untouched',
+      replyRemoved.some((l) => l.type === 'comment' && l.id === 'c1'));
+    check('removeSidecarLineCascade: a reply-only delete leaves the thread\'s status-change/anchor-update lines untouched',
+      replyRemoved.some((l) => l.type === 'status-change') && replyRemoved.some((l) => l.type === 'anchor-update'));
+    check('removeSidecarLineCascade: a reply-only delete removes exactly one line (the reply) plus its own edit',
+      replyRemoved.length === replyOnlyLines.length - 2);
+
+    // Unknown id: no-op, same tolerance foldSidecarRecords already gives a
+    // stray/racing delete.
+    const untouched = removeSidecarLineCascade(threadLines, 'no-such-id');
+    check('removeSidecarLineCascade: an unknown id is a no-op', untouched.length === threadLines.length);
+
+    // Deleting one thread among several must leave every other thread's own
+    // lines byte-identical and in original relative order.
+    const otherComment = comment({ id: 'c2' });
+    const multiThreadLines = [comment(), reply({ id: 'r1' }), otherComment, reply({ id: 'r2', parent_comment_id: 'c2' })];
+    const oneOfSeveral = removeSidecarLineCascade(multiThreadLines, 'c1');
+    check('removeSidecarLineCascade: deleting one thread among several leaves the other thread\'s lines untouched and in order',
+      oneOfSeveral.length === 2 && oneOfSeveral[0] === otherComment &&
+        oneOfSeveral[1].type === 'reply' && oneOfSeveral[1].id === 'r2');
+  }
+
+  // pruneDeadSidecarLines: Patch 2 (inprogress-comment-delete-sidecar-rewrite.md)
+  // — legacy-GC pass run alongside removeComment's own target-cascade, so a
+  // file with pre-existing tombstone bloat (from before this feature shipped,
+  // or from an older extension version) shrinks on the next unrelated delete
+  // instead of carrying that bloat forever.
+  {
+    // A legacy tombstone + its already-dead comment/reply/status/anchor/edit
+    // lines, alongside one UNRELATED live thread that a delete on it must
+    // leave untouched.
+    const legacyDeadThread = [
+      comment({ id: 'dead-c' }),
+      reply({ id: 'dead-r', parent_comment_id: 'dead-c' }),
+      statusChange({ id: 'dead-s', parent_comment_id: 'dead-c' }),
+      anchorUpdate({ id: 'dead-a', parent_comment_id: 'dead-c' }),
+      editLine({ id: 'dead-e', target_id: 'dead-c' }),
+      tombstone({ id: 'legacy-tombstone', target_id: 'dead-c' }),
+    ];
+    const liveThread = [comment({ id: 'live-c' }), reply({ id: 'live-r', parent_comment_id: 'live-c' })];
+    const withLegacyBloat = [...legacyDeadThread, ...liveThread];
+    const pruned = pruneDeadSidecarLines(withLegacyBloat);
+    check('pruneDeadSidecarLines: strips a legacy tombstone-comment pair and its whole cascade',
+      pruned.every((l) => !('id' in l) || !l.id.startsWith('dead-')));
+    check('pruneDeadSidecarLines: drops the delete-type tombstone line itself',
+      pruned.some((l) => l.type === 'delete') === false);
+    check('pruneDeadSidecarLines: leaves the unrelated live thread untouched',
+      pruned.some((l) => l.type === 'comment' && l.id === 'live-c') &&
+        pruned.some((l) => l.type === 'reply' && l.id === 'live-r'));
+
+    // A reply-only legacy tombstone: only that reply (+ its own edit) is dead;
+    // the comment and the reply's siblings survive.
+    const legacyReplyDelete = [
+      comment({ id: 'c1' }),
+      reply({ id: 'dead-reply', parent_comment_id: 'c1' }),
+      reply({ id: 'r2', parent_comment_id: 'c1' }),
+      editLine({ id: 'dead-reply-edit', target_id: 'dead-reply' }),
+      tombstone({ id: 'legacy-tombstone-2', target_id: 'dead-reply' }),
+    ];
+    const prunedReply = pruneDeadSidecarLines(legacyReplyDelete);
+    check('pruneDeadSidecarLines: a legacy reply-only tombstone removes just that reply and its edit',
+      prunedReply.some((l) => l.type === 'reply' && l.id === 'dead-reply') === false &&
+        prunedReply.some((l) => l.type === 'edit' && l.target_id === 'dead-reply') === false &&
+        prunedReply.some((l) => l.type === 'comment' && l.id === 'c1') &&
+        prunedReply.some((l) => l.type === 'reply' && l.id === 'r2'));
+
+    // A tombstone naming an orphaned reply (parent never existed) is a genuine
+    // orphan, not dead weight — foldSidecarRecords already preserves it in
+    // `orphans`; this pass must not silently delete the orphan reply itself
+    // (only the now-pointless tombstone line, per (a), is dropped).
+    const orphanReplyLines = [reply({ id: 'ghost-reply', parent_comment_id: 'no-such-comment' })];
+    const prunedOrphan = pruneDeadSidecarLines(orphanReplyLines);
+    check('pruneDeadSidecarLines: an orphaned reply (parent never existed) is preserved, not GC\'d',
+      prunedOrphan.some((l) => l.type === 'reply' && l.id === 'ghost-reply'));
+
+    // A file with no legacy dead weight at all is returned unchanged (minus
+    // any delete-type lines, of which there are none here).
+    const cleanFile = [comment({ id: 'clean-c' }), reply({ id: 'clean-r', parent_comment_id: 'clean-c' })];
+    check('pruneDeadSidecarLines: a file with nothing dead is left as-is',
+      pruneDeadSidecarLines(cleanFile).length === cleanFile.length);
+  }
 
   // AC7 clause 2 / US-23.16 AC4-AC6: does this sidecar even describe the
   // document it sits next to? Decided by CONTENT, never by the file's

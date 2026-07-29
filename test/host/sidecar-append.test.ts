@@ -92,6 +92,9 @@ export async function run(): Promise<void> {
             throw err;
           },
           rename: fs.promises.rename,
+          writeFile: fs.promises.writeFile,
+          unlink: fs.promises.unlink,
+          readFile: fs.promises.readFile,
         },
       });
       const comments = createCommentSupport(failingStore, noopLog, false);

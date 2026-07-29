@@ -42,7 +42,6 @@ import { sameDocumentUri } from '../text-utils';
 import {
   buildAnchorUpdateLine,
   buildCommentLine,
-  buildDeleteLine,
   buildEditLine,
   buildReplyLine,
   buildStatusChangeLine,
@@ -162,8 +161,12 @@ export interface CommentSupport extends vscode.Disposable {
   ): Promise<{ ok: true; replyId: string; author: string; timestamp: string } | { ok: false; error: string }>;
   /**
    * US-23.2 PO decision: delete a thread (cascading to every reply) or one
-   * reply within it, gated by a soft author-match nudge. A `delete` tombstone
-   * appended like every other action (US-23.6) — never a file rewrite.
+   * reply within it, gated by a soft author-match nudge. Unlike every other
+   * action in this interface, this is now a physical sidecar rewrite —
+   * `store.removeComment` — not an appended `delete` tombstone (Req 24
+   * `_bmad-output/quick-dev/inprogress-comment-delete-sidecar-rewrite.md`):
+   * the target's own line and its cascade are removed from disk, and the
+   * `.jsonl` file itself is deleted when that leaves zero threads behind.
    */
   deleteComment(
     msg: DeleteCommentMessage,
@@ -507,6 +510,15 @@ export function createCommentSupport(
   // for the same thread while the first's append is still pending is a no-op
   // on the live thread, never a race between two `anchor-update` appends.
   const updatingAnchor = new Set<string>();
+  // inprogress-comment-delete-sidecar-rewrite.md Patch 1: threadIds with a
+  // `store.removeComment` rewrite in flight. Same shape and reason as
+  // `creating`/`changingStatus`/`replying`/`updatingAnchor` — the check below
+  // runs before the first await, so two concurrent deletes on the same
+  // threadId can't both pass it and race `removeComment`'s read-modify-write
+  // against each other. This closes only the in-process race; a true
+  // cross-window/cross-process race is explicitly out of scope (see the
+  // spec's "Never: do not add a lock file").
+  const deleting = new Set<string>();
   // Documents whose sidecar has already been loaded, so a second panel on the
   // same file doesn't duplicate every thread.
   const loaded = new Set<string>();
@@ -1460,9 +1472,10 @@ export function createCommentSupport(
     },
 
     async deleteComment(msg, document) {
-      // Req 24 US-23.18 AC9: the write's payload is read from `msg` below and
-      // handed to `store.append` unchanged; this is the version it is consistent
-      // with, re-checked in `saveBeforeAppend` once every await in between is done.
+      // Req 24 US-23.18 AC9: `target.id` is read from the live registry below
+      // and handed to `store.removeComment` unchanged; this is the version it
+      // is consistent with, re-checked in `saveBeforeAppend` once every await
+      // in between is done.
       const versionAtEntry = document.version;
       const entry = threads.get(msg.threadId);
       const currentAuthor = await authorFor(document);
@@ -1485,37 +1498,48 @@ export function createCommentSupport(
       if (!ownedBy(document, msg.threadId)) {
         return { ok: false, error: 'That delete names a thread in another document.' };
       }
-      const timestamp = new Date().toISOString();
-      const saveError = await saveBeforeAppend(document, versionAtEntry);
-      const writeError =
-        saveError ??
-        (await appendLine(
-          document,
-          buildDeleteLine({ id: crypto.randomUUID(), targetId: target.id, author: currentAuthor, timestamp })
-        ));
-      if (writeError !== null) {
-        return { ok: false, error: writeError };
+      if (deleting.has(msg.threadId)) {
+        // Patch 1: covers a double-click or two racing delete requests for the
+        // SAME thread. The check runs before the `saveBeforeAppend` await
+        // below, so without this two concurrent deletes could both pass it and
+        // race `store.removeComment`'s read-modify-write against each other,
+        // with one delete's write silently clobbering the other's.
+        return { ok: false, error: 'A delete for this thread is already being saved.' };
       }
-      if (msg.targetReplyId !== undefined) {
-        // Cascades to this ONE reply only — the thread and its other replies
-        // are untouched (US-23.2 PO decision).
-        entry.replies = entry.replies.filter((r) => r.id !== msg.targetReplyId);
-        try {
-          entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
-        } catch {
-          // Disposed concurrently — nothing left to reconcile live.
+      deleting.add(msg.threadId);
+      try {
+        const saveError = await saveBeforeAppend(document, versionAtEntry);
+        // Req 24 spec (inprogress-comment-delete-sidecar-rewrite.md): delete
+        // physically rewrites/removes the target's own line and its cascade —
+        // it no longer appends a `delete` tombstone (see `store.removeComment`'s
+        // own doc comment and `sidecar-store.ts`'s file header for why).
+        const writeError = saveError ?? (await store.removeComment(document, target.id));
+        if (writeError !== null) {
+          return { ok: false, error: writeError };
         }
-      } else {
-        // Deleting the thread cascades to every reply under it in one action.
-        try {
-          entry.thread.dispose();
-        } catch {
-          // Already disposed.
+        if (msg.targetReplyId !== undefined) {
+          // Cascades to this ONE reply only — the thread and its other replies
+          // are untouched (US-23.2 PO decision).
+          entry.replies = entry.replies.filter((r) => r.id !== msg.targetReplyId);
+          try {
+            entry.thread.comments = nativeCommentsFor(entry, msg.threadId, document.uri.toString());
+          } catch {
+            // Disposed concurrently — nothing left to reconcile live.
+          }
+        } else {
+          // Deleting the thread cascades to every reply under it in one action.
+          try {
+            entry.thread.dispose();
+          } catch {
+            // Already disposed.
+          }
+          threads.delete(msg.threadId);
+          byDoc.get(docKeyFor(document.uri))?.delete(msg.threadId);
         }
-        threads.delete(msg.threadId);
-        byDoc.get(docKeyFor(document.uri))?.delete(msg.threadId);
+        return { ok: true };
+      } finally {
+        deleting.delete(msg.threadId);
       }
-      return { ok: true };
     },
 
     async editComment(msg, document) {

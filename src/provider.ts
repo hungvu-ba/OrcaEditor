@@ -750,6 +750,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * by hand). `forgetDocument` drops every thread for that document and releases
    * the load claim, so a sidecar that comes back (switching branches again, and
    * the create event that follows) rebuilds from disk.
+   *
+   * Since the comment-delete-sidecar-rewrite change, this can also fire for a
+   * legitimate reason: `store.removeComment` `unlink`s the sidecar itself when
+   * deleting a thread leaves zero threads behind. That is harmless here —
+   * `deleteComment` already pruned its own in-memory registry down to empty
+   * for that document before this event ever arrives, so `forgetDocument`
+   * finds nothing left to drop.
    */
   private dropSidecarThreads(uri: vscode.Uri): void {
     const key = uri.toString();

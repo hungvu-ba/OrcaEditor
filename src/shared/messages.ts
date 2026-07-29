@@ -653,12 +653,15 @@ export type WebviewToHost =
   | { type: 'replyToComment'; requestId: number; docUri: string; threadId: string; body: string }
   /**
    * Req 23 US-23.2 PO decision: delete a thread or one reply under it — a
-   * confirmation-gated, cascading tombstone (US-23.5's `delete` line), never a
-   * file rewrite (US-23.6). `targetReplyId` absent deletes the WHOLE thread
-   * (cascading to every reply); present deletes only that one reply, leaving the
-   * thread and its other replies intact. Enforced host-side as a soft,
-   * non-authenticated author-match nudge (`orcaEditor.comments.authorName`),
-   * same convention as US-23.3's Close-gating.
+   * confirmation-gated, cascading physical rewrite of the sidecar
+   * (`store.removeComment`, Req 24
+   * `_bmad-output/quick-dev/inprogress-comment-delete-sidecar-rewrite.md`),
+   * not an appended `delete` tombstone. `targetReplyId` absent deletes the
+   * WHOLE thread (cascading to every reply); present deletes only that one
+   * reply, leaving the thread and its other replies intact. Enforced
+   * host-side as a soft, non-authenticated author-match nudge
+   * (`orcaEditor.comments.authorName`), same convention as US-23.3's
+   * Close-gating.
    */
   | { type: 'deleteComment'; requestId: number; docUri: string; threadId: string; targetReplyId?: string }
   /**

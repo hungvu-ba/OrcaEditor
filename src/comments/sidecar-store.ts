@@ -3,10 +3,21 @@
  * sidecar — the one owner of every sidecar path and byte, so no caller
  * hand-rolls a path derivation or a comparison.
  *
- * Writes are a single `fs.appendFile` of one whole line (US-23.6's PO decision),
+ * Writes are a single `fs.appendFile` of one whole line for `append` (US-23.6's
+ * PO decision — used by `reply`/`editComment`/`changeStatus`/`anchor-update`),
  * never a read-modify-rewrite: an interrupted write can at most leave one
  * truncated final line, which `parseSidecarText` already tolerates, whereas a
  * full rewrite could clobber a concurrent writer's line entirely.
+ *
+ * `removeComment` is a deliberate, scoped exception to that append-only rule —
+ * NOT an oversight of it. Delete now physically rewrites (or removes) the
+ * sidecar instead of appending a `delete` tombstone, so the file stops growing
+ * forever and a fully-deleted file no longer trips the misleading "you will
+ * lose your comments" gitignore warning (`Local Test/bug_Comment.md` Bug #1;
+ * `_bmad-output/quick-dev/inprogress-comment-delete-sidecar-rewrite.md`). It
+ * narrows the reopened race back down by re-reading immediately before
+ * writing and failing rather than silently clobbering a concurrent append —
+ * see its own doc comment below.
  *
  * `node:fs` rather than `vscode.workspace.fs` because the latter has no append
  * API and a whole-file `writeFile` is exactly the read-modify-write this design
@@ -17,6 +28,7 @@
  * Nothing here touches the `.md`: a comment action must never occupy a slot in
  * the document's undo stack (US-23.6).
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import {
@@ -24,6 +36,8 @@ import {
   isSidecarName,
   mdNameForSidecar,
   parseSidecarText,
+  pruneDeadSidecarLines,
+  removeSidecarLineCascade,
   serializeSidecarLine,
   sidecarBackupNameFor,
   sidecarNameFor,
@@ -49,8 +63,15 @@ export type SidecarWriteGuard = (docUri: vscode.Uri, target: vscode.Uri) => Prom
 export interface SidecarStoreDeps {
   /** Defaults to a real `vscode.window.showWarningMessage` modal (AC6). */
   confirmOverwrite?: (message: string) => Promise<boolean>;
-  /** Defaults to `fs.promises` (AC9). */
-  fsOps?: Pick<typeof fs.promises, 'appendFile' | 'rename'>;
+  /**
+   * Defaults to `fs.promises` (AC9). `writeFile`/`unlink` were added alongside
+   * `removeComment` — the temp-file-then-`rename` rewrite and the
+   * zero-threads-left file deletion both need them. `readFile` was added so a
+   * host test can inject a stub that changes bytes between `removeComment`'s
+   * two internal reads, to exercise the concurrent-write-lands-in-between
+   * branch without a real timing race.
+   */
+  fsOps?: Pick<typeof fs.promises, 'appendFile' | 'rename' | 'writeFile' | 'unlink' | 'readFile'>;
 }
 
 export interface SidecarStore {
@@ -61,6 +82,20 @@ export interface SidecarStore {
    * success. A failure is always reported, never swallowed (US-23.6 AC5).
    */
   append(document: vscode.TextDocument, line: SidecarLine): Promise<string | null>;
+  /**
+   * Physically removes `targetId`'s line (and its cascade — see
+   * `removeSidecarLineCascade`) from the sidecar, instead of appending a
+   * `delete` tombstone. Deletes the `.jsonl` file itself when that rewrite
+   * leaves no lines at all — i.e. this was the only thread on record —
+   * rather than leaving an empty file behind. Reads the file's current bytes
+   * fresh immediately before computing what to keep, then re-reads
+   * immediately before writing to catch a concurrent append landing in
+   * between — that case fails with a retryable error rather than silently
+   * overwriting the concurrent line. Resolves to the reason it could not be
+   * applied, or null on success, matching `append`'s contract (never
+   * throws).
+   */
+  removeComment(document: vscode.TextDocument, targetId: string): Promise<string | null>;
   /**
    * Every thread persisted for a document, reassembled per AC4. An absent
    * sidecar is not an error — it is a document nobody has commented on yet.
@@ -167,17 +202,30 @@ export function createSidecarStore(
     return null;
   };
 
+  /**
+   * `outsideRootRejection` plus its refusal-logging boilerplate — shared by
+   * every write path (`append`, `removeComment`) so a new one never has to
+   * re-copy the "was this refusal the outside-workspace one" check.
+   */
+  const checkWritable = async (document: vscode.TextDocument): Promise<string | null> => {
+    const rejection = await outsideRootRejection(document);
+    if (rejection !== null) {
+      if (rejection === 'The comment sidecar would be written outside the allowed workspace.') {
+        log(`Refused to write comment sidecar outside the allowed workspace: ${uriFor(document).toString()}`);
+      }
+      return rejection;
+    }
+    return null;
+  };
+
   return {
     uriFor,
 
     refusalFor: outsideRootRejection,
 
     async append(document, line): Promise<string | null> {
-      const rejection = await outsideRootRejection(document);
+      const rejection = await checkWritable(document);
       if (rejection !== null) {
-        if (rejection === 'The comment sidecar would be written outside the allowed workspace.') {
-          log(`Refused to write comment sidecar outside the allowed workspace: ${uriFor(document).toString()}`);
-        }
         return rejection;
       }
       const target = uriFor(document);
@@ -190,6 +238,96 @@ export function createSidecarStore(
       } catch (err) {
         log(`Failed to append to comment sidecar ${target.toString()}`, err);
         return 'Failed to save the comment.';
+      }
+      return null;
+    },
+
+    async removeComment(document, targetId): Promise<string | null> {
+      const rejection = await checkWritable(document);
+      if (rejection !== null) {
+        return rejection;
+      }
+      const target = uriFor(document);
+      /** The file's current text, or null when it does not exist. Never throws for ENOENT. */
+      const readCurrent = async (): Promise<{ text: string | null } | { error: unknown }> => {
+        try {
+          // eslint-disable-next-line security/detect-non-literal-fs-filename
+          return { text: await fsOps.readFile(target.fsPath, 'utf8') };
+        } catch (err) {
+          if (isMissingFile(err)) {
+            return { text: null };
+          }
+          return { error: err };
+        }
+      };
+
+      // Read fresh, immediately before computing what to keep (I/O Matrix:
+      // "read the sidecar's current bytes fresh"), never a cached/older copy.
+      const before = await readCurrent();
+      if ('error' in before) {
+        log(`Failed to read comment sidecar ${target.toString()}`, before.error);
+        return 'Failed to delete the comment.';
+      }
+      if (before.text === null) {
+        // I/O Matrix: "Sidecar already gone" (a race with another delete) —
+        // no-op success, there is nothing left to remove.
+        return null;
+      }
+      const afterTarget = removeSidecarLineCascade(parseSidecarText(before.text).lines, targetId);
+      // Patch 2: since this delete already reads+parses+rewrites the whole
+      // file, also garbage-collect every line that's already dead under the
+      // EXISTING fold semantics (a legacy `delete` tombstone, or a
+      // comment/reply/status-change/anchor-update/edit line an existing
+      // tombstone already resolves as deleted) — not just the target above —
+      // so a file with pre-existing tombstone bloat shrinks on the next
+      // unrelated delete instead of carrying that bloat forever.
+      const remainingLines = pruneDeadSidecarLines(afterTarget);
+      const remainingText = remainingLines.map(serializeSidecarLine).join('');
+      // "Zero threads left" (the Approach) is exactly "no lines left" here: the
+      // cascade above removes every line belonging to the deleted target, and
+      // every OTHER thread's own lines are untouched — so nothing remains
+      // unless nothing else was ever recorded.
+      const isEmpty = remainingLines.length === 0;
+
+      // Re-check immediately before writing (I/O Matrix: "detect via a fresh
+      // re-read immediately before the write"): a concurrent append landing in
+      // the window above must never be silently clobbered by this rewrite.
+      const justBefore = await readCurrent();
+      if ('error' in justBefore) {
+        log(`Failed to re-read comment sidecar before delete ${target.toString()}`, justBefore.error);
+        return 'Failed to delete the comment.';
+      }
+      if (justBefore.text !== before.text) {
+        return 'The comment sidecar changed while this delete was being saved — please try again.';
+      }
+
+      try {
+        if (isEmpty) {
+          await fsOps.unlink(target.fsPath);
+        } else {
+          // Temp-file-then-rename: the closest available atomicity primitive
+          // here, reusing the already-injectable `rename` (I/O Matrix's
+          // non-empty rewrite row). Same directory as `target` so the rename
+          // is a same-filesystem move, never a cross-device copy.
+          const tempTarget = `${target.fsPath}.tmp-${crypto.randomUUID()}`;
+          try {
+            await fsOps.writeFile(tempTarget, remainingText, 'utf8');
+            await fsOps.rename(tempTarget, target.fsPath);
+          } catch (err) {
+            // The rewrite itself already failed, so best-effort cleanup here
+            // costs nothing further if it also fails.
+            await fsOps.unlink(tempTarget).catch(() => undefined);
+            throw err;
+          }
+        }
+      } catch (err) {
+        if (isEmpty && isMissingFile(err)) {
+          // Raced with another session's delete of the same file — the file
+          // is already gone, which is exactly what this branch wanted.
+          return null;
+        }
+        log(`Failed to rewrite comment sidecar ${target.toString()}`, err);
+        return 'Failed to delete the comment.';
       }
       return null;
     },
