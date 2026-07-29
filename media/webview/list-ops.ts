@@ -286,7 +286,7 @@ export function computeToList(blocks: Element[], ordered: boolean): ListOpPlan {
  */
 const CONVERTIBLE_ITEM_TAGS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL']);
 
-function isConvertibleBlock(el: Element): boolean {
+export function isConvertibleBlock(el: Element): boolean {
   return CONVERTIBLE_ITEM_TAGS.has(el.tagName);
 }
 

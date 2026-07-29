@@ -22,6 +22,7 @@ import {
   computeToList,
   computeToListAroundAtoms,
   computeUnwrapListRange,
+  isConvertibleBlock,
 } from './list-ops';
 import { insertTable } from './table';
 import type { CommentPanelController } from './comment-panel';
@@ -1975,7 +1976,29 @@ function resolveTopLevelBlocks(): Element[] | null {
   // and keeps them verbatim) instead — never dropping/mangling them. A blank
   // <p> IS P/UL/OL-listable, so blank-line dropping still happens cleanly here
   // via computeToList (bug 0717 round3 #5, Group ListVerbBlankDrop).
-  return resolveSelectionBlockRun((el) => el.tagName === 'P' || el.tagName === 'UL' || el.tagName === 'OL');
+  const blocks = resolveSelectionBlockRun((el) => el.tagName === 'P' || el.tagName === 'UL' || el.tagName === 'OL');
+  if (!blocks) {
+    return null;
+  }
+  // Even a clean P/UL/OL span can sit directly next to an atom OUTSIDE the
+  // span (a <blockquote>, most commonly). commitListOp's execCommand('insertHTML')
+  // then runs right at that boundary, and Chromium's ReplaceSelectionCommand
+  // merges the newly-inserted list INTO the adjacent blockquote instead of
+  // leaving two sibling blocks — every serialized line then leaks the
+  // blockquote's `> ` prefix. Bail to null here too so the caller falls back
+  // to computeToListAroundAtoms/commitListOpDirect, which never touches
+  // execCommand and leaves an untouched neighbor exactly where it was.
+  // Reuses computeToListAroundAtoms's own atom/convertible split (isConvertibleBlock)
+  // instead of a narrower inline check, so a heading neighbor (convertible, not
+  // an atom there) doesn't needlessly lose the fast path for the common
+  // paragraph-next-to-heading case.
+  const before = blocks[0].previousElementSibling;
+  const after = blocks[blocks.length - 1].nextElementSibling;
+  const isAtom = (el: Element | null) => el !== null && !isConvertibleBlock(el);
+  if (isAtom(before) || isAtom(after)) {
+    return null;
+  }
+  return blocks;
 }
 
 /**
