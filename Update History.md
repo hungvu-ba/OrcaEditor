@@ -544,3 +544,4 @@
 | 1.0.0 | 2026-07-29 | Feature: added Comment feature. |
 | 1.0.0 | 2026-07-30 | Fix: front matter's collapse/expand toggle now shows for every field count, not just when there are more than 2 fields. |
 | 1.0.0 | 2026-07-31 | Feature: front matter is parsed by a real YAML parser, so nested maps, block-style lists and block scalars display as structured fields. |
+| 1.0.0 | 2026-07-31 | Feature: TOML front matter (`+++` fences, e.g. Hugo) now renders as the same card as YAML and saves back with its own fences. |

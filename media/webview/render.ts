@@ -10,7 +10,7 @@ import taskLists from 'markdown-it-task-lists';
 import frontMatterPlugin from 'markdown-it-front-matter';
 import katexPlugin from '@vscode/markdown-it-katex';
 import hljs from 'highlight.js/lib/common';
-import { buildFrontMatterHtml, parseFrontMatterFields } from './front-matter';
+import { buildFrontMatterHtml, parseFrontMatterFields, parseTomlFrontMatterFields, type FrontMatterFormat } from './front-matter';
 
 export interface PipelineConfig {
   breaks: boolean;
@@ -110,6 +110,8 @@ export class MarkdownRenderer {
   private readonly md: MarkdownIt;
   private capturedFrontMatter: string | undefined;
   private capturedFrontMatterRange: [number, number] | undefined;
+  /** Which delimiter produced the captured block — picks the parser in renderFrontMatterBlock and the fence turndown re-emits (US-2.10). */
+  private capturedFrontMatterFormat: FrontMatterFormat = 'yaml';
   /**
    * math_block có renderer riêng (@vscode/markdown-it-katex) không dùng
    * renderToken/renderAttrs nên attrSet không lộ ra HTML (giống fence trước
@@ -191,17 +193,61 @@ export class MarkdownRenderer {
   private resetCaptureState(): void {
     this.capturedFrontMatter = undefined;
     this.capturedFrontMatterRange = undefined;
+    this.capturedFrontMatterFormat = 'yaml';
     this.capturedMathBlockRanges = [];
+  }
+
+  /**
+   * US-2.10: TOML front matter (`+++` fences). markdown-it-front-matter only
+   * knows `---` and there is no npm equivalent for `+++`, so this is a pre-scan
+   * run BEFORE markdown-it sees the text — and it must be called from BOTH
+   * render() and computeTopLevelBlockRanges(), or the debounced gutter refresh
+   * would keep parsing raw `+++` text and desync block numbering on every
+   * keystroke.
+   *
+   * Returns the markdown to hand to markdown-it: the matched region replaced by
+   * the SAME number of blank lines, so every downstream data-line stays aligned
+   * with the real source. Captures nothing (and returns the input untouched)
+   * unless the very first line is a `+++` fence with a matching closing fence
+   * later on — deliberately NOT markdown-it-front-matter's autoclose-at-EOF,
+   * which on an in-progress file would read the whole document as metadata and
+   * then write a closing fence the user never typed.
+   */
+  private captureTomlFrontMatter(markdown: string): string {
+    const lines = markdown.split('\n');
+    const isFence = (line: string | undefined): boolean => /^\+{3}[ \t]*$/.test((line ?? '').replace(/\r$/, ''));
+    if (!isFence(lines[0])) {
+      return markdown;
+    }
+    const close = lines.findIndex((line, i) => i > 0 && isFence(line));
+    if (close === -1) {
+      return markdown;
+    }
+    // Drop each line's trailing CR, exactly as markdown-it's own `normalize`
+    // rule does before `markdown-it-front-matter` sees a `---` block. Without
+    // it a CRLF document's captured text ends in a bare CR, which `escapeAttr`
+    // does not encode and the HTML parser folds to a newline on read — so the
+    // very first save would write a blank line into the block that the author
+    // never typed.
+    this.capturedFrontMatter = lines
+      .slice(1, close)
+      .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
+      .join('\n');
+    // Same [start0, endExclusive0] shape markdown-it's own token.map carries for
+    // YAML, so both consumers below read it unchanged.
+    this.capturedFrontMatterRange = [0, close + 1];
+    this.capturedFrontMatterFormat = 'toml';
+    return [...lines.slice(0, close + 1).map(() => ''), ...lines.slice(close + 1)].join('\n');
   }
 
   /** Render markdown → HTML (kèm block front-matter nếu có). */
   public render(markdown: string): RenderResult {
     this.resetCaptureState();
-    let html = this.md.render(markdown);
+    let html = this.md.render(this.captureTomlFrontMatter(markdown));
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
       const [start0] = this.capturedFrontMatterRange ?? [0, 0];
-      html = renderFrontMatterBlock(frontMatter, start0 + 1) + html;
+      html = renderFrontMatterBlock(frontMatter, start0 + 1, this.capturedFrontMatterFormat) + html;
     }
     return { html, frontMatter };
   }
@@ -225,7 +271,7 @@ export class MarkdownRenderer {
    */
   public computeTopLevelBlockRanges(markdown: string): TopLevelBlockRange[] {
     this.resetCaptureState();
-    const tokens = this.md.parse(markdown, {});
+    const tokens = this.md.parse(this.captureTomlFrontMatter(markdown), {});
     const groups: TopLevelBlockRange[] = [];
     if (this.capturedFrontMatter !== undefined) {
       const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
@@ -367,7 +413,8 @@ interface BlockToken extends TokenLike {
   hidden: boolean;
 }
 
-/** US-2.7 redesign: card-building logic lives in front-matter.ts (mirrors Mermaid/PlantUML's shared frame logic in diagram-frame.ts) — this stays a thin delegation so the `*_CLASS` constants above keep living here per existing convention. */
-function renderFrontMatterBlock(raw: string, line: number): string {
-  return buildFrontMatterHtml(raw, line, parseFrontMatterFields(raw));
+/** US-2.7 redesign: card-building logic lives in front-matter.ts (mirrors Mermaid/PlantUML's shared frame logic in diagram-frame.ts) — this stays a thin delegation so the `*_CLASS` constants above keep living here per existing convention. The format picks the parser; everything downstream of it is format-agnostic (US-2.10). */
+function renderFrontMatterBlock(raw: string, line: number, format: FrontMatterFormat): string {
+  const parsed = format === 'toml' ? parseTomlFrontMatterFields(raw) : parseFrontMatterFields(raw);
+  return buildFrontMatterHtml(raw, line, parsed, format);
 }

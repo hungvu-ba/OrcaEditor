@@ -21,6 +21,7 @@ import { hasAncestor, getAncestor } from './dom-portable';
 import { hasUrlScheme } from '../../src/shared/link-scheme';
 import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
+import { frontMatterFence } from './front-matter';
 import {
   HEADING_STYLE_ATTR,
   BULLET_STYLE_ATTR,
@@ -588,8 +589,16 @@ export function createTurndown(): TurndownService {
   td.addRule('frontMatter', {
     filter: (node) => (node as HTMLElement).classList?.contains(FRONT_MATTER_CLASS) ?? false,
     replacement: (_content, node) => {
-      const raw = (node as HTMLElement).getAttribute('data-raw') ?? '';
-      return `---\n${raw}\n---\n\n`;
+      const el = node as HTMLElement;
+      const raw = el.getAttribute('data-raw') ?? '';
+      // US-2.10: the fence follows the block's own format, so a TOML block is
+      // never saved back under YAML's `---`. `data-raw` is still re-emitted
+      // verbatim -- the byte-for-byte round-trip guarantee is format-neutral.
+      const fence = frontMatterFence(el.getAttribute('data-fm-format'));
+      // An empty block is two fence lines, not three: the generic form would
+      // put a blank line between them that the author never wrote, and the
+      // file would gain a line on its first save.
+      return raw === '' ? `${fence}\n${fence}\n\n` : `${fence}\n${raw}\n${fence}\n\n`;
     },
   });
 

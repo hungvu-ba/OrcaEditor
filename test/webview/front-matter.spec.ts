@@ -353,3 +353,128 @@ test('a path-like fallback title inside the toggle button is never linkified (no
   await expect(fm.locator('.md-fm-toggle .md-fm-row-title')).toHaveText('path: docs/notes.md');
   await expect(fm.locator('.md-fm-toggle a')).toHaveCount(0);
 });
+
+// ---------------------------------------------------------------------------
+// US-2.10 — TOML front matter (`+++`). The card, its fields and its grid are
+// the same code YAML runs through; only the topline tag, the RAW tint and the
+// fences Copy/turndown emit are format-aware, so these tests target exactly
+// those, plus the JS value types TOML produces and YAML never does.
+// ---------------------------------------------------------------------------
+
+const TOML_DOC = '+++\ntitle = "Hugo Doc"\ntype = "post"\nstatus = "draft"\ncreated = 2026-07-27\ntags = ["a", "b"]\n+++\n\n# Heading\n\nBody text.\n';
+const TOML_EMPTY = '+++\n+++\n\n# Heading\n';
+const TOML_MALFORMED = '+++\na = 1\nb = 2\nkey = \n+++\n\n# Heading\n';
+
+test('TOML front matter gets the same collapsed row and expanded card as YAML', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'toml');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('Hugo Doc');
+  await expect(fm.locator('.md-fm-count')).toHaveText('5 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-title')).toHaveText('Hugo Doc');
+  await expect(fm.locator('.md-fm-badges')).toContainText('post');
+  await expect(fm.locator('.md-fm-badges')).toContainText('draft');
+  // A date-only TOML value keeps its own YYYY-MM-DD form in the meta slot.
+  await expect(fm.locator('.md-fm-badges')).toContainText('created 2026-07-27');
+  await expect(fm.locator('.md-fm-grid')).toContainText('tags');
+});
+
+test('the format tag reads FRONT MATTER · TOML in the collapsed row and the expanded card', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · TOML');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · TOML');
+});
+
+test('a YAML block still reads FRONT MATTER with no format tag', async ({ page }) => {
+  await openEditor(page, MULTI_FIELD);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'yaml');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER');
+});
+
+test('malformed TOML shows the invalid frame, tagged, at the line parsing stopped at', async ({ page }) => {
+  await openEditor(page, TOML_MALFORMED);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'invalid');
+  // The wrapper must carry the format even here: a format-less invalid block
+  // would be saved back under `---` and silently corrupt the file.
+  await expect(fm).toHaveAttribute('data-fm-format', 'toml');
+  await expect(fm.locator('.md-fm-label-error')).toHaveText('FRONT MATTER · TOML — INVALID');
+  await expect(fm.locator('.md-fm-error-line')).toHaveText('Line 3');
+});
+
+test('an empty +++ block is a valid 0-field card with a working toggle, not an error', async ({ page }) => {
+  await openEditor(page, TOML_EMPTY);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-grid')).toHaveCount(0);
+});
+
+test('Copy writes the TOML block back with its own +++ fences', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+
+  await page.evaluate(() => {
+    (window as unknown as { __copied: string | null }).__copied = null;
+    navigator.clipboard.writeText = (t: string) => {
+      (window as unknown as { __copied: string | null }).__copied = t;
+      return Promise.resolve();
+    };
+  });
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-copy').click();
+  const copied = await page.evaluate(() => (window as unknown as { __copied: string | null }).__copied);
+  expect(copied).toBe('+++\ntitle = "Hugo Doc"\ntype = "post"\nstatus = "draft"\ncreated = 2026-07-27\ntags = ["a", "b"]\n+++');
+  await expect(fm.locator('.md-fm-live')).toHaveText('Copied front matter TOML');
+});
+
+test('the RAW view tints TOML assignments and section headers, and its buttons name the format', async ({ page }) => {
+  const TOML_SECTIONS = '+++\ntitle = "Sectioned"\n\n[params]\ntheme = "orca"\n+++\n\n# Heading\n';
+  await openEditor(page, TOML_SECTIONS);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-raw-toggle')).toHaveAttribute('title', 'Show raw TOML');
+  await expect(fm.locator('.md-fm-copy')).toHaveAttribute('aria-label', 'Copy front matter TOML');
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-raw-toggle').click();
+  await expect(fm.locator('.md-fm-raw-body')).toBeVisible();
+  // `key =` and a whole `[section]` header are tinted; YAML's `key:` rule would
+  // have matched neither.
+  await expect(fm.locator('.md-fm-raw-body .md-fm-yaml-key').first()).toHaveText('title =');
+  await expect(fm.locator('.md-fm-raw-body .md-fm-yaml-key')).toContainText(['title =', 'theme =']);
+  await expect(fm.locator('.md-fm-raw-body')).toContainText('[params]');
+});
+
+test('TOML-only value types display their own form, never a UTC-shifted or unserializable one', async ({ page }) => {
+  const TOML_VALUES =
+    // A `title` keeps every other key in the grid: the first promotable field
+    // would otherwise be promoted into the title slot and leave the grid.
+    '+++\ntitle = "Values"\nbig = 9223372036854775807\nratio = inf\nodt = 1979-05-27T07:32:00Z\nldt = 1979-05-27T07:32:00\noffset = 2025-10-31T02:00:00+07:00\nday = 2025-10-30\nclock = 07:32:00\n+++\n\n# Heading\n';
+  await openEditor(page, TOML_VALUES);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  const grid = fm.locator('.md-fm-grid');
+
+  // A bigint must resolve as a scalar: routed to the deeper-structure row it
+  // would hit JSON.stringify, which throws on BigInt.
+  await expect(grid).toContainText('9223372036854775807');
+  await expect(grid).not.toContainText('unserializable');
+  await expect(grid).toContainText('Infinity');
+  await expect(grid).toContainText('1979-05-27T07:32:00Z');
+  // A local datetime / local time keeps the source's own wall clock.
+  await expect(grid).toContainText('1979-05-27T07:32:00');
+  await expect(grid).toContainText('2025-10-31T02:00:00+07:00');
+  await expect(grid).toContainText('2025-10-30');
+  await expect(grid).toContainText('07:32:00');
+  await expect(grid).not.toContainText('1970-01-01');
+});

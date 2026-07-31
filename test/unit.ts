@@ -39,6 +39,8 @@ import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
+import { MarkdownRenderer } from '../media/webview/render';
+import { tomlErrorLine } from '../media/webview/front-matter';
 import { copySrcLines, lineAgnosticKey, planBlockPatch } from '../media/webview/block-patch';
 import domino from '@mixmark-io/domino';
 import { truncateDisplay } from '../media/webview/trigger-popup';
@@ -4936,6 +4938,104 @@ check(
   guarded.setAttribute('data-line', '2');
   copySrcLines(from, guarded);
   eq('P-9 copySrcLines: carrier-count mismatch leaves the target untouched', guarded.getAttribute('data-line'), '2');
+}
+
+// ---------------------------------------------------------------------------
+// US-2.10 — TOML front matter: the `+++` pre-scan and its gutter contract.
+// The pre-scan runs outside markdown-it, so `render()` and the debounced
+// `computeTopLevelBlockRanges()` must agree exactly: a range the gutter path
+// computed differently would renumber blocks on every keystroke.
+// ---------------------------------------------------------------------------
+
+{
+  const renderer = new MarkdownRenderer({ breaks: false, linkify: true });
+  const firstBlock = (
+    md: string
+  ): { format: string | null; line: string | null; view: string | null; count: string | null; note: string | null; bodyLine: string | null } => {
+    const doc = domino.createDocument(`<div>${renderer.render(md).html}</div>`, true);
+    const fm = doc.querySelector('.md-front-matter');
+    return {
+      format: fm ? fm.getAttribute('data-fm-format') : null,
+      line: fm ? fm.getAttribute('data-line') : null,
+      view: fm ? fm.getAttribute('data-fm-view') : null,
+      count: fm?.querySelector('.md-fm-count')?.textContent ?? null,
+      note: fm?.querySelector('.md-fm-error-line')?.textContent ?? null,
+      bodyLine: doc.querySelector('h1')?.getAttribute('data-line') ?? null,
+    };
+  };
+  const gridText = (md: string): string => {
+    const doc = domino.createDocument(`<div>${renderer.render(md).html}</div>`, true);
+    return doc.querySelector('.md-fm-grid')?.textContent ?? '';
+  };
+  const firstRange = (md: string): unknown => renderer.computeTopLevelBlockRanges(md)[0]?.range ?? null;
+
+  const TOML_DOC = '+++\ntitle = "T"\nweight = 3\n+++\n\n# Heading\n\nBody.\n';
+  const EMPTY_TOML = '+++\n+++\n\n# Heading\n';
+
+  eq('US-2.10 AC1: a `+++` block on line 1 is captured as TOML front matter', firstBlock(TOML_DOC), {
+    format: 'toml',
+    line: '1',
+    view: 'collapsed',
+    count: '2 fields',
+    note: null,
+    bodyLine: '6',
+  });
+  // Asserting the view and the field count, not just the format attribute:
+  // the invalid wrapper carries `data-fm-format` too, so a format-only check
+  // would pass even if every CRLF document collapsed into the error frame.
+  eq('US-2.10 AC1: CRLF authoring detects and parses identically', firstBlock(TOML_DOC.replace(/\n/g, '\r\n')), {
+    format: 'toml',
+    line: '1',
+    view: 'collapsed',
+    count: '2 fields',
+    note: null,
+    bodyLine: '6',
+  });
+  eq('US-2.10 AC2: an unclosed `+++` captures nothing rather than autoclosing at EOF', firstBlock('+++\ntitle = "T"\n\n# Heading\n').format, null);
+  eq('US-2.10 AC4: a `+++` that is not line 1 is ordinary markdown', firstBlock('# Heading\n\n+++\nnot = "front matter"\n+++\n').format, null);
+  eq('US-2.10 AC4/AC11: a `---` document is still captured as YAML', firstBlock('---\ntitle: T\n---\n\n# Heading\n').format, 'yaml');
+
+  eq('US-2.10 AC5: `+++\\n+++` is a valid 0-field card, not the invalid frame', firstBlock(EMPTY_TOML).view, 'collapsed');
+  // The reported position, not merely the invalid state: an implementation
+  // that always answered "Line 1" would pass a view-only assertion.
+  eq('US-2.10 AC8: malformed TOML reports the offending line within the block', firstBlock('+++\na = 1\nb = 2\nkey = \n+++\n\n# Heading\n'), {
+    format: 'toml',
+    line: '1',
+    view: 'invalid',
+    count: null,
+    note: 'Line 3',
+    // Still line-aligned: the invalid path blanks the same lines as the valid one.
+    bodyLine: '7',
+  });
+
+  // A TOML integer arrives as a bigint, which JSON.stringify throws on — a
+  // deeper structure holding one must still show its compact JSON, not the
+  // unserializable placeholder. `[[menu.main]]` with a `weight` is the
+  // canonical Hugo shape that triggers it.
+  const HUGO_MENU = '+++\ntitle = "T"\n\n[[menu.main]]\nname = "home"\nweight = 10\n+++\n\n# Heading\n';
+  check('US-2.10 AC7: a bigint nested in a deeper structure keeps its value in the compact JSON row', gridText(HUGO_MENU).includes('"weight":"10"'), `  grid: ${gridText(HUGO_MENU)}`);
+  check('US-2.10 AC7: ...and never degrades to the unserializable placeholder', !gridText(HUGO_MENU).includes('unserializable'), `  grid: ${gridText(HUGO_MENU)}`);
+
+  // AC16/AC17: same [start, end] from both consumers, and the first body block
+  // still maps to its true source line because the captured region was replaced
+  // by the SAME number of blank lines.
+  eq('US-2.10 AC16/AC17: gutter and render agree on the front-matter range', firstRange(TOML_DOC), { start: 1, end: 4 });
+  eq('US-2.10 AC17: render numbers the block from the same range', firstBlock(TOML_DOC).line, '1');
+  eq('US-2.10 AC17: an empty `+++` block reports its own two-line range', firstRange(EMPTY_TOML), { start: 1, end: 2 });
+  eq('US-2.10 AC17: the first body block after an empty block keeps its source line', firstBlock(EMPTY_TOML).bodyLine, '4');
+  // AC3: the pre-scan writes into the same capture state `resetCaptureState()`
+  // clears, so a TOML document must not leak its block or its range into the
+  // next document the same renderer handles — on either consumer.
+  renderer.render(TOML_DOC);
+  eq('US-2.10 AC3: capture state is cleared — the next render gets no stale block', firstBlock('# Plain\n\nBody.\n').format, null);
+  renderer.computeTopLevelBlockRanges(TOML_DOC);
+  eq('US-2.10 AC3: ...and the gutter path gets no stale range', firstRange('# Plain\n\nBody.\n'), { start: 1, end: 1 });
+
+  // AC9: the fallback exists as its own branch. Every `TomlError` carries
+  // `line`, so only a thrown value without one can reach it.
+  eq('US-2.10 AC8: a real parse error reports its own 1-based line', tomlErrorLine({ line: 3 }), 3);
+  eq('US-2.10 AC9: an error with no usable position falls back to line 1', tomlErrorLine(new Error('boom')), 1);
+  eq('US-2.10 AC9: a non-numeric position falls back too', tomlErrorLine({ line: '3' }), 1);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

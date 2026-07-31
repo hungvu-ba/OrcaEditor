@@ -24,17 +24,31 @@
  *    `js-yaml` import.
  *  - `buildFrontMatterHtml` — markup for all three view states.
  *
+ * US-2.10 (2026-07-31) added TOML (`+++` fences, `smol-toml`) as a second
+ * format. It supplies its own parsed object to the SAME adapter, so no field,
+ * badge or grid rendering branches on format — only the topline tag, the raw
+ * view's tint, and the fences Copy/turndown emit do.
+ *
  * Values are canonically reformatted for DISPLAY only (numbers via `String`,
  * dates to UTC, `null` to an empty string); the saved file always keeps its
  * original bytes because turndown re-emits `data-raw` verbatim. The `invalid`
  * state is now reserved for a top level that isn't a key/value map at all.
  */
 import { load } from 'js-yaml';
+import { parse as parseToml } from 'smol-toml';
 import { FRONT_MATTER_CLASS, LINE_NUMBER_ATTR } from './render';
 import { escapeHtml, escapeAttr } from './dom-utils';
 
+/** Which delimiter the block was written with. Picks the parser and the fence, and nothing else — no field, badge or grid rendering branches on it. */
+export type FrontMatterFormat = 'yaml' | 'toml';
+
 /** Retained from the removed scanner purely for `buildRawBodyHtml`'s `key:` syntax tint. */
 const KEY_VALUE_RE = /^([\w.-]+):\s*(.*)$/;
+
+/** TOML's equivalents for the same raw-view tint: a `key = value` assignment and a `[section]` / `[[array-of-tables]]` header. */
+const TOML_KEY_VALUE_RE = /^\s*("[^"]*"|'[^']*'|[\w.-]+)\s*=/;
+/** A comma excludes an array continuation line such as `  [1, 2]`, which is a value, not a header. */
+const TOML_SECTION_RE = /^\s*\[\[?[^\],]*\]\]?\s*$/;
 
 /** Character budget for a deeper-than-one-level value's compact JSON grid row, before it is ellipsised. */
 const DEEP_VALUE_MAX_CHARS = 160;
@@ -125,12 +139,27 @@ function canonicalScalar(v: unknown): string | undefined {
   if (typeof v === 'boolean') {
     return v ? 'true' : 'false';
   }
+  if (typeof v === 'bigint') {
+    // TOML's out-of-safe-range integer (US-2.10). It must resolve here: falling
+    // through to the deeper-structure row would hand it to `JSON.stringify`,
+    // which throws on a BigInt, and the row would read "unserializable".
+    return String(v);
+  }
   if (v instanceof Date) {
     const iso = v.toISOString();
     // Trim the time suffix by length, never `slice(0, 10)`: a rolled-over date
     // (`9999-99-99`) yields the 6-digit extended year form, which a fixed cut
     // would truncate mid-year into garbage.
-    return iso.endsWith(MIDNIGHT_UTC_SUFFIX) ? iso.slice(0, -MIDNIGHT_UTC_SUFFIX.length) : iso.replace('.000Z', 'Z');
+    if (iso.endsWith(MIDNIGHT_UTC_SUFFIX)) {
+      return iso.slice(0, -MIDNIGHT_UTC_SUFFIX.length);
+    }
+    // smol-toml's TomlDate extends Date and overrides toISOString() to emit the
+    // TOML form, which ends in `Z`, an offset, or nothing at all (a local
+    // datetime / local time keeps the source's own wall clock, never a
+    // UTC-shifted one) — so drop a zero millisecond component wherever it sits
+    // rather than only before a `Z`. A plain string replace is enough: the
+    // fractional seconds are the only `.` any of these forms contains.
+    return iso.replace('.000', '');
   }
   return undefined;
 }
@@ -139,7 +168,10 @@ function canonicalScalar(v: unknown): string | undefined {
 function compactJson(v: unknown): string {
   let json: string | undefined;
   try {
-    json = JSON.stringify(v);
+    // TOML hands every integer over as a `bigint`, which `JSON.stringify`
+    // throws on. Without the replacer a whole nested table degrades to the
+    // placeholder just because one child is an ordinary integer.
+    json = JSON.stringify(v, (_key, value: unknown) => (typeof value === 'bigint' ? String(value) : value));
   } catch {
     return UNSERIALIZABLE_TEXT;
   }
@@ -292,6 +324,45 @@ export function parseFrontMatterFields(raw: string): FrontMatterParseResult {
   return buildFrontMatterFields(parsed);
 }
 
+/**
+ * 1-based line, relative to the front-matter block, that a `smol-toml` parse
+ * failure points at — `TomlError` carries `line` directly, already relative to
+ * the string handed to `parse()`. Falls back to line 1 only when the thrown
+ * value carries no usable position at all; `err.name` is plain `Error`, so the
+ * position must be probed, never inferred from the error's class.
+ */
+export function tomlErrorLine(err: unknown): number {
+  // Optional chaining, not a bare property read: a thrown `null` would
+  // otherwise raise a TypeError from inside the catch that called this and
+  // blank the entire preview instead of one block.
+  const line = (err as { line?: unknown } | null | undefined)?.line;
+  return typeof line === 'number' && Number.isFinite(line) && line >= 1 ? line : 1;
+}
+
+/**
+ * TOML entry point — the only place `smol-toml` is used. Unlike YAML, a parse
+ * failure IS the invalid state: TOML's grammar guarantees a map at the top
+ * level, so the only way to fail is malformed source, which has a real position
+ * worth showing (a duplicate key throws here too, rather than resolving
+ * last-wins the way js-yaml's `{ json: true }` does).
+ *
+ * `integersAsBigInt` is load-bearing, not a tweak: without it `parse()` throws
+ * on any integer outside the JS safe range, so a perfectly valid file would
+ * render as an error frame.
+ */
+export function parseTomlFrontMatterFields(raw: string): FrontMatterParseResult {
+  let parsed: unknown;
+  // Only the parse call belongs inside the try. Wrapping the field-building
+  // too would relabel any rendering bug as a syntax error the user does not
+  // have, reported at a line number invented by the fallback.
+  try {
+    parsed = parseToml(raw, { integersAsBigInt: true });
+  } catch (err) {
+    return buildInvalidParseResult(tomlErrorLine(err));
+  }
+  return buildFrontMatterFields(parsed);
+}
+
 /** `unit` is `line` on a raw-row fallback card: those rows are source lines, not fields the parser resolved. */
 function countLabel(n: number, unit: 'field' | 'line'): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`;
@@ -413,29 +484,70 @@ function buildBodyHtml(parsed: FrontMatterParseResult): string {
   );
 }
 
-/** Minimal syntax tint for the raw view: `key:` in one span, the rest of the line in another, matched by `KEY_VALUE_RE` — which now exists only for this tint, not for parsing. Indented continuation lines (no top-level key) render untinted. */
-function buildRawBodyHtml(raw: string): string {
+/**
+ * Split point for the raw view's syntax tint: the end of the line's "key" part,
+ * or -1 for a line that gets no tint (a continuation line, a comment, a blank).
+ * YAML tints `key:`; TOML tints `key =` and a whole `[section]` header. The two
+ * `.md-fm-yaml-*` class names are the shipped tint palette, shared by both
+ * formats rather than duplicated under a second name.
+ */
+function tintSplit(line: string, format: FrontMatterFormat): number {
+  if (format === 'toml') {
+    if (TOML_SECTION_RE.test(line)) {
+      return line.length;
+    }
+    // The match's own length, never `indexOf('=')`: a quoted key may itself
+    // contain an `=`, and splitting on the first one would cut through it.
+    const assignment = TOML_KEY_VALUE_RE.exec(line);
+    return assignment ? assignment[0].length : -1;
+  }
+  return KEY_VALUE_RE.test(line) ? line.indexOf(':') + 1 : -1;
+}
+
+/** Minimal syntax tint for the raw view: the key part in one span, the rest of the line in another. `KEY_VALUE_RE` now exists only for this tint, not for parsing. */
+function buildRawBodyHtml(raw: string, format: FrontMatterFormat): string {
   const tinted = raw
     .split('\n')
     .map((line) => {
-      const colon = KEY_VALUE_RE.test(line) ? line.indexOf(':') : -1;
-      if (colon === -1) {
+      const split = tintSplit(line, format);
+      if (split === -1) {
         return escapeHtml(line);
       }
-      return `<span class="md-fm-yaml-key">${escapeHtml(line.slice(0, colon + 1))}</span><span class="md-fm-yaml-string">${escapeHtml(line.slice(colon + 1))}</span>`;
+      return `<span class="md-fm-yaml-key">${escapeHtml(line.slice(0, split))}</span><span class="md-fm-yaml-string">${escapeHtml(line.slice(split))}</span>`;
     })
     .join('\n');
   return `<pre class="md-fm-raw-body">${tinted}</pre>`;
 }
 
-function buildInvalidHtml(raw: string, rawAttr: string, line: number, note: string): string {
+/**
+ * Topline label. YAML — every currently-shipped document — reads exactly
+ * `FRONT MATTER`; any other format appends a ` · <FORMAT>` tag. Deliberately
+ * generic rather than a TOML-specific branch, so US-2.11 reuses it for JSON.
+ */
+function formatLabel(format: FrontMatterFormat): string {
+  return format === 'yaml' ? 'FRONT MATTER' : `FRONT MATTER · ${format.toUpperCase()}`;
+}
+
+/**
+ * The source fences a block is re-emitted with. Shared by the Copy button and
+ * turndown's `frontMatter` rule — the two must agree byte-for-byte, or a save
+ * would re-fence the block into a format the user never wrote.
+ */
+export function frontMatterFence(format: string | null | undefined): string {
+  return format === 'toml' ? '+++' : '---';
+}
+
+function buildInvalidHtml(raw: string, rawAttr: string, line: number, note: string, format: FrontMatterFormat): string {
   // YAML's non-map top level has no source position, so the topline states the
   // shape problem instead of a misleading "Line 1". `.md-fm-error-line` is the
   // topline's error-meta slot, not a line-number-only element.
+  // `data-fm-format` must be here too, not only on the valid-state wrapper: a
+  // malformed TOML block saved through a format-less wrapper would come back
+  // fenced in `---` and silently corrupt the file.
   return (
-    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-view="invalid" role="status">` +
+    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-format="${format}" data-fm-view="invalid" role="status">` +
     `<div class="md-fm-topline">` +
-    `<span class="md-fm-label md-fm-label-error">FRONT MATTER — INVALID</span>` +
+    `<span class="md-fm-label md-fm-label-error">${formatLabel(format)} — INVALID</span>` +
     `<span class="md-fm-error-line">${escapeHtml(note)}</span>` +
     `</div>` +
     `<pre class="md-fm-error-body">${escapeHtml(raw)}</pre>` +
@@ -450,11 +562,12 @@ function buildInvalidHtml(raw: string, rawAttr: string, line: number, note: stri
  * wrapper (toggled by `initFrontMatterToggle`, CSS-driven visibility) pick
  * which one shows, the same "attribute is the state" shape as diagram-frame.ts.
  */
-export function buildFrontMatterHtml(raw: string, line: number, parsed: FrontMatterParseResult): string {
+export function buildFrontMatterHtml(raw: string, line: number, parsed: FrontMatterParseResult, format: FrontMatterFormat = 'yaml'): string {
   const rawAttr = escapeAttr(raw);
   if (parsed.invalid) {
-    return buildInvalidHtml(raw, rawAttr, line, parsed.errorNote ?? NON_MAP_TEXT);
+    return buildInvalidHtml(raw, rawAttr, line, parsed.errorNote ?? NON_MAP_TEXT, format);
   }
+  const formatName = format.toUpperCase();
   // A note on a valid block means the raw-row fallback: its rows are source
   // lines, so calling them "fields" would claim a parse that never happened.
   const label = countLabel(parsed.fields.length, parsed.errorNote === undefined ? 'field' : 'line');
@@ -464,7 +577,7 @@ export function buildFrontMatterHtml(raw: string, line: number, parsed: FrontMat
   const topline =
     `<button type="button" class="md-fm-toggle" aria-expanded="false" aria-label="${escapeAttr(ariaLabel)}">` +
     `<span class="md-fm-chevron" aria-hidden="true"></span>` +
-    `<span class="md-fm-label">FRONT MATTER</span>` +
+    `<span class="md-fm-label">${formatLabel(format)}</span>` +
     `<span class="md-fm-row-title" title="${escapeAttr(titleText)}">${escapeHtml(titleText)}</span>` +
     `<span class="md-fm-count">${label}</span>` +
     `</button>` +
@@ -472,14 +585,14 @@ export function buildFrontMatterHtml(raw: string, line: number, parsed: FrontMat
     // source line rather than hiding them behind an error frame.
     (parsed.errorNote !== undefined ? `<span class="md-fm-error-line">${escapeHtml(parsed.errorNote)}</span>` : '') +
     `<div class="md-fm-actions" contenteditable="false">` +
-    `<button type="button" class="md-fm-raw-toggle" aria-pressed="false" title="Show raw YAML">RAW</button>` +
-    `<button type="button" class="md-fm-copy" aria-label="Copy front matter YAML">Copy</button>` +
+    `<button type="button" class="md-fm-raw-toggle" aria-pressed="false" title="Show raw ${formatName}">RAW</button>` +
+    `<button type="button" class="md-fm-copy" aria-label="Copy front matter ${formatName}">Copy</button>` +
     `</div>`;
   const body = buildBodyHtml(parsed);
-  const rawBody = buildRawBodyHtml(raw);
+  const rawBody = buildRawBodyHtml(raw, format);
 
   return (
-    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-view="collapsed" data-fm-raw="false">` +
+    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-format="${format}" data-fm-view="collapsed" data-fm-raw="false">` +
     `<div class="md-fm-topline">${topline}</div>` +
     body +
     rawBody +
@@ -518,11 +631,15 @@ export function initFrontMatterToggle(content: HTMLElement): void {
     if (copyBtn) {
       const wrapper = copyBtn.closest(`.${FRONT_MATTER_CLASS}`) as HTMLElement | null;
       const raw = wrapper?.getAttribute('data-raw') ?? '';
+      // The clipboard gets the SOURCE fences, byte-for-byte: a TOML block copied
+      // out under `---` would not paste back as the front matter it came from.
+      const format = wrapper?.getAttribute('data-fm-format') ?? 'yaml';
+      const fence = frontMatterFence(format);
       if (!navigator.clipboard) {
         return; // No Clipboard API in this context -- nothing to do (avoid a sync throw).
       }
       navigator.clipboard
-        .writeText(`---\n${raw}\n---`)
+        .writeText(`${fence}\n${raw}\n${fence}`)
         .then(() => {
           const pending = pendingCopyReset.get(copyBtn);
           if (pending !== undefined) {
@@ -531,7 +648,7 @@ export function initFrontMatterToggle(content: HTMLElement): void {
           copyBtn.textContent = 'Copied';
           const live = wrapper?.querySelector('.md-fm-live');
           if (live) {
-            live.textContent = 'Copied front matter YAML';
+            live.textContent = `Copied front matter ${format.toUpperCase()}`;
           }
           pendingCopyReset.set(
             copyBtn,
