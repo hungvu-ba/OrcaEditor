@@ -4,6 +4,12 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.1.0\] - 2026-07-31
+
+### Added
+
+-   Front matter now supports YAML, TOML, and JSON formats.
+
 ## \[1.0.0\] - 2026-07-29
 
 ### Added
