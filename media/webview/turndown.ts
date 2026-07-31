@@ -21,6 +21,7 @@ import { hasAncestor, getAncestor } from './dom-portable';
 import { hasUrlScheme } from '../../src/shared/link-scheme';
 import { DiagramFrameSpec, MERMAID_FRAME, PLANTUML_FRAME } from './diagram-frame';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
+import { frontMatterSource } from './front-matter';
 import {
   HEADING_STYLE_ATTR,
   BULLET_STYLE_ATTR,
@@ -588,8 +589,14 @@ export function createTurndown(): TurndownService {
   td.addRule('frontMatter', {
     filter: (node) => (node as HTMLElement).classList?.contains(FRONT_MATTER_CLASS) ?? false,
     replacement: (_content, node) => {
-      const raw = (node as HTMLElement).getAttribute('data-raw') ?? '';
-      return `---\n${raw}\n---\n\n`;
+      const el = node as HTMLElement;
+      const raw = el.getAttribute('data-raw') ?? '';
+      // US-2.10/US-2.11: the fence follows the block's own format, so a TOML
+      // block is never saved back under YAML's `---` and a JSON block gets no
+      // fence at all. `data-raw` is still re-emitted verbatim -- the
+      // byte-for-byte round-trip guarantee is format-neutral. The trailing
+      // separator is normalized to one blank line, as it always has been.
+      return `${frontMatterSource(el.getAttribute('data-fm-format'), raw)}\n\n`;
     },
   });
 

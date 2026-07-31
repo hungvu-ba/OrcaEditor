@@ -542,3 +542,9 @@
 | 0.10.0 | 2026-07-29 | Fix: the drag-handle hover highlight on a task-list item now extends past the checkbox instead of cutting through its left edge. |
 | 0.10.0 | 2026-07-29 | Fix: a still-present comment was flagged "foreign" once its anchored text got a markdown link, because the link's raw target slug split the belonging match. |
 | 1.0.0 | 2026-07-29 | Feature: added Comment feature. |
+| 1.0.0 | 2026-07-30 | Fix: front matter's collapse/expand toggle now shows for every field count, not just when there are more than 2 fields. |
+| 1.0.0 | 2026-07-31 | Feature: front matter is parsed by a real YAML parser, so nested maps, block-style lists and block scalars display as structured fields. |
+| 1.0.0 | 2026-07-31 | Feature: TOML front matter (`+++` fences, e.g. Hugo) now renders as the same card as YAML and saves back with its own fences. |
+| 1.0.0 | 2026-07-31 | Feature: a leading `{...}` block that is valid JSON now renders as a front-matter card, and saves back with no fence added. |
+| 1.0.0 | 2026-07-31 | Fix: Copy on an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes. |
+| 1.1.0 | 2026-07-31 | Release: bumped version to 1.1.0, consolidating YAML/TOML/JSON front matter parsing and the collapse/expand fix into one [1.1.0] entry in CHANGELOG.md. |

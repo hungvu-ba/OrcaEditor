@@ -4,15 +4,23 @@
  * and in-session state persistence across a re-render. Needs the real webview
  * engine — test/roundtrip/ (domino) only covers DOM-stability + serialization,
  * not click events, navigator.clipboard, or renderDocument()'s re-render path.
+ *
+ * US-2.9 added the js-yaml cases below: value shapes the hand-rolled scanner
+ * could not represent (nested list/map, block scalar, deeper structure),
+ * canonical display of dates/numbers/booleans, and the two behaviours it
+ * deliberately changed — duplicate keys resolve last-wins, and YAML that fails
+ * to parse degrades to verbatim raw rows instead of the invalid error frame.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
 
 const MULTI_FIELD = '---\ntitle: Sample Document\ntype: spec\nstatus: draft\ncreated: 2026-07-27\ntags: [a, b]\n---\n\n# Heading\n\nBody text.\n';
 const TWO_FIELD = '---\ntitle: Small Doc\ncreated: 2026-07-27\n---\n\n# Heading\n';
-const INVALID = '---\nthis has no colon\ntitle: still here\n---\n\n# Heading\n';
+const ONE_FIELD = '---\ntitle: One Field Doc\n---\n\n# Heading\n';
+const EMPTY_FIELD = '---\n---\n\n# Heading\n';
+const UNPARSABLE = '---\nthis has no colon\ntitle: still here\n---\n\n# Heading\n';
 
-test('front matter with > 2 fields is collapsed by default, no raw YAML visible', async ({ page }) => {
+test('front matter is collapsed by default, no raw YAML visible', async ({ page }) => {
   await openEditor(page, MULTI_FIELD);
   const fm = page.locator('.md-front-matter');
   await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
@@ -102,42 +110,208 @@ test('expanded/raw state survives a re-render triggered by an edit elsewhere in 
   await expect(fmAfter.locator('.md-fm-toggle')).toHaveAttribute('aria-expanded', 'true');
 });
 
-test('<= 2 fields renders as a line only, with no expand affordance', async ({ page }) => {
+test('a front matter block with only 2 fields still gets a working expand toggle', async ({ page }) => {
   await openEditor(page, TWO_FIELD);
   const fm = page.locator('.md-front-matter');
-  await expect(fm).toHaveAttribute('data-fm-view', 'line');
-  await expect(fm.locator('.md-fm-toggle')).toHaveCount(0);
-  await expect(fm.locator('.md-fm-line')).toContainText('Small Doc');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('Small Doc');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-body')).toBeVisible();
+  await expect(fm.locator('.md-fm-title')).toHaveText('Small Doc');
 });
 
-test('unparsable front matter shows the invalid error frame with the offending line number', async ({ page }) => {
-  await openEditor(page, INVALID);
+test('a front matter block with exactly 1 field still gets a working expand toggle', async ({ page }) => {
+  await openEditor(page, ONE_FIELD);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-body')).toBeVisible();
+  await expect(fm.locator('.md-fm-title')).toHaveText('One Field Doc');
+});
+
+test('an empty front matter block (0 fields) still gets a working expand toggle', async ({ page }) => {
+  await openEditor(page, EMPTY_FIELD);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-body')).toBeVisible();
+  await expect(fm.locator('.md-fm-grid')).toHaveCount(0);
+});
+
+test('unparsable YAML keeps the card and shows every source line verbatim, marked with the line parsing stopped at', async ({ page }) => {
+  await openEditor(page, UNPARSABLE);
+  const fm = page.locator('.md-front-matter');
+  // Not the error frame: the block stays a normal, expandable card.
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-error-line')).toHaveText('Line 2');
+  // Rows are source lines, not fields the parser resolved.
+  await expect(fm.locator('.md-fm-count')).toHaveText('2 lines');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-grid-row-raw')).toHaveCount(2);
+  await expect(fm.locator('.md-fm-grid')).toContainText('this has no colon');
+  await expect(fm.locator('.md-fm-grid')).toContainText('title: still here');
+  // RAW and Copy still work on a block that failed to parse.
+  await fm.locator('.md-fm-raw-toggle').click();
+  await expect(fm.locator('.md-fm-raw-body')).toBeVisible();
+});
+
+test('a top-level value that is not a key/value map shows the invalid frame with no line label', async ({ page }) => {
+  const TOP_LEVEL_LIST = '---\n- alpha\n- beta\n---\n\n# Heading\n';
+  await openEditor(page, TOP_LEVEL_LIST);
   const fm = page.locator('.md-front-matter');
   await expect(fm).toHaveAttribute('data-fm-view', 'invalid');
   await expect(fm).toHaveAttribute('role', 'status');
   await expect(fm.locator('.md-fm-label-error')).toHaveText('FRONT MATTER — INVALID');
-  await expect(fm.locator('.md-fm-error-line')).toHaveText('Line 1');
-  await expect(fm.locator('.md-fm-error-body')).toContainText('this has no colon');
+  // No source position exists, so a "Line 1" here would be a lie.
+  await expect(fm.locator('.md-fm-error-line')).toHaveText('Not a key/value map');
+  await expect(fm.locator('.md-fm-error-body')).toContainText('- alpha');
 });
 
-test('a duplicate key keeps its second value visible in the grid instead of vanishing', async ({ page }) => {
+test('a duplicate key resolves last-wins instead of showing both values', async ({ page }) => {
   const DUPLICATE_STATUS = '---\ntitle: Dup Doc\nstatus: draft\nstatus: done\ncreated: 2026-07-27\n---\n\n# Heading\n';
   await openEditor(page, DUPLICATE_STATUS);
   const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-count')).toHaveText('3 fields');
   await fm.locator('.md-fm-toggle').click();
-  // First "status: draft" is promoted to the badge; the second "status: done"
-  // must still show up somewhere (the grid), not disappear entirely.
-  await expect(fm.locator('.md-fm-badges')).toContainText('draft');
-  await expect(fm.locator('.md-fm-grid')).toContainText('done');
+  await expect(fm.locator('.md-fm-badges')).toContainText('done');
+  await expect(fm.locator('.md-fm-badges')).not.toContainText('draft');
 });
 
-test('a nested flow array falls back to a raw grid row instead of corrupting into garbage items', async ({ page }) => {
+test('a structure deeper than one level falls back to a compact JSON row carrying its key', async ({ page }) => {
   const NESTED_ARRAY = '---\ntitle: Nested Doc\nmatrix: [[a, b], [c, d]]\nstatus: draft\ncreated: 2026-07-27\n---\n\n# Heading\n';
   await openEditor(page, NESTED_ARRAY);
   const fm = page.locator('.md-front-matter');
   await fm.locator('.md-fm-toggle').click();
-  await expect(fm.locator('.md-fm-grid-row-raw')).toContainText('matrix: [[a, b], [c, d]]');
+  await expect(fm.locator('.md-fm-grid-row-raw')).toContainText('matrix: [["a","b"],["c","d"]]');
   await expect(fm.locator('.md-fm-value-item')).toHaveCount(0);
+});
+
+test('a block-style list renders as a stacked value list, not a raw row', async ({ page }) => {
+  const BLOCK_LIST = '---\ntitle: List Doc\ncategories:\n  - tutorial\n  - markdown\n---\n\n# Heading\n';
+  await openEditor(page, BLOCK_LIST);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-grid')).toContainText('categories');
+  await expect(fm.locator('.md-fm-value-item')).toHaveCount(2);
+  await expect(fm.locator('.md-fm-value-item').first()).toHaveText('tutorial');
+  await expect(fm.locator('.md-fm-grid-row-raw')).toHaveCount(0);
+});
+
+test('a one-level nested map renders as an indented sub-grid of its own key/value pairs', async ({ page }) => {
+  const NESTED_MAP = '---\ntitle: Author Doc\nauthor:\n  name: Hung\n  email: h@example.com\n---\n\n# Heading\n';
+  await openEditor(page, NESTED_MAP);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  const subgrid = fm.locator('.md-fm-subgrid');
+  await expect(subgrid).toHaveCount(1);
+  await expect(subgrid.locator('.md-fm-key')).toHaveCount(2);
+  await expect(subgrid).toContainText('name');
+  await expect(subgrid).toContainText('Hung');
+  await expect(fm.locator('.md-fm-grid-row-raw')).toHaveCount(0);
+});
+
+test('a block scalar renders full-width and pre-wrapped, clamped so it cannot stretch the card', async ({ page }) => {
+  const BLOCK_SCALAR = '---\ntitle: Scalar Doc\nsummary: |\n  alpha line\n  beta line\n---\n\n# Heading\n';
+  await openEditor(page, BLOCK_SCALAR);
+  const fm = page.locator('.md-front-matter');
+
+  await fm.locator('.md-fm-toggle').click();
+  const summaryCell = fm.locator('.md-fm-grid .md-fm-value-raw');
+  await expect(summaryCell).toContainText('alpha line');
+  await expect(summaryCell).toContainText('beta line');
+  await expect(summaryCell).toHaveCSS('white-space', 'pre-wrap');
+  await expect(summaryCell).toHaveCSS('overflow-y', 'hidden');
+  expect(await summaryCell.evaluate((el) => getComputedStyle(el).maxHeight)).not.toBe('none');
+});
+
+test('a promoted key holding a block scalar keeps its remaining lines in the grid', async ({ page }) => {
+  const PROMOTED_BLOCK = '---\ntitle: |\n  Promoted first line\n  kept second line\nother: x\n---\n\n# Heading\n';
+  await openEditor(page, PROMOTED_BLOCK);
+  const fm = page.locator('.md-front-matter');
+  // The collapsed row and the card title take the first line only...
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('Promoted first line');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-title')).toHaveText('Promoted first line');
+  // ...but the rest must not vanish from the structured card.
+  await expect(fm.locator('.md-fm-grid')).toContainText('kept second line');
+});
+
+test('a nested map child holding a block scalar drops to a raw row instead of clipping in a nowrap cell', async ({ page }) => {
+  const NESTED_MULTILINE = '---\ntitle: Bio Doc\nauthor:\n  bio: |\n    line one\n    line two\n---\n\n# Heading\n';
+  await openEditor(page, NESTED_MULTILINE);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-subgrid')).toHaveCount(0);
+  await expect(fm.locator('.md-fm-grid-row-raw')).toContainText('author: {"bio":"line one\\nline two\\n"}');
+});
+
+test('an empty nested map renders a compact JSON row, not an empty sub-grid box', async ({ page }) => {
+  const EMPTY_MAP = '---\ntitle: Empty Map Doc\nauthor: {}\n---\n\n# Heading\n';
+  await openEditor(page, EMPTY_MAP);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-subgrid')).toHaveCount(0);
+  await expect(fm.locator('.md-fm-grid-row-raw')).toHaveText('author: {}');
+});
+
+test('scalars are canonically reformatted for display: numbers, booleans and dates', async ({ page }) => {
+  const CANON = '---\ntitle: Canon Doc\ncount: 007\nratio: 1.10\nflag: true\nwhen: 2025-10-31T02:00:00+07:00\n---\n\n# Heading\n';
+  await openEditor(page, CANON);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  const values = fm.locator('.md-fm-grid .md-fm-value');
+  // Exact text, not a substring — `007` also contains `7`, `1.10` also contains `1.1`.
+  await expect(values.nth(0)).toHaveText('7');
+  await expect(values.nth(1)).toHaveText('1.1');
+  await expect(values.nth(2)).toHaveText('true');
+  // Normalized to UTC — the previous calendar day for a +07:00 source offset.
+  await expect(values.nth(3)).toHaveText('2025-10-30T19:00:00Z');
+});
+
+test('a date-only timestamp keeps its YYYY-MM-DD form in the meta slot', async ({ page }) => {
+  await openEditor(page, MULTI_FIELD);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-badges')).toContainText('created 2026-07-27');
+});
+
+test('comment-only front matter stays a valid 0-field card instead of turning invalid', async ({ page }) => {
+  const COMMENT_ONLY = '---\n# just a comment\n---\n\n# Heading\n';
+  await openEditor(page, COMMENT_ONLY);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-body')).toBeVisible();
+});
+
+test('a promoted key with an empty value is demoted into the grid instead of vanishing', async ({ page }) => {
+  const EMPTY_STATUS = '---\ntitle: Demoted Doc\nstatus:\ntype: spec\n---\n\n# Heading\n';
+  await openEditor(page, EMPTY_STATUS);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-badge-status')).toHaveCount(0);
+  await expect(fm.locator('.md-fm-grid')).toContainText('status');
+});
+
+test('a cyclic anchor renders a placeholder row instead of blanking the whole preview', async ({ page }) => {
+  const CYCLIC = '---\ntitle: Cyclic Doc\nloop: &a\n  self: *a\n---\n\n# Heading\n';
+  await openEditor(page, CYCLIC);
+  const fm = page.locator('.md-front-matter');
+  // The rest of the document still rendered.
+  await expect(page.locator('#content h1')).toHaveText('Heading');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-grid-row-raw')).toContainText('loop: <unserializable value>');
 });
 
 test('a blank title field falls back to the first non-blank scalar, like a missing title field', async ({ page }) => {
@@ -178,4 +352,272 @@ test('a path-like fallback title inside the toggle button is never linkified (no
   const fm = page.locator('.md-front-matter');
   await expect(fm.locator('.md-fm-toggle .md-fm-row-title')).toHaveText('path: docs/notes.md');
   await expect(fm.locator('.md-fm-toggle a')).toHaveCount(0);
+});
+
+// ---------------------------------------------------------------------------
+// US-2.10 — TOML front matter (`+++`). The card, its fields and its grid are
+// the same code YAML runs through; only the topline tag, the RAW tint and the
+// fences Copy/turndown emit are format-aware, so these tests target exactly
+// those, plus the JS value types TOML produces and YAML never does.
+// ---------------------------------------------------------------------------
+
+const TOML_DOC = '+++\ntitle = "Hugo Doc"\ntype = "post"\nstatus = "draft"\ncreated = 2026-07-27\ntags = ["a", "b"]\n+++\n\n# Heading\n\nBody text.\n';
+const TOML_EMPTY = '+++\n+++\n\n# Heading\n';
+const TOML_MALFORMED = '+++\na = 1\nb = 2\nkey = \n+++\n\n# Heading\n';
+
+test('TOML front matter gets the same collapsed row and expanded card as YAML', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'toml');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('Hugo Doc');
+  await expect(fm.locator('.md-fm-count')).toHaveText('5 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-title')).toHaveText('Hugo Doc');
+  await expect(fm.locator('.md-fm-badges')).toContainText('post');
+  await expect(fm.locator('.md-fm-badges')).toContainText('draft');
+  // A date-only TOML value keeps its own YYYY-MM-DD form in the meta slot.
+  await expect(fm.locator('.md-fm-badges')).toContainText('created 2026-07-27');
+  await expect(fm.locator('.md-fm-grid')).toContainText('tags');
+});
+
+test('the format tag reads FRONT MATTER · TOML in the collapsed row and the expanded card', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · TOML');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · TOML');
+});
+
+test('a YAML block still reads FRONT MATTER with no format tag', async ({ page }) => {
+  await openEditor(page, MULTI_FIELD);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'yaml');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER');
+});
+
+test('malformed TOML shows the invalid frame, tagged, at the line parsing stopped at', async ({ page }) => {
+  await openEditor(page, TOML_MALFORMED);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'invalid');
+  // The wrapper must carry the format even here: a format-less invalid block
+  // would be saved back under `---` and silently corrupt the file.
+  await expect(fm).toHaveAttribute('data-fm-format', 'toml');
+  await expect(fm.locator('.md-fm-label-error')).toHaveText('FRONT MATTER · TOML — INVALID');
+  await expect(fm.locator('.md-fm-error-line')).toHaveText('Line 3');
+});
+
+test('an empty +++ block is a valid 0-field card with a working toggle, not an error', async ({ page }) => {
+  await openEditor(page, TOML_EMPTY);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-grid')).toHaveCount(0);
+});
+
+test('Copy writes the TOML block back with its own +++ fences', async ({ page }) => {
+  await openEditor(page, TOML_DOC);
+  const fm = page.locator('.md-front-matter');
+
+  await page.evaluate(() => {
+    (window as unknown as { __copied: string | null }).__copied = null;
+    navigator.clipboard.writeText = (t: string) => {
+      (window as unknown as { __copied: string | null }).__copied = t;
+      return Promise.resolve();
+    };
+  });
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-copy').click();
+  const copied = await page.evaluate(() => (window as unknown as { __copied: string | null }).__copied);
+  expect(copied).toBe('+++\ntitle = "Hugo Doc"\ntype = "post"\nstatus = "draft"\ncreated = 2026-07-27\ntags = ["a", "b"]\n+++');
+  await expect(fm.locator('.md-fm-live')).toHaveText('Copied front matter TOML');
+});
+
+test('the RAW view tints TOML assignments and section headers, and its buttons name the format', async ({ page }) => {
+  const TOML_SECTIONS = '+++\ntitle = "Sectioned"\n\n[params]\ntheme = "orca"\n+++\n\n# Heading\n';
+  await openEditor(page, TOML_SECTIONS);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-raw-toggle')).toHaveAttribute('title', 'Show raw TOML');
+  await expect(fm.locator('.md-fm-copy')).toHaveAttribute('aria-label', 'Copy front matter TOML');
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-raw-toggle').click();
+  await expect(fm.locator('.md-fm-raw-body')).toBeVisible();
+  // `key =` and a whole `[section]` header are tinted; YAML's `key:` rule would
+  // have matched neither.
+  await expect(fm.locator('.md-fm-raw-body .md-fm-yaml-key').first()).toHaveText('title =');
+  await expect(fm.locator('.md-fm-raw-body .md-fm-yaml-key')).toContainText(['title =', 'theme =']);
+  await expect(fm.locator('.md-fm-raw-body')).toContainText('[params]');
+});
+
+test('TOML-only value types display their own form, never a UTC-shifted or unserializable one', async ({ page }) => {
+  const TOML_VALUES =
+    // A `title` keeps every other key in the grid: the first promotable field
+    // would otherwise be promoted into the title slot and leave the grid.
+    '+++\ntitle = "Values"\nbig = 9223372036854775807\nratio = inf\nodt = 1979-05-27T07:32:00Z\nldt = 1979-05-27T07:32:00\noffset = 2025-10-31T02:00:00+07:00\nday = 2025-10-30\nclock = 07:32:00\n+++\n\n# Heading\n';
+  await openEditor(page, TOML_VALUES);
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  const grid = fm.locator('.md-fm-grid');
+
+  // A bigint must resolve as a scalar: routed to the deeper-structure row it
+  // would hit JSON.stringify, which throws on BigInt.
+  await expect(grid).toContainText('9223372036854775807');
+  await expect(grid).not.toContainText('unserializable');
+  await expect(grid).toContainText('Infinity');
+  await expect(grid).toContainText('1979-05-27T07:32:00Z');
+  // A local datetime / local time keeps the source's own wall clock.
+  await expect(grid).toContainText('1979-05-27T07:32:00');
+  await expect(grid).toContainText('2025-10-31T02:00:00+07:00');
+  await expect(grid).toContainText('2025-10-30');
+  await expect(grid).toContainText('07:32:00');
+  await expect(grid).not.toContainText('1970-01-01');
+});
+
+// ---------------------------------------------------------------------------
+// US-2.11 — JSON front matter (`{...}`, no delimiter at all). The card itself
+// is US-2.9's, unchanged; what is new and worth a real browser here is the
+// fence-less Copy payload, the untinted RAW view, and the paste path, which
+// must keep treating a `{`-leading snippet as ordinary content.
+// ---------------------------------------------------------------------------
+
+const JSON_DOC =
+  '{\n  "title": "JSON Doc",\n  "type": "post",\n  "status": "draft",\n  "created": "2026-07-27",\n  "tags": ["a", "b"]\n}\n\n# Heading\n\nBody text.\n';
+const JSON_RAW = '{\n  "title": "JSON Doc",\n  "type": "post",\n  "status": "draft",\n  "created": "2026-07-27",\n  "tags": ["a", "b"]\n}';
+const JSON_EMPTY = '{}\n\n# Heading\n';
+
+/** Stub the clipboard and return what the Copy button wrote. */
+async function copiedText(page: Page): Promise<string | null> {
+  await page.evaluate(() => {
+    (window as unknown as { __copied: string | null }).__copied = null;
+    navigator.clipboard.writeText = (t: string) => {
+      (window as unknown as { __copied: string | null }).__copied = t;
+      return Promise.resolve();
+    };
+  });
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-copy').click();
+  return page.evaluate(() => (window as unknown as { __copied: string | null }).__copied);
+}
+
+test('JSON front matter gets the same collapsed row and expanded card as YAML', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'json');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('JSON Doc');
+  await expect(fm.locator('.md-fm-count')).toHaveText('5 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-title')).toHaveText('JSON Doc');
+  await expect(fm.locator('.md-fm-badges')).toContainText('post');
+  await expect(fm.locator('.md-fm-badges')).toContainText('draft');
+  // JSON has no native date type, so a date-like string is promoted exactly as
+  // any other string — displayed verbatim, never reformatted or UTC-shifted.
+  await expect(fm.locator('.md-fm-badges')).toContainText('created 2026-07-27');
+  await expect(fm.locator('.md-fm-grid')).toContainText('tags');
+});
+
+test('the format tag reads FRONT MATTER · JSON in the collapsed row and the expanded card', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · JSON');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · JSON');
+});
+
+test('an empty {} block is a valid 0-field card with a working toggle, and never the invalid frame', async ({ page }) => {
+  await openEditor(page, JSON_EMPTY);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+});
+
+test('duplicate keys resolve last-wins in the grid while RAW keeps every source line', async ({ page }) => {
+  await openEditor(page, '{\n  "title": "Dup",\n  "n": 1,\n  "n": 2\n}\n\n# Heading\n');
+  const fm = page.locator('.md-front-matter');
+  // The count reflects PARSED keys, not raw lines.
+  await expect(fm.locator('.md-fm-count')).toHaveText('2 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-grid')).toContainText('2');
+  await expect(fm.locator('.md-fm-grid')).not.toContainText('1');
+
+  await fm.locator('.md-fm-raw-toggle').click();
+  const rawBody = fm.locator('.md-fm-raw-body');
+  await expect(rawBody).toContainText('"n": 1');
+  await expect(rawBody).toContainText('"n": 2');
+});
+
+test('Copy writes the JSON block back with no fences added at all', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  expect(await copiedText(page)).toBe(JSON_RAW);
+  await expect(page.locator('.md-fm-live')).toHaveText('Copied front matter JSON');
+});
+
+test('an empty YAML block copies as two fence lines, not three', async ({ page }) => {
+  // The shared source builder owns the empty-block shape now, so Copy no longer
+  // emits the blank line between the fences that turndown never did.
+  await openEditor(page, EMPTY_FIELD);
+  expect(await copiedText(page)).toBe('---\n---');
+});
+
+test('the RAW view shows JSON verbatim and untinted, and its buttons name the format', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-raw-toggle')).toHaveAttribute('title', 'Show raw JSON');
+  await expect(fm.locator('.md-fm-copy')).toHaveAttribute('aria-label', 'Copy front matter JSON');
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-raw-toggle').click();
+  const rawBody = fm.locator('.md-fm-raw-body');
+  await expect(rawBody).toBeVisible();
+  // Whole-text equality, not a substring: a substring check would still pass if
+  // every line silently lost its last character, which is exactly what a
+  // mishandled "no tint" sentinel (`line.slice(0, -1)`) would produce.
+  expect(await rawBody.textContent()).toBe(JSON_RAW);
+  // No JSON tinter is added, so not a single key span exists — YAML's `key:`
+  // rule must not be allowed to half-match JSON lines either.
+  await expect(rawBody.locator('.md-fm-yaml-key')).toHaveCount(0);
+});
+
+test('pasting a JSON snippet mid-document inserts ordinary content, not a front-matter card', async ({ page }) => {
+  await openEditor(page, '# Heading\n\nBody text.\n');
+  await expect(page.locator('.md-front-matter')).toHaveCount(0);
+
+  await page.locator('#content p').first().evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    el.closest<HTMLElement>('#content')?.focus();
+  });
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', '{\n  "pasted": 1\n}\n\nmore text\n');
+    document.getElementById('content')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+
+  await expect(page.locator('#content')).toContainText('"pasted": 1');
+  await expect(page.locator('.md-front-matter')).toHaveCount(0);
+});
+
+test('a JSON wrapper whose data-raw is empty still serializes a visible block, not nothing', async ({ page }) => {
+  // Review finding (step-04, edge case hunter): the renderer cannot produce
+  // this, but `frontMatterSource` also runs over DOM the webview did not build.
+  // Returning the empty string there would make the block vanish from the file.
+  await openEditor(page, JSON_EMPTY);
+  await page.evaluate(() => document.querySelector('.md-front-matter')!.setAttribute('data-raw', ''));
+  expect(await copiedText(page)).toBe('{}');
 });

@@ -962,8 +962,12 @@ body.reading-mode:not(.reading-zen) #content {
   --fm-badge-size: 10.5px;
   --fm-badge-dot: 5px;
   --fm-raw-line-height: 1.75;
-  /* Matches FM_COLLAPSE_THRESHOLD in front-matter.ts — keep both in sync by hand. */
-  --fm-collapse-threshold: 2;
+  /* One-level nested map sub-grid + the height clamp that keeps a long block
+   * scalar from stretching the card (US-2.9). */
+  --fm-subgrid-key-col: 84px;
+  --fm-subgrid-gap: 6px 12px;
+  --fm-subgrid-indent: 10px;
+  --fm-value-raw-max-height: 132px;
   --fm-transition: 120ms ease-out;
 }
 
@@ -1188,14 +1192,12 @@ body.reading-mode-paper {
 .md-front-matter[data-fm-view='invalid'] {
   margin-bottom: var(--fm-margin-bottom-expanded);
 }
-.md-front-matter[data-fm-view='collapsed'],
-.md-front-matter[data-fm-view='line'] {
+.md-front-matter[data-fm-view='collapsed'] {
   border-radius: var(--fm-radius-collapsed);
   border: var(--fm-border-width) var(--fm-border-style-collapsed) var(--fm-border-collapsed);
   background: transparent;
 }
-.md-front-matter[data-fm-view='collapsed']:hover,
-.md-front-matter[data-fm-view='line']:hover {
+.md-front-matter[data-fm-view='collapsed']:hover {
   background: var(--fm-hover-bg);
   border-color: var(--fm-hover-border);
   color: var(--fm-hover-fg);
@@ -1231,8 +1233,7 @@ body.reading-mode-paper {
   border-bottom-color: var(--fm-error-divider);
 }
 
-.md-fm-toggle,
-.md-fm-line {
+.md-fm-toggle {
   display: flex;
   align-items: center;
   gap: var(--fm-row-gap);
@@ -1388,9 +1389,6 @@ body.reading-mode-paper {
   background: var(--fm-badge-bg);
   color: var(--fm-badge-fg);
 }
-.md-fm-badge-inline {
-  margin-left: auto;
-}
 .md-fm-status-dot {
   flex-shrink: 0;
   width: var(--fm-badge-dot);
@@ -1476,6 +1474,21 @@ body.reading-mode-paper {
   grid-column: 1 / -1;
   white-space: pre-wrap;
   word-break: break-word;
+  /* A 50-line block scalar must not stretch the card open. */
+  max-height: var(--fm-value-raw-max-height);
+  overflow: hidden;
+}
+
+/* One-level nested map: the parent key labels column 1 and its children get
+ * their own key/value grid inside column 2, offset by a rule so the nesting
+ * reads at a glance. Cells reuse `.md-fm-key` / `.md-fm-value`. */
+.md-fm-subgrid {
+  display: grid;
+  grid-template-columns: var(--fm-subgrid-key-col) 1fr;
+  gap: var(--fm-subgrid-gap);
+  min-width: 0;
+  padding-left: var(--fm-subgrid-indent);
+  border-left: var(--fm-border-width) solid var(--fm-sep);
 }
 
 /* ---- Raw YAML view (opt-in third state) + invalid state's verbatim body. ---- */

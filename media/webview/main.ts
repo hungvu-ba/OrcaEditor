@@ -2315,7 +2315,11 @@ function renderPasteHtml(text: string): string {
   if (!renderer) {
     return '';
   }
-  const { html } = renderer.render(text);
+  // US-2.11 AC14: `scanJson: false`. This is not a whole-document render, and
+  // the JSON front-matter pre-scan only recognizes a leading `{` — pasting a
+  // JSON snippet would otherwise turn it into a front-matter card sitting in
+  // the middle of the document.
+  const { html } = renderer.render(text, false);
   const tmp = document.createElement('div');
   // Review finding (step-04 iteration 2, edge case hunter): this feeds the SAME
   // html:true markdown-it renderer as renderDocument, and its result reaches
