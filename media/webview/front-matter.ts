@@ -39,8 +39,8 @@ import { parse as parseToml } from 'smol-toml';
 import { FRONT_MATTER_CLASS, LINE_NUMBER_ATTR } from './render';
 import { escapeHtml, escapeAttr } from './dom-utils';
 
-/** Which delimiter the block was written with. Picks the parser and the fence, and nothing else — no field, badge or grid rendering branches on it. */
-export type FrontMatterFormat = 'yaml' | 'toml';
+/** Which delimiter the block was written with. Picks the parser and the fence, and nothing else — no field, badge or grid rendering branches on it. `json` has no delimiter at all (US-2.11). */
+export type FrontMatterFormat = 'yaml' | 'toml' | 'json';
 
 /** Retained from the removed scanner purely for `buildRawBodyHtml`'s `key:` syntax tint. */
 const KEY_VALUE_RE = /^([\w.-]+):\s*(.*)$/;
@@ -492,6 +492,13 @@ function buildBodyHtml(parsed: FrontMatterParseResult): string {
  * formats rather than duplicated under a second name.
  */
 function tintSplit(line: string, format: FrontMatterFormat): number {
+  if (format === 'json') {
+    // US-2.11 AC11: no JSON tinter is added, so every line renders untinted.
+    // An explicit branch rather than letting JSON fall through to YAML's
+    // `KEY_VALUE_RE`, which happens to miss a quoted `"key":` today but would
+    // start tinting the moment that regex is widened for some other reason.
+    return -1;
+  }
   if (format === 'toml') {
     if (TOML_SECTION_RE.test(line)) {
       return line.length;
@@ -529,12 +536,31 @@ function formatLabel(format: FrontMatterFormat): string {
 }
 
 /**
- * The source fences a block is re-emitted with. Shared by the Copy button and
- * turndown's `frontMatter` rule — the two must agree byte-for-byte, or a save
- * would re-fence the block into a format the user never wrote.
+ * The block's exact source text, rebuilt from `data-raw` plus its format.
+ * Shared by the Copy button and turndown's `frontMatter` rule — the two must
+ * agree byte-for-byte, or a save would re-fence the block into a format the
+ * user never wrote, so this owns BOTH the fence choice and the empty-block
+ * shape rather than leaving each consumer to reassemble them.
+ *
+ * JSON (US-2.11) carries no fence at all: its `data-raw` already spans the
+ * opening `{` through the matching `}`, unlike YAML/TOML where the delimiter
+ * lines sit outside the attribute.
  */
-export function frontMatterFence(format: string | null | undefined): string {
-  return format === 'toml' ? '+++' : '---';
+export function frontMatterSource(format: string | null | undefined, raw: string): string {
+  if (format === 'json') {
+    // The renderer cannot build a JSON block with an empty `data-raw` (the
+    // smallest recognizable source is `{}`), but this helper also runs over DOM
+    // the webview did not build — pasted or mutated markup reaches both the
+    // Copy handler and turndown. Returning `raw` there would emit nothing at
+    // all and the block would silently vanish from the file, where every other
+    // format degrades to a still-visible pair of fences.
+    return raw === '' ? '{}' : raw;
+  }
+  const fence = format === 'toml' ? '+++' : '---';
+  // An empty block is two fence lines, not three: the generic form would put a
+  // blank line between them that the author never wrote, and the file would
+  // gain a line on its first save.
+  return raw === '' ? `${fence}\n${fence}` : `${fence}\n${raw}\n${fence}`;
 }
 
 function buildInvalidHtml(raw: string, rawAttr: string, line: number, note: string, format: FrontMatterFormat): string {
@@ -631,15 +657,15 @@ export function initFrontMatterToggle(content: HTMLElement): void {
     if (copyBtn) {
       const wrapper = copyBtn.closest(`.${FRONT_MATTER_CLASS}`) as HTMLElement | null;
       const raw = wrapper?.getAttribute('data-raw') ?? '';
-      // The clipboard gets the SOURCE fences, byte-for-byte: a TOML block copied
-      // out under `---` would not paste back as the front matter it came from.
+      // The clipboard gets the SOURCE text, byte-for-byte: a TOML block copied
+      // out under `---` would not paste back as the front matter it came from,
+      // and a JSON block gains fences it never had.
       const format = wrapper?.getAttribute('data-fm-format') ?? 'yaml';
-      const fence = frontMatterFence(format);
       if (!navigator.clipboard) {
         return; // No Clipboard API in this context -- nothing to do (avoid a sync throw).
       }
       navigator.clipboard
-        .writeText(`${fence}\n${raw}\n${fence}`)
+        .writeText(frontMatterSource(format, raw))
         .then(() => {
           const pending = pendingCopyReset.get(copyBtn);
           if (pending !== undefined) {

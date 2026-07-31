@@ -10,7 +10,7 @@ import taskLists from 'markdown-it-task-lists';
 import frontMatterPlugin from 'markdown-it-front-matter';
 import katexPlugin from '@vscode/markdown-it-katex';
 import hljs from 'highlight.js/lib/common';
-import { buildFrontMatterHtml, parseFrontMatterFields, parseTomlFrontMatterFields, type FrontMatterFormat } from './front-matter';
+import { buildFrontMatterFields, buildFrontMatterHtml, parseFrontMatterFields, parseTomlFrontMatterFields, type FrontMatterFormat } from './front-matter';
 
 export interface PipelineConfig {
   breaks: boolean;
@@ -19,7 +19,12 @@ export interface PipelineConfig {
 
 export interface RenderResult {
   html: string;
-  /** Nội dung front-matter thô (không gồm dấu ---), nếu có. */
+  /**
+   * The captured front-matter source, if any. Delimiters are EXCLUDED for the
+   * fenced formats (`---`, `+++`) but INCLUDED for JSON, which has no fence and
+   * whose block is the braces themselves (US-2.11) — so this is the block's own
+   * text, not a uniformly fence-stripped body.
+   */
   frontMatter: string | undefined;
 }
 
@@ -102,6 +107,55 @@ export interface LineRange {
   end: number;
 }
 
+/**
+ * UTF-8 BOM — a Windows-authored file can carry one before the opening `{` of
+ * JSON front matter (US-2.11). Written as an escape, never as the literal
+ * character: a raw U+FEFF in source is invisible, and any tool that strips it
+ * would silently turn this into `''`, which `startsWith` matches on every
+ * document.
+ *
+ * Defensive in practice — VS Code keeps the BOM in the document's encoding
+ * rather than in `getText()`, so the webview should never see one. If it ever
+ * does, the BOM is dropped from the captured block and is NOT re-emitted on
+ * save; this branch does not promise BOM preservation.
+ */
+const BOM = '\uFEFF';
+
+/**
+ * Index of the `}` closing the object that opens at `start`, or -1 when the
+ * text ends with braces still open or inside an unterminated string literal.
+ *
+ * Braces count ONLY outside strings, and inside a string a backslash always
+ * consumes the next character — so `"a\\"` ends at its own closing quote (the
+ * escaped backslash does not escape it) and a `{` or `}` written inside a
+ * string value never miscounts.
+ */
+function matchingBraceEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}' && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // ---------------------------------------------------------------------------
 // Render: Markdown → HTML
 // ---------------------------------------------------------------------------
@@ -112,6 +166,15 @@ export class MarkdownRenderer {
   private capturedFrontMatterRange: [number, number] | undefined;
   /** Which delimiter produced the captured block — picks the parser in renderFrontMatterBlock and the fence turndown re-emits (US-2.10). */
   private capturedFrontMatterFormat: FrontMatterFormat = 'yaml';
+  /**
+   * The object `captureJsonFrontMatter` already parsed (US-2.11). Kept rather
+   * than re-parsed downstream: the pre-scan has to run `JSON.parse` anyway to
+   * decide whether the block is front matter at all, and a second parse in
+   * `front-matter.ts` would need a catch branch for a failure that, by
+   * construction, cannot happen — dead code the JSON path has no invalid state
+   * to route to.
+   */
+  private capturedJsonValue: unknown;
   /**
    * math_block có renderer riêng (@vscode/markdown-it-katex) không dùng
    * renderToken/renderAttrs nên attrSet không lộ ra HTML (giống fence trước
@@ -194,6 +257,7 @@ export class MarkdownRenderer {
     this.capturedFrontMatter = undefined;
     this.capturedFrontMatterRange = undefined;
     this.capturedFrontMatterFormat = 'yaml';
+    this.capturedJsonValue = undefined;
     this.capturedMathBlockRanges = [];
   }
 
@@ -240,14 +304,102 @@ export class MarkdownRenderer {
     return [...lines.slice(0, close + 1).map(() => ''), ...lines.slice(close + 1)].join('\n');
   }
 
-  /** Render markdown → HTML (kèm block front-matter nếu có). */
-  public render(markdown: string): RenderResult {
+  /**
+   * US-2.11: JSON front matter — a leading `{...}` with no delimiter at all.
+   * Same pre-scan architecture as `captureTomlFrontMatter` and the same
+   * both-entry-points requirement, but with a far stricter recognition rule:
+   * a fence-less `{` carries no marker of intent, and a `{`-leading paragraph
+   * is ordinary content, so anything less than valid JSON followed by a blank
+   * line stays exactly the text it is today.
+   *
+   * `scanJson === false` is the paste path (AC14): a pasted snippet that
+   * happens to start with `{` must not become a front-matter card in the
+   * middle of the document.
+   */
+  private captureJsonFrontMatter(markdown: string, scanJson: boolean): string {
+    // Detection order is YAML → TOML → bare `{`, first match wins. A captured
+    // block already means line 1 was a fence, never a brace, but the guard is
+    // written out rather than left implied by the earlier scans' shape.
+    if (!scanJson || this.capturedFrontMatter !== undefined) {
+      return markdown;
+    }
+    const start = markdown.startsWith(BOM) ? BOM.length : 0;
+    // No leading whitespace and no leading blank line: the very first character
+    // after an optional BOM must be the brace itself.
+    if (markdown[start] !== '{') {
+      return markdown;
+    }
+    const close = matchingBraceEnd(markdown, start);
+    if (close === -1) {
+      return markdown; // EOD with braces still open, or inside an unterminated string.
+    }
+    // Drop CRs for the same reason the TOML scan does: `escapeAttr` does not
+    // encode `\r`, so what survives the `data-raw` round trip is the LF form
+    // anyway, and the host reconciles back to the document's own EOL.
+    //
+    // A LONE `\r` is deleted rather than folded to `\n`. VS Code does not treat
+    // it as a line separator, but the HTML parser folds a bare CR to a newline
+    // when reading the attribute back — so folding it here too would make the
+    // block grow a line the author never typed on the very first save. It
+    // cannot be significant content either: JSON forbids a raw control
+    // character inside a string, so outside one it is only whitespace.
+    const raw = markdown
+      .slice(start, close + 1)
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '');
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return markdown; // Not front matter at all -- a `{`-leading paragraph must never be misdetected.
+    }
+    const lineEnd = markdown.indexOf('\n', close);
+    // The closing brace must be the last non-whitespace character on its line...
+    const trailer = lineEnd === -1 ? markdown.slice(close + 1) : markdown.slice(close + 1, lineEnd);
+    if (!/^[ \t]*\r?$/.test(trailer)) {
+      return markdown;
+    }
+    // ...and what follows must be end-of-document or at least one blank line —
+    // a whitespace-only line terminated by `\n` or `\r\n`, so a CRLF document
+    // behaves identically. The `|$` alternative makes end-of-document tolerate
+    // trailing spaces/tabs exactly as the trailer check above already does; the
+    // two boundaries are one line apart and would otherwise disagree about the
+    // same whitespace.
+    const rest = lineEnd === -1 ? '' : markdown.slice(lineEnd + 1);
+    if (!/^[ \t]*(\r?\n|$)/.test(rest)) {
+      return markdown;
+    }
+    this.capturedFrontMatter = raw;
+    this.capturedJsonValue = value;
+    // Same [start0, endExclusive0] shape the YAML token.map and the TOML scan
+    // carry, so both consumers below read it unchanged.
+    const blockLineCount = markdown.slice(0, lineEnd === -1 ? markdown.length : lineEnd).split('\n').length;
+    this.capturedFrontMatterRange = [0, blockLineCount];
+    this.capturedFrontMatterFormat = 'json';
+    // The region becomes the SAME number of blank lines, or the block would
+    // render twice — once as the prepended card, once as an ordinary paragraph
+    // — and every downstream data-line would shift.
+    return '\n'.repeat(blockLineCount - 1) + (lineEnd === -1 ? '' : markdown.slice(lineEnd));
+  }
+
+  /** Run the pre-scans that must happen BEFORE markdown-it, in detection order (TOML, then JSON), returning the markdown with any matched region replaced by blank lines. */
+  private capturePreScannedFrontMatter(markdown: string, scanJson: boolean): string {
+    return this.captureJsonFrontMatter(this.captureTomlFrontMatter(markdown), scanJson);
+  }
+
+  /**
+   * Render markdown → HTML (kèm block front-matter nếu có).
+   *
+   * `scanJson` is false only on the paste/insert path (US-2.11 AC14) — every
+   * whole-document render leaves it at its default.
+   */
+  public render(markdown: string, scanJson = true): RenderResult {
     this.resetCaptureState();
-    let html = this.md.render(this.captureTomlFrontMatter(markdown));
+    let html = this.md.render(this.capturePreScannedFrontMatter(markdown, scanJson));
     const frontMatter = this.capturedFrontMatter;
     if (frontMatter !== undefined) {
       const [start0] = this.capturedFrontMatterRange ?? [0, 0];
-      html = renderFrontMatterBlock(frontMatter, start0 + 1, this.capturedFrontMatterFormat) + html;
+      html = renderFrontMatterBlock(frontMatter, start0 + 1, this.capturedFrontMatterFormat, this.capturedJsonValue) + html;
     }
     return { html, frontMatter };
   }
@@ -271,7 +423,7 @@ export class MarkdownRenderer {
    */
   public computeTopLevelBlockRanges(markdown: string): TopLevelBlockRange[] {
     this.resetCaptureState();
-    const tokens = this.md.parse(this.captureTomlFrontMatter(markdown), {});
+    const tokens = this.md.parse(this.capturePreScannedFrontMatter(markdown, true), {});
     const groups: TopLevelBlockRange[] = [];
     if (this.capturedFrontMatter !== undefined) {
       const [start0, end0] = this.capturedFrontMatterRange ?? [0, 0];
@@ -414,7 +566,15 @@ interface BlockToken extends TokenLike {
 }
 
 /** US-2.7 redesign: card-building logic lives in front-matter.ts (mirrors Mermaid/PlantUML's shared frame logic in diagram-frame.ts) — this stays a thin delegation so the `*_CLASS` constants above keep living here per existing convention. The format picks the parser; everything downstream of it is format-agnostic (US-2.10). */
-function renderFrontMatterBlock(raw: string, line: number, format: FrontMatterFormat): string {
-  const parsed = format === 'toml' ? parseTomlFrontMatterFields(raw) : parseFrontMatterFields(raw);
+function renderFrontMatterBlock(raw: string, line: number, format: FrontMatterFormat, jsonValue: unknown): string {
+  const parsed =
+    format === 'json'
+      ? // Already parsed by the pre-scan, which had to succeed for the block to
+        // be front matter at all — so JSON feeds US-2.9's parser-agnostic
+        // adapter directly and has no invalid state of its own.
+        buildFrontMatterFields(jsonValue)
+      : format === 'toml'
+        ? parseTomlFrontMatterFields(raw)
+        : parseFrontMatterFields(raw);
   return buildFrontMatterHtml(raw, line, parsed, format);
 }

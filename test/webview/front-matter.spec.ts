@@ -11,7 +11,7 @@
  * deliberately changed — duplicate keys resolve last-wins, and YAML that fails
  * to parse degrades to verbatim raw rows instead of the invalid error frame.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
 
 const MULTI_FIELD = '---\ntitle: Sample Document\ntype: spec\nstatus: draft\ncreated: 2026-07-27\ntags: [a, b]\n---\n\n# Heading\n\nBody text.\n';
@@ -477,4 +477,147 @@ test('TOML-only value types display their own form, never a UTC-shifted or unser
   await expect(grid).toContainText('2025-10-30');
   await expect(grid).toContainText('07:32:00');
   await expect(grid).not.toContainText('1970-01-01');
+});
+
+// ---------------------------------------------------------------------------
+// US-2.11 — JSON front matter (`{...}`, no delimiter at all). The card itself
+// is US-2.9's, unchanged; what is new and worth a real browser here is the
+// fence-less Copy payload, the untinted RAW view, and the paste path, which
+// must keep treating a `{`-leading snippet as ordinary content.
+// ---------------------------------------------------------------------------
+
+const JSON_DOC =
+  '{\n  "title": "JSON Doc",\n  "type": "post",\n  "status": "draft",\n  "created": "2026-07-27",\n  "tags": ["a", "b"]\n}\n\n# Heading\n\nBody text.\n';
+const JSON_RAW = '{\n  "title": "JSON Doc",\n  "type": "post",\n  "status": "draft",\n  "created": "2026-07-27",\n  "tags": ["a", "b"]\n}';
+const JSON_EMPTY = '{}\n\n# Heading\n';
+
+/** Stub the clipboard and return what the Copy button wrote. */
+async function copiedText(page: Page): Promise<string | null> {
+  await page.evaluate(() => {
+    (window as unknown as { __copied: string | null }).__copied = null;
+    navigator.clipboard.writeText = (t: string) => {
+      (window as unknown as { __copied: string | null }).__copied = t;
+      return Promise.resolve();
+    };
+  });
+  const fm = page.locator('.md-front-matter');
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-copy').click();
+  return page.evaluate(() => (window as unknown as { __copied: string | null }).__copied);
+}
+
+test('JSON front matter gets the same collapsed row and expanded card as YAML', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-format', 'json');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-row-title')).toHaveText('JSON Doc');
+  await expect(fm.locator('.md-fm-count')).toHaveText('5 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+  await expect(fm.locator('.md-fm-title')).toHaveText('JSON Doc');
+  await expect(fm.locator('.md-fm-badges')).toContainText('post');
+  await expect(fm.locator('.md-fm-badges')).toContainText('draft');
+  // JSON has no native date type, so a date-like string is promoted exactly as
+  // any other string — displayed verbatim, never reformatted or UTC-shifted.
+  await expect(fm.locator('.md-fm-badges')).toContainText('created 2026-07-27');
+  await expect(fm.locator('.md-fm-grid')).toContainText('tags');
+});
+
+test('the format tag reads FRONT MATTER · JSON in the collapsed row and the expanded card', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · JSON');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-label')).toHaveText('FRONT MATTER · JSON');
+});
+
+test('an empty {} block is a valid 0-field card with a working toggle, and never the invalid frame', async ({ page }) => {
+  await openEditor(page, JSON_EMPTY);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm).toHaveAttribute('data-fm-view', 'collapsed');
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields');
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm).toHaveAttribute('data-fm-view', 'expanded');
+});
+
+test('duplicate keys resolve last-wins in the grid while RAW keeps every source line', async ({ page }) => {
+  await openEditor(page, '{\n  "title": "Dup",\n  "n": 1,\n  "n": 2\n}\n\n# Heading\n');
+  const fm = page.locator('.md-front-matter');
+  // The count reflects PARSED keys, not raw lines.
+  await expect(fm.locator('.md-fm-count')).toHaveText('2 fields');
+
+  await fm.locator('.md-fm-toggle').click();
+  await expect(fm.locator('.md-fm-grid')).toContainText('2');
+  await expect(fm.locator('.md-fm-grid')).not.toContainText('1');
+
+  await fm.locator('.md-fm-raw-toggle').click();
+  const rawBody = fm.locator('.md-fm-raw-body');
+  await expect(rawBody).toContainText('"n": 1');
+  await expect(rawBody).toContainText('"n": 2');
+});
+
+test('Copy writes the JSON block back with no fences added at all', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  expect(await copiedText(page)).toBe(JSON_RAW);
+  await expect(page.locator('.md-fm-live')).toHaveText('Copied front matter JSON');
+});
+
+test('an empty YAML block copies as two fence lines, not three', async ({ page }) => {
+  // The shared source builder owns the empty-block shape now, so Copy no longer
+  // emits the blank line between the fences that turndown never did.
+  await openEditor(page, EMPTY_FIELD);
+  expect(await copiedText(page)).toBe('---\n---');
+});
+
+test('the RAW view shows JSON verbatim and untinted, and its buttons name the format', async ({ page }) => {
+  await openEditor(page, JSON_DOC);
+  const fm = page.locator('.md-front-matter');
+  await expect(fm.locator('.md-fm-raw-toggle')).toHaveAttribute('title', 'Show raw JSON');
+  await expect(fm.locator('.md-fm-copy')).toHaveAttribute('aria-label', 'Copy front matter JSON');
+
+  await fm.locator('.md-fm-toggle').click();
+  await fm.locator('.md-fm-raw-toggle').click();
+  const rawBody = fm.locator('.md-fm-raw-body');
+  await expect(rawBody).toBeVisible();
+  // Whole-text equality, not a substring: a substring check would still pass if
+  // every line silently lost its last character, which is exactly what a
+  // mishandled "no tint" sentinel (`line.slice(0, -1)`) would produce.
+  expect(await rawBody.textContent()).toBe(JSON_RAW);
+  // No JSON tinter is added, so not a single key span exists — YAML's `key:`
+  // rule must not be allowed to half-match JSON lines either.
+  await expect(rawBody.locator('.md-fm-yaml-key')).toHaveCount(0);
+});
+
+test('pasting a JSON snippet mid-document inserts ordinary content, not a front-matter card', async ({ page }) => {
+  await openEditor(page, '# Heading\n\nBody text.\n');
+  await expect(page.locator('.md-front-matter')).toHaveCount(0);
+
+  await page.locator('#content p').first().evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    el.closest<HTMLElement>('#content')?.focus();
+  });
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', '{\n  "pasted": 1\n}\n\nmore text\n');
+    document.getElementById('content')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+
+  await expect(page.locator('#content')).toContainText('"pasted": 1');
+  await expect(page.locator('.md-front-matter')).toHaveCount(0);
+});
+
+test('a JSON wrapper whose data-raw is empty still serializes a visible block, not nothing', async ({ page }) => {
+  // Review finding (step-04, edge case hunter): the renderer cannot produce
+  // this, but `frontMatterSource` also runs over DOM the webview did not build.
+  // Returning the empty string there would make the block vanish from the file.
+  await openEditor(page, JSON_EMPTY);
+  await page.evaluate(() => document.querySelector('.md-front-matter')!.setAttribute('data-raw', ''));
+  expect(await copiedText(page)).toBe('{}');
 });
