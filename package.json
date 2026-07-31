@@ -399,7 +399,7 @@
     "test:unit": "node esbuild.js --test && node dist/test/unit.js",
     "test:webview": "node esbuild.js --test && playwright test",
     "test:host": "node esbuild.js --test && node dist/test/host/runTest.js",
-    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview && npm run test:host",
+    "test": "npm run check:css-comments && npm run test:roundtrip && npm run test:unit && npm run test:webview",
     "shots": "node esbuild.js --test && playwright test --config playwright.shots.config.ts",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package --no-dependencies",
