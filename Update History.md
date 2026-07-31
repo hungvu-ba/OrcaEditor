@@ -548,3 +548,4 @@
 | 1.0.0 | 2026-07-31 | Feature: a leading `{...}` block that is valid JSON now renders as a front-matter card, and saves back with no fence added. |
 | 1.0.0 | 2026-07-31 | Fix: Copy on an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes. |
 | 1.1.0 | 2026-07-31 | Release: bumped version to 1.1.0, consolidating YAML/TOML/JSON front matter parsing and the collapse/expand fix into one [1.1.0] entry in CHANGELOG.md. |
+| 1.1.0 | 2026-07-31 | Chore: dropped `test:host` from the `npm test`/release gate — its VS Code download kept timing out on this network; still runnable manually via `npm run test:host`. |
