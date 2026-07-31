@@ -2,34 +2,31 @@
 
 A fast, clean WYSIWYG editor for `.md` files: **preview Markdown with pixel-accurate rendering while editing directly in the preview**, drag-and-drop to reorder blocks/tables/lists, search across your whole project, and use a rich toolbar — all while every change syncs back to the `.md` file pristine and diff-friendly.
 
-## What's New in 0.9.0
+## What's New in 1.1.0
 
-Three headline additions this release — a keyboard-driven trigger system, a cross-document entity model, and a redesigned Reading Mode.
+Two headline additions this release — threaded review comments and expanded front matter support (YAML, TOML, JSON).
 
 ![Editor toolbar](docs/features-0.9.0/01-toolbar.png)
 
-### `@` Mention & `/` Commands
+### Review Comments
 
-Type a trigger character and pick without leaving the keyboard — a real focused input with native caret + IME, so the marker stays inline and only the picked result is written back.
+Leave threaded comments anchored to any line, right in the WYSIWYG editor — reply, resolve, reopen, or close without leaving the document.
 
-- **`@`** — mention a declared entity; the link shows its full name (`UC01 Submit Leave Request`) while the URL fragment stays clean (`#UC01`).
-- **`/`** — a block menu (Heading 1–3, lists, table, code, Mermaid…) and commands from the line start.
+- **Anchored to source lines**: a gutter pin marks each thread; click the highlighted text or the pin to open it.
+- **Full lifecycle**: reply, resolve, reopen, and close, with author and timestamp tracked per comment.
+- **Portable**: comments live in a sidecar file next to the `.md`, so the document itself stays clean.
 
-| `@` Mention | `/` Commands |
-| --- | --- |
-| ![@ mention popup](docs/features-0.9.0/04-at-mention-popup.png) | ![/ block menu](docs/features-0.9.0/05-slash-block-menu.png) |
+![Comment thread popup](docs/features-1.1.0/01-comment-thread.png)
 
-### Entity Declare & Reference
+### Front Matter — YAML, TOML & JSON
 
-Turn any block into a navigable, searchable entity with a `caption::NS_ID` declaration — indexed automatically to power `@`-mention search.
+Front matter now renders as a structured, collapsible card instead of raw text, parsed by a real parser so nested maps, lists, and block scalars display correctly.
 
-- **Cmd/Ctrl-click** a mention to open the target file *and* jump to its declaration (the badge flashes).
-- **Hover** shows the entity name plus a short preview of the following text.
-- **Broken references** get a warning marker; its fix popup re-points the link at the correct file.
+- **YAML** (`---`), **TOML** (`+++`), and **JSON** (`{...}`) front matter all render as the same card.
+- Collapse/expand to save space, or toggle **Raw** to see the exact source.
+- Round-trips byte-for-byte on save — no reformatting of your fences.
 
-| Declaration badge | Mention pill |
-| --- | --- |
-| ![Declaration badge](docs/features-0.9.0/02-declaration-badge.png) | ![Entity mention pill](docs/features-0.9.0/03-entity-mention-pill.png) |
+![Front matter card](docs/features-1.1.0/02-front-matter.png)
 
 ### Reading Mode — 3 themes
 
