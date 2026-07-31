@@ -8,14 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
--   Front matter is now parsed by a real YAML parser (`js-yaml`), so nested maps, block-style lists, and block scalars display as structured fields instead of falling back to raw text.
--   TOML front matter (`+++` fences, e.g. Hugo sites) now renders as the same structured card as YAML, and saves back with its own fences.
--   A leading `{...}` block that is valid JSON now renders as a front-matter card, and saves back with no fence added.
-
-### Fixed
-
--   The front-matter collapse/expand toggle now shows for every field count, not just when there are more than 2 fields.
--   Copying an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes.
+-   Front matter now supports YAML, TOML, and JSON formats.
 
 ## \[1.0.0\] - 2026-07-29
 
