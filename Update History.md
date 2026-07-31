@@ -542,3 +542,5 @@
 | 0.10.0 | 2026-07-29 | Fix: the drag-handle hover highlight on a task-list item now extends past the checkbox instead of cutting through its left edge. |
 | 0.10.0 | 2026-07-29 | Fix: a still-present comment was flagged "foreign" once its anchored text got a markdown link, because the link's raw target slug split the belonging match. |
 | 1.0.0 | 2026-07-29 | Feature: added Comment feature. |
+| 1.0.0 | 2026-07-30 | Fix: front matter's collapse/expand toggle now shows for every field count, not just when there are more than 2 fields. |
+| 1.0.0 | 2026-07-31 | Feature: front matter is parsed by a real YAML parser, so nested maps, block-style lists and block scalars display as structured fields. |

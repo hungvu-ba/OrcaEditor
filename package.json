@@ -410,6 +410,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
+    "@types/js-yaml": "^4.0.9",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
     "@types/turndown": "^5.0.5",
@@ -428,6 +429,7 @@
     "@plantuml/core": "^1.2026.6",
     "@vscode/markdown-it-katex": "^1.1.1",
     "highlight.js": "^11.10.0",
+    "js-yaml": "^4.3.0",
     "katex": "^0.16.11",
     "markdown-it": "^14.1.0",
     "markdown-it-front-matter": "^0.2.4",
