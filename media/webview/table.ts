@@ -987,19 +987,18 @@ export function insertTable(): void {
 // dragged row lands at the very first/last gap) reproduced this on every
 // drag. `finishRowMove` below moves the live `<tr>` node directly instead —
 // no HTML serialize/reparse round-trip, so there's nothing for the browser
-// to misparse. Trade-off: unlike the column move below (still execCommand,
-// see its own comment), a row move no longer lands on the native undo stack
+// to misparse. Trade-off: a row move no longer lands on the native undo stack
 // as its own step — accepted over the alternative of corrupting the table.
 //
 // Column reorder is a DIFFERENT shape — a "column" isn't a DOM sibling run,
-// it's one cell per row scattered across every <tr>. Rather than juggling N
-// separate Ranges (which would cost N undo steps, breaking F1), the whole
-// <table> is cloned, every row's cells are reordered in the clone, and the
-// ENTIRE table is swapped in with a single Range (selectNode(table)) +
-// execCommand('insertHTML') call — one undo step for the whole column move,
-// same technique, applied to a subtree-rebuild instead of a sibling-reorder.
-// Each cell keeps its own align/style attributes since real cell elements
-// move as a unit — no separate column-alignment bookkeeping needed.
+// it's one cell per row scattered across every <tr>. `finishColMove` moves
+// each row's live cell node in place, same as the row move. It used to clone
+// the table and swap it in via execCommand('insertHTML') for one undo step,
+// but the swapped-in <table> is a fresh scroll-island element (scrollLeft 0),
+// so a wide, horizontally scrolled table jumped back to its first column on
+// every drop. Same undo trade-off as the row move. Each cell keeps its own
+// align/style attributes (including the inline widths fitTableColumns set)
+// since real cell elements move as a unit — no separate column bookkeeping.
 // ---------------------------------------------------------------------------
 
 type TableDragKind = 'row' | 'col';
@@ -1288,7 +1287,7 @@ function finishRowMove(): void {
   ctx.scheduleSync();
 }
 
-/** Column move: whole-table rebuild + single execCommand — see the block comment above this section. */
+/** Column move: live cell move per row, table element kept — see the block comment above this section. */
 function finishColMove(): void {
   const table = tdTable;
   if (!table) {
@@ -1296,34 +1295,21 @@ function finishColMove(): void {
   }
   const fromIdx = tdColIndex;
   const gap = tdCurrentGap;
-  const clone = table.cloneNode(true) as HTMLTableElement;
   const insertionIndex = gap > fromIdx ? gap - 1 : gap;
-  for (const row of Array.from(clone.rows)) {
+  for (const row of Array.from(table.rows)) {
     const cells = Array.from(row.cells);
     const moved = cells[fromIdx];
     if (!moved) {
       continue;
     }
-    cells.splice(fromIdx, 1);
-    cells.splice(insertionIndex, 0, moved);
-    row.replaceChildren(...cells);
+    // `gap` indexes the pre-move order; `undefined` (gap past the last cell) means append.
+    row.insertBefore(moved, cells[gap] ?? null);
   }
-  const prevSibling = table.previousElementSibling;
-  const parent = table.parentElement;
-  const range = document.createRange();
-  range.selectNode(table);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  document.execCommand('insertHTML', false, clone.outerHTML);
-
-  const newTable = (prevSibling ? prevSibling.nextElementSibling : parent?.firstElementChild) as HTMLTableElement | null;
-  if (newTable) {
-    fitTableColumns(newTable);
-    const headerCell = newTable.tHead?.rows[0]?.cells[insertionIndex];
-    if (headerCell) {
-      ctx.dom.placeCaretIn(headerCell, true);
-    }
+  // No fitTableColumns: per-cell widths moved with their cells, and its strip-then-measure
+  // pass can shrink scrollWidth mid-layout and clamp the island's scrollLeft.
+  const headerCell = table.tHead?.rows[0]?.cells[insertionIndex];
+  if (headerCell) {
+    ctx.dom.placeCaretIn(headerCell, true);
   }
   ctx.scheduleSync();
 }
@@ -1511,7 +1497,7 @@ function onTdMouseUp(): void {
     tdCleanupVisuals();
     if (shouldMove) {
       // Clear the highlight before the move rebuilds the DOM (row reorder replaces
-      // rows via Range + insertHTML; column reorder clones the whole table) —
+      // rows via Range + insertHTML; column reorder used to clone the whole table) —
       // otherwise tdResetState()'s own clear below only touches the stale,
       // now-detached original row/table, leaving the newly-created node
       // highlighted forever (bug 0715 #12).

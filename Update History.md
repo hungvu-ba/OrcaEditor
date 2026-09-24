@@ -573,3 +573,4 @@
 | 1.2.1 | 2026-09-24 | Release: bumped version to 1.2.1, consolidating the list-item handle menu, block-handle Delete, and Cut/Copy/Paste fixes since 1.2.0 into one [1.2.1] entry in CHANGELOG.md. |
 | 1.2.1 | 2026-09-24 | Feature: the line-number gutter (`orcaEditor.showLineNumbers`) is now hidden by default; enable it in Settings to show it. |
 | 1.2.1 | 2026-09-24 | Fix: with line numbers off, the gutter no longer draws numbers over the text — ResizeObserver/drag-drop repaints are now hidden by CSS. |
+| 1.2.1 | 2026-09-24 | Fix: dragging a table column to a new position no longer rebuilds the table or resets a wide table's horizontal scroll to the left. |
