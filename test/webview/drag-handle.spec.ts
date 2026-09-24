@@ -9,7 +9,7 @@
  * dispatch (Plan/WEBVIEW_TEST.md).
  */
 import { test, expect, type Page, type Locator } from '@playwright/test';
-import { openEditor, waitForEdit, seedCommentThreads } from './_harness';
+import { openEditor, waitForEdit, clearPosted, seedCommentThreads } from './_harness';
 
 /** Right-edge padding (px) the li handle adds past the marker/checkbox it covers (bug General #2,
  * `LI_HANDLE_MARKER_COVER_PAD_PX` in drag-drop.ts) — kept in sync by hand, same as the pre-existing
@@ -1110,6 +1110,92 @@ test('the handle menu has "Delete" right below "Move down", and clicking it remo
   expect(md).not.toContain('Alpha paragraph.');
   expect(md).toContain('Beta paragraph.');
   await expect(popup).toHaveCount(0);
+});
+
+/** Collapses runs of spaces so list assertions don't depend on the serializer's marker padding. */
+function squashBullets(md: string): string {
+  return md.replace(/ +/g, ' ');
+}
+
+/** Clicks (no movement) the li handle of the item containing `text` and returns the open menu. */
+async function openLiMenu(page: Page, text: string): Promise<Locator> {
+  // Hover the item's own first row — its center can land on a nested child item instead.
+  const box = await page.locator('li', { hasText: text }).last().boundingBox();
+  if (!box) {
+    throw new Error('li has no bounding box');
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + 5);
+  const hb = await page.locator('.dd-li-handle').boundingBox();
+  if (!hb) {
+    throw new Error('li handle has no bounding box');
+  }
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  const popup = page.locator('.dd-menu-popup:visible');
+  await expect(popup).toBeVisible();
+  return popup;
+}
+
+test('a click on the li handle opens a Move up / Move down / Delete menu', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- Apple\n- Banana\n- Cherry\n`);
+  const popup = await openLiMenu(page, 'Apple');
+  expect(await popup.locator('.dd-menu-item').allTextContents()).toEqual(['Move up', 'Move down', 'Delete']);
+  await expect(popup.locator('.dd-menu-item', { hasText: 'Move up' })).toBeDisabled();
+  await expect(page.locator('li', { hasText: 'Apple' })).toHaveClass(/dd-hover-outline/);
+});
+
+test('li menu "Move down" swaps the item with its next sibling, carrying its nested subtree', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- Apple\n  - Seed\n- Banana\n- Cherry\n`);
+  const popup = await openLiMenu(page, 'Apple');
+  await popup.locator('.dd-menu-item', { hasText: 'Move down' }).click();
+  const md = await waitForEdit(page);
+  expect(squashBullets(md)).toContain('- Banana\n- Apple\n - Seed\n- Cherry');
+});
+
+test('li menu "Move up" swaps the item with its previous sibling', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- Apple\n- Banana\n- Cherry\n`);
+  const popup = await openLiMenu(page, 'Cherry');
+  await popup.locator('.dd-menu-item', { hasText: 'Move up' }).click();
+  const md = await waitForEdit(page);
+  expect(squashBullets(md)).toContain('- Apple\n- Cherry\n- Banana');
+});
+
+test('li menu "Delete" removes the item with its subtree; deleting a nested sole child drops its sublist', async ({
+  page,
+}) => {
+  await openEditor(page, `# Heading\n\n- Apple\n  - Seed\n- Banana\n`);
+  let popup = await openLiMenu(page, 'Seed');
+  await popup.locator('.dd-menu-item', { hasText: 'Delete' }).click();
+  let md = await waitForEdit(page);
+  expect(squashBullets(md)).toContain('- Apple\n- Banana');
+  expect(md).not.toContain('Seed');
+
+  await clearPosted(page);
+  popup = await openLiMenu(page, 'Apple');
+  await popup.locator('.dd-menu-item', { hasText: 'Delete' }).click();
+  md = await waitForEdit(page);
+  expect(md).not.toContain('Apple');
+  expect(squashBullets(md)).toContain('- Banana');
+});
+
+test('li menu "Delete" on the only item of a list removes the whole list block', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- Apple\n\nTail paragraph.\n`);
+  const popup = await openLiMenu(page, 'Apple');
+  await popup.locator('.dd-menu-item', { hasText: 'Delete' }).click();
+  const md = await waitForEdit(page);
+  expect(md).not.toContain('Apple');
+  expect(md).toContain('Tail paragraph.');
+  await expect(page.locator('#content ul')).toHaveCount(0);
+});
+
+test('Delete key with an li menu open removes that item', async ({ page }) => {
+  await openEditor(page, `# Heading\n\n- Apple\n- Banana\n`);
+  await openLiMenu(page, 'Apple');
+  await page.keyboard.press('Delete');
+  const md = await waitForEdit(page);
+  expect(md).not.toContain('Apple');
+  expect(squashBullets(md)).toContain('- Banana');
 });
 
 test('hovering a table cell shows both the row handle and the column handle', async ({ page }) => {

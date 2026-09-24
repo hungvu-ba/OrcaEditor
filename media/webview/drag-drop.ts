@@ -568,6 +568,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
     }
 
+    showMenu(block, span, anchorX, anchorY);
+  }
+
+  /** Shows the already-filled menu at the handle click point and marks `target` (outlining
+   * `outlined`) as the menu's selected block. */
+  function showMenu(target: HTMLElement, outlined: HTMLElement[], anchorX: number, anchorY: number): void {
     menuPopupEl.style.display = 'block';
     // Anchor the popup at the handle click point (bug General R3 #1) rather than the whole block's
     // rect — a tall block/section used to open the menu far below where the handle was clicked. A
@@ -581,10 +587,68 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Track the block by reference only (bug General R2 #1) — no native text selection; the
     // `.dd-hover-outline` outline is the "selected" cue and the Delete/Backspace handler keys
     // off `menuTargetBlock`, so atom blocks / tables still delete cleanly as whole elements.
-    menuTargetBlock = block;
+    menuTargetBlock = target;
     // Outline the whole section a "Move" would carry (bug General #2), reusing the span already
     // computed above — matches the section-spanning handle so the menu targets what it says.
-    span.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
+    outlined.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
+  }
+
+  /** Li handle click (no drag): Move up / Move down swap the item with its own sibling (nested
+   * subtree carried), Delete removes it — the li counterpart of `openMenu`. */
+  function openLiMenu(li: HTMLLIElement, anchorX: number, anchorY: number): void {
+    closeMenu();
+    if (!content.contains(li)) {
+      return;
+    }
+    const prev = li.previousElementSibling;
+    const next = li.nextElementSibling;
+    addMenuItem('Move up', !prev, () => moveLiBefore(li, prev));
+    addMenuItem('Move down', !next, () => moveLiBefore(li, next?.nextElementSibling ?? null));
+    addMenuItem('Delete', false, () => deleteSelectedLi(li));
+    showMenu(li, [li], anchorX, anchorY);
+  }
+
+  /** Re-inserts `li` into its own list before `beforeEl` (null = append) — the same
+   * `applyLiReparentMove` + `normalizeListDom` path a li drop uses (`finishLiMove`). */
+  function moveLiBefore(li: HTMLLIElement, beforeEl: Element | null): void {
+    const container = li.parentElement;
+    if (!container || !content.contains(li)) {
+      return;
+    }
+    if (li === hoveredLi) {
+      setHighlightedLi(null);
+    }
+    const movedEl = applyLiReparentMove(li, { container, beforeEl });
+    normalizeListDom(content);
+    if (movedEl && content.contains(movedEl)) {
+      deps.dom.placeCaretIn(movedEl);
+    }
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    refresh();
+  }
+
+  /** Removes `li` with its subtree. A sole item takes its emptied list with it — a top-level list
+   * goes through `deleteSelectedBlock`; a nested one leaves its owner item behind. */
+  function deleteSelectedLi(li: HTMLLIElement): void {
+    closeMenu();
+    const list = li.parentElement;
+    if (!list || !content.contains(li)) {
+      return;
+    }
+    const target = list.children.length === 1 ? list : li;
+    if (draggableBlocks().includes(target)) {
+      deleteSelectedBlock(target);
+      return;
+    }
+    const caretTarget = li.previousElementSibling ?? li.nextElementSibling ?? list.parentElement?.closest('li');
+    const range = document.createRange();
+    range.selectNode(target);
+    range.deleteContents();
+    deps.dom.placeCaretIn(caretTarget && content.contains(caretTarget) ? caretTarget : content.lastElementChild);
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    refresh();
   }
 
   document.addEventListener('mousedown', (e) => {
@@ -605,7 +669,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // native delete at whatever caret happens to be focused never runs alongside it.
     if ((e.key === 'Delete' || e.key === 'Backspace') && menuTargetBlock) {
       e.preventDefault();
-      deleteSelectedBlock(menuTargetBlock);
+      if (menuTargetBlock instanceof HTMLLIElement) {
+        deleteSelectedLi(menuTargetBlock);
+      } else {
+        deleteSelectedBlock(menuTargetBlock);
+      }
       return;
     }
     // A bare modifier keydown is the start of a combo (e.g. Ctrl+Z), not an action on its own —
@@ -1403,7 +1471,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (hoveredBlock !== menuTargetBlock) {
       setHighlightedBlock(null);
     }
-    setHighlightedLi(null);
+    // Same for an li menu (opened just before this in the click path): drop the hover reference
+    // but keep the outline, which closeMenu owns.
+    if (hoveredLi === menuTargetBlock) {
+      hoveredLi = null;
+    } else {
+      setHighlightedLi(null);
+    }
     if (hoveredTableBlock !== menuTargetBlock) {
       setHighlightedTableBlock(null);
     }
@@ -1556,13 +1630,15 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     } else {
       // Never crossed DRAG_THRESHOLD_PX — a click, not a drag. For the block handle
       // (armedBlock set), that click opens the same menu the removed kebab button used
-      // to (bug 0716 #5). The li/row/col handles never set armedBlock, so they stay
-      // drag-only (spec: no new li/row/col menu).
+      // to (bug 0716 #5); the li handle opens its own Move up/down/Delete menu. The
+      // row/col handles stay drag-only.
       cleanupVisuals();
       if (armedBlock) {
         // startX/startY still hold this click's handle-mousedown point (reset happens below in
         // resetState) — anchor the menu there so it opens at the cursor (bug General R3 #1).
         openMenu(armedBlock, startX, startY);
+      } else if (kind === 'li' && liDragged) {
+        openLiMenu(liDragged, startX, startY);
       }
     }
     resetState();
@@ -1679,7 +1755,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   // removal is folded into the existing `mouseleave` below (which already runs
   // the leftward climb), so both effects share one exit handler.
   liHandleEl.addEventListener('mouseenter', () => {
-    if (state !== 'idle') {
+    if (state !== 'idle' || isMenuOpen()) {
       return;
     }
     hoveredLi?.classList.add(DD_HOVER_OUTLINE_CLASS);
@@ -1728,8 +1804,10 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Bug #3: leaving the glyph drops its hover preview outline. The climb below
     // only re-targets which handle shows (a bare gutter band is not a glyph, so it
     // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
-    // return-to-#content path — so clear it unconditionally here.
-    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
+    // return-to-#content path — so clear it here, unless an open li menu owns the outline.
+    if (!isMenuOpen()) {
+      hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
+    }
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (

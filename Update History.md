@@ -569,3 +569,4 @@
 | 1.2.0 | 2026-09-24 | Fix: `.vscodeignore` now excludes `.map/` and `.github/` so codemap tooling output no longer ships in the packaged VSIX. |
 | 1.2.0 | 2026-09-24 | Fix: right-click menu Cut/Copy/Paste now work — routed through the async Clipboard API instead of blocked `execCommand` calls. |
 | 1.2.0 | 2026-09-24 | Feature: block-handle menu gains a "Delete" item below "Move down" that removes the selected block, same as the Delete/Backspace shortcut. |
+| 1.2.0 | 2026-09-24 | Fix: clicking a list-item (bullet) drag handle now opens a Move up / Move down / Delete menu instead of doing nothing. |
