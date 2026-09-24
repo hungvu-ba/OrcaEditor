@@ -11,7 +11,7 @@ Default = every ☐ task (not started). Per task, from its Code ```text block:
   req     US-x.y heading exists in ../OrcaEditor-Requirements (named Requirement file, else any)
   dep     task in "Starts when" has a commit tagged (Tx.y) on rev (else: which branch holds it)
   line    file.ts:123 anchor = drifts, use symbol
-Paths with spaces must be backticked in the prompt; Requirement files may be bare.
+Paths with spaces must be backticked or double-quoted in the prompt; Requirement files may be bare.
 FAIL = prompt states something false now. WARN = check by hand. Exit 1 on any FAIL.
 """
 import argparse
@@ -30,7 +30,7 @@ MAIN_ROOT = os.path.dirname(_common) if _common else ROOT  # main checkout, also
 REQ_DIR = os.path.normpath(os.path.join(MAIN_ROOT, "..", "OrcaEditor-Requirements"))
 TASK_HEAD = re.compile(r"^###\s+(\S)\s+([TF]\d+\.\d+)\b")  # F = human task: status only, no commit
 TASK_ID = re.compile(r"\b([TF]\d+\.\d+)\b")
-SPACED_PATH = re.compile(r"`([^`\n]* [^`\n]*\.(?:md|ts|css|js|json|py))`")
+SPACED_PATH = re.compile(r"[`\"]([^`\"\n]* [^`\"\n]*\.(?:md|ts|css|js|json|py))[`\"]")
 REQ_FILE = re.compile(r"(?:\.\./OrcaEditor-Requirements/)?(Requirement - \d{2} [^`\"\n#]*?\.md)")
 BACKTICK = re.compile(r"`([^`\n]+)`")
 TS_IDENT = re.compile(r"^([A-Za-z_$][\w$]*)(?:\(([^()]*)\))?$")
@@ -248,7 +248,9 @@ def check(t, tree, status, since):
         for us in sorted(set(US_ID.findall(line))):
             rx = re.compile(r"^#{1,6}\s*US-%s\b" % re.escape(us), re.M)
             if not any(rx.search(s) for s in pool):
-                add("FAIL", "req", "US-%s heading in no %s" % (us, named[0] if named else "Requirement file"))
+                add("WARN" if unmerged else "FAIL", "req", "US-%s heading in no %s%s" % (
+                    us, named[0] if named else "Requirement file",
+                    " -- maybe from %s" % ", ".join(unmerged) if unmerged else ""))
 
     # anchor: quoted "## heading" in a doc the prompt names (else any Plan/ doc)
     docs = [h for f in t_plain + t_spaced if f.endswith(".md") for h in tree.find(f)]
