@@ -539,6 +539,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       addMenuItem('Move up', idx === 0, () => moveBlockToGap(block, idx - 1));
       addMenuItem('Move down', spanEndIdx >= blocks.length - 1, () => moveBlockToGap(block, spanEndIdx + 2));
     }
+    // Mouse counterpart of the Delete/Backspace shortcut below — same whole-block removal.
+    addMenuItem('Delete', false, () => deleteSelectedBlock(block));
 
     // "Move to…" targets: sibling headings only (heading), else every other heading (unchanged).
     const targets: Array<{ heading: HTMLElement; gap: number }> = sib

@@ -1088,6 +1088,30 @@ test('clicking "Move down" in the handle menu actually reorders the block', asyn
   expect(md.indexOf('Beta paragraph.')).toBeLessThan(md.indexOf('Alpha paragraph.'));
 });
 
+test('the handle menu has "Delete" right below "Move down", and clicking it removes the block', async ({ page }) => {
+  await openEditor(page, DOC);
+  await hoverCenter(page, page.locator('p', { hasText: 'Alpha paragraph.' }));
+
+  const handleBox = await page.locator(BLOCK_HANDLE_SELECTOR).boundingBox();
+  if (!handleBox) {
+    throw new Error('block handle has no bounding box');
+  }
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+
+  const popup = page.locator('.dd-menu-popup:visible');
+  await expect(popup).toBeVisible();
+  const labels = await popup.locator('.dd-menu-item').allTextContents();
+  expect(labels.slice(0, 3)).toEqual(['Move up', 'Move down', 'Delete']);
+  await popup.locator('.dd-menu-item', { hasText: 'Delete' }).click();
+
+  const md = await waitForEdit(page);
+  expect(md).not.toContain('Alpha paragraph.');
+  expect(md).toContain('Beta paragraph.');
+  await expect(popup).toHaveCount(0);
+});
+
 test('hovering a table cell shows both the row handle and the column handle', async ({ page }) => {
   await openEditor(page, DOC);
   await hoverCenter(page, page.locator('td', { hasText: 'a1' }));

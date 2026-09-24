@@ -568,3 +568,4 @@
 | 1.2.0 | 2026-09-24 | Fix: `npm audit fix` for brace-expansion, dompurify, fast-uri, js-yaml, mermaid, qs and undici transitive vulnerabilities. |
 | 1.2.0 | 2026-09-24 | Fix: `.vscodeignore` now excludes `.map/` and `.github/` so codemap tooling output no longer ships in the packaged VSIX. |
 | 1.2.0 | 2026-09-24 | Fix: right-click menu Cut/Copy/Paste now work — routed through the async Clipboard API instead of blocked `execCommand` calls. |
+| 1.2.0 | 2026-09-24 | Feature: block-handle menu gains a "Delete" item below "Move down" that removes the selected block, same as the Delete/Backspace shortcut. |
