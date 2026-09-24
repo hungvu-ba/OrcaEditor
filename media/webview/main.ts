@@ -404,7 +404,11 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
 });
 // Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
 // only contextmenu handler.
-const commentMenu = initCommentMenu(content, vscode, commentResolve);
+const commentMenu = initCommentMenu(content, vscode, commentResolve, {
+  cut: () => void cutSelectionViaClipboardApi(),
+  copy: () => void copySelectionViaClipboardApi(),
+  paste: pasteFromClipboardApi,
+});
 const brokenRef = initBrokenRef({
   content,
   vscode,
@@ -2142,6 +2146,28 @@ function cutSelectionViaClipboardApi(): boolean {
   });
   document.execCommand('delete');
   scheduleSync();
+  return true;
+}
+
+/**
+ * Copy for the right-click menu: the same text/plain Markdown + text/html pair
+ * as the 'copy' event handler, written through the async Clipboard API since
+ * `execCommand('copy')` does not reliably fire 'copy' inside the nested webview
+ * iframe. Returns false when nothing is selected.
+ */
+function copySelectionViaClipboardApi(): boolean {
+  const md = selectionAsMarkdown();
+  if (md === null) {
+    return false;
+  }
+  const data: Record<string, Blob> = { 'text/plain': new Blob([md], { type: 'text/plain' }) };
+  const html = renderPasteHtml(md);
+  if (html) {
+    data['text/html'] = new Blob([html], { type: 'text/html' });
+  }
+  navigator.clipboard.write([new ClipboardItem(data)]).catch(() => {
+    /* No clipboard-write permission — nothing else to fall back to. */
+  });
   return true;
 }
 
