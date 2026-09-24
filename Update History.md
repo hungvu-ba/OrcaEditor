@@ -561,3 +561,4 @@
 | 1.1.0 | 2026-09-24 | Fix: a comment whose stored offsets land past its paragraph (e.g. AI-written sidecar) now re-finds its quote by text search and highlights again. |
 | 1.1.0 | 2026-09-24 | Feature: a comment line in the sidecar may carry a loose { last_known_line, quote } anchor instead of computed offsets; the thread loads and is flagged loose. |
 | 1.1.0 | 2026-09-24 | Fix: comment thread popover widened so an edited row's timestamps stay on one line and the edit field's Save button is no longer clipped. |
+| 1.1.0 | 2026-09-24 | Feature: a loose sidecar anchor now finds its quote, highlights it exactly and saves the full anchor once; an unmatched quote stays floating, nothing written. |

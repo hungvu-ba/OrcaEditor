@@ -776,6 +776,7 @@ window.addEventListener('message', (event) => {
           // boundary and every consumer reads `.length` — a producer that misses it
           // would take the whole Comment tab down rather than one blank cell.
           statusChanges: t.statusChanges ?? [],
+          looseAnchor: t.looseAnchor === true,
         }))
       );
       commentPopover.forgetThreads(pruned);

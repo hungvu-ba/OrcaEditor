@@ -108,6 +108,11 @@ export interface ThreadAnchor {
    * whichever came first).
    */
   carrier?: HTMLElement;
+  /**
+   * Req 24 US-23.27: seeded from a loose sidecar anchor — `recordedText` is only
+   * a quote and the offsets are placeholders until the quote is found once.
+   */
+  looseAnchor?: boolean;
 }
 
 /** The anchor facts a thread is registered with (everything else is derived, never supplied). */
@@ -387,6 +392,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       return;
     }
 
+    if (anchor.looseAnchor) {
+      resolveLoose(anchor, candidates);
+      return;
+    }
+
     const match = pickAnchorCandidate(anchor.recordedText, candidates, {
       lastKnownLine: anchor.lastKnownLine,
       nearestHeading: anchor.nearestHeading,
@@ -404,6 +414,35 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
 
     // Tier 4: nothing left to hold it. The thread keeps its recorded text, line
     // and heading so a later edit (or an undo) can promote it back out.
+    anchor.carrier = undefined;
+    anchor.state = 'floating';
+  }
+
+  /**
+   * Req 24 US-23.27: a loose anchor is only a quote near a line. The first block
+   * holding the quote — those covering `lastKnownLine` first (narrowest wins, as
+   * in `blockCovering`), then the rest by line distance — becomes its canonical
+   * anchor: the block's text, the match's offsets, placed exact. No match stays
+   * floating; tiers 2–4 never run on a quote-only anchor.
+   */
+  function resolveLoose(anchor: ThreadAnchor, candidates: readonly AnchorCandidateNode[]): void {
+    const line = anchor.lastKnownLine;
+    const distance = (c: AnchorCandidateNode): number =>
+      line < c.line ? c.line - line : line > c.lineEnd ? line - c.lineEnd : 0;
+    const ordered = [...candidates].sort(
+      (a, b) => distance(a) - distance(b) || b.line - a.line || b.depth - a.depth
+    );
+    for (const candidate of ordered) {
+      const found = locateQuote(candidate.text, anchor.recordedText);
+      if (found) {
+        anchor.recordedText = candidate.text;
+        anchor.offsetStart = found.start;
+        anchor.offsetEnd = found.end;
+        anchor.looseAnchor = false;
+        place(anchor, candidate.el, 'exact');
+        return;
+      }
+    }
     anchor.carrier = undefined;
     anchor.state = 'floating';
   }
@@ -686,7 +725,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
 
   /** A thread's initial derived state, before the first resolution pass reads the DOM. */
   function seedToAnchor(seed: ThreadAnchorSeed): ThreadAnchor {
-    return { ...seed, state: 'exact', contentDrifted: false, awaitingAnchorDecision: false };
+    // A loose seed starts floating, so finding its quote is the floating -> exact
+    // transition `resolveAnchor` persists as origin 'resolved' (US-23.27).
+    return {
+      ...seed,
+      state: seed.looseAnchor ? 'floating' : 'exact',
+      contentDrifted: false,
+      awaitingAnchorDecision: false,
+    };
   }
 
   /** Shared by `register` and `syncThread`'s "not seen before" branch. */
