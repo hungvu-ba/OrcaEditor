@@ -30,6 +30,7 @@ import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_COMPOSER_CLASS, COMMENT_COMPOSER_I
 import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
+import { shortcutLabel } from './tooltip';
 import type { VsCodeApi } from './vscode-api';
 
 /** The anchored node + within-node character offsets one comment attaches to (US-23.1 AC3). */
@@ -87,15 +88,6 @@ function bubbleIcon(className: string): SVGSVGElement {
   path.setAttribute('d', BUBBLE_PATH);
   svg.appendChild(path);
   return svg;
-}
-
-/**
- * Cross-platform trap (CLAUDE.md): a shortcut label must never hardcode `⌘`.
- * macOS shows the glyph, every other platform shows `Ctrl+`.
- */
-function primaryModifierLabel(): string {
-  const platform = navigator.userAgent;
-  return /Mac|iPhone|iPad/.test(platform) ? '⌘' : 'Ctrl+';
 }
 
 export interface CommentMenuController {
@@ -200,17 +192,16 @@ export function initCommentMenu(
     }
   }
 
-  const mod = primaryModifierLabel();
   const addCommentItem = menuItem('Add Comment', '', () => openComposer());
   addCommentItem.prepend(bubbleIcon('comment-menu-item-icon'));
-  const cutItem = menuItem('Cut', `${mod}X`, () => document.execCommand('cut'));
-  const copyItem = menuItem('Copy', `${mod}C`, () => document.execCommand('copy'));
-  const pasteItem = menuItem('Paste', `${mod}V`, () => {
+  const cutItem = menuItem('Cut', shortcutLabel('X'), () => document.execCommand('cut'));
+  const copyItem = menuItem('Copy', shortcutLabel('C'), () => document.execCommand('copy'));
+  const pasteItem = menuItem('Paste', shortcutLabel('V'), () => {
     // execCommand('paste') is the only route that re-enters the editor's own
     // paste pipeline (image paste, smart gap). It is blocked in plain browsers;
     // when it is, say so rather than silently dropping the action.
     if (!document.execCommand('paste')) {
-      showToast(`Use ${mod}V to paste here.`);
+      showToast(`Use ${shortcutLabel('V')} to paste here.`);
     }
   });
   menu.append(addCommentItem, el('div', 'dd-menu-sep'), cutItem, copyItem, pasteItem);
@@ -423,7 +414,7 @@ export function initCommentMenu(
       : targetLost
         ? TARGET_LOST_HINT
         : ready
-          ? `${mod}⏎ to submit · Esc to cancel`
+          ? `${shortcutLabel('⏎')} to submit · Esc to cancel`
           : EMPTY_HINT;
   }
 

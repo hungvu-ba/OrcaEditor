@@ -549,9 +549,12 @@
 | 1.0.0 | 2026-07-31 | Fix: Copy on an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes. |
 | 1.1.0 | 2026-07-31 | Release: bumped version to 1.1.0, consolidating YAML/TOML/JSON front matter parsing and the collapse/expand fix into one [1.1.0] entry in CHANGELOG.md. |
 | 1.1.0 | 2026-07-31 | Chore: dropped `test:host` from the `npm test`/release gate — its VS Code download kept timing out on this network; still runnable manually via `npm run test:host`. |
+| 1.1.0 | 2026-09-24 | Chore: added review tiers with a fresh-session review handoff, a review run log (`scripts/review_log.py`), and a per-task context-usage audit (`scripts/context_audit.py`). |
 | 1.1.0 | 2026-09-24 | Fix: a long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list. |
 | 1.1.0 | 2026-09-24 | Fix: anyone can now delete any comment or reply — the popover and host no longer refuse delete on another author's content (confirm dialog kept). |
 | 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
 | 1.1.0 | 2026-09-24 | Fix: a comment on a code block no longer records its Copy/Wrap/language header as anchor text, so its sidecar is no longer flagged foreign. |
 | 1.1.0 | 2026-09-24 | Fix: a comment on a selection crossing blocks now anchors to the block where the selection starts, not the whole document. |
+| 1.1.0 | 2026-09-24 | Feature: `scripts/codemap.py` (ported from PZMod) — `sym`/`doc`/`build` find a symbol's def+callers+tests+doc-mentions or one doc section by heading, without grepping or reading whole files. |
 | 1.1.0 | 2026-09-24 | Fix: ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions or Quick Open — the chords stop at the content. |
+| 1.1.0 | 2026-09-24 | Fix: toolbar/menu shortcut tooltips now show only the current platform's chord (⌘ on macOS, Ctrl+ elsewhere), not both. |
