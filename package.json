@@ -266,7 +266,7 @@
         },
         "orcaEditor.showLineNumbers": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
         },
         "orcaEditor.table.fitMode": {

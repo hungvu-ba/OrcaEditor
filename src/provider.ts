@@ -1460,7 +1460,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       void postToWebview({
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
-        showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+        showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', false),
         // US-21.5: triggerActions.mode is the one trigger.* setting that DOES
         // need live propagation (visibility gate, not just a seed) — dateFormat/
         // executeCommands stay init-only, unchanged behavior.
@@ -1529,7 +1529,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif'
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
-              showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+              showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', false),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
               // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
