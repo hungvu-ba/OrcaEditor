@@ -3822,6 +3822,16 @@ check(
       '(#bug-number-one--a-long-heading-slug-with-many-extra-words-in-it) right here today.\n';
     check('belonging (single thread): a link-wrapped mention inside the anchored text still matches',
       sidecarBelongsToDocument([withText(linkLabel, 'c8')], linkDoc) === 'belongs');
+
+    // US-23.25 AC1: a comment on a fenced code block records the code text only.
+    // The raw .md never contains the header chrome ("TypeScript" label, Wrap,
+    // Copy), so a lone thread whose recorded text still carried it read foreign.
+    const codeText = 'const refundQueue = drainInEnqueueOrder(pendingRefunds); // oldest refund requests are always paid out first';
+    const codeDoc = '# Refunds\n\n```ts\n' + codeText + '\n```\n';
+    check('belonging (single thread): chrome-free code-block text belongs',
+      sidecarBelongsToDocument([withText(codeText, 'c9')], codeDoc) === 'belongs');
+    check('belonging (single thread): the same code text prefixed with header chrome reads foreign',
+      sidecarBelongsToDocument([withText('TypeScriptWrapCopy' + codeText, 'c9')], codeDoc) === 'foreign');
   }
 
   // US-23.16 AC7: the orphan-row pill label for each of the 5 orphanable line kinds.

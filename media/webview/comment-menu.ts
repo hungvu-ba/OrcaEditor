@@ -18,6 +18,8 @@
  */
 import {
   commentAnchorLine,
+  commentAnchorOffset,
+  commentAnchorText,
   ensureCommentAnchorId,
   findCommentAnchor,
   nearestHeadingBefore,
@@ -25,7 +27,7 @@ import {
 } from './block-map';
 import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
 import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_COMPOSER_CLASS, COMMENT_COMPOSER_INPUT_CLASS } from './constants';
-import { el, getOffsetWithin, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
+import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
 import type { VsCodeApi } from './vscode-api';
@@ -427,19 +429,23 @@ export function initCommentMenu(
 
   /** The anchor for `range`/`node`, or null when the selection cannot be measured within `node` (US-23.1 AC3). */
   function mintAnchor(range: Range, node: HTMLElement): PendingAnchor | null {
-    const offsetStart = getOffsetWithin(node, range.startContainer, range.startOffset);
-    const offsetEnd = getOffsetWithin(node, range.endContainer, range.endOffset);
+    const offsetStart = commentAnchorOffset(node, range.startContainer, range.startOffset);
+    const offsetEnd = commentAnchorOffset(node, range.endContainer, range.endOffset);
     if (offsetStart === null || offsetEnd === null) {
       return null;
     }
+    // US-23.25 AC1: one text space — the quote is the slice of the recorded
+    // text the offsets name, so a selection that swept editor chrome (a code
+    // block's "Copy") never quotes text the anchor does not record.
+    const recordedText = commentAnchorText(node);
     return {
       node,
       anchorId: ensureCommentAnchorId(content, node),
       offsetStart,
       offsetEnd,
       line: commentAnchorLine(content, node),
-      quote: range.toString(),
-      recordedText: node.textContent ?? '',
+      quote: recordedText.slice(offsetStart, offsetEnd),
+      recordedText,
       nearestHeading: nearestHeadingBefore(content, node),
     };
   }

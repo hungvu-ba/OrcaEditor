@@ -382,7 +382,7 @@ export function showToast(message: string): void {
  * Top-level (không thuộc createDomHelpers's closure) — không phụ thuộc gì
  * riêng của #content, nên list-ops.ts tái dùng được không cần duplicate.
  */
-export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): number | null {
+export function getOffsetWithin(root: Element, node: Node, nodeOffset: number, skipSelector?: string): number | null {
   if (!root.contains(node)) {
     return null;
   }
@@ -393,7 +393,59 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
   } catch {
     return null;
   }
-  return probe.toString().length;
+  if (skipSelector === undefined) {
+    return probe.toString().length;
+  }
+  // Same count as `probe.toString()`, minus every Text node inside a
+  // `skipSelector` subtree — a point inside such a subtree lands at the
+  // offset of the next counted character.
+  const walker = textWalker(root, skipSelector);
+  let offset = 0;
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    if (n === probe.endContainer) {
+      return offset + probe.endOffset;
+    }
+    if (!probe.intersectsNode(n)) {
+      break;
+    }
+    offset += (n as Text).data.length;
+  }
+  return offset;
+}
+
+/**
+ * Text-only walker over `root`. With `skipSelector`, a matching element's whole
+ * subtree is never walked — the one definition of "excluded text" that
+ * `getOffsetWithin`, `rangeWithinOffsets` and `textExcluding` share, so an
+ * offset measured by one names the same character in the others.
+ */
+function textWalker(root: Element, skipSelector?: string): TreeWalker {
+  if (skipSelector === undefined) {
+    return document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  }
+  return document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) =>
+      n.nodeType === Node.TEXT_NODE
+        ? NodeFilter.FILTER_ACCEPT
+        : (n as Element).matches(skipSelector)
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_SKIP,
+  });
+}
+
+/** `root.textContent` minus every Text node inside a `skipSelector` subtree. */
+export function textExcluding(root: Element, skipSelector: string): string {
+  if (!root.querySelector(skipSelector)) {
+    return root.textContent ?? '';
+  }
+  const walker = textWalker(root, skipSelector);
+  let text = '';
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    text += (n as Text).data;
+  }
+  return text;
 }
 
 /**
@@ -410,10 +462,12 @@ export function getOffsetWithin(root: Element, node: Node, nodeOffset: number): 
  * (which needs block boundaries) and this one for a stored character anchor.
  *
  * Offsets are clamped rather than throwing; returns null when no range can be
- * built (no text nodes, or a collapsed result).
+ * built (no text nodes, or a collapsed result). With `skipSelector`, text inside
+ * a matching subtree is never walked — pair it with a `getOffsetWithin` offset
+ * measured with the same selector.
  */
-export function rangeWithinOffsets(root: Element, start: number, end: number): Range | null {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+export function rangeWithinOffsets(root: Element, start: number, end: number, skipSelector?: string): Range | null {
+  const walker = textWalker(root, skipSelector);
   let consumed = 0;
   let startNode: Text | undefined;
   let startOffset = 0;

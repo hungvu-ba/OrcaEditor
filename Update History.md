@@ -552,3 +552,4 @@
 | 1.1.0 | 2026-09-24 | Fix: a long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list. |
 | 1.1.0 | 2026-09-24 | Fix: anyone can now delete any comment or reply — the popover and host no longer refuse delete on another author's content (confirm dialog kept). |
 | 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
+| 1.1.0 | 2026-09-24 | Fix: a comment on a code block no longer records its Copy/Wrap/language header as anchor text, so its sidecar is no longer flagged foreign. |

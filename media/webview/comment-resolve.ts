@@ -24,6 +24,7 @@ import { anchorTextRetention, driftBandFor, pickAnchorCandidate } from './commen
 import {
   anchorCandidates,
   commentAnchorLine,
+  commentAnchorText,
   COMMENT_ANCHOR_ATTR,
   dedupeCommentAnchors,
   ensureCommentAnchorId,
@@ -307,7 +308,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     // The offsets were measured inside a different node — clamping keeps them a
     // valid range in the new one instead of pointing past its end (AC2: the
     // offsets are what place the comment precisely WITHIN the node found).
-    const length = (el.textContent ?? '').length;
+    const length = commentAnchorText(el).length;
     anchor.offsetStart = Math.min(anchor.offsetStart, length);
     anchor.offsetEnd = Math.min(Math.max(anchor.offsetEnd, anchor.offsetStart), length);
     anchor.state = state;
@@ -420,7 +421,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       const threshold = anchor.contentDrifted ? band.exit : band.enter;
       const retention = anchorTextRetention(
         anchor.recordedText,
-        anchor.carrier.textContent ?? '',
+        commentAnchorText(anchor.carrier),
         threshold
       );
       anchor.contentDrifted = retention < threshold;
@@ -763,7 +764,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // `place`, so the offsets are clamped against the same node's length the
       // snapshot was just taken from. Persisted below via `postUpdate`'s
       // `'manual'` origin (US-23.13 AC1), so it also survives a reload.
-      anchor.recordedText = el.textContent ?? '';
+      anchor.recordedText = commentAnchorText(el);
       // The offsets described a range inside the OLD node, so they name nothing in
       // the new one — left as they were, the popover's quote row would show an
       // arbitrary mid-word fragment of the newly chosen paragraph and present it

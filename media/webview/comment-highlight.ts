@@ -24,7 +24,7 @@
  * Nothing here writes to `#content` — Ranges are pure text-position handles,
  * so there is no DOM class/attribute for turndown.ts to strip.
  */
-import { rangeWithinOffsets } from './dom-utils';
+import { commentAnchorRange } from './block-map';
 import type { CommentResolveController, ThreadAnchor } from './comment-resolve';
 import {
   COMMENT_HIGHLIGHT_ACTIVE_NAME,
@@ -60,11 +60,12 @@ function rangeForAnchor(anchor: ThreadAnchor): Range | null {
     // A bare-caret anchor has no range to wash — nothing to highlight.
     return null;
   }
-  // `rangeWithinOffsets`, NOT collectHaystack/rangeAt: these offsets were
-  // captured by `getOffsetWithin` (comment-menu.ts) in Range.toString() space,
-  // which inserts no inter-block '\n' and does not skip KaTeX's hidden text.
-  // Mixing the two spaces washes the wrong characters — see the helper's doc.
-  return rangeWithinOffsets(anchor.carrier, start, end);
+  // `commentAnchorRange`, NOT collectHaystack/rangeAt: these offsets were
+  // captured by `commentAnchorOffset` (comment-menu.ts) in Range.toString()
+  // space minus editor chrome, which inserts no inter-block '\n' and does not
+  // skip KaTeX's hidden text. Mixing the two spaces washes the wrong
+  // characters — see `rangeWithinOffsets`' doc.
+  return commentAnchorRange(anchor.carrier, start, end);
 }
 
 /**
