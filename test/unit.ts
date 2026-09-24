@@ -2686,22 +2686,16 @@ check(
     ...over,
   });
   check('delete: the content author may delete their own content',
-    deleteRejection(del(), 'file:///a.md', { author: 'hungvu' }, 'hungvu') === null);
-  // The soft, non-authenticated nudge — not a security boundary (US-23.3 AC6).
-  check('delete: another author is refused',
-    deleteRejection(del(), 'file:///a.md', { author: 'someone-else' }, 'hungvu') !== null);
-  // The same name typed on macOS (NFD) and Windows (NFC) is one person — the
-  // two literals below are genuinely different strings before normalization.
-  check('delete: the NFD and NFC author names are genuinely different strings',
-    'Nguyễn'.normalize('NFD') !== 'Nguyễn'.normalize('NFC'));
-  check('delete: author matching is NFC-normalized',
-    deleteRejection(del(), 'file:///a.md', { author: 'Nguyễn'.normalize('NFD') }, 'Nguyễn'.normalize('NFC')) === null);
+    deleteRejection(del(), 'file:///a.md', { author: 'hungvu' }) === null);
+  // Req 24 US-23.16 AC8: no authority check — anyone may delete any content.
+  check('delete: another author\'s content may be deleted',
+    deleteRejection(del(), 'file:///a.md', { author: 'someone-else' }) === null);
   check('delete: a vanished target is refused',
-    deleteRejection(del(), 'file:///a.md', undefined, 'hungvu') !== null);
+    deleteRejection(del(), 'file:///a.md', undefined) !== null);
   check('delete: a delete for another document is refused',
-    deleteRejection(del(), 'file:///b.md', { author: 'hungvu' }, 'hungvu') !== null);
+    deleteRejection(del(), 'file:///b.md', { author: 'hungvu' }) !== null);
   check('delete: a delete naming no thread is refused',
-    deleteRejection(del({ threadId: '' }), 'file:///a.md', { author: 'hungvu' }, 'hungvu') !== null);
+    deleteRejection(del({ threadId: '' }), 'file:///a.md', { author: 'hungvu' }) !== null);
 
   // The field sets are frozen by the requirement's "Sidecar Schema Decision"
   // section — a drift here is a data-format break, not a cosmetic one.

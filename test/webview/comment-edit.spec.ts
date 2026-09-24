@@ -220,7 +220,7 @@ test.describe('AC1 — Edit is gated on thread status, never on authorship', () 
     await expect(page.locator(`${originalRow} .comment-popover-edit`)).toHaveCount(1);
   });
 
-  test('AC8: Edit is offered on content written by someone else — unlike Delete, it has no authority gate', async ({ page }) => {
+  test('AC8: Edit is offered on content written by someone else — like Delete, it has no authority gate', async ({ page }) => {
     await openEditor(page, DOC, { commentAuthorName: 'me' });
     const { threadId } = await createThread(page, 0, "Reviewer's comment.", 'someone-else');
     await clickPin(page, 0);
@@ -230,12 +230,11 @@ test.describe('AC1 — Edit is gated on thread status, never on authorship', () 
       replies: [{ id: 'reply-other', author: 'someone-else', timestamp: '2026-07-24T11:05:00.000Z', body: 'Their reply.' }],
     });
 
-    // Delete stays author-gated (US-23.2 AC5) while Edit does not — the two
-    // controls sit in the same row and must disagree here.
-    await expect(page.locator(`${originalRow} .comment-popover-delete`)).toBeDisabled();
+    // Neither control is author-gated (Req 24 US-23.16 AC8 ungated Delete too).
+    await expect(page.locator(`${originalRow} .comment-popover-delete`)).toBeEnabled();
     await expect(page.locator(`${originalRow} .comment-popover-edit`)).toBeEnabled();
     const other = page.locator('.comment-popover-reply[data-reply-id="reply-other"]');
-    await expect(other.locator('.comment-popover-delete')).toBeDisabled();
+    await expect(other.locator('.comment-popover-delete')).toBeEnabled();
     await expect(other.locator('.comment-popover-edit')).toBeEnabled();
 
     // ...and it actually works, not merely enabled-looking.

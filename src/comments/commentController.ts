@@ -1491,7 +1491,7 @@ export function createCommentSupport(
             : entry.commentId !== null
               ? { id: entry.commentId, author: entry.commentAuthor }
               : undefined;
-      const rejection = deleteRejection(msg, document.uri.toString(), target, currentAuthor);
+      const rejection = deleteRejection(msg, document.uri.toString(), target);
       if (rejection !== null || !entry || !target) {
         return { ok: false, error: rejection ?? 'That comment or reply no longer exists.' };
       }

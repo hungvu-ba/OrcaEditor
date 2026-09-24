@@ -37,7 +37,6 @@ import {
 import { el, makeDraggable, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
-import { sameAuthor } from '../../src/comments/sidecar-format';
 import {
   clipCommentBodyToLimit,
   commentBodyCodePointLength,
@@ -74,7 +73,6 @@ export interface CommentPopoverController {
   /** Close the popover if it is showing one of these now-deleted threads. */
   forgetThreads(threadIds: string[]): void;
   setDocUri(uri: string): void;
-  setAuthorName(name: string): void;
   notifyReplyResult(requestId: number, ok: boolean, error?: string): void;
   notifyDeleteResult(requestId: number, ok: boolean, error?: string): void;
   /** US-23.3: outcome of a Resolve/Close/Reopen request this popover sent. */
@@ -194,7 +192,6 @@ export function initCommentPopover(
   highlight: CommentHighlightController
 ): CommentPopoverController {
   let docUri = '';
-  let authorName = '';
   let currentThreadId: string | undefined;
   let requestSeq = 0;
   let inFlightReplyRequest: number | undefined;
@@ -492,7 +489,7 @@ export function initCommentPopover(
     timestamp: string,
     body: string,
     editedAt: string | undefined,
-    onDelete: (() => void) | undefined,
+    onDelete: () => void,
     onEdit: (() => void) | undefined
   ): HTMLElement {
     const row = el('div', className);
@@ -502,7 +499,7 @@ export function initCommentPopover(
       meta.appendChild(el('span', 'comment-popover-edited', marker));
     }
     // AC8: Edit carries no authority check — offered to whoever is at the
-    // keyboard, unlike Delete below. `onEdit` is undefined only when the
+    // keyboard, like Delete below. `onEdit` is undefined only when the
     // thread is Closed (mirrors `replyBox.hidden = closed`'s gating), never by
     // authorship.
     if (onEdit) {
@@ -514,21 +511,14 @@ export function initCommentPopover(
       editBtn.addEventListener('click', onEdit);
       meta.appendChild(editBtn);
     }
-    // AC5: the Delete control is DISABLED (a visible soft nudge showing the
-    // content isn't yours), not removed — the real enforcement is the host's
-    // author check in `deleteRejection`, not this button's state.
+    // Req 24 US-23.16 AC8: Delete carries no authority check either — any
+    // author's content is deletable, through the confirm dialog.
     const deleteBtn = el('button', 'comment-popover-delete', '');
     deleteBtn.type = 'button';
     deleteBtn.setAttribute('aria-label', 'Delete');
     deleteBtn.textContent = '🗑';
-    if (onDelete) {
-      deleteBtn.title = 'Delete';
-      deleteBtn.addEventListener('click', onDelete);
-    } else {
-      deleteBtn.disabled = true;
-      deleteBtn.setAttribute('aria-disabled', 'true');
-      deleteBtn.title = 'Only the author of this content can delete it';
-    }
+    deleteBtn.title = 'Delete';
+    deleteBtn.addEventListener('click', onDelete);
     meta.appendChild(deleteBtn);
     row.appendChild(meta);
     row.appendChild(el('div', 'comment-popover-body-text', body));
@@ -745,7 +735,6 @@ export function initCommentPopover(
     }
 
     list.textContent = '';
-    const ownsComment = authorName !== '' && sameAuthor(authorName, anchor.author);
     // AC1 sub-criterion: Edit is gated on thread status exactly like Reply —
     // not offered at all on a Closed thread.
     const editGated = anchor.status === 'Closed';
@@ -771,7 +760,7 @@ export function initCommentPopover(
           anchor.createdAt,
           anchor.body,
           anchor.editedAt,
-          ownsComment ? () => requestDeleteThread(anchor, list.getBoundingClientRect()) : undefined,
+          () => requestDeleteThread(anchor, list.getBoundingClientRect()),
           editGated ? undefined : () => startEdit(anchor.threadId, undefined, anchor.body)
         )
       );
@@ -783,14 +772,13 @@ export function initCommentPopover(
         list.appendChild(row);
         continue;
       }
-      const ownsReply = authorName !== '' && sameAuthor(authorName, reply.author);
       const row = personRow(
         'comment-popover-reply',
         reply.author,
         reply.timestamp,
         reply.body,
         reply.editedAt,
-        ownsReply ? () => requestDeleteReply(anchor, reply.id, list.getBoundingClientRect()) : undefined,
+        () => requestDeleteReply(anchor, reply.id, list.getBoundingClientRect()),
         editGated ? undefined : () => startEdit(anchor.threadId, reply.id, reply.body)
       );
       // Distinguishes replies whose rendered text happens to be a substring of
@@ -1251,9 +1239,6 @@ export function initCommentPopover(
     },
     setDocUri(uri): void {
       docUri = uri;
-    },
-    setAuthorName(name): void {
-      authorName = name;
     },
     notifyReplyResult(requestId, ok, error): void {
       if (requestId !== inFlightReplyRequest) {

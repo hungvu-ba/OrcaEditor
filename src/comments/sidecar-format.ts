@@ -672,15 +672,13 @@ export function parseSidecarText(text: string): ParsedSidecar {
  *
  * AC9's other half — "an empty or whitespace-only `orcaEditor.comments.authorName`
  * never matches any stored author" — is scoped to the CURRENT USER's name, so it
- * lives at the callers that have one (`deleteRejection`, the popover), not here.
+ * never lives here; since Req 24 US-23.16 AC8 no live path compares against it.
  * Two blank names still compare equal in this function on purpose: the loader's
  * tombstone check compares two STORED authors, and refusing a blank-vs-blank
  * match there would silently stop a `delete` line from deleting its target,
  * resurrecting a comment the user had removed.
  *
- * Exported (not local to this fold) so US-23.2's own delete-gating in
- * `comment-utils.ts`/`commentController.ts` uses this exact comparison rather
- * than a second, potentially-diverging copy.
+ * Exported so test/unit.ts can pin this exact comparison.
  */
 export function sameAuthor(a: string, b: string): boolean {
   return normalizeAuthorName(a) === normalizeAuthorName(b);

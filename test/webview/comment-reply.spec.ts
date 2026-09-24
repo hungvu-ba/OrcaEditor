@@ -1,7 +1,7 @@
 /**
  * Req 23 US-23.2 — Author sees and replies to comments in place: gutter pins
  * (count/clustering), the "Show Comments" toggle, the thread popover (single-
- * open, reply, Cancel, delete with confirmation, own-vs-other-author gating),
+ * open, reply, Cancel, delete with confirmation, any author's content deletable),
  * and the undo-safety invariant carried forward from US-23.6.
  *
  * Playwright track (Plan/WEBVIEW_TEST.md): pins/popover only exist after real
@@ -285,7 +285,7 @@ test.describe('reply', () => {
   });
 });
 
-test.describe('delete — confirmation, cascade, and author gating', () => {
+test.describe('delete — confirmation, cascade, and any-author delete', () => {
   test('deleting the thread requires confirmation and closes the popover on success', async ({ page }) => {
     await openEditor(page, DOC);
     const { threadId } = await createThread(page, 0, 'Original comment.');
@@ -378,18 +378,12 @@ test.describe('delete — confirmation, cascade, and author gating', () => {
     await expect(page.locator('.comment-popover-reply .comment-popover-body-text')).toHaveText('Also mine.');
   });
 
-  test('own-vs-other-author gating: delete is offered only on content the current author actually wrote', async ({
+  test("Req 24 US-23.16 AC8: another author's thread and reply delete through the confirm dialog, Edit present", async ({
     page,
   }) => {
     await openEditor(page, DOC, { commentAuthorName: 'me' });
     const { threadId } = await createThread(page, 0, "Reviewer's comment.", 'someone-else');
     await clickPin(page, 0);
-
-    // Authored by someone else: the control is PRESENT but disabled — AC5's soft
-    // nudge is "the Delete control is disabled", i.e. visible and inert.
-    const otherDelete = page.locator('.comment-popover-original .comment-popover-delete');
-    await expect(otherDelete).toHaveCount(1);
-    await expect(otherDelete).toBeDisabled();
 
     await simulate(page, {
       type: 'commentThreadsSync',
@@ -407,17 +401,35 @@ test.describe('delete — confirmation, cascade, and author gating', () => {
           lastKnownLine: 3,
           nearestHeading: 'Session expiry',
           replies: [
-            { id: 'reply-mine', author: 'me', timestamp: '2026-07-24T11:00:00.000Z', body: 'My own reply.' },
             { id: 'reply-other', author: 'someone-else', timestamp: '2026-07-24T11:05:00.000Z', body: 'Their reply.' },
           ],
         },
       ],
     });
 
-    const mine = page.locator('.comment-popover-reply[data-reply-id="reply-mine"]');
+    const original = page.locator('.comment-popover-original');
     const other = page.locator('.comment-popover-reply[data-reply-id="reply-other"]');
-    await expect(mine.locator('.comment-popover-delete')).toBeEnabled();
-    await expect(other.locator('.comment-popover-delete')).toBeDisabled();
+    await expect(original.locator('.comment-popover-edit')).toHaveCount(1);
+    await expect(other.locator('.comment-popover-edit')).toHaveCount(1);
+
+    // Another author's reply: Delete is enabled and goes through the confirm dialog.
+    await other.locator('.comment-popover-delete').click();
+    await expect(page.locator('.comment-delete-confirm')).toBeVisible();
+    await page.locator('.comment-delete-confirm-delete').click();
+    const [replyDel] = await postedOfType(page, 'deleteComment');
+    expect(replyDel.threadId).toBe(threadId);
+    expect(replyDel.targetReplyId).toBe('reply-other');
+    await simulate(page, { type: 'deleteCommentResult', requestId: replyDel.requestId, ok: true });
+
+    // Another author's thread: same path, whole thread (no targetReplyId).
+    await original.locator('.comment-popover-delete').click();
+    await expect(page.locator('.comment-delete-confirm')).toBeVisible();
+    await page.locator('.comment-delete-confirm-delete').click();
+    const threadDel = (await postedOfType(page, 'deleteComment')).at(-1)!;
+    expect(threadDel.threadId).toBe(threadId);
+    expect(threadDel.targetReplyId).toBeUndefined();
+    await simulate(page, { type: 'deleteCommentResult', requestId: threadDel.requestId, ok: true });
+    await expect(page.locator('.comment-popover')).toBeHidden();
   });
 
   test('Req 24 US-23.13 AC3: a floating thread is deleted through the same popover path, reached via the Comment tab', async ({
