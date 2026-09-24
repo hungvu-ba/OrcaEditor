@@ -5066,7 +5066,9 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
   z-index: 498;
   display: flex;
   flex-direction: column;
-  width: 340px;
+  /* Wide enough for an edited row's author + time + "edited <time>" + actions
+     on one line, and for the edit field's Cancel/Save row. */
+  width: 420px;
   max-width: calc(100vw - 8px);
   max-height: 70vh;
   overflow: hidden;
@@ -5381,7 +5383,8 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
  * `.comment-popover-reply` instead of the fixed reply-box slot. */
 .comment-popover-edit-input {
   box-sizing: border-box;
-  width: 100%;
+  /* Minus the body indent: `100%` plus the margin overflowed the list sideways. */
+  width: calc(100% - 26px);
   margin-left: 26px;
   min-height: 56px;
   padding: 8px 10px;

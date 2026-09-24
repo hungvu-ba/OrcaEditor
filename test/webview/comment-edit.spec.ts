@@ -734,3 +734,40 @@ test('US-23.6: no edit/undo/redo document message escapes the whole edit flow', 
   expect(types).not.toContain('undo');
   expect(types).not.toContain('redo');
 });
+
+test.describe('Layout — the card is wide enough for an edited row and its edit field', () => {
+  test('an edited row keeps its time and "edited" marker on one line each', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { threadId } = await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await pushSync(page, threadId, { body: 'Edited body.', editedAt: '2026-07-28T16:00:00.000Z' });
+    await expect(page.locator(`${originalRow} .comment-popover-edited`)).toHaveCount(1);
+
+    for (const sel of ['.comment-popover-time', '.comment-popover-edited']) {
+      const box = await page.locator(`${originalRow} ${sel}`).evaluate((el) => ({
+        height: el.getBoundingClientRect().height,
+        lineHeight: parseFloat(getComputedStyle(el).lineHeight) || parseFloat(getComputedStyle(el).fontSize) * 1.3,
+      }));
+      expect(box.height, sel).toBeLessThan(box.lineHeight * 1.5);
+    }
+  });
+
+  test('the edit field and its Save button fit inside the card without a horizontal scroll', async ({ page }) => {
+    await openEditor(page, DOC);
+    await createThread(page, 0, 'Original comment.');
+    await clickPin(page, 0);
+    await page.locator(`${originalRow} .comment-popover-edit`).click();
+    await expect(page.locator(editField)).toBeVisible();
+
+    const list = await page.locator('.comment-popover-list').evaluate((el) => ({
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      right: el.getBoundingClientRect().right,
+    }));
+    expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth);
+    const field = await page.locator(editField).evaluate((el) => el.getBoundingClientRect().right);
+    const save = await page.locator('.comment-popover-edit-save').evaluate((el) => el.getBoundingClientRect().right);
+    expect(field).toBeLessThanOrEqual(list.right);
+    expect(save).toBeLessThanOrEqual(list.right);
+  });
+});
