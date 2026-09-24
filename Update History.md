@@ -554,3 +554,4 @@
 | 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
 | 1.1.0 | 2026-09-24 | Fix: a comment on a code block no longer records its Copy/Wrap/language header as anchor text, so its sidecar is no longer flagged foreign. |
 | 1.1.0 | 2026-09-24 | Fix: a comment on a selection crossing blocks now anchors to the block where the selection starts, not the whole document. |
+| 1.1.0 | 2026-09-24 | Fix: ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions or Quick Open — the chords stop at the content. |

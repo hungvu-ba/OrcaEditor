@@ -1568,8 +1568,11 @@ function scheduleSync(): void {
 // Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
 // strikethrough: swallow the browser default, run the format, then schedule a
 // sync. `apply` is a thunk so it covers both execCommand and toggleInlineCode.
+// stopPropagation too: the VS Code preload forwards every key that bubbles to
+// `window` to the workbench, ignoring defaultPrevented (⌘B toggled the sidebar).
 function applyInlineFormat(e: KeyboardEvent, apply: () => void): void {
   e.preventDefault();
+  e.stopPropagation();
   apply();
   scheduleSync();
 }
