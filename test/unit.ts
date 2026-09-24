@@ -128,6 +128,7 @@ import {
   anchorThresholdFor,
   driftBandFor,
   levenshtein,
+  locateQuote,
   normalizeAnchorText,
   pickAnchorCandidate,
   rankReattachTargets,
@@ -5156,6 +5157,28 @@ check(
   const pasted = domino.createDocument(`<div>${renderer.render(JSON_DOC, false).html}</div>`, true);
   eq('US-2.11 AC14: the paste path builds no front-matter card', pasted.querySelector('.md-front-matter') == null, true);
   eq('US-2.11 AC14: ...and a `---` block still is captured on that path, unchanged from today', renderer.render('---\ntitle: T\n---\n\n# Heading\n', false).frontMatter, 'title: T');
+}
+
+// --- Req 24 US-23.26: locateQuote -------------------------------------------
+{
+  eq('US-23.26 locateQuote: an exact quote maps to its own offsets',
+    locateQuote('Alpha beta gamma.', 'beta'), { start: 6, end: 10 });
+  const rendered = 'Open Questions: the sidecar is x.jsonl, see the spec.';
+  eq('US-23.26 locateQuote: a raw-md quote (**, backticks, [t](u)) finds its rendered text',
+    locateQuote(rendered, '**Open Questions:** the sidecar is `x.jsonl`, see [the spec](spec.md).'),
+    { start: 0, end: rendered.length });
+  eq('US-23.26 locateQuote: a line-break/double-space diff maps back to original offsets',
+    locateQuote('Intro.  The held\n  queue drains.', 'The held queue drains'), { start: 8, end: 31 });
+  const nfcText = 'Ghi chú: Nhật ký cũ.'.normalize('NFC');
+  eq('US-23.26 locateQuote: an NFD quote matches NFC text',
+    locateQuote(nfcText, 'Nhật ký'.normalize('NFD')), { start: 9, end: 16 });
+  const nfdText = 'Ghi chú: Nhật ký cũ.'.normalize('NFD');
+  const nfdHit = locateQuote(nfdText, 'Nhật ký');
+  eq('US-23.26 locateQuote: ...and offsets stay in the ORIGINAL (NFD) text',
+    nfdHit && nfdText.slice(nfdHit.start, nfdHit.end).normalize('NFC'), 'Nhật ký');
+  eq('US-23.26 locateQuote: an absent quote is null', locateQuote('Alpha beta.', 'gamma'), null);
+  eq('US-23.26 locateQuote: an empty quote is null', locateQuote('Alpha beta.', ''), null);
+  eq('US-23.26 locateQuote: a marker-only quote is null', locateQuote('Alpha ** beta.', ' ** `` '), null);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

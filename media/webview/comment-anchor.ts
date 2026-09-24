@@ -56,6 +56,53 @@ export function normalizeAnchorText(text: string): string {
   return text.normalize('NFC').replace(/\s+/g, ' ').trim();
 }
 
+/** Inline markdown markers a raw-`.md` quote carries and the rendered text does not. */
+const QUOTE_MARKER_CHARS = '*_`~';
+const QUOTE_MARKER_RE = /[*_`~]/g;
+const QUOTE_LINK_RE = /\[([^\]]*)\]\([^)]*\)/g;
+/** One base character plus the combining marks NFC may fold into it. */
+const NFC_CHUNK_RE = /\P{M}\p{M}*|\p{M}+/gu;
+
+/**
+ * Req 24 US-23.26: where `quote` sits inside an anchored block's `text`, as
+ * offsets into the ORIGINAL `text`. Both sides are compared in a derived form
+ * (NFC, inline markers dropped, whitespace collapsed; links reduced to their
+ * label in `quote` only), so a raw-markdown quote still finds its rendered
+ * text. First case-sensitive occurrence; `null` for no match or an empty quote.
+ */
+export function locateQuote(text: string, quote: string): { start: number; end: number } | null {
+  const needle = normalizeAnchorText(quote.normalize('NFC').replace(QUOTE_LINK_RE, '$1').replace(QUOTE_MARKER_RE, ''));
+  if (needle === '') {
+    return null;
+  }
+  // Derive `text` the same way while recording, for every derived character,
+  // the original [start, end) it came from.
+  let derived = '';
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (const chunk of text.matchAll(NFC_CHUNK_RE)) {
+    const start = chunk.index ?? 0;
+    const end = start + chunk[0].length;
+    for (const ch of chunk[0].normalize('NFC')) {
+      const space = /\s/.test(ch);
+      if (QUOTE_MARKER_CHARS.includes(ch) || (space && (derived === '' || derived.endsWith(' ')))) {
+        continue;
+      }
+      const piece = space ? ' ' : ch;
+      derived += piece;
+      for (let i = 0; i < piece.length; i++) {
+        starts.push(start);
+        ends.push(end);
+      }
+    }
+  }
+  const at = derived.indexOf(needle);
+  if (at < 0) {
+    return null;
+  }
+  return { start: starts[at], end: ends[at + needle.length - 1] };
+}
+
 /** Levenshtein edit distance over two normalized strings (two-row DP, O(min) memory). */
 export function levenshtein(a: string, b: string): number {
   if (a === b) {

@@ -20,7 +20,7 @@
  * names match the frozen `.orca-comments.jsonl` anchor schema so that story can
  * persist it verbatim.
  */
-import { anchorTextRetention, driftBandFor, pickAnchorCandidate } from './comment-anchor';
+import { anchorTextRetention, driftBandFor, locateQuote, pickAnchorCandidate } from './comment-anchor';
 import {
   anchorCandidates,
   commentAnchorLine,
@@ -308,9 +308,22 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     // The offsets were measured inside a different node — clamping keeps them a
     // valid range in the new one instead of pointing past its end (AC2: the
     // offsets are what place the comment precisely WITHIN the node found).
-    const length = commentAnchorText(el).length;
-    anchor.offsetStart = Math.min(anchor.offsetStart, length);
-    anchor.offsetEnd = Math.min(Math.max(anchor.offsetEnd, anchor.offsetStart), length);
+    const text = commentAnchorText(el);
+    const { offsetStart: storedStart, offsetEnd: storedEnd } = anchor;
+    anchor.offsetStart = Math.min(anchor.offsetStart, text.length);
+    anchor.offsetEnd = Math.min(Math.max(anchor.offsetEnd, anchor.offsetStart), text.length);
+    // Req 24 US-23.26: a real range that clamped to nothing was measured in a
+    // different text space (e.g. whole-file offsets) — re-find its quote in this
+    // node instead of highlighting nothing. In-memory only; a stored caret stays one.
+    if (storedEnd > storedStart && anchor.offsetStart === anchor.offsetEnd) {
+      const quote =
+        storedEnd <= anchor.recordedText.length
+          ? anchor.recordedText.slice(storedStart, storedEnd)
+          : anchor.recordedText;
+      const found = locateQuote(text, quote);
+      anchor.offsetStart = found ? found.start : 0;
+      anchor.offsetEnd = found ? found.end : text.length;
+    }
     anchor.state = state;
     anchor.carrier = el;
     stampState(el, state);
