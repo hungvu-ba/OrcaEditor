@@ -565,3 +565,4 @@
 | 1.1.0 | 2026-09-24 | Chore: added `scripts/plan_check.py` (ported from PZMod) — checks paths, file symbols/call arity, quoted headings, US-x.y headings and dependency commits named in a task plan before a session starts. |
 | 1.1.0 | 2026-09-24 | Fix: `plan_check.py` warns instead of erroring on US ids from unmerged dependencies, and reads quoted paths containing spaces. |
 | 1.2.0 | 2026-09-24 | Release: bumped version to 1.2.0, consolidating the comment-anchor, delete-permission and shortcut-scoping fixes since 1.1.0 into one [1.2.0] entry in CHANGELOG.md. |
+| 1.2.0 | 2026-09-24 | Fix: `npm audit fix` for brace-expansion, dompurify, fast-uri, js-yaml, mermaid, qs and undici transitive vulnerabilities. |
