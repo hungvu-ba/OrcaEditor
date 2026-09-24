@@ -92,11 +92,14 @@ interface StatusAction {
 }
 
 /**
- * The least height at which the popover is still usable — header, one message and
- * the reply row. Below this a cap does more harm than the overlap it avoids, so
- * `placeClearOfAnchor` stops capping and accepts the overlap (AC8's own exception).
+ * The least height at which the popover is still usable — header (40) + the
+ * 2-line-clamped quote (52) + the list's minimum (100px content + 22 padding,
+ * US-23.24) + the reply box (136) + the action bar (48), measured in the harness.
+ * Below this a cap does more harm than the overlap it avoids — it would clip the
+ * reply box — so `placeClearOfAnchor` stops capping and accepts the overlap
+ * (AC8's own exception).
  */
-const MIN_USABLE_CARD_PX = 200;
+const MIN_USABLE_CARD_PX = 400;
 
 /**
  * Req 24 US-23.23 AC8: place `card` clear of `anchorRect` — a comment must never

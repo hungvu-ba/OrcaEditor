@@ -5149,6 +5149,11 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 }
 
 .comment-popover-quote-text {
+  /* Req 24 US-23.24: display-only 2-line clamp; the DOM keeps the whole quote. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   font-size: 11.5px;
   line-height: 1.5;
   font-style: italic;
@@ -5157,6 +5162,10 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
 
 .comment-popover-list {
   overflow-y: auto;
+  /* Req 24 US-23.24: never shrink below min(5 body lines, content). 100px = 5 x
+     the body text's 1.6 x 12.5px line-height. A scroll container's flex minimum
+     is otherwise 0, so a tall card squeezed the list down to one header row. */
+  min-height: calc-size(max-content, min(size, 100px));
   padding: 11px 12px;
   display: flex;
   flex-direction: column;
