@@ -19,6 +19,9 @@ _bmad-output/
 Wireframe Handoff/
 # Added by code-review-graph
 .code-review-graph/
+# codemap.py output, rebuilt per checkout by the SessionStart hook
+.map/
+__pycache__/
 .vscode/
 .vscode-test/
 .github/

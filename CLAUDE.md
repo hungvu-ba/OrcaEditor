@@ -12,6 +12,21 @@ Whenever a task alters raw `.md` content (toolbar formatting, input rules, table
 
 Whenever a task touches real interactive webview behavior that can't be verified by a hand-built DOM snapshot (click handlers, keyboard shortcuts, `execCommand`, Selection API, drag/drop, popovers) — including writing the bug-reproduction test required by [Working Principles #4](#4-work-toward-the-goal-not-a-fixed-sequence-of-steps) when the bug is this kind — read and follow [Plan/WEBVIEW\_TEST.md](Plan/WEBVIEW_TEST.md) — it defines the Playwright harness, where tests live, and how to pick this track vs. `test/unit.ts` vs. `test/roundtrip/`.
 
+## Mandatory Rule: Review Tier & Review Log
+
+-   Every change gets one review tier, defined in `.claude/skills/review-commit/tiers.md`: **tier 1** = automated checks + Known Traps check, no reviewer; **tier 2** = one in-session review, no sub-agent; **tier 3** = three-reviewer sub-agent panel.
+-   A tier 2/3 review never runs in the session that wrote the code: the code session commits once tests are green, records the hashes in the spec's `code_commits`, and hands off `/bmad-quick-dev-solo <spec_file>` to a fresh session, which reviews `git show <hashes>` — never the working tree.
+-   Independent review of any committed work: `/review-commit <hash...> | <a>..<b> | --spec <spec_file>` in a fresh session — it picks the tier, fixes pure defects in its own commit, holds behavior changes for the user. `bmad-quick-dev-solo` step-04 uses the same skill.
+-   Every review run (`/review-commit`, quick-dev step-04 / one-shot, `/code-review`, `/review-changes`) ends with `python3 scripts/review_log.py add ...` → `Plan/Skill Analysis/review-log.jsonl`. Pending items decided → `outcome <id> ...`; a bug found later that the review should have caught → `miss`; weekly read → `report --since <date>`.
+-   Context usage per task: `python3 scripts/context_audit.py report --since <date>` (a SessionStart hook runs `sweep`). A session keys to its task by the quick-dev spec slug or the first prompt line `T<phase>.<n> Code:` / `Review:`.
+
+## Mandatory Rule: Commit When Code Is Done
+
+-   Every finished coding task ends with a commit — once its tests are green, and always before a review in another session, a handoff, or the end of the session. Never leave finished code uncommitted.
+-   Stage by name only this task's files — never `git add -A`/`git add .` (parallel threads share the working tree). Message per [Plan/GIT\_WORKFLOW.md](Plan/GIT_WORKFLOW.md) §3.
+-   Review fixes go in their own commit. Never amend, rebase or reset a commit that a spec, a review, or another session already references by hash; undo with `git revert`.
+-   Push/PR stay manual.
+
 ## Mandatory Rule: Output Language vs. Conversation Language
 
 Every **project output** — code, **all code comments** (inline, block, JSDoc/TSDoc, TODO/FIXME, test comments...), variable/function names, UI-facing strings (webview, toolbar, error/empty-state messages...), commit messages, and documentation (`Update History.md`, requirements, other docs) — is **always written in English**, no exceptions, including short or throwaway comments.
@@ -73,6 +88,15 @@ Before adding a new helper function, check whether one of these already covers i
 -   Shared DOM class names/selectors → `media/webview/constants.ts`
 
 Also run `npm run check:duplication` (jscpd) and `npm run check:deadcode` (ts-prune) before merge — see [Plan/GIT\_WORKFLOW.md](Plan/GIT_WORKFLOW.md).
+
+## Mandatory Rule: Find Code / Docs
+
+Before grep or opening a long file:
+
+-   `python3 scripts/codemap.py sym <Name>` → def `file:start-end` + callers + tests + doc mentions (whole repo, not just `src`/`media/webview`). Then read that range only.
+-   `python3 scripts/codemap.py doc "<heading part>"` → one section of a Plan doc (e.g. `"US-23.10"`, `"Roundtrip Test"`). Never read those files whole.
+-   Name unknown → `grep -n <word> .map/*/code.md` or read `.map/docs.md`. Maps rebuilt at session start (hook) + `python3 scripts/codemap.py build --all` if stale.
+-   `sym`/`doc` parse live and always search the whole repo, so they're never stale — only `.map/*/code.md` (per-area overview) can go stale between rebuilds.
 
 ## Mandatory Rule: Known Traps
 
