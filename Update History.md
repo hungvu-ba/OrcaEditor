@@ -551,3 +551,4 @@
 | 1.1.0 | 2026-07-31 | Chore: dropped `test:host` from the `npm test`/release gate — its VS Code download kept timing out on this network; still runnable manually via `npm run test:host`. |
 | 1.1.0 | 2026-09-24 | Fix: a long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list. |
 | 1.1.0 | 2026-09-24 | Fix: anyone can now delete any comment or reply — the popover and host no longer refuse delete on another author's content (confirm dialog kept). |
+| 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
