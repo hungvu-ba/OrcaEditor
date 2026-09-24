@@ -78,6 +78,12 @@ body.md-line-numbers #toolbar {
   user-select: none;
 }
 
+/* The gutter's ResizeObserver and drag-drop repaint numbers regardless of the
+ * setting, so visibility must follow the body class, not the gutter's contents. */
+body:not(.md-line-numbers) #line-gutter {
+  display: none;
+}
+
 .md-line-number {
   position: absolute;
   right: 10px;
