@@ -559,3 +559,4 @@
 | 1.1.0 | 2026-09-24 | Fix: ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions or Quick Open — the chords stop at the content. |
 | 1.1.0 | 2026-09-24 | Fix: toolbar/menu shortcut tooltips now show only the current platform's chord (⌘ on macOS, Ctrl+ elsewhere), not both. |
 | 1.1.0 | 2026-09-24 | Fix: a comment whose stored offsets land past its paragraph (e.g. AI-written sidecar) now re-finds its quote by text search and highlights again. |
+| 1.1.0 | 2026-09-24 | Feature: a comment line in the sidecar may carry a loose { last_known_line, quote } anchor instead of computed offsets; the thread loads and is flagged loose. |

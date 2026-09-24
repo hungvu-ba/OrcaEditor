@@ -337,6 +337,8 @@ export interface CommentSyncThread {
   offsetEnd: number;
   lastKnownLine: number;
   nearestHeading: string;
+  /** US-23.27: the sidecar anchor is still the loose `{ last_known_line, quote }` shape — `recordedText` is only the quote and the offsets are 0..0 until the webview resolves it. */
+  looseAnchor?: true;
   replies: CommentSyncReply[];
   /**
    * US-23.11 AC2: every applied Resolved/Closed/Reopen transition, oldest first.

@@ -3835,6 +3835,77 @@ check(
       sidecarBelongsToDocument([withText('TypeScriptWrapCopy' + codeText, 'c9')], codeDoc) === 'foreign');
   }
 
+  // Req 24 US-23.27: a `comment` line may carry a loose anchor
+  // `{ last_known_line, quote, nearest_heading? }` — an AI-written sidecar never
+  // has to compute offsets. Normalized in memory; `loose` is never written.
+  {
+    const rawLine = (type: string, anchor: unknown): string =>
+      JSON.stringify({
+        schema_version: 1,
+        type,
+        id: type === 'comment' ? 'c1' : 'u1',
+        ...(type === 'comment' ? { body: 'why?' } : { parent_comment_id: 'c1', origin: 'resolved' }),
+        author: 'ai',
+        timestamp: '2026-09-24T10:00:00.000Z',
+        anchor,
+      }) + '\n';
+    const quote = 'the **bold** `code` phrase';
+    const looseText = rawLine('comment', { last_known_line: 12, quote });
+    const looseLines = parseSidecarText(looseText).lines;
+    eq('loose anchor: a comment line parses to { 0, 0, quote, line, \'\', loose }',
+      looseLines.map((l) => (l as CommentLine).anchor),
+      [{ offset_start: 0, offset_end: 0, recorded_text: quote, last_known_line: 12, nearest_heading: '', loose: true }]);
+    check('loose anchor: a given nearest_heading is kept',
+      (parseSidecarText(rawLine('comment', { last_known_line: 3, quote, nearest_heading: 'US-1' })).lines[0] as CommentLine)
+        .anchor.nearest_heading === 'US-1');
+    for (const [label, bad] of [
+      ['an empty quote', { last_known_line: 12, quote: '' }],
+      ['last_known_line 0', { last_known_line: 0, quote }],
+      ['a missing quote', { last_known_line: 12 }],
+      ['a non-string nearest_heading', { last_known_line: 12, quote, nearest_heading: 7 }],
+      ['a quote mixed with offsets', { last_known_line: 12, quote, offset_start: 0, offset_end: 4 }],
+    ] as const) {
+      check(`loose anchor: ${label} is skipped`, parseSidecarText(rawLine('comment', bad)).lines.length === 0);
+    }
+    check('loose anchor: the loose shape on an anchor-update is skipped',
+      parseSidecarText(rawLine('anchor-update', { last_known_line: 12, quote })).lines.length === 0);
+
+    const fullUpdate = serializeSidecarLine(buildAnchorUpdateLine({
+      id: 'u1',
+      parentCommentId: 'c1',
+      author: 'author',
+      timestamp: '2026-09-24T11:00:00.000Z',
+      origin: 'resolved',
+      anchor: { offset_start: 9, offset_end: 13, recorded_text: 'the bold code phrase', last_known_line: 12, nearest_heading: '' },
+    }));
+    const resolved = foldSidecarRecords(parseSidecarText(looseText + fullUpdate).lines).threads[0].anchor;
+    check('loose anchor: a later full anchor-update wins the fold and is not loose',
+      resolved.recorded_text === 'the bold code phrase' && resolved.offset_end === 13 && resolved.loose === undefined);
+
+    const rewritten = serializeSidecarLine(buildCommentLine({
+      id: 'c1',
+      author: 'ai',
+      timestamp: '2026-09-24T10:00:00.000Z',
+      body: 'why?',
+      anchor: (looseLines[0] as CommentLine).anchor,
+    }));
+    check('loose anchor: a serialized line never contains "loose"', !rewritten.includes('loose'));
+    // A delete re-serializes every surviving line: an unresolved loose line must stay loose.
+    eq('loose anchor: a re-serialized loose line is written back in the loose shape',
+      JSON.parse(rewritten).anchor, { last_known_line: 12, quote });
+    eq('loose anchor: a re-serialized loose line parses back to the same anchor',
+      (parseSidecarText(rewritten).lines[0] as CommentLine).anchor, (looseLines[0] as CommentLine).anchor);
+    check('loose anchor: a full anchor serializes unchanged', !serializeSidecarLine(comment()).includes('quote'));
+
+    // Belonging needs no change: its needle is `recorded_text`, i.e. the raw-markdown quote.
+    const longQuote = 'This is **bold** text in a paragraph about `requirement` twenty three details right here';
+    check('loose anchor: a >= 80-char raw-markdown quote proves belonging',
+      sidecarBelongsToDocument(
+        foldSidecarRecords(parseSidecarText(rawLine('comment', { last_known_line: 3, quote: longQuote })).lines).threads,
+        `# Req\n\n${longQuote}.\n`
+      ) === 'belongs');
+  }
+
   // US-23.16 AC7: the orphan-row pill label for each of the 5 orphanable line kinds.
   check('orphanKindLabel: reply', orphanKindLabel('reply') === 'Reply');
   check('orphanKindLabel: status-change', orphanKindLabel('status-change') === 'Status');
