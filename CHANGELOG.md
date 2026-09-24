@@ -4,6 +4,17 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.2.2\] - 2026-09-24
+
+### Changed
+
+-   The line-number gutter (`orcaEditor.showLineNumbers`) is now hidden by default; enable it in Settings to show it.
+
+### Fixed
+
+-   With line numbers off, the gutter no longer draws numbers over the text.
+-   Dragging a table column to a new position no longer resets a wide table's horizontal scroll to the left.
+
 ## \[1.2.1\] - 2026-09-24
 
 ### Added
