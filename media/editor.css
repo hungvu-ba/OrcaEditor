@@ -5218,18 +5218,12 @@ body.comment-gutter-active.md-line-numbers #line-gutter {
   border-radius: 4px;
 }
 
-.comment-popover-delete:hover:not(:disabled) {
+.comment-popover-delete:hover {
   opacity: 1;
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
 }
 
-/* AC5's soft nudge: visible but inert on content the current author didn't write. */
-.comment-popover-delete:disabled {
-  opacity: 0.25;
-  cursor: default;
-}
-
-/* US-23.14 AC1: same treatment as .comment-popover-delete, but never disabled
+/* US-23.14 AC1: same treatment as .comment-popover-delete
  * — AC8 carries no authority check, so it is never shown inert. */
 .comment-popover-edit {
   margin-left: auto;
