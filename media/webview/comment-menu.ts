@@ -427,17 +427,19 @@ export function initCommentMenu(
           : EMPTY_HINT;
   }
 
-  /** The anchor for `range`/`node`, or null when the selection cannot be measured within `node` (US-23.1 AC3). */
+  /** The anchor for `range`/`node`, or null when the selection start cannot be measured within `node` (US-23.1 AC3). */
   function mintAnchor(range: Range, node: HTMLElement): PendingAnchor | null {
     const offsetStart = commentAnchorOffset(node, range.startContainer, range.startOffset);
-    const offsetEnd = commentAnchorOffset(node, range.endContainer, range.endOffset);
-    if (offsetStart === null || offsetEnd === null) {
+    if (offsetStart === null) {
       return null;
     }
     // US-23.25 AC1: one text space — the quote is the slice of the recorded
     // text the offsets name, so a selection that swept editor chrome (a code
     // block's "Copy") never quotes text the anchor does not record.
     const recordedText = commentAnchorText(node);
+    // US-23.25 AC2: a selection crossing top-level blocks anchors to the block
+    // holding its start — an end past that block clamps to the block's end.
+    const offsetEnd = commentAnchorOffset(node, range.endContainer, range.endOffset) ?? recordedText.length;
     return {
       node,
       anchorId: ensureCommentAnchorId(content, node),

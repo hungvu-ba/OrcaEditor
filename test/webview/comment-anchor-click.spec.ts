@@ -552,7 +552,12 @@ test.describe('AC4 — gestures another handler already owns', () => {
 
 test.describe('AC1 — the clickable region is the WASHED region, not the range\'s boxes', () => {
   test('a multi-block anchor does not make a contained block\'s blank margin clickable', async ({ page }) => {
-    await openEditor(page, DOC, { commentHighlightOn: true });
+    // Three paragraphs inside ONE blockquote: since US-23.25 AC2 a selection
+    // crossing top-level blocks anchors to its first block, so a multi-block
+    // carrier created through the real flow is a block that holds several blocks.
+    await openEditor(page, '> Alpha paragraph text.\n>\n> Beta paragraph text.\n>\n> Gamma paragraph text.\n', {
+      commentHighlightOn: true,
+    });
     // Span p0 → p2 so the range FULLY CONTAINS p1. `Range.getClientRects()` reports
     // a fully-contained element's border box, which is content-width — measured at
     // 1053px past p1's last glyph — so hit-testing the range's own rects made the

@@ -112,6 +112,10 @@ function topLevelBlockOf(content: HTMLElement, el: HTMLElement): HTMLElement | n
  * one enclosing node instead of being split or refused. A collapsed range (bare
  * caret) resolves through the same path, landing on its containing node.
  *
+ * Req 24 US-23.25 AC2: a new comment never anchors to `#content` — a selection
+ * crossing top-level blocks anchors to the top-level block holding its start
+ * (`mintAnchor` clamps the end to that block).
+ *
  * Null means "no addressable node" — an empty document, a selection outside
  * `#content`, or a block block-map excludes from its structural index (the
  * self-inserted caret-trap `<p>`, which has no `data-line`; see readSrcRange).
@@ -126,11 +130,15 @@ export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HT
   if (!el || (el !== content && !content.contains(el))) {
     return null;
   }
-  if (el !== content) {
-    const block = topLevelBlockOf(content, el);
-    if (!block || !readSrcRange(block)) {
-      return null;
-    }
+  if (el === content) {
+    const startNode = range.startContainer;
+    const startEl = startNode.nodeType === Node.ELEMENT_NODE ? (startNode as HTMLElement) : startNode.parentElement;
+    const block = startEl && startEl !== content ? topLevelBlockOf(content, startEl) : null;
+    return block && readSrcRange(block) ? block : null;
+  }
+  const block = topLevelBlockOf(content, el);
+  if (!block || !readSrcRange(block)) {
+    return null;
   }
   return el;
 }

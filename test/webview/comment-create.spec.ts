@@ -154,7 +154,7 @@ test('a bare caret is a valid anchor — collapsed offsets, same path as a range
   expect(msg.line).toBe(5);
 });
 
-test('a selection crossing two paragraphs anchors to their common ancestor, not a split', async ({ page }) => {
+test('a selection crossing two paragraphs anchors to the first paragraph, not a split', async ({ page }) => {
   await openEditor(page, DOC);
   await selectAcrossParagraphs(page);
   await clearPosted(page);
@@ -167,8 +167,9 @@ test('a selection crossing two paragraphs anchors to their common ancestor, not 
   // One thread for the whole selection — never one per crossed node.
   expect(msgs).toHaveLength(1);
   const anchorId = String(msgs[0].anchorId);
-  const stampedOnContent = await page.locator('#content').getAttribute('data-comment-anchor-id');
-  expect(stampedOnContent).toBe(anchorId);
+  // US-23.25 AC2: stamped on the block holding the selection start, never on `#content`.
+  await expect(page.locator('#content > p').first()).toHaveAttribute('data-comment-anchor-id', anchorId);
+  expect(await page.locator('#content').getAttribute('data-comment-anchor-id')).toBeNull();
 });
 
 test('empty and whitespace-only bodies are a no-op — nothing posted, the composer stays open', async ({ page }) => {
