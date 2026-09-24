@@ -562,3 +562,6 @@
 | 1.1.0 | 2026-09-24 | Feature: a comment line in the sidecar may carry a loose { last_known_line, quote } anchor instead of computed offsets; the thread loads and is flagged loose. |
 | 1.1.0 | 2026-09-24 | Fix: comment thread popover widened so an edited row's timestamps stay on one line and the edit field's Save button is no longer clipped. |
 | 1.1.0 | 2026-09-24 | Feature: a loose sidecar anchor now finds its quote, highlights it exactly and saves the full anchor once; an unmatched quote stays floating, nothing written. |
+| 1.1.0 | 2026-09-24 | Chore: added `scripts/plan_check.py` (ported from PZMod) — checks paths, file symbols/call arity, quoted headings, US-x.y headings and dependency commits named in a task plan before a session starts. |
+| 1.1.0 | 2026-09-24 | Fix: `plan_check.py` warns instead of erroring on US ids from unmerged dependencies, and reads quoted paths containing spaces. |
+| 1.2.0 | 2026-09-24 | Release: bumped version to 1.2.0, consolidating the comment-anchor, delete-permission and shortcut-scoping fixes since 1.1.0 into one [1.2.0] entry in CHANGELOG.md. |
