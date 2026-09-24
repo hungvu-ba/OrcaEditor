@@ -51,6 +51,13 @@ export interface SidecarAnchor {
   recorded_text: string;
   last_known_line: number;
   nearest_heading: string;
+  /**
+   * US-23.27: set only in memory, on a `comment` line whose anchor was written
+   * in the loose shape `{ last_known_line, quote, nearest_heading? }` — the
+   * offsets are then 0..0 and `recorded_text` is the quote, until the webview
+   * resolves it. Never written as a field (`serializeSidecarLine`).
+   */
+  loose?: true;
 }
 
 /** The thread-creating line (US-23.1). */
@@ -361,7 +368,18 @@ export function sidecarBelongsToDocument(
  * diff hunks rather than a collision on one line region.
  */
 export function serializeSidecarLine(line: SidecarLine): string {
-  return `${JSON.stringify(line)}\n`;
+  // US-23.27: a loose anchor still unresolved when the file is rewritten (a
+  // delete re-serializes every surviving line) goes back in the loose shape it
+  // was read in — writing its 0..0 placeholder offsets would turn it into a
+  // full anchor that is never resolved by its quote again.
+  const onDisk = 'anchor' in line && line.anchor.loose ? { ...line, anchor: looseAnchorOnDisk(line.anchor) } : line;
+  return `${JSON.stringify(onDisk)}\n`;
+}
+
+function looseAnchorOnDisk(anchor: SidecarAnchor): { last_known_line: number; quote: string; nearest_heading?: string } {
+  return anchor.nearest_heading === ''
+    ? { last_known_line: anchor.last_known_line, quote: anchor.recorded_text }
+    : { last_known_line: anchor.last_known_line, quote: anchor.recorded_text, nearest_heading: anchor.nearest_heading };
 }
 
 /** Assemble the thread-creating line for a new comment. Caller supplies id/timestamp so this stays pure. */
@@ -518,6 +536,36 @@ function isAnchor(value: unknown): value is SidecarAnchor {
   );
 }
 
+/**
+ * US-23.27: the loose anchor an AI-written sidecar can carry without computing
+ * offsets — `{ last_known_line: int ≥ 1, quote: non-empty string,
+ * nearest_heading?: string }` and none of the full shape's own fields —
+ * normalized to a `SidecarAnchor`; null for anything else.
+ */
+function looseAnchorOf(value: unknown): SidecarAnchor | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const a = value as Record<string, unknown>;
+  if (a.offset_start !== undefined || a.offset_end !== undefined || a.recorded_text !== undefined) {
+    return null;
+  }
+  if (!isInt(a.last_known_line) || a.last_known_line < 1 || !isString(a.quote) || a.quote === '') {
+    return null;
+  }
+  if (a.nearest_heading !== undefined && !isString(a.nearest_heading)) {
+    return null;
+  }
+  return {
+    offset_start: 0,
+    offset_end: 0,
+    recorded_text: a.quote,
+    last_known_line: a.last_known_line,
+    nearest_heading: a.nearest_heading ?? '',
+    loose: true,
+  };
+}
+
 function isCommentLine(value: unknown): value is CommentLine {
   const line = value as Record<string, unknown>;
   return line.type === 'comment' && isString(line.body) && isAnchor(line.anchor);
@@ -588,8 +636,16 @@ function asSidecarLine(value: unknown): SidecarLine | null {
     return null;
   }
   switch (line.type) {
-    case 'comment':
+    case 'comment': {
+      // US-23.27: accepted on `comment` lines only — an `anchor-update` still
+      // needs the full shape. Normalized here so every reader past the parse
+      // sees one anchor shape.
+      const loose = looseAnchorOf(line.anchor);
+      if (loose !== null) {
+        line.anchor = loose;
+      }
       return isCommentLine(line) ? line : null;
+    }
     case 'reply':
       return isReplyLine(line) ? line : null;
     case 'status-change':
@@ -672,15 +728,13 @@ export function parseSidecarText(text: string): ParsedSidecar {
  *
  * AC9's other half — "an empty or whitespace-only `orcaEditor.comments.authorName`
  * never matches any stored author" — is scoped to the CURRENT USER's name, so it
- * lives at the callers that have one (`deleteRejection`, the popover), not here.
+ * never lives here; since Req 24 US-23.16 AC8 no live path compares against it.
  * Two blank names still compare equal in this function on purpose: the loader's
  * tombstone check compares two STORED authors, and refusing a blank-vs-blank
  * match there would silently stop a `delete` line from deleting its target,
  * resurrecting a comment the user had removed.
  *
- * Exported (not local to this fold) so US-23.2's own delete-gating in
- * `comment-utils.ts`/`commentController.ts` uses this exact comparison rather
- * than a second, potentially-diverging copy.
+ * Exported so test/unit.ts can pin this exact comparison.
  */
 export function sameAuthor(a: string, b: string): boolean {
   return normalizeAuthorName(a) === normalizeAuthorName(b);

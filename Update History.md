@@ -549,3 +549,20 @@
 | 1.0.0 | 2026-07-31 | Fix: Copy on an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes. |
 | 1.1.0 | 2026-07-31 | Release: bumped version to 1.1.0, consolidating YAML/TOML/JSON front matter parsing and the collapse/expand fix into one [1.1.0] entry in CHANGELOG.md. |
 | 1.1.0 | 2026-07-31 | Chore: dropped `test:host` from the `npm test`/release gate — its VS Code download kept timing out on this network; still runnable manually via `npm run test:host`. |
+| 1.1.0 | 2026-09-24 | Chore: added review tiers with a fresh-session review handoff, a review run log (`scripts/review_log.py`), and a per-task context-usage audit (`scripts/context_audit.py`). |
+| 1.1.0 | 2026-09-24 | Fix: a long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list. |
+| 1.1.0 | 2026-09-24 | Fix: anyone can now delete any comment or reply — the popover and host no longer refuse delete on another author's content (confirm dialog kept). |
+| 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
+| 1.1.0 | 2026-09-24 | Fix: a comment on a code block no longer records its Copy/Wrap/language header as anchor text, so its sidecar is no longer flagged foreign. |
+| 1.1.0 | 2026-09-24 | Fix: a comment on a selection crossing blocks now anchors to the block where the selection starts, not the whole document. |
+| 1.1.0 | 2026-09-24 | Feature: `scripts/codemap.py` (ported from PZMod) — `sym`/`doc`/`build` find a symbol's def+callers+tests+doc-mentions or one doc section by heading, without grepping or reading whole files. |
+| 1.1.0 | 2026-09-24 | Fix: ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions or Quick Open — the chords stop at the content. |
+| 1.1.0 | 2026-09-24 | Fix: toolbar/menu shortcut tooltips now show only the current platform's chord (⌘ on macOS, Ctrl+ elsewhere), not both. |
+| 1.1.0 | 2026-09-24 | Fix: a comment whose stored offsets land past its paragraph (e.g. AI-written sidecar) now re-finds its quote by text search and highlights again. |
+| 1.1.0 | 2026-09-24 | Feature: a comment line in the sidecar may carry a loose { last_known_line, quote } anchor instead of computed offsets; the thread loads and is flagged loose. |
+| 1.1.0 | 2026-09-24 | Fix: comment thread popover widened so an edited row's timestamps stay on one line and the edit field's Save button is no longer clipped. |
+| 1.1.0 | 2026-09-24 | Feature: a loose sidecar anchor now finds its quote, highlights it exactly and saves the full anchor once; an unmatched quote stays floating, nothing written. |
+| 1.1.0 | 2026-09-24 | Chore: added `scripts/plan_check.py` (ported from PZMod) — checks paths, file symbols/call arity, quoted headings, US-x.y headings and dependency commits named in a task plan before a session starts. |
+| 1.1.0 | 2026-09-24 | Fix: `plan_check.py` warns instead of erroring on US ids from unmerged dependencies, and reads quoted paths containing spaces. |
+| 1.2.0 | 2026-09-24 | Release: bumped version to 1.2.0, consolidating the comment-anchor, delete-permission and shortcut-scoping fixes since 1.1.0 into one [1.2.0] entry in CHANGELOG.md. |
+| 1.2.0 | 2026-09-24 | Fix: `npm audit fix` for brace-expansion, dompurify, fast-uri, js-yaml, mermaid, qs and undici transitive vulnerabilities. |

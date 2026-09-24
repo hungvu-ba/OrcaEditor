@@ -20,10 +20,11 @@
  * names match the frozen `.orca-comments.jsonl` anchor schema so that story can
  * persist it verbatim.
  */
-import { anchorTextRetention, driftBandFor, pickAnchorCandidate } from './comment-anchor';
+import { anchorTextRetention, driftBandFor, locateQuote, pickAnchorCandidate } from './comment-anchor';
 import {
   anchorCandidates,
   commentAnchorLine,
+  commentAnchorText,
   COMMENT_ANCHOR_ATTR,
   dedupeCommentAnchors,
   ensureCommentAnchorId,
@@ -107,6 +108,11 @@ export interface ThreadAnchor {
    * whichever came first).
    */
   carrier?: HTMLElement;
+  /**
+   * Req 24 US-23.27: seeded from a loose sidecar anchor — `recordedText` is only
+   * a quote and the offsets are placeholders until the quote is found once.
+   */
+  looseAnchor?: boolean;
 }
 
 /** The anchor facts a thread is registered with (everything else is derived, never supplied). */
@@ -307,9 +313,22 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
     // The offsets were measured inside a different node — clamping keeps them a
     // valid range in the new one instead of pointing past its end (AC2: the
     // offsets are what place the comment precisely WITHIN the node found).
-    const length = (el.textContent ?? '').length;
-    anchor.offsetStart = Math.min(anchor.offsetStart, length);
-    anchor.offsetEnd = Math.min(Math.max(anchor.offsetEnd, anchor.offsetStart), length);
+    const text = commentAnchorText(el);
+    const { offsetStart: storedStart, offsetEnd: storedEnd } = anchor;
+    anchor.offsetStart = Math.min(anchor.offsetStart, text.length);
+    anchor.offsetEnd = Math.min(Math.max(anchor.offsetEnd, anchor.offsetStart), text.length);
+    // Req 24 US-23.26: a real range that clamped to nothing was measured in a
+    // different text space (e.g. whole-file offsets) — re-find its quote in this
+    // node instead of highlighting nothing. In-memory only; a stored caret stays one.
+    if (storedEnd > storedStart && anchor.offsetStart === anchor.offsetEnd) {
+      const quote =
+        storedEnd <= anchor.recordedText.length
+          ? anchor.recordedText.slice(storedStart, storedEnd)
+          : anchor.recordedText;
+      const found = locateQuote(text, quote);
+      anchor.offsetStart = found ? found.start : 0;
+      anchor.offsetEnd = found ? found.end : text.length;
+    }
     anchor.state = state;
     anchor.carrier = el;
     stampState(el, state);
@@ -373,6 +392,11 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       return;
     }
 
+    if (anchor.looseAnchor) {
+      resolveLoose(anchor, candidates);
+      return;
+    }
+
     const match = pickAnchorCandidate(anchor.recordedText, candidates, {
       lastKnownLine: anchor.lastKnownLine,
       nearestHeading: anchor.nearestHeading,
@@ -390,6 +414,35 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
 
     // Tier 4: nothing left to hold it. The thread keeps its recorded text, line
     // and heading so a later edit (or an undo) can promote it back out.
+    anchor.carrier = undefined;
+    anchor.state = 'floating';
+  }
+
+  /**
+   * Req 24 US-23.27: a loose anchor is only a quote near a line. The first block
+   * holding the quote — those covering `lastKnownLine` first (narrowest wins, as
+   * in `blockCovering`), then the rest by line distance — becomes its canonical
+   * anchor: the block's text, the match's offsets, placed exact. No match stays
+   * floating; tiers 2–4 never run on a quote-only anchor.
+   */
+  function resolveLoose(anchor: ThreadAnchor, candidates: readonly AnchorCandidateNode[]): void {
+    const line = anchor.lastKnownLine;
+    const distance = (c: AnchorCandidateNode): number =>
+      line < c.line ? c.line - line : line > c.lineEnd ? line - c.lineEnd : 0;
+    const ordered = [...candidates].sort(
+      (a, b) => distance(a) - distance(b) || b.line - a.line || b.depth - a.depth
+    );
+    for (const candidate of ordered) {
+      const found = locateQuote(candidate.text, anchor.recordedText);
+      if (found) {
+        anchor.recordedText = candidate.text;
+        anchor.offsetStart = found.start;
+        anchor.offsetEnd = found.end;
+        anchor.looseAnchor = false;
+        place(anchor, candidate.el, 'exact');
+        return;
+      }
+    }
     anchor.carrier = undefined;
     anchor.state = 'floating';
   }
@@ -420,7 +473,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       const threshold = anchor.contentDrifted ? band.exit : band.enter;
       const retention = anchorTextRetention(
         anchor.recordedText,
-        anchor.carrier.textContent ?? '',
+        commentAnchorText(anchor.carrier),
         threshold
       );
       anchor.contentDrifted = retention < threshold;
@@ -672,7 +725,14 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
 
   /** A thread's initial derived state, before the first resolution pass reads the DOM. */
   function seedToAnchor(seed: ThreadAnchorSeed): ThreadAnchor {
-    return { ...seed, state: 'exact', contentDrifted: false, awaitingAnchorDecision: false };
+    // A loose seed starts floating, so finding its quote is the floating -> exact
+    // transition `resolveAnchor` persists as origin 'resolved' (US-23.27).
+    return {
+      ...seed,
+      state: seed.looseAnchor ? 'floating' : 'exact',
+      contentDrifted: false,
+      awaitingAnchorDecision: false,
+    };
   }
 
   /** Shared by `register` and `syncThread`'s "not seen before" branch. */
@@ -763,7 +823,7 @@ export function initCommentResolve(content: HTMLElement, vscode: VsCodeApi): Com
       // `place`, so the offsets are clamped against the same node's length the
       // snapshot was just taken from. Persisted below via `postUpdate`'s
       // `'manual'` origin (US-23.13 AC1), so it also survives a reload.
-      anchor.recordedText = el.textContent ?? '';
+      anchor.recordedText = commentAnchorText(el);
       // The offsets described a range inside the OLD node, so they name nothing in
       // the new one — left as they were, the popover's quote row would show an
       // arbitrary mid-word fragment of the newly chosen paragraph and present it

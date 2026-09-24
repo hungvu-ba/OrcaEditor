@@ -18,6 +18,8 @@
  */
 import {
   commentAnchorLine,
+  commentAnchorOffset,
+  commentAnchorText,
   ensureCommentAnchorId,
   findCommentAnchor,
   nearestHeadingBefore,
@@ -25,9 +27,10 @@ import {
 } from './block-map';
 import type { CommentResolveController, ThreadAnchorSeed } from './comment-resolve';
 import { COMMENT_ANCHOR_ACTIVE_CLASS, COMMENT_COMPOSER_CLASS, COMMENT_COMPOSER_INPUT_CLASS } from './constants';
-import { el, getOffsetWithin, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
+import { el, neutralizeBodyText, normalizeBodyEol, positionNear, showToast } from './dom-utils';
 import { initPopoverDismiss } from './escape-stack';
 import { lockPageScroll, positionMenuClearOf, unlockPageScroll } from './menu-popup';
+import { shortcutLabel } from './tooltip';
 import type { VsCodeApi } from './vscode-api';
 
 /** The anchored node + within-node character offsets one comment attaches to (US-23.1 AC3). */
@@ -85,15 +88,6 @@ function bubbleIcon(className: string): SVGSVGElement {
   path.setAttribute('d', BUBBLE_PATH);
   svg.appendChild(path);
   return svg;
-}
-
-/**
- * Cross-platform trap (CLAUDE.md): a shortcut label must never hardcode `⌘`.
- * macOS shows the glyph, every other platform shows `Ctrl+`.
- */
-function primaryModifierLabel(): string {
-  const platform = navigator.userAgent;
-  return /Mac|iPhone|iPad/.test(platform) ? '⌘' : 'Ctrl+';
 }
 
 export interface CommentMenuController {
@@ -198,17 +192,16 @@ export function initCommentMenu(
     }
   }
 
-  const mod = primaryModifierLabel();
   const addCommentItem = menuItem('Add Comment', '', () => openComposer());
   addCommentItem.prepend(bubbleIcon('comment-menu-item-icon'));
-  const cutItem = menuItem('Cut', `${mod}X`, () => document.execCommand('cut'));
-  const copyItem = menuItem('Copy', `${mod}C`, () => document.execCommand('copy'));
-  const pasteItem = menuItem('Paste', `${mod}V`, () => {
+  const cutItem = menuItem('Cut', shortcutLabel('X'), () => document.execCommand('cut'));
+  const copyItem = menuItem('Copy', shortcutLabel('C'), () => document.execCommand('copy'));
+  const pasteItem = menuItem('Paste', shortcutLabel('V'), () => {
     // execCommand('paste') is the only route that re-enters the editor's own
     // paste pipeline (image paste, smart gap). It is blocked in plain browsers;
     // when it is, say so rather than silently dropping the action.
     if (!document.execCommand('paste')) {
-      showToast(`Use ${mod}V to paste here.`);
+      showToast(`Use ${shortcutLabel('V')} to paste here.`);
     }
   });
   menu.append(addCommentItem, el('div', 'dd-menu-sep'), cutItem, copyItem, pasteItem);
@@ -421,25 +414,31 @@ export function initCommentMenu(
       : targetLost
         ? TARGET_LOST_HINT
         : ready
-          ? `${mod}⏎ to submit · Esc to cancel`
+          ? `${shortcutLabel('⏎')} to submit · Esc to cancel`
           : EMPTY_HINT;
   }
 
-  /** The anchor for `range`/`node`, or null when the selection cannot be measured within `node` (US-23.1 AC3). */
+  /** The anchor for `range`/`node`, or null when the selection start cannot be measured within `node` (US-23.1 AC3). */
   function mintAnchor(range: Range, node: HTMLElement): PendingAnchor | null {
-    const offsetStart = getOffsetWithin(node, range.startContainer, range.startOffset);
-    const offsetEnd = getOffsetWithin(node, range.endContainer, range.endOffset);
-    if (offsetStart === null || offsetEnd === null) {
+    const offsetStart = commentAnchorOffset(node, range.startContainer, range.startOffset);
+    if (offsetStart === null) {
       return null;
     }
+    // US-23.25 AC1: one text space — the quote is the slice of the recorded
+    // text the offsets name, so a selection that swept editor chrome (a code
+    // block's "Copy") never quotes text the anchor does not record.
+    const recordedText = commentAnchorText(node);
+    // US-23.25 AC2: a selection crossing top-level blocks anchors to the block
+    // holding its start — an end past that block clamps to the block's end.
+    const offsetEnd = commentAnchorOffset(node, range.endContainer, range.endOffset) ?? recordedText.length;
     return {
       node,
       anchorId: ensureCommentAnchorId(content, node),
       offsetStart,
       offsetEnd,
       line: commentAnchorLine(content, node),
-      quote: range.toString(),
-      recordedText: node.textContent ?? '',
+      quote: recordedText.slice(offsetStart, offsetEnd),
+      recordedText,
       nearestHeading: nearestHeadingBefore(content, node),
     };
   }

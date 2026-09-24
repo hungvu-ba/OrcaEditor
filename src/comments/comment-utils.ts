@@ -5,7 +5,6 @@
  */
 import * as os from 'os';
 import type { CommentStatus, CommentStatusAction, WebviewToHost } from '../shared/messages';
-import { sameAuthor } from './sidecar-format';
 import { COMMENT_BODY_MAX_CODEPOINTS, commentBodyCodePointLength } from './comment-body-limit';
 
 /**
@@ -232,14 +231,13 @@ export function replyRejection(msg: ReplyMessage, docUri: string, threadStatus: 
  * decision). `target` is the author string recorded on whatever this delete
  * would remove (the thread's own comment, or one specific reply) — `undefined`
  * means the named target no longer exists (already deleted, or never existed).
- * The author-match check is a soft, non-authenticated UX nudge (same
- * convention as US-23.3 AC6's Close-gating), never a security boundary.
+ * **No authority check** (Req 24 US-23.16 AC8) — any user with the file open
+ * may delete any comment or reply regardless of whose name is on it.
  */
 export function deleteRejection(
   msg: DeleteCommentMessage,
   docUri: string,
-  target: { author: string } | undefined,
-  currentAuthor: string
+  target: { author: string } | undefined
 ): string | null {
   if (msg.docUri !== docUri) {
     return 'This delete was written for a different document.';
@@ -250,16 +248,13 @@ export function deleteRejection(
   if (!target) {
     return 'That comment or reply no longer exists.';
   }
-  if (!sameAuthor(target.author, currentAuthor)) {
-    return 'Only the original author can delete this.';
-  }
   return null;
 }
 
 /**
  * Why an `editComment` request is refused, or null when valid (US-23.14).
  * `threadStatus` `undefined` means the named thread does not exist. **No
- * authority check** (AC8, PO decision) — unlike `deleteRejection`, any user
+ * authority check** (AC8, PO decision) — like `deleteRejection`, any user
  * with the file open may edit any comment or reply regardless of whose name
  * is on it. The "unchanged text is treated as Cancel" rule (AC2's sub-
  * criterion) is NOT a rejection — it is a silent no-op the caller checks

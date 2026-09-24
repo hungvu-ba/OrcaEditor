@@ -4,6 +4,26 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.2.0\] - 2026-09-24
+
+### Added
+
+-   A comment line in the sidecar may carry a loose `{ last_known_line, quote }` anchor instead of computed offsets: the thread still loads (flagged loose) and, once its quote is found again, resolves and saves the full anchor.
+
+### Changed
+
+-   Comments can now be deleted by anyone, not just their author (a confirmation dialog is still shown).
+
+### Fixed
+
+-   A long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list.
+-   A comment on a code block no longer records its Copy/Wrap/language header as anchor text.
+-   A comment on a selection crossing blocks now anchors to the block where the selection starts, not the whole document.
+-   A comment whose stored offsets land past its paragraph now re-finds its quote by text search and highlights again.
+-   The comment thread popover was widened so an edited row's timestamps stay on one line and the edit field's Save button is no longer clipped.
+-   ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions, or open Quick Open.
+-   Toolbar and menu shortcut tooltips now show only the current platform's chord (⌘ on macOS, Ctrl+ elsewhere).
+
 ## \[1.1.0\] - 2026-07-31
 
 ### Added

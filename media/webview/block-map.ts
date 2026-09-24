@@ -18,6 +18,8 @@ import {
   type LineRange,
 } from './render';
 import { readOwnSrcRange, readSrcRange } from './block-info';
+import { MD_CHROME_MARKER_ATTR } from './constants';
+import { getOffsetWithin, rangeWithinOffsets, textExcluding } from './dom-utils';
 
 /** Bản chiếu tra-ngược nhanh trên DOM — mảng BlockEntry trong JS mới là bản chính. */
 export const BLOCK_ID_ATTR = 'data-block-id';
@@ -110,6 +112,10 @@ function topLevelBlockOf(content: HTMLElement, el: HTMLElement): HTMLElement | n
  * one enclosing node instead of being split or refused. A collapsed range (bare
  * caret) resolves through the same path, landing on its containing node.
  *
+ * Req 24 US-23.25 AC2: a new comment never anchors to `#content` — a selection
+ * crossing top-level blocks anchors to the top-level block holding its start
+ * (`mintAnchor` clamps the end to that block).
+ *
  * Null means "no addressable node" — an empty document, a selection outside
  * `#content`, or a block block-map excludes from its structural index (the
  * self-inserted caret-trap `<p>`, which has no `data-line`; see readSrcRange).
@@ -124,11 +130,15 @@ export function resolveCommentAnchorNode(content: HTMLElement, range: Range): HT
   if (!el || (el !== content && !content.contains(el))) {
     return null;
   }
-  if (el !== content) {
-    const block = topLevelBlockOf(content, el);
-    if (!block || !readSrcRange(block)) {
-      return null;
-    }
+  if (el === content) {
+    const startNode = range.startContainer;
+    const startEl = startNode.nodeType === Node.ELEMENT_NODE ? (startNode as HTMLElement) : startNode.parentElement;
+    const block = startEl && startEl !== content ? topLevelBlockOf(content, startEl) : null;
+    return block && readSrcRange(block) ? block : null;
+  }
+  const block = topLevelBlockOf(content, el);
+  if (!block || !readSrcRange(block)) {
+    return null;
   }
   return el;
 }
@@ -183,6 +193,30 @@ function nearestSrcRange(content: HTMLElement, el: HTMLElement): LineRange | nul
  */
 export function commentAnchorLine(content: HTMLElement, el: HTMLElement): number {
   return nearestSrcRange(content, el)?.start ?? 0;
+}
+
+/**
+ * Req 24 US-23.25 AC1: editor-injected UI (code-block language label / Wrap /
+ * Copy, diagram/math toolbars) is not document text — a comment anchor's
+ * recorded text, offsets, quote, resolver comparisons and highlight range all
+ * measure its carrier with these subtrees excluded, so every one of them lives
+ * in the same text space as the raw `.md`.
+ */
+const COMMENT_ANCHOR_SKIP_SELECTOR = `[${MD_CHROME_MARKER_ATTR}]`;
+
+/** Req 24 US-23.25 AC1: `el`'s text as a comment anchor sees it — editor chrome excluded. */
+export function commentAnchorText(el: Element): string {
+  return textExcluding(el, COMMENT_ANCHOR_SKIP_SELECTOR);
+}
+
+/** Req 24 US-23.25 AC1: character offset of (node, nodeOffset) within `commentAnchorText(el)`; null when `node` is outside `el`. */
+export function commentAnchorOffset(el: Element, node: Node, nodeOffset: number): number | null {
+  return getOffsetWithin(el, node, nodeOffset, COMMENT_ANCHOR_SKIP_SELECTOR);
+}
+
+/** Req 24 US-23.25 AC1: live Range for `[start, end)` of `commentAnchorText(el)`. */
+export function commentAnchorRange(el: Element, start: number, end: number): Range | null {
+  return rangeWithinOffsets(el, start, end, COMMENT_ANCHOR_SKIP_SELECTOR);
 }
 
 /**
@@ -277,7 +311,7 @@ function depthWithin(content: HTMLElement, el: HTMLElement): number {
 /** Req 23 US-23.4: one node tier 2/3 can consider, described by what the match needs. */
 export interface AnchorCandidateNode {
   el: HTMLElement;
-  /** Whole text content of the node — the same shape `recordedText` was captured in. */
+  /** `commentAnchorText` of the node — the same shape `recordedText` was captured in. */
   text: string;
   /** 1-based source line: the node's own when it carries one (list items do), else its block's. */
   line: number;
@@ -312,7 +346,7 @@ export function anchorCandidates(content: HTMLElement): AnchorCandidateNode[] {
   if (first) {
     candidates.push({
       el: content,
-      text: content.textContent ?? '',
+      text: commentAnchorText(content),
       line: first.start,
       lineEnd: last?.end ?? first.end,
       heading: '',
@@ -345,7 +379,7 @@ export function anchorCandidates(content: HTMLElement): AnchorCandidateNode[] {
       const ownRange = nearestSrcRange(content, el) ?? srcRange;
       candidates.push({
         el,
-        text: el.textContent ?? '',
+        text: commentAnchorText(el),
         line: ownRange.start,
         lineEnd: ownRange.end,
         heading,

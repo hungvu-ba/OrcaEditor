@@ -128,6 +128,7 @@ import {
   anchorThresholdFor,
   driftBandFor,
   levenshtein,
+  locateQuote,
   normalizeAnchorText,
   pickAnchorCandidate,
   rankReattachTargets,
@@ -2686,22 +2687,16 @@ check(
     ...over,
   });
   check('delete: the content author may delete their own content',
-    deleteRejection(del(), 'file:///a.md', { author: 'hungvu' }, 'hungvu') === null);
-  // The soft, non-authenticated nudge — not a security boundary (US-23.3 AC6).
-  check('delete: another author is refused',
-    deleteRejection(del(), 'file:///a.md', { author: 'someone-else' }, 'hungvu') !== null);
-  // The same name typed on macOS (NFD) and Windows (NFC) is one person — the
-  // two literals below are genuinely different strings before normalization.
-  check('delete: the NFD and NFC author names are genuinely different strings',
-    'Nguyễn'.normalize('NFD') !== 'Nguyễn'.normalize('NFC'));
-  check('delete: author matching is NFC-normalized',
-    deleteRejection(del(), 'file:///a.md', { author: 'Nguyễn'.normalize('NFD') }, 'Nguyễn'.normalize('NFC')) === null);
+    deleteRejection(del(), 'file:///a.md', { author: 'hungvu' }) === null);
+  // Req 24 US-23.16 AC8: no authority check — anyone may delete any content.
+  check('delete: another author\'s content may be deleted',
+    deleteRejection(del(), 'file:///a.md', { author: 'someone-else' }) === null);
   check('delete: a vanished target is refused',
-    deleteRejection(del(), 'file:///a.md', undefined, 'hungvu') !== null);
+    deleteRejection(del(), 'file:///a.md', undefined) !== null);
   check('delete: a delete for another document is refused',
-    deleteRejection(del(), 'file:///b.md', { author: 'hungvu' }, 'hungvu') !== null);
+    deleteRejection(del(), 'file:///b.md', { author: 'hungvu' }) !== null);
   check('delete: a delete naming no thread is refused',
-    deleteRejection(del({ threadId: '' }), 'file:///a.md', { author: 'hungvu' }, 'hungvu') !== null);
+    deleteRejection(del({ threadId: '' }), 'file:///a.md', { author: 'hungvu' }) !== null);
 
   // The field sets are frozen by the requirement's "Sidecar Schema Decision"
   // section — a drift here is a data-format break, not a cosmetic one.
@@ -3828,6 +3823,87 @@ check(
       '(#bug-number-one--a-long-heading-slug-with-many-extra-words-in-it) right here today.\n';
     check('belonging (single thread): a link-wrapped mention inside the anchored text still matches',
       sidecarBelongsToDocument([withText(linkLabel, 'c8')], linkDoc) === 'belongs');
+
+    // US-23.25 AC1: a comment on a fenced code block records the code text only.
+    // The raw .md never contains the header chrome ("TypeScript" label, Wrap,
+    // Copy), so a lone thread whose recorded text still carried it read foreign.
+    const codeText = 'const refundQueue = drainInEnqueueOrder(pendingRefunds); // oldest refund requests are always paid out first';
+    const codeDoc = '# Refunds\n\n```ts\n' + codeText + '\n```\n';
+    check('belonging (single thread): chrome-free code-block text belongs',
+      sidecarBelongsToDocument([withText(codeText, 'c9')], codeDoc) === 'belongs');
+    check('belonging (single thread): the same code text prefixed with header chrome reads foreign',
+      sidecarBelongsToDocument([withText('TypeScriptWrapCopy' + codeText, 'c9')], codeDoc) === 'foreign');
+  }
+
+  // Req 24 US-23.27: a `comment` line may carry a loose anchor
+  // `{ last_known_line, quote, nearest_heading? }` — an AI-written sidecar never
+  // has to compute offsets. Normalized in memory; `loose` is never written.
+  {
+    const rawLine = (type: string, anchor: unknown): string =>
+      JSON.stringify({
+        schema_version: 1,
+        type,
+        id: type === 'comment' ? 'c1' : 'u1',
+        ...(type === 'comment' ? { body: 'why?' } : { parent_comment_id: 'c1', origin: 'resolved' }),
+        author: 'ai',
+        timestamp: '2026-09-24T10:00:00.000Z',
+        anchor,
+      }) + '\n';
+    const quote = 'the **bold** `code` phrase';
+    const looseText = rawLine('comment', { last_known_line: 12, quote });
+    const looseLines = parseSidecarText(looseText).lines;
+    eq('loose anchor: a comment line parses to { 0, 0, quote, line, \'\', loose }',
+      looseLines.map((l) => (l as CommentLine).anchor),
+      [{ offset_start: 0, offset_end: 0, recorded_text: quote, last_known_line: 12, nearest_heading: '', loose: true }]);
+    check('loose anchor: a given nearest_heading is kept',
+      (parseSidecarText(rawLine('comment', { last_known_line: 3, quote, nearest_heading: 'US-1' })).lines[0] as CommentLine)
+        .anchor.nearest_heading === 'US-1');
+    for (const [label, bad] of [
+      ['an empty quote', { last_known_line: 12, quote: '' }],
+      ['last_known_line 0', { last_known_line: 0, quote }],
+      ['a missing quote', { last_known_line: 12 }],
+      ['a non-string nearest_heading', { last_known_line: 12, quote, nearest_heading: 7 }],
+      ['a quote mixed with offsets', { last_known_line: 12, quote, offset_start: 0, offset_end: 4 }],
+    ] as const) {
+      check(`loose anchor: ${label} is skipped`, parseSidecarText(rawLine('comment', bad)).lines.length === 0);
+    }
+    check('loose anchor: the loose shape on an anchor-update is skipped',
+      parseSidecarText(rawLine('anchor-update', { last_known_line: 12, quote })).lines.length === 0);
+
+    const fullUpdate = serializeSidecarLine(buildAnchorUpdateLine({
+      id: 'u1',
+      parentCommentId: 'c1',
+      author: 'author',
+      timestamp: '2026-09-24T11:00:00.000Z',
+      origin: 'resolved',
+      anchor: { offset_start: 9, offset_end: 13, recorded_text: 'the bold code phrase', last_known_line: 12, nearest_heading: '' },
+    }));
+    const resolved = foldSidecarRecords(parseSidecarText(looseText + fullUpdate).lines).threads[0].anchor;
+    check('loose anchor: a later full anchor-update wins the fold and is not loose',
+      resolved.recorded_text === 'the bold code phrase' && resolved.offset_end === 13 && resolved.loose === undefined);
+
+    const rewritten = serializeSidecarLine(buildCommentLine({
+      id: 'c1',
+      author: 'ai',
+      timestamp: '2026-09-24T10:00:00.000Z',
+      body: 'why?',
+      anchor: (looseLines[0] as CommentLine).anchor,
+    }));
+    check('loose anchor: a serialized line never contains "loose"', !rewritten.includes('loose'));
+    // A delete re-serializes every surviving line: an unresolved loose line must stay loose.
+    eq('loose anchor: a re-serialized loose line is written back in the loose shape',
+      JSON.parse(rewritten).anchor, { last_known_line: 12, quote });
+    eq('loose anchor: a re-serialized loose line parses back to the same anchor',
+      (parseSidecarText(rewritten).lines[0] as CommentLine).anchor, (looseLines[0] as CommentLine).anchor);
+    check('loose anchor: a full anchor serializes unchanged', !serializeSidecarLine(comment()).includes('quote'));
+
+    // Belonging needs no change: its needle is `recorded_text`, i.e. the raw-markdown quote.
+    const longQuote = 'This is **bold** text in a paragraph about `requirement` twenty three details right here';
+    check('loose anchor: a >= 80-char raw-markdown quote proves belonging',
+      sidecarBelongsToDocument(
+        foldSidecarRecords(parseSidecarText(rawLine('comment', { last_known_line: 3, quote: longQuote })).lines).threads,
+        `# Req\n\n${longQuote}.\n`
+      ) === 'belongs');
   }
 
   // US-23.16 AC7: the orphan-row pill label for each of the 5 orphanable line kinds.
@@ -5152,6 +5228,28 @@ check(
   const pasted = domino.createDocument(`<div>${renderer.render(JSON_DOC, false).html}</div>`, true);
   eq('US-2.11 AC14: the paste path builds no front-matter card', pasted.querySelector('.md-front-matter') == null, true);
   eq('US-2.11 AC14: ...and a `---` block still is captured on that path, unchanged from today', renderer.render('---\ntitle: T\n---\n\n# Heading\n', false).frontMatter, 'title: T');
+}
+
+// --- Req 24 US-23.26: locateQuote -------------------------------------------
+{
+  eq('US-23.26 locateQuote: an exact quote maps to its own offsets',
+    locateQuote('Alpha beta gamma.', 'beta'), { start: 6, end: 10 });
+  const rendered = 'Open Questions: the sidecar is x.jsonl, see the spec.';
+  eq('US-23.26 locateQuote: a raw-md quote (**, backticks, [t](u)) finds its rendered text',
+    locateQuote(rendered, '**Open Questions:** the sidecar is `x.jsonl`, see [the spec](spec.md).'),
+    { start: 0, end: rendered.length });
+  eq('US-23.26 locateQuote: a line-break/double-space diff maps back to original offsets',
+    locateQuote('Intro.  The held\n  queue drains.', 'The held queue drains'), { start: 8, end: 31 });
+  const nfcText = 'Ghi chú: Nhật ký cũ.'.normalize('NFC');
+  eq('US-23.26 locateQuote: an NFD quote matches NFC text',
+    locateQuote(nfcText, 'Nhật ký'.normalize('NFD')), { start: 9, end: 16 });
+  const nfdText = 'Ghi chú: Nhật ký cũ.'.normalize('NFD');
+  const nfdHit = locateQuote(nfdText, 'Nhật ký');
+  eq('US-23.26 locateQuote: ...and offsets stay in the ORIGINAL (NFD) text',
+    nfdHit && nfdText.slice(nfdHit.start, nfdHit.end).normalize('NFC'), 'Nhật ký');
+  eq('US-23.26 locateQuote: an absent quote is null', locateQuote('Alpha beta.', 'gamma'), null);
+  eq('US-23.26 locateQuote: an empty quote is null', locateQuote('Alpha beta.', ''), null);
+  eq('US-23.26 locateQuote: a marker-only quote is null', locateQuote('Alpha ** beta.', ' ** `` '), null);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);

@@ -606,8 +606,7 @@ window.addEventListener('message', (event) => {
       // path — seeded once here like the rest of `InitConfig`, never round-tripped.
       commentPanel.setDocument(msg.docUri, cfg.docRelativePath ?? '');
       commentMenu.setAuthorName(cfg.commentAuthorName ?? '');
-      // Req 23 US-23.2: the popover echoes docUri back on reply/delete, and
-      // needs the author name for its own-authorship delete gating.
+      // Req 23 US-23.2: the popover echoes docUri back on reply/delete.
       // US-23.9: a document switch invalidates the tab's whole picture — the
       // previous file's rows, its sidecar report, and any armed re-attach. Back
       // to the loading state until this document's own snapshot arrives, so the
@@ -622,7 +621,6 @@ window.addEventListener('message', (event) => {
       }
       currentDocUri = msg.docUri;
       commentPopover.setDocUri(msg.docUri);
-      commentPopover.setAuthorName(cfg.commentAuthorName ?? '');
       // Req 23 US-23.2: per-file persisted "Show Comments" state.
       commentHighlight.setToggle(cfg.commentHighlightOn === true);
       syncCommentHighlightButton();
@@ -778,6 +776,7 @@ window.addEventListener('message', (event) => {
           // boundary and every consumer reads `.length` — a producer that misses it
           // would take the whole Comment tab down rather than one blank cell.
           statusChanges: t.statusChanges ?? [],
+          looseAnchor: t.looseAnchor === true,
         }))
       );
       commentPopover.forgetThreads(pruned);
@@ -897,12 +896,10 @@ window.addEventListener('message', (event) => {
       // (bug 0716 #2) — có kênh broadcast riêng ('readingModeChanged'), y hệt
       // Zen ('zenChanged', US-19.19). configUpdate chỉ phát khi user đổi
       // orcaEditor.* trong Settings, không phải lúc runtime toggle.
-      // Req 23 US-23.2: the identity the delete-ownership nudge reads must track
-      // the setting live — the host re-reads it per action, so a stale copy here
-      // disagrees with what the host allows. US-23.11 AC1 removed the identity
-      // gate from the status actions and from the anchor-lost dialog, so neither
-      // needs the name any more.
-      commentPopover.setAuthorName(msg.commentAuthorName ?? '');
+      // Req 23 US-23.1: the author name the composer shows must track the
+      // setting live — the host re-reads it per action. US-23.11 AC1 and Req 24
+      // US-23.16 AC8 removed the identity gate from the status actions, the
+      // anchor-lost dialog and delete, so none of them needs the name any more.
       commentMenu.setAuthorName(msg.commentAuthorName ?? '');
       lineNumbersEnabled = msg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
@@ -1572,8 +1569,11 @@ function scheduleSync(): void {
 // Ctrl/Cmd inline-format shortcut body shared by bold/italic/inline-code/
 // strikethrough: swallow the browser default, run the format, then schedule a
 // sync. `apply` is a thunk so it covers both execCommand and toggleInlineCode.
+// stopPropagation too: the VS Code preload forwards every key that bubbles to
+// `window` to the workbench, ignoring defaultPrevented (⌘B toggled the sidebar).
 function applyInlineFormat(e: KeyboardEvent, apply: () => void): void {
   e.preventDefault();
+  e.stopPropagation();
   apply();
   scheduleSync();
 }

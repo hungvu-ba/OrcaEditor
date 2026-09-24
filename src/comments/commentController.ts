@@ -66,6 +66,8 @@ export interface CommentAnchor {
   lastKnownLine: number;
   /** US-23.4 tier 2 tie-breaker: heading the anchored node sat under. */
   nearestHeading: string;
+  /** US-23.27: loaded from a loose sidecar anchor; cleared once an `anchor-update` for this thread is persisted. */
+  looseAnchor?: true;
   /** US-23.4: which tier placed it — orthogonal to the Open/Resolved/Closed axis (US-23.3). */
   state: AnchorUpdateMessage['state'];
 }
@@ -1121,6 +1123,7 @@ export function createCommentSupport(
             recordedText: persisted.anchor.recorded_text,
             lastKnownLine: persisted.anchor.last_known_line,
             nearestHeading: persisted.anchor.nearest_heading,
+            looseAnchor: persisted.anchor.loose,
             // Placed from last_known_line, not from a resolved structural id —
             // AC3's "never silently indistinguishable from an exact anchor".
             state: loadedState,
@@ -1390,6 +1393,11 @@ export function createCommentSupport(
               },
             })
           ));
+        if (writeError === null) {
+          // US-23.27: the sidecar now holds a full anchor for this thread, so the
+          // next sync must not seed it as loose again.
+          delete entry.anchor.looseAnchor;
+        }
         return writeError;
       } catch (err) {
         // Same "report, don't swallow" contract as `changeStatus`: a throw here
@@ -1491,7 +1499,7 @@ export function createCommentSupport(
             : entry.commentId !== null
               ? { id: entry.commentId, author: entry.commentAuthor }
               : undefined;
-      const rejection = deleteRejection(msg, document.uri.toString(), target, currentAuthor);
+      const rejection = deleteRejection(msg, document.uri.toString(), target);
       if (rejection !== null || !entry || !target) {
         return { ok: false, error: rejection ?? 'That comment or reply no longer exists.' };
       }
@@ -1842,6 +1850,7 @@ export function createCommentSupport(
           offsetEnd: entry.anchor.offsetEnd,
           lastKnownLine: entry.anchor.lastKnownLine,
           nearestHeading: entry.anchor.nearestHeading,
+          looseAnchor: entry.anchor.looseAnchor,
           replies: entry.replies.map((r) => ({
             id: r.id,
             author: r.author,

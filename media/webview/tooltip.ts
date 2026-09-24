@@ -47,6 +47,15 @@ export function setTooltip(el: HTMLElement, text: string): void {
   el.dataset.tooltip = text;
 }
 
+/**
+ * Cross-platform trap (CLAUDE.md): a shortcut label must never hardcode `⌘`.
+ * macOS shows the glyph, every other platform shows `Ctrl+`.
+ */
+export function shortcutLabel(key: string, opts?: { shift?: boolean }): string {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+  return isMac ? `⌘${opts?.shift ? '⇧' : ''}${key}` : `Ctrl+${opts?.shift ? 'Shift+' : ''}${key}`;
+}
+
 /** Gắn tooltip tự vẽ (mouseenter/focus → hiện, mouseleave/blur → ẩn) cho 1 phần tử. */
 export function attachTooltip(el: HTMLElement, text: string): void {
   setTooltip(el, text);

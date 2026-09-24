@@ -26,6 +26,7 @@ import {
 import { buildMatchOptionToggles } from './match-options';
 import { makeDraggable } from './dom-utils';
 import { registerEscapeHandler, ESCAPE_PRIORITY } from './escape-stack';
+import { shortcutLabel } from './tooltip';
 import type { VsCodeApi } from './vscode-api';
 import type { CrossFileMatchGroup, CrossFileSearchScope, WebviewToHost } from '../../src/shared/messages';
 import type { MatchOptions } from '../../src/shared/text-match';
@@ -82,7 +83,7 @@ export function initCrossFileSearch(content: HTMLElement, vscode: VsCodeApi): Cr
   const icon = el('button', 'cross-file-search-icon');
   icon.type = 'button';
   icon.innerHTML = ICON_SVG;
-  icon.title = 'Search across project files (⌘⇧F / Ctrl+Shift+F)';
+  icon.title = `Search across project files (${shortcutLabel('F', { shift: true })})`;
   icon.setAttribute('aria-label', 'Search across project files');
   icon.hidden = true;
   // Giữ selection trong #content khi bấm icon (giống mkBtn của search.ts).
