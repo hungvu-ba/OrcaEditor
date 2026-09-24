@@ -4,6 +4,17 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.2.1\] - 2026-09-24
+
+### Added
+
+-   The block-handle menu gains a "Delete" item.
+
+### Fixed
+
+-   Clicking a list-item (bullet) drag handle now opens a Move up / Move down / Delete menu.
+-   Right-click menu Cut/Copy/Paste now work.
+
 ## \[1.2.0\] - 2026-09-24
 
 ### Added

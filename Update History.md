@@ -570,3 +570,4 @@
 | 1.2.0 | 2026-09-24 | Fix: right-click menu Cut/Copy/Paste now work — routed through the async Clipboard API instead of blocked `execCommand` calls. |
 | 1.2.0 | 2026-09-24 | Feature: block-handle menu gains a "Delete" item below "Move down" that removes the selected block, same as the Delete/Backspace shortcut. |
 | 1.2.0 | 2026-09-24 | Fix: clicking a list-item (bullet) drag handle now opens a Move up / Move down / Delete menu instead of doing nothing. |
+| 1.2.1 | 2026-09-24 | Release: bumped version to 1.2.1, consolidating the list-item handle menu, block-handle Delete, and Cut/Copy/Paste fixes since 1.2.0 into one [1.2.1] entry in CHANGELOG.md. |
