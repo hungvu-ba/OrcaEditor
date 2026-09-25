@@ -2118,6 +2118,23 @@ check(
   idx.build([]);
   check('entity: index is ready after build', idx.isReady() === true);
 }
+// T1.3 — file-by-file scan: onFileChanged per file, then markReady().
+{
+  const idx = new EntityIndex();
+  idx.onFileChanged('file:///a.md', 'caption::UC01\n');
+  idx.onFileChanged('file:///b.md', 'caption::BR01\n');
+  check('entity T1.3: not ready while the scan feeds files', idx.isReady() === false);
+  idx.markReady();
+  check('entity T1.3: ready after markReady', idx.isReady() === true);
+  eq('entity T1.3: markReady keeps every scanned file\'s rows', idx.query('').map((r) => r.namespace + r.id), ['BR01', 'UC01']);
+}
+{
+  const idx = new EntityIndex();
+  idx.onFileChanged('file:///a.md', 'caption::UC01\n');
+  idx.onFileChanged('file:///a.md', ''); // emptied before the scan finishes.
+  idx.markReady();
+  check('entity T1.3: file emptied before markReady stays dropped', idx.query('').length === 0);
+}
 
 // namespaces() — count-desc sort + case-insensitive fold to first-seen casing.
 {
