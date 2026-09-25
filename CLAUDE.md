@@ -70,11 +70,10 @@ Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't
 
 ### 5\. Update History
 
--   Every bug fix or feature must get one line (max 30 words) appended to \[Update History.md\](Update History.md) at the repo root (`Markdown Preview VS Code/`).
--   Table format: `Date | Update Content`.
-    -   **Date**: `YYYY-MM-DD`.
-    -   **Update Content**: max 30 words, states whether it's a fix or feature.
--   Append only — never edit existing rows.
+-   Every bug fix or feature must get one row in \[Update History.md\](Update History.md) at the repo root (`Markdown Preview VS Code/`), added only via `python3 scripts/update_history.py "Fix: ..." | "Feature: ..."` (`--version` defaults to `package.json`).
+-   `Update History.md` holds today's rows only; the script first moves older-dated rows to `Update History_Archived.md`, then appends the new row.
+-   Table format: `Version | Date | Update Content` — **Update Content** max 30 words, starts with `Fix:` or `Feature:`.
+-   Never hand-edit either file or existing rows.
 
 ## Mandatory Rule: Reuse Shared Modules
 
