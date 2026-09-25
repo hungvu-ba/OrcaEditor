@@ -575,3 +575,4 @@
 | 1.2.1 | 2026-09-24 | Fix: with line numbers off, the gutter no longer draws numbers over the text — ResizeObserver/drag-drop repaints are now hidden by CSS. |
 | 1.2.1 | 2026-09-24 | Fix: dragging a table column to a new position no longer rebuilds the table or resets a wide table's horizontal scroll to the left. |
 | 1.2.2 | 2026-09-24 | Release: bumped version to 1.2.2, shipping the hidden-by-default line-number gutter, gutter overlap fix, and table column-move scroll fix. |
+| 1.2.2 | 2026-09-25 | Perf: bundle KaTeX once via esbuild alias, minify production CSS, exclude test/debug artifacts from the .vsix — smaller webview bundle and package (T1.2). |
