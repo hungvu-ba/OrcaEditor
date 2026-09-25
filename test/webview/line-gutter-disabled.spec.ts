@@ -28,3 +28,17 @@ test('turning the gutter off via configUpdate hides numbers already drawn', asyn
   await simulate(page, { type: 'configUpdate', autoOpenToc: false, showLineNumbers: false, triggerMode: 'advanced' });
   await expect(page.locator('#line-gutter .md-line-number').first()).toBeHidden();
 });
+
+test('disabled gutter builds no markers after a relayout', async ({ page }) => {
+  await openEditor(page, DOC, { showLineNumbers: false });
+  await page.setViewportSize({ width: 500, height: 700 });
+  await page.waitForTimeout(100);
+  await expect(page.locator('#line-gutter .md-line-number')).toHaveCount(0);
+});
+
+test('turning the gutter on via configUpdate draws markers', async ({ page }) => {
+  await openEditor(page, DOC, { showLineNumbers: false });
+  await expect(page.locator('#line-gutter .md-line-number')).toHaveCount(0);
+  await simulate(page, { type: 'configUpdate', autoOpenToc: false, showLineNumbers: true, triggerMode: 'advanced' });
+  await expect(page.locator('#line-gutter .md-line-number').first()).toBeVisible();
+});

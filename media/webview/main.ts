@@ -154,8 +154,8 @@ const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
 initFrontMatterToggle(content);
-const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
+const lineGutter = initLineGutter(content, gutterEl, () => renderer, () => lineNumbersEnabled);
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
