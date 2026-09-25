@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Plan tick. Flip a break-tasks plan task's status; ☑ also empties its prompt blocks.
+"""Plan tick. Flip a break-tasks plan task's status; ☑ also removes its prompt blocks.
 
   python3 scripts/plan_tick.py <plan.md> T1.4 ◐   # code done: ☐ -> ◐ (waiting for review)
-  python3 scripts/plan_tick.py <plan.md> T1.4 ☑   # review done (or tier 1): ☐/◐ -> ☑ + empty every ```text block
+  python3 scripts/plan_tick.py <plan.md> T1.4 ☑   # review done (or tier 1): ☐/◐ -> ☑ + remove every ```text block
 
 A relative plan path resolves against the main checkout (Plan/ lives only there), so a worktree session
-passes the same path. The ```text fences are kept; Verify, Notes and everything outside the blocks stay.
+passes the same path. Each ```text block goes with its fences; Verify, Notes and everything outside the blocks stay.
 """
 import argparse
 import os
@@ -18,7 +18,7 @@ ALLOWED_FROM = {"◐": ("☐",), "☑": ("☐", "◐")}
 
 
 def tick(lines, task_id, status):
-    """lines -> (new lines, old status, emptied block count). Raises ValueError on a bad task/transition."""
+    """lines -> (new lines, old status, removed block count). Raises ValueError on a bad task/transition."""
     start = next((i for i, l in enumerate(lines) if (m := TASK_HEAD.match(l)) and m.group(2) == task_id), None)
     if start is None:
         raise ValueError(f"{task_id}: no '### <status> {task_id}' heading")
@@ -29,20 +29,21 @@ def tick(lines, task_id, status):
     head = lines[start]
     pos = head.index(old)
     out = lines[:start] + [head[:pos] + status + head[pos + len(old):]]
-    emptied, in_block = 0, False
+    removed, in_block = 0, False
     for line in lines[start + 1:end]:
         if in_block:
-            if line.strip() == "```":
-                in_block = False
-                out.append(line)
+            in_block = line.strip() != "```"
             continue
         if status == "☑" and line.strip() == "```text":
             in_block = True
-            emptied += 1
+            removed += 1
+            continue
+        if removed and line.strip() == "" and out[-1].strip() == "":
+            continue  # a removed block leaves two blank lines
         out.append(line)
     if in_block:
         raise ValueError(f"{task_id}: unclosed ```text block")
-    return out + lines[end:], old, emptied
+    return out + lines[end:], old, removed
 
 
 def main():
@@ -55,12 +56,12 @@ def main():
     with open(plan, encoding="utf-8") as fh:
         lines = fh.readlines()
     try:
-        new, old, emptied = tick(lines, a.task, a.status)
+        new, old, removed = tick(lines, a.task, a.status)
     except ValueError as e:
         sys.exit(f"plan_tick: {e}")
     with open(plan, "w", encoding="utf-8") as fh:
         fh.writelines(new)
-    note = f", emptied {emptied} prompt block(s)" if a.status == "☑" else ""
+    note = f", removed {removed} prompt block(s)" if a.status == "☑" else ""
     print(f"{a.task}: {old} -> {a.status}{note}  ({plan})")
 
 
