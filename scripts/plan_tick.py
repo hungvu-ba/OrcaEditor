@@ -5,16 +5,19 @@
   python3 scripts/plan_tick.py <plan.md> T1.4 ☑   # review done (or tier 1): ☐/◐ -> ☑ + remove every ```text block
 
 A relative plan path resolves against the main checkout (Plan/ lives only there), so a worktree session
-passes the same path. Each ```text block goes with its fences; Verify, Notes and everything outside the blocks stay.
+passes the same path. Each ```text block goes with its fences and its Code:/Review label line; Verify, Notes and
+everything else stay.
 """
 import argparse
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plan_check import MAIN_ROOT, TASK_HEAD  # noqa: E402
 
 ALLOWED_FROM = {"◐": ("☐",), "☑": ("☐", "◐")}
+BLOCK_LABEL = re.compile(r"^(Code|Review\b.*):\s*$")
 
 
 def tick(lines, task_id, status):
@@ -37,6 +40,10 @@ def tick(lines, task_id, status):
         if status == "☑" and line.strip() == "```text":
             in_block = True
             removed += 1
+            while out[-1].strip() == "":
+                out.pop()
+            if BLOCK_LABEL.match(out[-1]):
+                out.pop()  # "Code:" / "Review (...):" line above the block
             continue
         if removed and line.strip() == "" and out[-1].strip() == "":
             continue  # a removed block leaves two blank lines
