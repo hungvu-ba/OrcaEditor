@@ -30,6 +30,10 @@ const webviewConfig = {
   target: 'es2020',
   sourcemap: !production,
   minify: production,
+  // Routes both math-edit.ts's ESM import and @vscode/markdown-it-katex's
+  // require('katex') to the same katex.mjs, instead of bundling both katex.mjs
+  // and katex.js (~270 KB).
+  alias: { katex: 'katex/dist/katex.mjs' },
 };
 
 /**
@@ -194,7 +198,15 @@ const hostTestConfig = {
 function copyAssets() {
   fs.mkdirSync('dist/webview', { recursive: true });
   for (const f of ['markdown.css', 'editor.css']) {
-    fs.copyFileSync(path.join('media', f), path.join('dist/webview', f));
+    const src = path.join('media', f);
+    const dest = path.join('dist/webview', f);
+    if (production) {
+      const text = fs.readFileSync(src, 'utf8');
+      const { code } = esbuild.transformSync(text, { loader: 'css', minify: true });
+      fs.writeFileSync(dest, code);
+    } else {
+      fs.copyFileSync(src, dest);
+    }
   }
   // Bundled fonts (Literata cho reading preset "academic" — @font-face trong
   // markdown.css trỏ url('fonts/literata/*.woff2'). Copy .woff2 + OFL.txt: media/**

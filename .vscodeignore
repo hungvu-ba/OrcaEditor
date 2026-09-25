@@ -10,6 +10,9 @@ tsconfig.json
 dist/test/**
 **/*.map
 sample/**
+Sample/**
+dist/webview/_harness-*.html
+dist/webview/*-debug.js
 WIP/**
 Requirement/**
 Plan/**
@@ -31,6 +34,7 @@ eslint.config.mjs
 .mcp.json
 .jscpd.json
 playwright.config.ts
+playwright.shots.config.ts
 scripts/**
 .map/**
 .github/**
