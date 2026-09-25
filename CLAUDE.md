@@ -74,6 +74,7 @@ Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't
 -   `Update History.md` holds today's rows only; the script first moves older-dated rows to `Update History_Archived.md`, then appends the new row.
 -   Table format: `Version | Date | Update Content` — **Update Content** max 30 words, starts with `Fix:` or `Feature:`.
 -   Never hand-edit either file or existing rows.
+-   Never read `Update History_Archived.md` whole — `grep -n` it by date or keyword.
 
 ## Mandatory Rule: Reuse Shared Modules
 
