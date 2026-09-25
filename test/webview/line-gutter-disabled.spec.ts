@@ -41,4 +41,5 @@ test('turning the gutter on via configUpdate draws markers', async ({ page }) =>
   await expect(page.locator('#line-gutter .md-line-number')).toHaveCount(0);
   await simulate(page, { type: 'configUpdate', autoOpenToc: false, showLineNumbers: true, triggerMode: 'advanced' });
   await expect(page.locator('#line-gutter .md-line-number').first()).toBeVisible();
+  await expect(page.locator('#line-gutter .md-line-number')).toHaveText(['1', '3', '5', '6', '8']);
 });
