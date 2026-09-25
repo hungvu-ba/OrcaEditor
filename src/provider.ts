@@ -825,8 +825,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /**
    * Req 21 US-21.2: initial non-blocking full build of the entity index —
-   * findFiles all markdown, read each (skipping+logging any single failing
-   * file), yielding between files so activation isn't blocked, then build().
+   * findFiles all markdown, read and index each one in turn (skipping+logging
+   * any single failing file) so only one file's text is alive at a time,
+   * yielding between files so activation isn't blocked, then markReady().
    */
   public async buildEntityIndex(): Promise<void> {
     let uris: readonly vscode.Uri[];
@@ -840,10 +841,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       MarkdownWysiwygProvider.log('entityIndex: findFiles failed', err);
       uris = [];
     }
-    const entries: { uri: string; text: string }[] = [];
     for (const uri of uris) {
       try {
-        entries.push({ uri: uri.toString(), text: await this.readMarkdownText(uri) });
+        this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
       } catch (err) {
         // One unreadable file must not abort the whole build — skip + log.
         MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
@@ -851,7 +851,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // Yield so a large workspace scan doesn't monopolize the event loop.
       await new Promise<void>((r) => setTimeout(r, 0));
     }
-    this.entityIndex.build(entries);
+    this.entityIndex.markReady();
   }
 
   /**

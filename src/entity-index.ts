@@ -257,7 +257,8 @@ interface IndexedRow {
 /**
  * In-memory entity index keyed by file so an incremental per-file update just
  * replaces that file's rows (US-21.2). Pure — fed already-read text by
- * provider.ts. `isReady()` is false until the first full `build()` completes so
+ * provider.ts. `isReady()` is false until the first full `build()` or the
+ * scan-end `markReady()` so
  * a query during the initial background scan reports "indexing" rather than a
  * false "nothing exists" (index freshness is NOT existence truth).
  */
@@ -399,7 +400,15 @@ export class EntityIndex {
     );
   }
 
-  /** False until the first full `build()` completes (US-21.2 indexing state). */
+  /**
+   * End of the file-by-file workspace scan (fed through `onFileChanged`): flips
+   * the index to ready without touching any row.
+   */
+  markReady(): void {
+    this.ready = true;
+  }
+
+  /** False until the first full `build()` or `markReady()` (US-21.2 indexing state). */
   isReady(): boolean {
     return this.ready;
   }
