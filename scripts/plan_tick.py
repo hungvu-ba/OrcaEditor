@@ -1,75 +1,79 @@
 #!/usr/bin/env python3
-"""Plan tick. Flip a break-tasks plan task's status; ☑ also removes its prompt blocks.
+"""Plan tick. Shim over the harness task CLI: the status goes to harness.db, the CLI re-renders the plan mirror.
 
-  python3 scripts/plan_tick.py <plan.md> T1.4 ◐   # code done: ☐ -> ◐ (waiting for review)
-  python3 scripts/plan_tick.py <plan.md> T1.4 ☑   # review done (or tier 1): ☐/◐ -> ☑ + remove every ```text block
+  python3 scripts/plan_tick.py <plan.md> T1.4 ◐   # code done: -> review (waiting for review)
+  python3 scripts/plan_tick.py <plan.md> T1.4 ☑   # review done (or tier 1): -> done, mirror hides its prompt blocks
 
 A relative plan path resolves against the main checkout (Plan/ lives only there), so a worktree session
-passes the same path. Each ```text block goes with its fences and its Code:/Review label line; Verify, Notes and
-everything else stay.
+passes the same path. Prompts of a done task stay in the DB: `task show <feature>/<id> --part code`.
+Exit 1: plan not imported, unknown id, refused (done / dropped reopen only via `task tick <ref> open`),
+hand-edited mirror (DB already updated: run `task import --update <plan.md>`).
+AGENT_HARNESS overrides the harness checkout, HARNESS_DB the DB.
 """
 import argparse
 import os
-import re
+import sqlite3
+import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plan_check import MAIN_ROOT, TASK_HEAD  # noqa: E402
+from plan_check import MAIN_ROOT  # noqa: E402
 
-ALLOWED_FROM = {"◐": ("☐",), "☑": ("☐", "◐")}
-BLOCK_LABEL = re.compile(r"^(Code|Review\b.*):\s*$")
+HARNESS = os.environ.get("AGENT_HARNESS") or os.path.expanduser("~/Documents/Dev/agent-harness")
+TASK = os.path.join(HARNESS, "tools", "task.py")
+STATUS = {"◐": "review", "☑": "done"}
 
 
-def tick(lines, task_id, status):
-    """lines -> (new lines, old status, removed block count). Raises ValueError on a bad task/transition."""
-    start = next((i for i, l in enumerate(lines) if (m := TASK_HEAD.match(l)) and m.group(2) == task_id), None)
-    if start is None:
-        raise ValueError(f"{task_id}: no '### <status> {task_id}' heading")
-    old = TASK_HEAD.match(lines[start]).group(1)
-    if old not in ALLOWED_FROM[status]:
-        raise ValueError(f"{task_id}: {old} -> {status} not allowed (from {'/'.join(ALLOWED_FROM[status])} only)")
-    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(("## ", "### "))), len(lines))
-    head = lines[start]
-    pos = head.index(old)
-    out = lines[:start] + [head[:pos] + status + head[pos + len(old):]]
-    removed, in_block = 0, False
-    for line in lines[start + 1:end]:
-        if in_block:
-            in_block = line.strip() != "```"
-            continue
-        if status == "☑" and line.strip() == "```text":
-            in_block = True
-            removed += 1
-            while out[-1].strip() == "":
-                out.pop()
-            if BLOCK_LABEL.match(out[-1]):
-                out.pop()  # "Code:" / "Review (...):" line above the block
-            continue
-        if removed and line.strip() == "" and out[-1].strip() == "":
-            continue  # a removed block leaves two blank lines
-        out.append(line)
-    if in_block:
-        raise ValueError(f"{task_id}: unclosed ```text block")
-    return out + lines[end:], old, removed
+def db_path():
+    return Path(os.environ.get("HARNESS_DB") or Path.home() / ".claude" / "harness" / "harness.db")
+
+
+def feature_of(plan):
+    """plan path -> (project root, feature key) by features.source. Raises ValueError when no feature mirrors it."""
+    db = db_path()
+    if not db.is_file():
+        raise ValueError(f"no harness DB at {db}")
+    con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT project, key, source FROM features").fetchall()
+    finally:
+        con.close()
+    real = os.path.realpath(plan)
+    hit = next(((p, k) for p, k, s in rows if os.path.realpath(os.path.join(p, s)) == real), None)
+    if hit is None:
+        raise ValueError(f"{plan} is not a mirror in {db}: task import it first")
+    return hit
+
+
+def task(*args):
+    """Run the task CLI, output passes through -> its exit code."""
+    return subprocess.run([sys.executable, TASK, *args]).returncode
+
+
+def tick(plan, task_id, glyph):
+    """-> exit code. ☑ re-renders the feature with --hide-done-prompts (the old md edit dropped the blocks)."""
+    project, feature = feature_of(plan)
+    code = task("tick", f"{feature}/{task_id}", STATUS[glyph], "--project", project)
+    if code == 0 and glyph == "☑":
+        code = task("render", feature, "--hide-done-prompts", "--project", project)
+    return code
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("plan")
     ap.add_argument("task", help="task id, e.g. T1.4")
-    ap.add_argument("status", choices=sorted(ALLOWED_FROM))
+    ap.add_argument("status", choices=sorted(STATUS))
     a = ap.parse_args()
     plan = a.plan if os.path.isabs(a.plan) else os.path.join(MAIN_ROOT, a.plan)
-    with open(plan, encoding="utf-8") as fh:
-        lines = fh.readlines()
+    if not os.path.isfile(TASK):
+        sys.exit(f"plan_tick: no task CLI at {TASK} (set AGENT_HARNESS)")
     try:
-        new, old, removed = tick(lines, a.task, a.status)
+        code = tick(plan, a.task, a.status)
     except ValueError as e:
         sys.exit(f"plan_tick: {e}")
-    with open(plan, "w", encoding="utf-8") as fh:
-        fh.writelines(new)
-    note = f", removed {removed} prompt block(s)" if a.status == "☑" else ""
-    print(f"{a.task}: {old} -> {a.status}{note}  ({plan})")
+    sys.exit(1 if code else 0)
 
 
 if __name__ == "__main__":
