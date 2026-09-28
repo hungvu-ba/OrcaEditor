@@ -226,3 +226,18 @@ test('an edit that detaches the hovered table hides its row/column handles inste
   await expect(page.locator('.dd-col-handle')).toHaveCSS('display', 'none');
   expect(errors).toEqual([]);
 });
+
+test('an edit that detaches the hovered block hides its handle instead of measuring it', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const paragraph = page.locator('p', { hasText: 'Paragraph 1.' }).first();
+  await hoverCenter(page, paragraph);
+  const handle = page.locator(BLOCK_HANDLE_SELECTOR);
+  await expect(handle).toHaveCSS('display', 'flex');
+
+  // #content shrinks -> the ResizeObserver reposition runs with the hovered block detached.
+  await paragraph.evaluate((el) => el.remove());
+
+  await expect(handle).toHaveCSS('display', 'none');
+  expect(errors).toEqual([]);
+});
