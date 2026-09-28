@@ -36,7 +36,7 @@ import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-po
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
-import { findTaskCheckbox } from './dom-utils';
+import { findTaskCheckbox, fixedRightAt, fixedBottomAt } from './dom-utils';
 
 export interface DragDropDeps {
   scheduleSync: () => void;
@@ -315,7 +315,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     handleEl.classList.toggle('dd-handle--section', span.length > 1);
     handleEl.style.top = `${firstRect.top}px`;
     handleEl.style.height = `${bottom - firstRect.top}px`;
-    handleEl.style.right = `${window.innerWidth - firstRect.left - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
+    handleEl.style.right = `${fixedRightAt(firstRect.left) - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
   }
 
   // ---------------------------------------------------------------------
@@ -382,8 +382,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     const r = block.getBoundingClientRect();
     tableHandleEl.style.display = 'flex';
-    tableHandleEl.style.right = `${window.innerWidth - r.left}px`;
-    tableHandleEl.style.bottom = `${window.innerHeight - r.top}px`;
+    tableHandleEl.style.right = `${fixedRightAt(r.left)}px`;
+    tableHandleEl.style.bottom = `${fixedBottomAt(r.top)}px`;
   }
 
   // ---------------------------------------------------------------------
@@ -883,7 +883,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     const r = li.getBoundingClientRect();
     liHandleEl.style.display = 'flex';
-    liHandleEl.style.right = `${window.innerWidth - liHandleAnchorLeft(li)}px`;
+    liHandleEl.style.right = `${fixedRightAt(liHandleAnchorLeft(li))}px`;
     // A parent whose only child is its nested list has ~0 own content, so clamp to a grabbable
     // minimum; its vertical extent is the item's OWN content only, down to the top of its first
     // nested `<ul>`/`<ol>` — unchanged from before this change (out of scope, bug General #2).

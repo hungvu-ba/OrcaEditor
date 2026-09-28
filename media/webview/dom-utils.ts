@@ -355,6 +355,15 @@ export function positionNear(el: HTMLElement, anchorRect: DOMRect, gap = 8): voi
   el.style.left = `${left}px`;
 }
 
+/** `right` for a position:fixed element whose right edge must sit at viewport x = `left`. */
+export function fixedRightAt(left: number): number {
+  return document.documentElement.clientWidth - left;
+}
+/** `bottom` counterpart. */
+export function fixedBottomAt(top: number): number {
+  return document.documentElement.clientHeight - top;
+}
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Toast nhỏ góc dưới phải, tự ẩn sau vài giây. */

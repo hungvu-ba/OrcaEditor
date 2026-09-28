@@ -114,6 +114,7 @@ Before grep or opening a long file:
 **Cross-platform trap (macOS vs Windows):**
 
 -   **Never compare paths/filenames/text with a raw `===`/`startsWith`/`includes`.** Windows vs macOS differ in path separator, filesystem case-sensitivity, filename Unicode form (NFC/NFD), and line ending (CRLF/LF) — a raw comparison usually coincides on macOS and silently breaks on Windows. Route file/entity-name comparisons through a shared normalizer (decode → NFC → normalize separator → optional case-fold) and reconcile text to `document.eol` before diffing/writing. Keyboard-shortcut handlers must test both `metaKey` and `ctrlKey`; shortcut labels shown in UI must not hardcode `⌘`. See [Plan/Cross-Environment Defects — Audit.md](Plan/Cross-Environment%20Defects%20%E2%80%94%20Audit.md) for the full defect family and fix patterns.
+-   **`position: fixed` + `right`/`bottom` must be computed from `document.documentElement.clientWidth/clientHeight`, never `window.innerWidth/innerHeight`** — the difference is the classic scrollbar, which VS Code webviews always have. Use `fixedRightAt`/`fixedBottomAt` in `media/webview/dom-utils.ts`.
 
 **Test-infra trap:**
 

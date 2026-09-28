@@ -37,6 +37,7 @@ import {
   RIGHT_DOCK_TAB_CLASS,
   RIGHT_DOCK_TAB_LABEL_CLASS,
 } from './constants';
+import { fixedRightAt } from './dom-utils';
 import { ESCAPE_PRIORITY, initPopoverDismiss } from './escape-stack';
 import type { VsCodeApi } from './vscode-api';
 
@@ -317,7 +318,7 @@ export function createTabDock(
     // element resolves against the initial containing block, which EXCLUDES a
     // classic scrollbar while innerWidth includes it — the difference is 0 on
     // macOS overlay scrollbars and ~15px on Windows (CLAUDE.md cross-platform trap).
-    menu.style.right = `${document.documentElement.clientWidth - panelRect.right + MENU_OFFSET_RIGHT_PX}px`;
+    menu.style.right = `${fixedRightAt(panelRect.right) + MENU_OFFSET_RIGHT_PX}px`;
     menu.hidden = false;
     menuDismiss.arm();
     menuBtn.setAttribute('aria-expanded', 'true');

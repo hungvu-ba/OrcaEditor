@@ -4,7 +4,15 @@
  * chuột vào bảng (gõ phím không tính).
  */
 import { fillSequenceColumn } from './pipeline';
-import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
+import {
+  closestElement,
+  emptyParagraph,
+  fixedBottomAt,
+  fixedRightAt,
+  showToast,
+  svgIcon,
+  type DomHelpers,
+} from './dom-utils';
 import {
   TABLE_TOOLBAR_HIDE_MS,
   MD_TABLE_FIT_CLASS as FIT_CLASS,
@@ -1098,7 +1106,7 @@ function positionRowHandle(row: HTMLTableRowElement | null): void {
   rowHandleEl.style.display = 'flex';
   rowHandleEl.style.top = `${rRect.top}px`;
   rowHandleEl.style.height = `${rRect.height}px`;
-  rowHandleEl.style.right = `${window.innerWidth - tRect.left}px`;
+  rowHandleEl.style.right = `${fixedRightAt(tRect.left)}px`;
 }
 
 /** Hit column spans the header cell's own full width and sits flush (zero gap) against
@@ -1120,7 +1128,7 @@ function positionColHandle(col: { table: HTMLTableElement; index: number } | nul
   colHandleEl.style.display = 'flex';
   colHandleEl.style.left = `${cRect.left}px`;
   colHandleEl.style.width = `${cRect.width}px`;
-  colHandleEl.style.bottom = `${window.innerHeight - tRect.top}px`;
+  colHandleEl.style.bottom = `${fixedBottomAt(tRect.top)}px`;
 }
 
 function sameCol(a: { table: HTMLTableElement; index: number } | null, b: { table: HTMLTableElement; index: number } | null): boolean {
