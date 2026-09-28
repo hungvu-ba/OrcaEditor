@@ -1054,20 +1054,33 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   });
 
   // Handles use position:fixed + viewport coordinates from
-  // getBoundingClientRect(), recomputed only on mousemove over #content — a
-  // scroll with the mouse stationary otherwise leaves them stuck at the old
-  // position while the block underneath moves.
-  window.addEventListener(
-    'scroll',
-    () => {
+  // getBoundingClientRect(), recomputed on mousemove over #content only when
+  // the hovered target changes — a scroll, resize or re-wrap (TOC toggle, image
+  // load, zoom) with the mouse stationary otherwise leaves them stuck at the old
+  // position/size while the block underneath moves. rAF-coalesced: each
+  // position* call reads rects, and scroll/resize fire uncoalesced.
+  let repositionRaf = 0;
+  function scheduleHandleReposition(): void {
+    if (state !== 'idle' || repositionRaf !== 0) {
+      return;
+    }
+    repositionRaf = requestAnimationFrame(() => {
+      repositionRaf = 0;
+      // Re-check inside the frame: a drag can arm between the event and this callback.
       if (state !== 'idle') {
         return;
       }
-      positionHandle(hoveredBlock);
-      positionLiHandle(hoveredLi);
-    },
-    { passive: true, capture: true }
-  );
+      // An edit can detach a hovered target without a refresh() (the ResizeObserver fires on
+      // exactly those edits) — hide its handle instead of measuring a zero rect.
+      const live = <T extends HTMLElement>(el: T | null): T | null => (el && content.contains(el) ? el : null);
+      positionHandle(live(hoveredBlock));
+      positionLiHandle(live(hoveredLi));
+      positionTableHandle(live(hoveredTableBlock));
+    });
+  }
+  window.addEventListener('scroll', scheduleHandleReposition, { passive: true, capture: true });
+  window.addEventListener('resize', scheduleHandleReposition);
+  new ResizeObserver(scheduleHandleReposition).observe(content);
 
   // ---------------------------------------------------------------------
   // IME guard (F5)

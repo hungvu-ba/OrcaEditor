@@ -1703,37 +1703,36 @@ function initTableDragDrop(): void {
   });
 
   // Handles use viewport coordinates from getBoundingClientRect(), recomputed
-  // only on mousemove over #content — a scroll with the mouse stationary
-  // otherwise leaves them stuck at the old position while the row/column
-  // underneath moves (mirrors the block-level drag handle in drag-drop.ts).
-  // rAF-coalesce the reposition: positionRowHandle/positionColHandle each read rects, and scroll
-  // fires uncoalesced — same frame-guard shape as the hover path above.
-  let scrollHandleRaf = 0;
-  window.addEventListener(
-    'scroll',
-    () => {
+  // on mousemove over #content only when the hovered row/column changes — a
+  // scroll, resize or re-wrap with the mouse stationary otherwise leaves them
+  // stuck at the old position/size while the row/column underneath moves
+  // (mirrors the block-level drag handle in drag-drop.ts).
+  // rAF-coalesce the reposition: positionRowHandle/positionColHandle each read rects, and
+  // scroll/resize fire uncoalesced — same frame-guard shape as the hover path above.
+  let repositionRaf = 0;
+  function scheduleHandleReposition(): void {
+    if (tdState !== 'idle' || repositionRaf !== 0) {
+      return;
+    }
+    repositionRaf = requestAnimationFrame(() => {
+      repositionRaf = 0;
+      // Re-check inside the frame: a drag can arm, or hover can clear, between event and frame.
       if (tdState !== 'idle') {
         return;
       }
-      if (scrollHandleRaf !== 0) {
-        return;
+      // An edit can detach a hovered row/table without a refresh() (the ResizeObserver fires on
+      // exactly those edits) — hide its handle instead of measuring a detached node.
+      if (hoveredRow) {
+        positionRowHandle(content.contains(hoveredRow) ? hoveredRow : null);
       }
-      scrollHandleRaf = requestAnimationFrame(() => {
-        scrollHandleRaf = 0;
-        // Re-check inside the frame: a drag can arm, or hover can clear, between event and frame.
-        if (tdState !== 'idle') {
-          return;
-        }
-        if (hoveredRow) {
-          positionRowHandle(hoveredRow);
-        }
-        if (hoveredCol) {
-          positionColHandle(hoveredCol);
-        }
-      });
-    },
-    { passive: true, capture: true }
-  );
+      if (hoveredCol) {
+        positionColHandle(content.contains(hoveredCol.table) ? hoveredCol : null);
+      }
+    });
+  }
+  window.addEventListener('scroll', scheduleHandleReposition, { passive: true, capture: true });
+  window.addEventListener('resize', scheduleHandleReposition);
+  new ResizeObserver(scheduleHandleReposition).observe(content);
 
   rowHandleEl.addEventListener('mousedown', (e) => {
     if (e.button !== 0 || !hoveredRow) {
