@@ -147,23 +147,29 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   if (growOnlyCol !== undefined && prevWidths) {
     const others = cols.map((_, j) => (j === growOnlyCol ? 0 : prevWidths[j] ?? hard[j]));
     const prevJ = prevWidths[growOnlyCol] ?? hard[growOnlyCol];
-    const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
     const widths = cols.map((_, j) => prevWidths[j] ?? hard[j]);
-    if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
-    const candidates = new Set<number>([prevJ]);
-    for (const f of fits[growOnlyCol]) for (const w of f.need) if (w > prevJ && w <= maxAllowed) candidates.add(w);
-    let bestW = prevJ;
-    let bestH = Infinity;
-    for (const w of [...candidates].sort((x, y) => x - y)) {
-      widths[growOnlyCol] = w;
-      const h = sum(heightsAt(widths));
-      if (h < bestH) {
-        bestH = h;
-        bestW = w;
+    // prevWidths can go stale between re-fits (e.g. the panel narrowed, or a
+    // column's hardMinW grew, since they were applied); only trust the fast
+    // path when they are still feasible, else fall through to a full solve
+    // instead of returning an over-budget or below-hardMinW result.
+    if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j])) {
+      const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
+      if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
+      const candidates = new Set<number>([prevJ]);
+      for (const f of fits[growOnlyCol]) for (const w of f.need) if (w > prevJ && w <= maxAllowed) candidates.add(w);
+      let bestW = prevJ;
+      let bestH = Infinity;
+      for (const w of [...candidates].sort((x, y) => x - y)) {
+        widths[growOnlyCol] = w;
+        const h = sum(heightsAt(widths));
+        if (h < bestH) {
+          bestH = h;
+          bestW = w;
+        }
       }
+      widths[growOnlyCol] = bestW;
+      return { widths, rowHeights: heightsAt(widths), scroll: false };
     }
-    widths[growOnlyCol] = bestW;
-    return { widths, rowHeights: heightsAt(widths), scroll: false };
   }
 
   const settle = (P: number[], lines: number[][]): FitState => {

@@ -1939,6 +1939,23 @@ const af20 = (): AreaFitColumn[] => [
   const noSpareBudget = idW + prevW;
   const noSpare = afSolve(cols, { ...afOpts(noSpareBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
   eq('solveAreaFit growOnlyCol: no spare → prevWidths unchanged', noSpare.widths, [idW, prevW]);
+
+  // Stale prevWidths (e.g. the panel narrowed since they were applied) already
+  // exceed budgetW before growOnlyCol even widens — the fast path must not
+  // return them unchanged as a non-scroll, over-budget result.
+  const staleBudget = idW + prevW - 20;
+  const stale = afSolve(cols, { ...afOpts(staleBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  check('solveAreaFit growOnlyCol: stale prevWidths over budget → falls back to a full solve within budget', afSum(stale.widths) <= staleBudget || stale.scroll, `  ${JSON.stringify(stale)}`);
+
+  // A non-grow column's prevWidths can also fall below its CURRENT hardMinW
+  // (its longest word grew since that width was applied) — the fast path
+  // must not copy it through unshrunk.
+  const staleHard = afSolve([idCol, targetCol], {
+    ...afOpts(idW + prevW),
+    prevWidths: [idW - 10, prevW],
+    growOnlyCol: 1,
+  });
+  check('solveAreaFit growOnlyCol: a stale prevWidths entry below hardMinW is not copied through', staleHard.widths[0] >= idW, `  ${JSON.stringify(staleHard.widths)}`);
 }
 
 {
