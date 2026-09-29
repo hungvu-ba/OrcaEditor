@@ -1790,6 +1790,17 @@ const af20 = (): AreaFitColumn[] => [
   eq('solveAreaFit tie-break: equal ratio → lower column index takes width first', afSolve(cols, afOpts(560)).widths, [320, 240]);
 }
 
+// GATE A (T1.3): the DOM max-content width (maxW) can run a sub-pixel short of the
+// model's one-line width; hi is raised to the model line so the cell still reaches 1 line.
+{
+  // One line = 40 + 4 + 40 + 4 + 40 = 128 px; maxW − padX = ceil(142.6) − 16 = 127 px.
+  const short: AreaFitColumn = { cells: [afCell(afWords(5, 5, 5))], hardMinW: 40 + AF_PAD, readFloorW: 60, looseFloorW: 60, maxW: 128 + AF_PAD - 1.4 };
+  const fixed: AreaFitColumn = { cells: [afCell(afWords(5))], hardMinW: 100, readFloorW: 100, looseFloorW: 100, maxW: 100 };
+  const res = afSolve([short, fixed], afOpts(244));
+  eq('solveAreaFit hi: a cell whose model line exceeds maxW − padX still reaches 1 line', res.rowHeights, [AF_LINE]);
+  eq('solveAreaFit hi: the column widens to padX + the model line', res.widths, [128 + AF_PAD, 100]);
+}
+
 // fixedH: a row held tall by a 120px image gives its text columns no width.
 {
   const photo = (fixedH?: number): AreaFitColumn => ({

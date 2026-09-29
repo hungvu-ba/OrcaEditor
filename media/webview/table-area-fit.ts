@@ -86,6 +86,21 @@ function fitCell(cell: CellLines, lo: number, hi: number, padX: number): CellFit
   return { need, fixedH: cell.fixedH ?? 0 };
 }
 
+/** Widest hard line of the column's cells in the model: max Σ (unit widths + gaps), px. */
+function widestModelLine(col: AreaFitColumn): number {
+  let widest = 0;
+  for (const cell of col.cells) {
+    for (const seg of cell.segments) {
+      let lineW = 0;
+      seg.forEach((u, i) => {
+        lineW += u.w + (i ? u.gap : 0);
+      });
+      widest = Math.max(widest, lineW);
+    }
+  }
+  return widest;
+}
+
 /** Lines of the cell at border-box width `w` (w within the column's range). */
 function linesAtWidth(f: CellFit, w: number): number {
   let k = 1;
@@ -124,7 +139,10 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   const rows = cols.reduce((m, c) => Math.max(m, c.cells.length), 0);
   // Contracts 3 + 5: integer px, hardMinW ≤ looseFloorW ≤ readFloorW ≤ maxW.
   const hard = cols.map((c) => Math.ceil(c.hardMinW));
-  const hi = cols.map((c, j) => Math.max(hard[j], Math.ceil(c.maxW)));
+  // GATE A (T1.3): the DOM max-content width runs up to ~2 px short of the model's
+  // one-line width (per-word Range widths accumulate sub-pixel rounding), so at
+  // ceil(maxW) alone such a cell would never reach 1 line — raise hi to the model line.
+  const hi = cols.map((c, j) => Math.max(hard[j], Math.ceil(c.maxW), Math.ceil(padX + widestModelLine(c))));
   const read = cols.map((c, j) => Math.min(hi[j], Math.max(hard[j], Math.ceil(c.readFloorW))));
   const loose = cols.map((c, j) => Math.min(read[j], Math.max(hard[j], Math.ceil(c.looseFloorW))));
   const fits = cols.map((c, j) =>

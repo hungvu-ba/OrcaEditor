@@ -23,6 +23,15 @@ export const TABLE_4 = `| Requirement | Actor | Precondition | Trigger | Main fl
 | Check in at the gate | Gate staff | Visitor holds a valid QR code | Scans the visitor's ticket | System marks ticket as used | Invalid QR → manual lookup | Attendance count updated | One scan per ticket only | Gate scanner app | TC-CHK-001 to TC-CHK-004 |
 `;
 
+/** 02-content-types-alignment.md #8a Mixed content in cells: image, math, inline code, emoji, bold. */
+export const TABLE_8A = `| Item | Preview | Formula | Code | Tags | Note |
+| --- | --- | --- | --- | --- | --- |
+| Dolphin icon | ![icon](../dolphinicon.png) | $E = mc^2$ | \`render()\` | 🐬 ✅ | **Bold** normal *italic* |
+| Pasted screenshot | ![shot](../images/sample-pasted-image-1783866525344-7834407b.png) | $\\sum_{i=1}^{n} x_i^2 + \\int_0^1 f(t)\\,dt$ | \`const x = computeTotal(items, taxRate);\` | 🔥🔥🔥 | Short |
+| Text only | — | $a$ | \`x\` | 🙂 | A plain sentence that is a bit longer than the others to force a wrap. |
+| Long formula | — | $\\frac{\\partial^2 u}{\\partial t^2} = c^2 \\left( \\frac{\\partial^2 u}{\\partial x^2} + \\frac{\\partial^2 u}{\\partial y^2} + \\frac{\\partial^2 u}{\\partial z^2} \\right)$ | \`—\` | ⭐ | Math is unbreakable |
+`;
+
 /** 02-content-types-alignment.md #8b Vietnamese diacritics and CJK text. */
 export const TABLE_8B = `| Mã | Tiếng Việt | 日本語 | 中文 | English |
 | --- | --- | --- | --- | --- |
