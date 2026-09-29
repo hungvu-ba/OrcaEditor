@@ -27,6 +27,7 @@ export const AREA_FIT_KNEE_EPSILON = 0.05;
 export const AREA_FIT_KNEE_MAX_SHRINK = 0.15;
 export const AREA_FIT_HYSTERESIS = 0.05;
 export const AREA_FIT_RESIZE_HYSTERESIS = 0.02;
+const AREA_FIT_MAX_CANDIDATES = 16;
 
 /**
  * Line model (contract 9): greedy fill of break units into `contentW`. A unit
@@ -149,6 +150,16 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   const fits = cols.map((c, j) =>
     Array.from({ length: rows }, (_, r) => fitCell(c.cells[r] ?? EMPTY_CELL, loose[j], hi[j], padX)),
   );
+  // Contract 11: at most AREA_FIT_MAX_CANDIDATES trajectory widths per column —
+  // evenly spaced by rank over the sorted union of its cells' breakpoints, the
+  // widest always kept; a move snaps up to the next kept width.
+  const candidates = fits.map((colFits) => {
+    const all = [...new Set(colFits.flatMap((f) => f.need.filter((w) => w < Infinity)))].sort((a, b) => a - b);
+    if (all.length <= AREA_FIT_MAX_CANDIDATES) return all;
+    const step = all.length / AREA_FIT_MAX_CANDIDATES;
+    return Array.from({ length: AREA_FIT_MAX_CANDIDATES }, (_, i) => all[Math.ceil((i + 1) * step) - 1]);
+  });
+  const snapUp = (j: number, w: number): number => candidates[j].find((c) => c >= w) ?? w;
   const cellH = (j: number, r: number, lines: number): number => Math.max(lines * lineH, fits[j][r].fixedH);
   const colLines = (j: number, w: number): number[] => fits[j].map((f) => linesAtWidth(f, w));
   const sum = (a: number[]): number => a.reduce((s, w) => s + w, 0);
@@ -233,7 +244,7 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   /** Smallest width lowering cell (j, r) by one line; Infinity when an image holds it or maxW is reached. */
   const oneLineLess = (s: FitState, j: number, r: number): number => {
     const L = s.lines[j][r];
-    return L * lineH > fits[j][r].fixedH ? fits[j][r].need[L - 1] : Infinity;
+    return L * lineH > fits[j][r].fixedH ? snapUp(j, fits[j][r].need[L - 1]) : Infinity;
   };
 
   /** Candidate P's: (a) single — a column to its smallest breakpoint lowering a row it alone tops; (b) joint — every tied tallest cell of a row one line down together. */

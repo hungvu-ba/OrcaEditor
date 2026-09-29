@@ -54,6 +54,60 @@ async function openTable(page: Page, viewport: number, md: string): Promise<void
   await page.waitForTimeout(300);
 }
 
+/** openTable, then wait until the render and ResizeObserver fit passes agree (GATE A (d)). */
+async function openStableTable(page: Page, viewport: number, md: string): Promise<void> {
+  await openTable(page, viewport, md);
+  let prev = '';
+  await expect
+    .poll(
+      async () => {
+        const cur = await page.evaluate(() => {
+          const r = (document.querySelector('#content table') as HTMLElement).getBoundingClientRect();
+          return `${Math.round(r.width)}|${Math.round(r.height)}`;
+        });
+        const same = cur === prev;
+        prev = cur;
+        return same;
+      },
+      { timeout: 8000, intervals: [150] }
+    )
+    .toBe(true);
+}
+
+interface TableMetrics { fit: boolean; w: number; h: number; contentW: number; widths: number[]; ch15: number; ch30: number; ch36: number }
+
+/** Table rect (the visible box, as GATE A (d) measured it), column widths and N·ch in the cell font. */
+async function tableMetrics(page: Page): Promise<TableMetrics> {
+  return page.evaluate(() => {
+    const t = document.querySelector('#content table') as HTMLTableElement;
+    const r = t.getBoundingClientRect();
+    const cell = t.tBodies[0].rows[0].cells[0];
+    const cs = getComputedStyle(cell);
+    const ch = (n: number): number => {
+      const probe = document.createElement('span');
+      probe.style.cssText = `position:absolute;visibility:hidden;display:inline-block;width:${n}ch;padding:0;border:0;`;
+      probe.style.fontFamily = cs.fontFamily;
+      probe.style.fontSize = cs.fontSize;
+      probe.style.fontWeight = cs.fontWeight;
+      probe.style.letterSpacing = cs.letterSpacing;
+      document.body.appendChild(probe);
+      const px = probe.getBoundingClientRect().width;
+      probe.remove();
+      return px;
+    };
+    return {
+      fit: t.classList.contains('md-table-fit'),
+      w: r.width,
+      h: r.height,
+      contentW: (document.getElementById('content') as HTMLElement).clientWidth,
+      widths: Array.from(t.tBodies[0].rows[0].cells).map((c) => c.getBoundingClientRect().width),
+      ch15: ch(15),
+      ch30: ch(30),
+      ch36: ch(36),
+    };
+  });
+}
+
 test.describe('US-19.27 table area fit', () => {
   test('a squeezed column holding a long CJK run ends at or below its 36ch read floor', async ({ page }) => {
     await openTable(page, 900, makeTable(5, 4, (r, c) => (c === CJK_COL ? CJK_RUN : WIDE(r, c))));
@@ -117,6 +171,74 @@ test.describe('US-19.27 table area fit', () => {
     expect(atFit.scrolls).toBe(false);
     expect(atFit.fit).toBe(true);
     atFit.widths.forEach((w, i) => expect(Math.abs(w - atScroll.widths[i])).toBeLessThanOrEqual(1));
+  });
+
+  // GATE A (d) baseline: the pre-solver fit ladder's table rect W × H (px²) per viewport.
+  const BASELINE: Record<string, [string, Record<number, number>]> = {
+    '#8b': [TABLE_8B, { 800: 224622, 1000: 284681, 1200: 319036 }],
+    '#20': [TABLE_20, { 800: 291615, 1000: 369587, 1200: 344741 }],
+  };
+  for (const [name, [md, baseline]] of Object.entries(BASELINE)) {
+    test(`area vs the GATE A baseline: ${name} is lower and not wider`, async ({ page }) => {
+      // T1.10 Verify: #20 @ 800 scrolls at floors narrower than the old 30ch ladder (+5.7%); pending PO decision.
+      test.fail(name === '#20');
+      const rows: string[] = [];
+      let lower = 0;
+      for (const viewport of [800, 1000, 1200]) {
+        await openStableTable(page, viewport, md);
+        const m = await tableMetrics(page);
+        const area = Math.round(m.w * m.h);
+        rows.push(`${name} @ ${viewport}: ${area} px² (baseline ${baseline[viewport]}, ${(((area - baseline[viewport]) / baseline[viewport]) * 100).toFixed(1)}%) W ${m.w.toFixed(0)} / #content ${m.contentW} widths ${m.widths.map((w) => w.toFixed(0)).join(' ')}`);
+        expect.soft(m.w).toBeLessThanOrEqual(m.contentW + 1);
+        expect.soft(area).toBeLessThanOrEqual(baseline[viewport]);
+        if (area < baseline[viewport]) lower++;
+      }
+      console.log(rows.join('\n'));
+      expect(lower).toBeGreaterThanOrEqual(2);
+    });
+  }
+
+  test('#20 Risk column is between 15ch and 30ch at viewport 800 / 1000 / 1200', async ({ page }) => {
+    const rows: string[] = [];
+    for (const viewport of [800, 1000, 1200]) {
+      await openStableTable(page, viewport, TABLE_20);
+      const m = await tableMetrics(page);
+      rows.push(`#20 @ ${viewport}: Risk ${m.widths[0].toFixed(0)} px (15ch ${m.ch15.toFixed(0)}, 30ch ${m.ch30.toFixed(0)})`);
+      expect.soft(m.widths[0]).toBeLessThan(m.ch30);
+      expect.soft(m.widths[0]).toBeGreaterThanOrEqual(m.ch15 - 1);
+    }
+    console.log(rows.join('\n'));
+  });
+
+  test('#8b JA and ZH columns are at least 36ch at viewport 800 / 1000 / 1200', async ({ page }) => {
+    // T1.10 Verify: free shrink (contract 5) takes a CJK column that tops no row below 36ch; pending PO decision.
+    test.fail();
+    const rows: string[] = [];
+    for (const viewport of [800, 1000, 1200]) {
+      await openStableTable(page, viewport, TABLE_8B);
+      const m = await tableMetrics(page);
+      rows.push(`#8b @ ${viewport}: JA ${m.widths[2].toFixed(0)} ZH ${m.widths[3].toFixed(0)} px (36ch ${m.ch36.toFixed(0)})`);
+      expect.soft(m.widths[2]).toBeGreaterThanOrEqual(m.ch36 - 1);
+      expect.soft(m.widths[3]).toBeGreaterThanOrEqual(m.ch36 - 1);
+    }
+    console.log(rows.join('\n'));
+  });
+
+  test('knee: a table whose extra width saves < 5% height stops short of #content, at ≥ 85% of it', async ({ page }) => {
+    // 30 one-line rows plus one long paragraph: past the knee, each line the
+    // paragraph loses is ≈ 3% of the table height.
+    const long = Array.from({ length: 40 }, (_, i) => `sentence part ${i + 1} of the long note`).join(', ');
+    const md =
+      '| Key | Value | Note |\n| --- | --- | --- |\n' +
+      `| k0 | v0 | ${long} |\n` +
+      Array.from({ length: 30 }, (_, r) => `| k${r + 1} | value ${r + 1} | ok |`).join('\n') +
+      '\n';
+    await openStableTable(page, 1000, md);
+    const m = await tableMetrics(page);
+    console.log(`knee @ 1000: W ${m.w.toFixed(0)} / #content ${m.contentW} (${((m.w / m.contentW) * 100).toFixed(1)}%)`);
+    expect(m.fit).toBe(true);
+    expect(m.w).toBeLessThan(m.contentW - 1);
+    expect(m.w).toBeGreaterThanOrEqual(0.85 * m.contentW - 1);
   });
 
   const fixtures: Record<string, string> = { '#1': TABLE_1, '#4': TABLE_4, '#8a': TABLE_8A, '#8b': TABLE_8B, '#20': TABLE_20 };
