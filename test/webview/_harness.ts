@@ -184,6 +184,10 @@ function harnessHtml(readability: InitConfig['readability']): string {
        list-ops-primitive.spec.ts can drive them directly without wiring into
        any real call site (Phase 2). -->
   <script src="./list-ops-debug.js"></script>
+  <!-- US-19.27: test-only bundle exposing measureCellLines/cellLineCount/
+       solveAreaFit on window.TableAreaFitDebug, so area-fit specs measure real
+       cells and feed them to the pure solver. -->
+  <script src="./table-area-fit-debug.js"></script>
   <!-- Req 20 US-20.4: test-only bundle exposing escape-stack.ts's
        registerEscapeHandler/ESCAPE_PRIORITY on window.EscapeStackDebug, so
        escape-stack-priority.spec.ts can register fake handlers and dispatch a

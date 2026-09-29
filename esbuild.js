@@ -125,6 +125,24 @@ const listOpsDebugConfig = {
 };
 
 /**
+ * Test-only bundle exposing the US-19.27 area-fit measure adapter + solver
+ * (measureCellLines/cellLineCount/solveAreaFit) as window.TableAreaFitDebug —
+ * lets test/webview/table-area-measure.spec.ts and GATE A measure real cells.
+ * Only built with --test, so it never ships in the production dist/webview bundle.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const tableAreaFitDebugConfig = {
+  entryPoints: ['media/webview/table-area-fit-debug.ts'],
+  bundle: true,
+  outfile: 'dist/webview/table-area-fit-debug.js',
+  format: 'iife',
+  globalName: 'TableAreaFitDebug',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: true,
+};
+
+/**
  * Test-only bundle exposing escape-stack.ts's exports (registerEscapeHandler/
  * ESCAPE_PRIORITY) as window.EscapeStackDebug — lets
  * test/webview/escape-stack-priority.spec.ts register fake handlers at arbitrary
@@ -255,6 +273,7 @@ async function main() {
       unitTestConfig,
       hostTestConfig,
       listOpsDebugConfig,
+      tableAreaFitDebugConfig,
       escapeStackDebugConfig,
       triggerPopupDebugConfig
     );
