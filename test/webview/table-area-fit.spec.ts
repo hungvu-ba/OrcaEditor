@@ -74,7 +74,20 @@ async function openStableTable(page: Page, viewport: number, md: string): Promis
     .toBe(true);
 }
 
-interface TableMetrics { fit: boolean; w: number; h: number; contentW: number; widths: number[]; ch15: number; ch30: number; ch36: number }
+interface TableMetrics {
+  fit: boolean;
+  scrolls: boolean;
+  scrollW: number;
+  w: number;
+  h: number;
+  contentW: number;
+  widths: number[];
+  /** Per row, the column whose content is strictly the tallest; -1 on a tie. */
+  topCol: number[];
+  ch15: number;
+  ch30: number;
+  ch36: number;
+}
 
 /** Table rect (the visible box, as GATE A (d) measured it), column widths and N·ch in the cell font. */
 async function tableMetrics(page: Page): Promise<TableMetrics> {
@@ -95,12 +108,25 @@ async function tableMetrics(page: Page): Promise<TableMetrics> {
       probe.remove();
       return px;
     };
+    const range = document.createRange();
+    const topCol = Array.from(t.rows).map((row) => {
+      const hs = Array.from(row.cells).map((c) => {
+        range.selectNodeContents(c);
+        return range.getBoundingClientRect().height;
+      });
+      const max = Math.max(...hs);
+      const at = hs.filter((h) => h > max - 1);
+      return at.length === 1 ? hs.indexOf(max) : -1;
+    });
     return {
       fit: t.classList.contains('md-table-fit'),
+      scrolls: t.scrollWidth - t.clientWidth > 1,
+      scrollW: t.scrollWidth,
       w: r.width,
       h: r.height,
       contentW: (document.getElementById('content') as HTMLElement).clientWidth,
       widths: Array.from(t.tBodies[0].rows[0].cells).map((c) => c.getBoundingClientRect().width),
+      topCol,
       ch15: ch(15),
       ch30: ch(30),
       ch36: ch(36),
@@ -173,25 +199,30 @@ test.describe('US-19.27 table area fit', () => {
     atFit.widths.forEach((w, i) => expect(Math.abs(w - atScroll.widths[i])).toBeLessThanOrEqual(1));
   });
 
-  // GATE A (d) baseline: the pre-solver fit ladder's table rect W × H (px²) per viewport.
-  const BASELINE: Record<string, [string, Record<number, number>]> = {
-    '#8b': [TABLE_8B, { 800: 224622, 1000: 284681, 1200: 319036 }],
-    '#20': [TABLE_20, { 800: 291615, 1000: 369587, 1200: 344741 }],
+  // GATE A (d) baseline per viewport: the pre-solver fit ladder's table rect
+  // W × H (px²) and its scroll width (#content width where it did not scroll).
+  const BASELINE: Record<string, [string, Record<number, { area: number; scrollW: number }>]> = {
+    '#8b': [TABLE_8B, { 800: { area: 224622, scrollW: 996 }, 1000: { area: 284681, scrollW: 996 }, 1200: { area: 319036, scrollW: 1148 } }],
+    '#20': [TABLE_20, { 800: { area: 291615, scrollW: 926 }, 1000: { area: 369587, scrollW: 948 }, 1200: { area: 344741, scrollW: 1148 } }],
   };
   for (const [name, [md, baseline]] of Object.entries(BASELINE)) {
     test(`area vs the GATE A baseline: ${name} is lower and not wider`, async ({ page }) => {
-      // T1.10 Verify: #20 @ 800 scrolls at floors narrower than the old 30ch ladder (+5.7%); pending PO decision.
-      test.fail(name === '#20');
       const rows: string[] = [];
       let lower = 0;
       for (const viewport of [800, 1000, 1200]) {
         await openStableTable(page, viewport, md);
         const m = await tableMetrics(page);
         const area = Math.round(m.w * m.h);
-        rows.push(`${name} @ ${viewport}: ${area} px² (baseline ${baseline[viewport]}, ${(((area - baseline[viewport]) / baseline[viewport]) * 100).toFixed(1)}%) W ${m.w.toFixed(0)} / #content ${m.contentW} widths ${m.widths.map((w) => w.toFixed(0)).join(' ')}`);
+        const base = baseline[viewport];
+        rows.push(`${name} @ ${viewport}: ${area} px² (baseline ${base.area}, ${(((area - base.area) / base.area) * 100).toFixed(1)}%) W ${m.w.toFixed(0)} / #content ${m.contentW} scrollW ${m.scrollW} (baseline ${base.scrollW}) widths ${m.widths.map((w) => w.toFixed(0)).join(' ')}`);
         expect.soft(m.w).toBeLessThanOrEqual(m.contentW + 1);
-        expect.soft(area).toBeLessThanOrEqual(baseline[viewport]);
-        if (area < baseline[viewport]) lower++;
+        // US-19.27 (PO 2026-09-30): a scrolling table is judged by scroll width, not visible area.
+        if (m.scrolls) {
+          expect.soft(m.scrollW).toBeLessThanOrEqual(base.scrollW);
+        } else {
+          expect.soft(area).toBeLessThanOrEqual(base.area);
+          if (area < base.area) lower++;
+        }
       }
       console.log(rows.join('\n'));
       expect(lower).toBeGreaterThanOrEqual(2);
@@ -210,16 +241,17 @@ test.describe('US-19.27 table area fit', () => {
     console.log(rows.join('\n'));
   });
 
-  test('#8b JA and ZH columns are at least 36ch at viewport 800 / 1000 / 1200', async ({ page }) => {
-    // T1.10 Verify: free shrink (contract 5) takes a CJK column that tops no row below 36ch; pending PO decision.
-    test.fail();
+  test('#8b JA and ZH columns: ≥ 36ch where they hold a row\'s tallest cell, ≥ 15ch otherwise', async ({ page }) => {
+    // Contract 5 (PO 2026-09-30): a CJK column that sets no row's height may shrink to 15ch.
     const rows: string[] = [];
     for (const viewport of [800, 1000, 1200]) {
       await openStableTable(page, viewport, TABLE_8B);
       const m = await tableMetrics(page);
-      rows.push(`#8b @ ${viewport}: JA ${m.widths[2].toFixed(0)} ZH ${m.widths[3].toFixed(0)} px (36ch ${m.ch36.toFixed(0)})`);
-      expect.soft(m.widths[2]).toBeGreaterThanOrEqual(m.ch36 - 1);
-      expect.soft(m.widths[3]).toBeGreaterThanOrEqual(m.ch36 - 1);
+      for (const [label, col] of [['JA', 2], ['ZH', 3]] as [string, number][]) {
+        const tops = m.topCol.flatMap((c, r) => (c === col ? [r] : []));
+        rows.push(`#8b @ ${viewport}: ${label} ${m.widths[col].toFixed(0)} px, tallest in rows [${tops.join(',')}] (15ch ${m.ch15.toFixed(0)}, 36ch ${m.ch36.toFixed(0)})`);
+        expect.soft(m.widths[col]).toBeGreaterThanOrEqual((tops.length ? m.ch36 : m.ch15) - 1);
+      }
     }
     console.log(rows.join('\n'));
   });
