@@ -1,0 +1,237 @@
+/**
+ * Height-first column-width solver for fit-mode tables that must be squeezed
+ * (US-19.27). Pure and deterministic: no DOM access, runs under Node in
+ * `test/unit.ts`. Fed by measured break units (`table-area-measure.ts`).
+ * Contracts and algorithm steps: `Plan/Table Area Fit — Code Plan.md`.
+ */
+
+export interface BreakUnit { w: number; gap: number }            // w = unit px; gap = px added before it when not first on its line
+export interface CellLines { segments: BreakUnit[][]; cjkUnits: number; units: number; fixedH?: number } // one segment per hard line; empty cell = { segments: [], cjkUnits: 0, units: 0 }; fixedH = px height of img/svg/video/.katex content
+export interface AreaFitColumn {
+  cells: CellLines[];   // every row incl. header, row order
+  hardMinW: number;     // border-box px (contract 3)
+  readFloorW: number;   // border-box px (contract 5)
+  looseFloorW: number;  // border-box px (contract 5)
+  maxW: number;         // border-box px, single-line max-content
+}
+export interface AreaFitOptions {
+  budgetW: number;                        // parent content width px
+  padX: number;                           // cell padding + border px
+  lineH: number;                          // cell line height px
+  prevWidths?: (number | undefined)[];    // contract 8; undefined = column without an applied width
+  hysteresis?: number;                    // default AREA_FIT_HYSTERESIS
+  growOnlyCol?: number;                   // contract 8: only this column may widen; needs prevWidths
+}
+export interface AreaFitResult { widths: number[]; rowHeights: number[]; scroll: boolean } // rowHeights px (contract 4)
+
+/**
+ * Line model (contract 9): greedy fill of break units into `contentW`. A unit
+ * starts a new line when it does not fit after the gap; a unit wider than the
+ * line still takes a line of its own. Each segment (hard line) starts a new
+ * line; an empty cell is 1 line.
+ */
+export function cellLineCount(cell: CellLines, contentW: number): number {
+  let lines = 0;
+  for (const seg of cell.segments) {
+    lines++;
+    let lineW = seg.length ? seg[0].w : 0;
+    for (let i = 1; i < seg.length; i++) {
+      const u = seg[i];
+      if (lineW + u.gap + u.w > contentW) {
+        lines++;
+        lineW = u.w;
+      } else {
+        lineW += u.gap + u.w;
+      }
+    }
+  }
+  return Math.max(1, lines);
+}
+
+const EMPTY_CELL: CellLines = { segments: [], cjkUnits: 0, units: 0 };
+
+/** One cell's breakpoints over the column's integer width range [lo, hi]. */
+interface CellFit {
+  /** need[k] = smallest border-box width in [lo, hi] giving ≤ k lines; Infinity when even hi gives more. need[need.length - 1] = lo. */
+  need: number[];
+  fixedH: number;
+}
+
+/** Solver step 2: breakpoints by binary search on `cellLineCount` (monotone non-increasing in width). */
+function fitCell(cell: CellLines, lo: number, hi: number, padX: number): CellFit {
+  const linesAt = (w: number): number => cellLineCount(cell, w - padX);
+  const linesLo = linesAt(lo);
+  const linesHi = linesAt(hi);
+  const need = new Array<number>(linesLo + 1).fill(Infinity);
+  need[linesLo] = lo;
+  for (let k = linesLo - 1; k >= linesHi; k--) {
+    let a = need[k + 1];
+    if (linesAt(a) <= k) {
+      need[k] = a;
+      continue;
+    }
+    // linesAt(a) > k, linesAt(b) <= k
+    let b = hi;
+    while (b - a > 1) {
+      const m = (a + b) >> 1;
+      if (linesAt(m) <= k) b = m;
+      else a = m;
+    }
+    need[k] = b;
+  }
+  return { need, fixedH: cell.fixedH ?? 0 };
+}
+
+/** Lines of the cell at border-box width `w` (w within the column's range). */
+function linesAtWidth(f: CellFit, w: number): number {
+  let k = 1;
+  while (f.need[k] > w) k++;
+  return k;
+}
+
+/** One trajectory point: `P` = widths the moves act on; `E` = `P` after free shrink (the widths applied). */
+interface FitState {
+  P: number[];
+  /** lines[j][r] at P[j]. */
+  lines: number[][];
+  rowH: number[];
+  /** Column of the row's strictly tallest cell at P; -1 when the tallest cells tie. */
+  top: number[];
+  H: number;
+  E: number[];
+  sumE: number;
+}
+
+interface FitMove { state: FitState; dH: number; cost: number; firstCol: number }
+
+/**
+ * Solver steps 1–3 and 5 (knee + hysteresis are T1.8): floor assignment →
+ * scroll when it is wider than the budget (contract 7); otherwise a greedy
+ * height-first trajectory of single and joint row moves until no affordable
+ * move lowers H (contract 4). Free shrink (contract 5) is applied at every
+ * trajectory point, so a move's cost counts the columns it forces back out of
+ * their free shrink and width a free shrink releases stays spendable.
+ */
+export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaFitResult {
+  const { budgetW, padX, lineH } = opts;
+  const n = cols.length;
+  const rows = cols.reduce((m, c) => Math.max(m, c.cells.length), 0);
+  // Contracts 3 + 5: integer px, hardMinW ≤ looseFloorW ≤ readFloorW ≤ maxW.
+  const hard = cols.map((c) => Math.ceil(c.hardMinW));
+  const hi = cols.map((c, j) => Math.max(hard[j], Math.ceil(c.maxW)));
+  const read = cols.map((c, j) => Math.min(hi[j], Math.max(hard[j], Math.ceil(c.readFloorW))));
+  const loose = cols.map((c, j) => Math.min(read[j], Math.max(hard[j], Math.ceil(c.looseFloorW))));
+  const fits = cols.map((c, j) =>
+    Array.from({ length: rows }, (_, r) => fitCell(c.cells[r] ?? EMPTY_CELL, loose[j], hi[j], padX)),
+  );
+  const cellH = (j: number, r: number, lines: number): number => Math.max(lines * lineH, fits[j][r].fixedH);
+  const colLines = (j: number, w: number): number[] => fits[j].map((f) => linesAtWidth(f, w));
+
+  const settle = (P: number[], lines: number[][]): FitState => {
+    const rowH = new Array<number>(rows).fill(-1);
+    const top = new Array<number>(rows).fill(-1);
+    for (let r = 0; r < rows; r++) {
+      for (let j = 0; j < n; j++) {
+        const h = cellH(j, r, lines[j][r]);
+        if (h > rowH[r]) {
+          rowH[r] = h;
+          top[r] = j;
+        } else if (h === rowH[r]) {
+          top[r] = -1;
+        }
+      }
+    }
+    const bottleneck = new Array<boolean>(n).fill(false);
+    for (const j of top) if (j >= 0) bottleneck[j] = true;
+    // Free shrink: narrowest width keeping every row height; only a column
+    // that is no row's strictly tallest cell may go below readFloorW.
+    const E = P.map((_, j) => {
+      let w = bottleneck[j] ? read[j] : loose[j];
+      for (let r = 0; r < rows; r++) {
+        const f = fits[j][r];
+        const k = Math.min(f.need.length - 1, Math.floor(rowH[r] / lineH + 1e-9));
+        w = Math.max(w, f.need[k]);
+      }
+      return w;
+    });
+    return {
+      P,
+      lines,
+      rowH,
+      top,
+      H: rowH.reduce((s, h) => s + h, 0),
+      E,
+      sumE: E.reduce((s, w) => s + w, 0),
+    };
+  };
+
+  /** Smallest width lowering cell (j, r) by one line; Infinity when an image holds it or maxW is reached. */
+  const oneLineLess = (s: FitState, j: number, r: number): number => {
+    const L = s.lines[j][r];
+    return L * lineH > fits[j][r].fixedH ? fits[j][r].need[L - 1] : Infinity;
+  };
+
+  /** Candidate P's: (a) single — a column to its smallest breakpoint lowering a row it alone tops; (b) joint — every tied tallest cell of a row one line down together. */
+  const moves = (s: FitState): number[][] => {
+    const out: number[][] = [];
+    for (let j = 0; j < n; j++) {
+      let t = Infinity;
+      for (let r = 0; r < rows; r++) if (s.top[r] === j) t = Math.min(t, oneLineLess(s, j, r));
+      if (t < Infinity) out.push(s.P.map((w, i) => (i === j ? t : w)));
+    }
+    for (let r = 0; r < rows; r++) {
+      if (s.top[r] !== -1) continue;
+      const P = s.P.slice();
+      let ok = true;
+      for (let j = 0; j < n && ok; j++) {
+        if (cellH(j, r, s.lines[j][r]) !== s.rowH[r]) continue;
+        const t = oneLineLess(s, j, r);
+        ok = t < Infinity;
+        P[j] = Math.max(P[j], t);
+      }
+      if (ok) out.push(P);
+    }
+    return out;
+  };
+
+  // Step 1: floor assignment = every column at readFloorW, then free shrink.
+  let s = settle(read.slice(), read.map((w, j) => colLines(j, w)));
+  if (s.sumE > budgetW) return { widths: s.E, rowHeights: s.rowH, scroll: true };
+
+  // Step 3: largest ΔH / Δ Σ widths; ties → smaller Σ widths → lower column index.
+  const trajectory: FitState[] = [s];
+  for (;;) {
+    let best: FitMove | undefined;
+    let bestRatio = -Infinity;
+    const seen = new Set<string>();
+    for (const P of moves(s)) {
+      const key = P.join(',');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const next = settle(P, P.map((w, j) => (w === s.P[j] ? s.lines[j] : colLines(j, w))));
+      if (next.H >= s.H || next.sumE > budgetW) continue;
+      const move: FitMove = {
+        state: next,
+        dH: s.H - next.H,
+        cost: next.sumE - s.sumE,
+        firstCol: P.findIndex((w, j) => w !== s.P[j]),
+      };
+      const ratio = move.cost > 0 ? move.dH / move.cost : Infinity;
+      if (
+        !best ||
+        ratio > bestRatio ||
+        (ratio === bestRatio && (move.cost < best.cost || (move.cost === best.cost && move.firstCol < best.firstCol)))
+      ) {
+        best = move;
+        bestRatio = ratio;
+      }
+    }
+    if (!best) break;
+    s = best.state;
+    trajectory.push(s);
+  }
+
+  // Step 5 on the trajectory's last point: its E is already free-shrunk, integer px.
+  const end = trajectory[trajectory.length - 1];
+  return { widths: end.E, rowHeights: end.rowH, scroll: false };
+}

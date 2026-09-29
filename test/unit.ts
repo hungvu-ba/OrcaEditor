@@ -136,6 +136,15 @@ import {
   type AnchorCandidate,
 } from '../media/webview/comment-anchor';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
+import {
+  cellLineCount,
+  solveAreaFit,
+  type AreaFitColumn,
+  type AreaFitOptions,
+  type AreaFitResult,
+  type BreakUnit,
+  type CellLines,
+} from '../media/webview/table-area-fit';
 import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
 import {
   collectClassConstants,
@@ -1610,6 +1619,192 @@ eq('countWords: supplementary-plane Han counts per character', countWords(String
 eq('estimateReadMinutes: 0 words → 0 min', estimateReadMinutes(0), 0);
 eq('estimateReadMinutes: 7 words → 1 min (floor never shown for real content)', estimateReadMinutes(7), 1);
 eq('formatCount: hardcoded comma, not toLocaleString', formatCount(1860), '1,860');
+
+// ---------------------------------------------------------------------------
+// table-area-fit (US-19.27) — height-first fit-mode column solver: greedy line
+// model, role floors, single + joint row moves, free shrink, scroll floor.
+// Fixture px: Latin char 8, space 4, CJK glyph 16, padX 16, line 24.
+// ---------------------------------------------------------------------------
+
+const AF_PAD = 16;
+const AF_LINE = 24;
+const afWords = (...chars: number[]): BreakUnit[] => chars.map((c) => ({ w: c * 8, gap: 4 }));
+const afCell = (...segments: BreakUnit[][]): CellLines => ({
+  segments,
+  cjkUnits: 0,
+  units: segments.reduce((s, g) => s + g.length, 0),
+});
+/** `words` five-char words on one line. */
+const afText = (words: number): CellLines => afCell(afWords(...new Array<number>(words).fill(5)));
+const afCjk = (glyphs: number): CellLines => ({
+  segments: [Array.from({ length: glyphs }, () => ({ w: 16, gap: 0 }))],
+  cjkUnits: glyphs,
+  units: glyphs,
+});
+function afColumn(cells: CellLines[], readFloorW = 240, looseFloorW = 120): AreaFitColumn {
+  const units = cells.flatMap((c) => c.segments.flat());
+  const lineW = (seg: BreakUnit[]): number => seg.reduce((s, u, i) => s + u.w + (i ? u.gap : 0), 0);
+  return {
+    cells,
+    hardMinW: Math.max(0, ...units.map((u) => u.w)) + AF_PAD,
+    readFloorW,
+    looseFloorW,
+    maxW: Math.max(0, ...cells.flatMap((c) => c.segments.map(lineW))) + AF_PAD,
+  };
+}
+const afOpts = (budgetW: number): AreaFitOptions => ({ budgetW, padX: AF_PAD, lineH: AF_LINE });
+const afSum = (ws: number[]): number => ws.reduce((s, w) => s + w, 0);
+function afRowHeights(cols: AreaFitColumn[], widths: number[], padX = AF_PAD, lineH = AF_LINE): number[] {
+  return cols[0].cells.map((_, r) =>
+    Math.max(...cols.map((c, j) => Math.max(cellLineCount(c.cells[r], widths[j] - padX) * lineH, c.cells[r].fixedH ?? 0))),
+  );
+}
+const afH = (cols: AreaFitColumn[], widths: number[]): number => afSum(afRowHeights(cols, widths));
+/** Smallest integer width in (w, maxW] giving the cell fewer lines; undefined when none. */
+function afOneLineLess(col: AreaFitColumn, r: number, w: number): number | undefined {
+  const lines = cellLineCount(col.cells[r], w - AF_PAD);
+  for (let x = w + 1; x <= col.maxW; x++) if (cellLineCount(col.cells[r], x - AF_PAD) < lines) return x;
+  return undefined;
+}
+const afRuns: { cols: AreaFitColumn[]; res: AreaFitResult }[] = [];
+function afSolve(cols: AreaFitColumn[], opts: AreaFitOptions): AreaFitResult {
+  const res = solveAreaFit(cols, opts);
+  afRuns.push({ cols, res });
+  return res;
+}
+
+eq('cellLineCount: single unit → 1 line', cellLineCount(afCell(afWords(5)), 100), 1);
+eq('cellLineCount: gap boundary — 40+4+40 fits 84px exactly', cellLineCount(afCell(afWords(5, 5)), 84), 1);
+eq('cellLineCount: gap boundary — 1px narrower wraps', cellLineCount(afCell(afWords(5, 5)), 83), 2);
+eq('cellLineCount: greedy fill 5 words at 3 per line → 2 lines', cellLineCount(afText(5), 128), 2);
+eq('cellLineCount: unit wider than the line takes a line of its own', cellLineCount(afCell(afWords(5, 25, 5)), 100), 3);
+eq('cellLineCount: CJK glyphs gap 0 → 3 per 48px line', cellLineCount(afCjk(6), 48), 2);
+eq('cellLineCount: CJK glyphs gap 0 → 2 per 47px line', cellLineCount(afCjk(6), 47), 3);
+eq('cellLineCount: two segments (hard break) → 2 lines', cellLineCount(afCell(afWords(5), afWords(5)), 1000), 2);
+eq('cellLineCount: empty cell → 1 line', cellLineCount({ segments: [], cjkUnits: 0, units: 0 }, 100), 1);
+
+// #20-shaped risk register: ID, Risk (medium), Owner, Status, Mitigation +
+// Contingency (long). At 240px Mitigation holds every row but one tie.
+const af20 = (): AreaFitColumn[] => [
+  afColumn([afCell(afWords(2)), ...[1, 2, 3, 4].map(() => afCell(afWords(2)))]),
+  afColumn([afCell(afWords(4)), afText(8), afText(7), afText(9), afText(6)]),
+  afColumn([afCell(afWords(5)), ...[1, 2, 3, 4].map(() => afCell(afWords(5)))]),
+  afColumn([afCell(afWords(6)), ...[1, 2, 3, 4].map(() => afCell(afWords(4)))]),
+  afColumn([afCell(afWords(10)), afText(30), afText(26), afText(22), afText(28)]),
+  afColumn([afCell(afWords(11)), afText(22), afText(18), afText(20), afText(16)]),
+];
+{
+  const cols = af20();
+  const res = afSolve(cols, afOpts(1000));
+  const risk = res.widths[1];
+  check('solveAreaFit #20: medium column ends below readFloorW', risk < cols[1].readFloorW, `  Risk ${risk}`);
+  check('solveAreaFit #20: medium column stays ≥ looseFloorW', risk >= cols[1].looseFloorW, `  Risk ${risk}`);
+  check('solveAreaFit #20: fits the budget, no scroll', !res.scroll && afSum(res.widths) <= 1000, `  ${JSON.stringify(res)}`);
+  eq('solveAreaFit #20: rowHeights match the line model at the widths', res.rowHeights, afRowHeights(cols, res.widths));
+  // US-19.26 ② baseline: every column at min(maxW, readFloorW), spare shared ∝ (maxW − floor).
+  const floors = cols.map((c) => Math.min(c.maxW, c.readFloorW));
+  const slack = cols.map((c, j) => c.maxW - floors[j]);
+  const spare = 1000 - afSum(floors);
+  const proportional = floors.map((f, j) => Math.floor(f + (spare * slack[j]) / afSum(slack)));
+  const hSolver = afH(cols, res.widths);
+  const hProp = afH(cols, proportional);
+  check('solveAreaFit #20: H lower than proportional shrink at the same budget', hSolver < hProp, `  solver ${hSolver}px, proportional ${hProp}px`);
+}
+
+// Scroll floor (contract 7) on the #20 shape: Mitigation tops every row but
+// one → readFloorW; Risk + Contingency are no row's strictly tallest → free
+// shrink (Risk to looseFloorW, Contingency to the 6-line breakpoint).
+{
+  const cols = af20();
+  const floorAssignment = [32, 120, 56, 64, 240, 188];
+  const tight = afSolve(cols, afOpts(500));
+  eq('solveAreaFit scroll: floors > budget → scroll', tight.scroll, true);
+  eq('solveAreaFit scroll: widths = floor assignment', tight.widths, floorAssignment);
+  const exact = afSolve(cols, afOpts(afSum(floorAssignment)));
+  eq('solveAreaFit scroll: budget = Σ floor assignment → no scroll', exact.scroll, false);
+  eq('solveAreaFit scroll: budget = Σ floor assignment → same widths', exact.widths, floorAssignment);
+}
+
+// CJK column (readFloorW 36ch = 288px) tops every row.
+{
+  const cols = [
+    afColumn([afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1))]),
+    afColumn([afCell(afWords(2)), afCjk(90), afCjk(80), afCjk(70)], 288),
+    afColumn([afCell(afWords(2)), afText(12), afText(10), afText(11)]),
+  ];
+  eq('solveAreaFit CJK: tight budget holds the CJK column at its readFloorW', afSolve(cols, afOpts(432)).widths[1], 288);
+  for (const budgetW of [460, 600, 800, 1200]) {
+    const w = afSolve(cols, afOpts(budgetW)).widths[1];
+    check(`solveAreaFit CJK: budget ${budgetW} → CJK column never below readFloorW`, w >= 288, `  CJK ${w}`);
+  }
+}
+
+// #8b-shaped: three text columns carry the same text → tied at every row's max.
+{
+  const cols = [
+    afColumn([afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1))]),
+    ...[1, 2, 3].map(() => afColumn([afCell(afWords(2)), afText(20), afText(14), afText(26)])),
+  ];
+  const floor = afSolve(cols, afOpts(0));
+  const tiedEveryRow = afRowHeights(cols, floor.widths).every(
+    (h, r) => cols.filter((c, j) => cellLineCount(c.cells[r], floor.widths[j] - AF_PAD) * AF_LINE === h).length >= 2,
+  );
+  check('solveAreaFit #8b: every row tied at the floor assignment → no single move lowers H', tiedEveryRow);
+  const res = afSolve(cols, afOpts(1000));
+  const hFloor = afH(cols, floor.widths);
+  const hRes = afH(cols, res.widths);
+  check('solveAreaFit #8b: joint moves reach a lower H than single moves alone', hRes < hFloor, `  joint ${hRes}px, single-only ${hFloor}px`);
+  const spare = 1000 - afSum(res.widths);
+  const unspent: string[] = [];
+  res.rowHeights.forEach((h, r) => {
+    const tied = cols.map((_, j) => j).filter((j) => cellLineCount(cols[j].cells[r], res.widths[j] - AF_PAD) * AF_LINE === h);
+    if (tied.length < 2) return;
+    const next = res.widths.slice();
+    for (const j of tied) {
+      const w = afOneLineLess(cols[j], r, res.widths[j]);
+      if (w === undefined) return;
+      next[j] = w;
+    }
+    if (afSum(next) - afSum(res.widths) <= spare && afH(cols, next) < hRes) unspent.push(`row ${r}: ${JSON.stringify(next)}`);
+  });
+  eq('solveAreaFit #8b: no budget left unused while a joint move still lowers H', unspent, []);
+  eq('solveAreaFit: same input twice → identical output', solveAreaFit(cols, afOpts(1000)), res);
+}
+
+// fixedH: a row held tall by a 120px image gives its text columns no width.
+{
+  const photo = (fixedH?: number): AreaFitColumn => ({
+    cells: [afCell(afWords(5)), { segments: [], cjkUnits: 0, units: 0, fixedH }],
+    hardMinW: 136,
+    readFloorW: 240,
+    looseFloorW: 120,
+    maxW: 136,
+  });
+  const text = (): AreaFitColumn[] => [afColumn([afCell(afWords(5)), afText(16)]), afColumn([afCell(afWords(4)), afText(10)])];
+  const withImg = [photo(120), ...text()];
+  const res = afSolve(withImg, afOpts(800));
+  check(
+    'solveAreaFit fixedH: text columns free-shrink below readFloorW under a 120px image row',
+    res.widths[1] < 240 && res.widths[2] < 240,
+    `  ${JSON.stringify(res.widths)}`,
+  );
+  eq('solveAreaFit fixedH: the image sets the row height', res.rowHeights[1], 120);
+  const noImg = afSolve([photo(), ...text()], afOpts(800));
+  check('solveAreaFit fixedH: without the image the tallest text column gets width', noImg.widths[1] >= 240, `  ${JSON.stringify(noImg.widths)}`);
+}
+
+// Fractional floors / padding / line height still give integer widths.
+{
+  const cols = af20().map((c) => ({ ...c, hardMinW: c.hardMinW + 0.4, readFloorW: 233.6, looseFloorW: 117.3, maxW: c.maxW + 0.7 }));
+  afSolve(cols, { budgetW: 987.5, padX: 16.5, lineH: 22.4 });
+  afSolve(cols, { budgetW: 400.2, padX: 16.5, lineH: 22.4 });
+}
+{
+  const bad = afRuns.flatMap(({ cols, res }) =>
+    res.widths.flatMap((w, j) => (Number.isInteger(w) && w >= cols[j].hardMinW ? [] : [`${w} (hardMinW ${cols[j].hardMinW})`])),
+  );
+  eq(`solveAreaFit: every width ≥ hardMinW and an integer (${afRuns.length} runs)`, bad, []);
+}
 
 // ---------------------------------------------------------------------------
 // Security tripwires (src/provider.ts) — khoá các bất biến từ security review
