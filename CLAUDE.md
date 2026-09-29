@@ -101,6 +101,15 @@ Before grep or opening a long file:
 -   Name unknown → `grep -n <word> .map/*/code.md` or read `.map/docs.md`. Maps rebuilt at session start (hook) + `python3 scripts/codemap.py build --all` if stale.
 -   `sym`/`doc` parse live and always search the whole repo, so they're never stale — only `.map/*/code.md` (per-area overview) can go stale between rebuilds.
 
+## Mandatory Rule: Round Trips & Context
+
+Every tool call is one API round trip that re-reads the whole context.
+
+-   Batch independent reads: all reads/greps of one step (e.g. a prompt step's `Read:` anchors) go in one Bash command, or as several tool calls in one response. End a batched grep command with `; true`. Look up by symbol (`codemap.py sym`, `grep -n "function <name>" -A<n>`), not by line range.
+-   Run the full gate and the webview suite in the foreground, in one call (`timeout` up to 600000). Never start them in the background and poll.
+-   One task per session. Model change → fresh session, never `/model` mid-task.
+-   Context past ~250K → stop at a green point: commit, set the plan task ◐ + `**Note**` "stopped at step <k>: <what is left>", continue in a fresh session from that Note. Same after > 1h idle on a large session: fresh session from a Note, not a resume.
+
 ## Mandatory Rule: Known Traps
 
 **Correctness trap (not performance):**
