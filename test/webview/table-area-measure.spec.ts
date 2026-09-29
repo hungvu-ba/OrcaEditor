@@ -92,6 +92,19 @@ test.describe('Table area fit — measureCellLines', () => {
     }
   });
 
+  test('kinsoku: a glyph Chromium never starts a line with joins the unit before it', async ({ page }) => {
+    // 、 。 々 〜 cannot start a line in Chromium; ー and small kana can.
+    const [closing, allowed, leading, marks] = await measureCells(page, ['必要で、承認。', 'コーディネーター', '、あ', '人々〜']);
+    expect(closing.lines.units).toBe(5);
+    expect(closing.lines.cjkUnits).toBe(5);
+    const seg = closing.lines.segments[0];
+    expect(seg[2].w).toBeGreaterThan(1.5 * seg[0].w);
+    expect(Math.abs(oneLineWidth(closing.lines) - closing.lineW)).toBeLessThanOrEqual(2);
+    expect(allowed.lines.units).toBe(8);
+    expect(leading.lines.units).toBe(2);
+    expect(marks.lines.units).toBe(1);
+  });
+
   test('a mixed word keeps its Latin run atomic and splits its CJK glyphs', async ({ page }) => {
     const { lines, lineW } = await measureCell(page, '48時間前');
     expect(lines.units).toBe(4);

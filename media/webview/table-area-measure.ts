@@ -14,6 +14,9 @@ import { isCjkBreakUnit } from './reading-stats';
  */
 const FIXED_BOX_SELECTOR = 'img,svg,video,.katex';
 
+/** Kinsoku: CJK glyphs Chromium never starts a line with (probed; ー and small kana may start one). */
+const NO_LINE_START_RE = /[、。，．：；？！・）」』】〕〉》々ゝゞヽヾ〜]/u;
+
 const px = (value: string): number => parseFloat(value) || 0;
 
 /**
@@ -39,7 +42,8 @@ function fixedBoxHeight(el: Element, rect: DOMRect): number {
  * child's boundary). A word is one unit whose gap is the Range width of the
  * whitespace before it (NBSP, figure space, narrow NBSP and BOM are no break
  * opportunity and stay inside the word); inside a word, each CJK glyph is its
- * own unit with gap 0 (the glyph run measured once, split evenly) and every
+ * own unit with gap 0 (the glyph run measured once, split evenly; a glyph
+ * Chromium never starts a line with, e.g. 、。」, joins the unit before it) and every
  * non-CJK run between glyphs stays atomic — the split table.ts's
  * `widestWordWidth` uses. A word split across inline elements with no
  * whitespace between (`<b>foo</b>bar`) stays one unit. An inline element's
@@ -95,7 +99,13 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
       push(w, true);
       return;
     }
-    for (let i = 0; i < cjkGlyphs; i++) {
+    for (const ch of (node.nodeValue ?? '').slice(start, end)) {
+      if (NO_LINE_START_RE.test(ch) && seg.length && gap === 0) {
+        seg[seg.length - 1].w += w / cjkGlyphs + lead;
+        lead = 0;
+        joinPrev = false;
+        continue;
+      }
       push(w / cjkGlyphs, false, true);
     }
   };
