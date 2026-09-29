@@ -9,3 +9,4 @@
 | 1.2.2 | 2026-09-29 | Feature: area-fit table solver stops at the knee (5% H), keeps a 15% knee floor, and holds applied widths within a 5%/2% hysteresis band with grow-only column support. |
 | 1.2.2 | 2026-09-29 | Fix: area-fit cell measure adapter counts inline-box padding, block-child line breaks, KaTeX formula height and <br>-only lines, and keeps non-breaking spaces inside words (US-19.27, T1.9 review). |
 | 1.2.2 | 2026-09-29 | Feature: GATE A probe measures the area-fit line model against Chromium (99.8% exact); the solver's column upper bound now covers the model's one-line width (US-19.27, T1.3). |
+| 1.2.2 | 2026-09-29 | Fix: area-fit knee floor keeps Σ maxW after the model-line hi raise; GATE A probe counts atomic inline and wrapped KaTeX boxes, asserts pin drift. |

@@ -1799,6 +1799,8 @@ const af20 = (): AreaFitColumn[] => [
   const res = afSolve([short, fixed], afOpts(244));
   eq('solveAreaFit hi: a cell whose model line exceeds maxW − padX still reaches 1 line', res.rowHeights, [AF_LINE]);
   eq('solveAreaFit hi: the column widens to padX + the model line', res.widths, [128 + AF_PAD, 100]);
+  // Contract 6: Σ ceil(maxW) = 243 is 1px over budget 242 → knee floor 241; the raised hi (Σ 244) must not lower it to 240.
+  eq('solveAreaFit hi: the knee floor still uses Σ maxW, not the raised hi', afSolve([short, fixed], afOpts(242)).widths, [141, 100]);
 }
 
 // fixedH: a row held tall by a 120px image gives its text columns no width.

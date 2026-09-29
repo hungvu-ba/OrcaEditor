@@ -153,8 +153,10 @@ async function installGateA(page: Page): Promise<void> {
               return;
             }
             const el = n as Element;
-            if (el.matches(FIXED)) {
-              push(el.getBoundingClientRect());
+            // Fixed boxes and atomic inline boxes (e.g. the text-less .md-math-toggle button):
+            // one rect per line fragment, since KaTeX itself can wrap between its .base boxes.
+            if (el.matches(FIXED) || getComputedStyle(el).display.startsWith('inline-')) {
+              Array.from(el.getClientRects()).forEach(push);
               return;
             }
             if (getComputedStyle(el).display === 'none') {
@@ -267,7 +269,7 @@ async function probeLines(page: Page, name: string, markdown: string, widths: nu
       const g = (window as unknown as { __gateA: GateA }).__gateA;
       const table = document.querySelector('#content table') as HTMLTableElement;
       const rows = Array.from(table.rows);
-      const box = g.box(rows[0].cells[0]);
+      const box = g.box(table.tBodies[0].rows[0].cells[0]);
       const measured = g.measure(table);
       const overflowCells: string[] = [];
       measured.forEach((row, r) =>
@@ -363,15 +365,17 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
     );
     console.log(notes.join('\n'));
     const gateNames = new Set(GATE_TABLES.map(([n]) => n));
-    const aggregate = (pretty: boolean): { cells: number; exact: number; maxAbs: number } =>
+    const aggregate = (pretty: boolean): { cells: number; exact: number; maxAbs: number; pinDrift: number } =>
       all
         .filter((s) => gateNames.has(s.table) && s.pretty === pretty)
-        .reduce((acc, s) => ({ cells: acc.cells + s.cells, exact: acc.exact + s.exact, maxAbs: Math.max(acc.maxAbs, s.maxAbs) }), { cells: 0, exact: 0, maxAbs: 0 });
+        .reduce((acc, s) => ({ cells: acc.cells + s.cells, exact: acc.exact + s.exact, maxAbs: Math.max(acc.maxAbs, s.maxAbs), pinDrift: acc.pinDrift + s.pinDrift }), { cells: 0, exact: 0, maxAbs: 0, pinDrift: 0 });
     const on = aggregate(true);
     const off = aggregate(false);
     const verdict = (a: { cells: number; exact: number; maxAbs: number }): string =>
       `${a.exact}/${a.cells} exact = ${((100 * a.exact) / a.cells).toFixed(1)}%, max |Δ| = ${a.maxAbs} → ${a.exact / a.cells >= 0.95 && a.maxAbs <= 1 ? 'green' : 'RED'}`;
     console.log(`GATE A (text-wrap: pretty on, contract 12): ${verdict(on)}\nGATE A (text-wrap: pretty off): ${verdict(off)}`);
+    // Positive control: every gate cell really sat at the requested content width (else sim and real both read max-content).
+    expect(on.pinDrift).toBe(0);
     expect(on.exact / on.cells).toBeGreaterThanOrEqual(0.95);
     expect(on.maxAbs).toBeLessThanOrEqual(1);
   });
@@ -387,7 +391,7 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
       const byCell = new Map<string, number[]>();
       for (const s of probe.summaries) {
         for (const m of s.mismatches) {
-          const key = m.replace(/ sim \d+ real \d+$/, '');
+          const key = m.replace(/ sim (\d+) real (\d+)$/, (_, sim: string, real: string) => ` Δ${Number(sim) > Number(real) ? '+' : ''}${Number(sim) - Number(real)}`);
           byCell.set(key, [...(byCell.get(key) ?? []), s.contentW]);
         }
       }
@@ -441,8 +445,8 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
     const r = await page.evaluate(() => {
       const g = (window as unknown as { __gateA: GateA }).__gateA;
       const table = document.querySelector('#content table') as HTMLTableElement;
-      const box = g.box(table.rows[0].cells[0]);
-      const median = (fn: () => void): number => {
+      const box = g.box(table.tBodies[0].rows[0].cells[0]);
+      const median =(fn: () => void): number => {
         const t: number[] = [];
         for (let i = 0; i < 5; i++) {
           const t0 = performance.now();
@@ -516,7 +520,8 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
             return `${t.classList.contains('md-table-fit')}|${Math.round(r.width)}|${Math.round(r.height)}`;
           });
         // The fit pass runs after render and again from the ResizeObserver rAF: wait until two reads 150 ms apart agree.
-        let prev = await snapshot();
+        // Sentinel: expect.poll calls at once, so the first compare must fail and every later one is 150 ms apart.
+        let prev = '';
         await expect
           .poll(
             async () => {
@@ -560,7 +565,7 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
         const g = (window as unknown as { __gateA: GateA }).__gateA;
         const table = document.querySelector('#content table') as HTMLTableElement;
         const rows = Array.from(table.rows);
-        const box = g.box(rows[0].cells[0]);
+        const box = g.box(table.tBodies[0].rows[0].cells[0]);
         const measured = g.measure(table);
         const cols = g.columns(measured, box);
         const content = document.getElementById('content') as HTMLElement;

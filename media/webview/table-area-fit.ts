@@ -139,10 +139,11 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   const rows = cols.reduce((m, c) => Math.max(m, c.cells.length), 0);
   // Contracts 3 + 5: integer px, hardMinW ≤ looseFloorW ≤ readFloorW ≤ maxW.
   const hard = cols.map((c) => Math.ceil(c.hardMinW));
+  const natural = cols.map((c, j) => Math.max(hard[j], Math.ceil(c.maxW)));
   // GATE A (T1.3): the DOM max-content width runs up to ~2 px short of the model's
   // one-line width (per-word Range widths accumulate sub-pixel rounding), so at
   // ceil(maxW) alone such a cell would never reach 1 line — raise hi to the model line.
-  const hi = cols.map((c, j) => Math.max(hard[j], Math.ceil(c.maxW), Math.ceil(padX + widestModelLine(c))));
+  const hi = cols.map((c, j) => Math.max(natural[j], Math.ceil(padX + widestModelLine(c))));
   const read = cols.map((c, j) => Math.min(hi[j], Math.max(hard[j], Math.ceil(c.readFloorW))));
   const loose = cols.map((c, j) => Math.min(read[j], Math.max(hard[j], Math.ceil(c.looseFloorW))));
   const fits = cols.map((c, j) =>
@@ -170,7 +171,7 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     // column's hardMinW grew, or a column's own content shrank below its
     // prev width, since they were applied); only trust the fast path when
     // they are still feasible, else fall through to a full solve instead of
-    // returning an over-budget, below-hardMinW, or past-maxW result.
+    // returning an over-budget, below-hardMinW, or past-hi result.
     if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j] && w <= hi[j])) {
       const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
       if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
@@ -298,11 +299,12 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   // Step 4 (contract 6): knee — the earliest (smallest Σ widths) trajectory
   // point within AREA_FIT_KNEE_EPSILON of the trajectory's final H. Its E is
   // already free-shrunk (step 5), integer px. Below the knee floor, hand the
-  // gap back ∝ (maxW − width), capped at maxW (no hand-back after this point).
+  // gap back ∝ (hi − width), capped at hi (no hand-back after this point).
   const hEnd = trajectory[trajectory.length - 1].H;
   const kneeThreshold = hEnd * (1 + AREA_FIT_KNEE_EPSILON);
   const knee = trajectory.find((p) => p.H <= kneeThreshold) ?? trajectory[trajectory.length - 1];
-  const kneeFloor = budgetW - Math.min(AREA_FIT_KNEE_MAX_SHRINK * budgetW, sum(hi) - budgetW);
+  // The ①a boundary is Σ maxW (DOM), not Σ hi: the model-line raise must not widen the allowed shrink.
+  const kneeFloor = budgetW - Math.min(AREA_FIT_KNEE_MAX_SHRINK * budgetW, sum(natural) - budgetW);
   let widths = knee.E;
   if (knee.sumE < kneeFloor) {
     const gap = Math.min(Math.ceil(kneeFloor - knee.sumE), Math.floor(budgetW - knee.sumE));
