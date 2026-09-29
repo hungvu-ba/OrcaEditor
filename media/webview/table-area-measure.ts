@@ -13,13 +13,39 @@ import { isCjkBreakUnit } from './reading-stats';
  */
 const FIXED_BOX_SELECTOR = 'img,svg,video,.katex';
 
+const px = (value: string): number => parseFloat(value) || 0;
+
 /**
- * Break units of `cell`, one segment per hard line (`<br>`). A `\S+` word is one
- * unit whose gap is the Range width of the whitespace before it; inside a word,
- * each CJK glyph is its own unit with gap 0 (the glyph run measured once, split
- * evenly) and every non-CJK run between glyphs stays atomic — the split
- * table.ts's `widestWordWidth` uses. A word split across inline elements with
- * no whitespace between (`<b>foo</b>bar`) stays one unit.
+ * Height of a fixed box. An inline `.katex` rect is only its font's line box;
+ * the formula's extent is the union of its `.base` inline-blocks.
+ */
+function fixedBoxHeight(el: Element, rect: DOMRect): number {
+  if (!el.classList.contains('katex')) {
+    return rect.height;
+  }
+  let top = rect.top;
+  let bottom = rect.bottom;
+  for (const base of Array.from(el.querySelectorAll('.base'))) {
+    const r = base.getBoundingClientRect();
+    top = Math.min(top, r.top);
+    bottom = Math.max(bottom, r.bottom);
+  }
+  return bottom - top;
+}
+
+/**
+ * Break units of `cell`, one segment per hard line (`<br>`, or a block-level
+ * child's boundary). A word is one unit whose gap is the Range width of the
+ * whitespace before it (NBSP, figure space, narrow NBSP and BOM are no break
+ * opportunity and stay inside the word); inside a word, each CJK glyph is its
+ * own unit with gap 0 (the glyph run measured once, split evenly) and every
+ * non-CJK run between glyphs stays atomic — the split table.ts's
+ * `widestWordWidth` uses. A word split across inline elements with no
+ * whitespace between (`<b>foo</b>bar`) stays one unit. An inline element's
+ * horizontal margin + border + padding goes to its first and last unit; an
+ * atomic inline box (`inline-block`, `inline-flex`, …, e.g. a button) is one
+ * unit of its margin-box width; a block child's left inset goes to the first
+ * unit of each of its lines; `display: none` content is skipped.
  */
 export function measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines {
   const segments: BreakUnit[][] = [];
@@ -31,6 +57,10 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
   // word with no whitespace after it yet (the next word run joins it).
   let gap = 0;
   let joinPrev = false;
+  // Left inset of the open block ancestors (added to a line's first unit);
+  // inline-box decoration waiting for the next unit.
+  let indent = 0;
+  let lead = 0;
 
   const width = (node: Node, start: number, end: number): number => {
     range.setStart(node, start);
@@ -38,10 +68,12 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
     return range.getBoundingClientRect().width;
   };
   const push = (w: number, word: boolean, cjk = false): void => {
+    w += lead;
+    lead = 0;
     if (word && joinPrev) {
       seg[seg.length - 1].w += w;
     } else {
-      seg.push({ w, gap: seg.length ? gap : 0 });
+      seg.push(seg.length ? { w, gap } : { w: w + indent, gap: 0 });
       units++;
       if (cjk) {
         cjkUnits++;
@@ -66,7 +98,7 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
   };
   const addText = (node: Node): void => {
     const text = node.nodeValue ?? '';
-    const re = /(\s+)|\S+/g;
+    const re = /([^\S   ﻿]+)|(?:\S|[   ﻿])+/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
       if (m[1]) {
@@ -92,6 +124,15 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
       addRun(node, runStart, offset, cjkGlyphs);
     }
   };
+  /** A block boundary ends the current line, if any, without opening an empty one. */
+  const endLine = (): void => {
+    if (seg.length) {
+      segments.push(seg);
+      seg = [];
+    }
+    gap = 0;
+    joinPrev = false;
+  };
   const walk = (parent: Node): void => {
     for (let node = parent.firstChild; node; node = node.nextSibling) {
       if (node.nodeType === Node.TEXT_NODE) {
@@ -104,23 +145,52 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
           joinPrev = false;
         } else if (node.matches(FIXED_BOX_SELECTOR)) {
           const rect = node.getBoundingClientRect();
-          fixedH = Math.max(fixedH ?? 0, rect.height);
+          fixedH = Math.max(fixedH ?? 0, fixedBoxHeight(node, rect));
           push(rect.width, false);
         } else {
-          walk(node);
+          const style = getComputedStyle(node);
+          const display = style.display;
+          if (display === 'none') {
+            continue;
+          }
+          const marginL = px(style.marginLeft);
+          const marginR = px(style.marginRight);
+          if (display.startsWith('inline-')) {
+            push(marginL + node.getBoundingClientRect().width + marginR, false);
+            continue;
+          }
+          const insetL = marginL + px(style.borderLeftWidth) + px(style.paddingLeft);
+          if (display === 'inline' || display === 'contents') {
+            lead += insetL;
+            walk(node);
+            const insetR = marginR + px(style.borderRightWidth) + px(style.paddingRight);
+            if (lead === 0 && seg.length) {
+              seg[seg.length - 1].w += insetR;
+            } else {
+              lead += insetR;
+            }
+          } else {
+            endLine();
+            indent += insetL;
+            walk(node);
+            indent -= insetL;
+            endLine();
+          }
         }
       }
     }
   };
 
   walk(cell);
-  if (units === 0) {
-    return { segments: [], cjkUnits: 0, units: 0 };
-  }
   segments.push(seg);
   // A trailing <br> ends the last line without opening a new one.
   if (seg.length === 0) {
     segments.pop();
+  }
+  // No unit and at most one (empty) hard line: an empty cell. `<br><br>` still
+  // renders two lines.
+  if (units === 0 && segments.length <= 1) {
+    return { segments: [], cjkUnits: 0, units: 0 };
   }
   const lines: CellLines = { segments, cjkUnits, units };
   if (fixedH !== undefined) {
