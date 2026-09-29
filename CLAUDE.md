@@ -2,6 +2,8 @@
 
 ## Mandatory Rule: Requirement Structure (HLR = master list)
 
+Requirements live in a separate repo: `/Users/hungvu/Documents/Dev/OrcaEditor-Requirements/` (`High-Level Requirement.md`, `Requirement - NN <Name>.md`). A US is found with `grep -n "US-<id>" "/Users/hungvu/Documents/Dev/OrcaEditor-Requirements/Requirement - "*.md` — never search this repo for it.
+
 Whenever a task creates or updates a requirement (HLR entry, detail file, status tag), read and follow [Plan/REQUIREMENT\_STRUCTURE.md](Plan/REQUIREMENT_STRUCTURE.md) — it defines the HLR ⇄ detail-file linking, naming, and status-tag rules.
 
 ## Mandatory Rule: Roundtrip Test for `.md`\-changing Features
