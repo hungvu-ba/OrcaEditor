@@ -478,6 +478,9 @@ td {
   min-width: 14ch;
   overflow-wrap: normal;
   word-break: normal;
+  /* US-19.27 contract 12: top-align cells and avoid one-word wrapped last lines. */
+  vertical-align: top;
+  text-wrap: pretty;
 }
 
 /* Dùng bởi fitTableColumns() (table.ts) khi đo bề rộng tự nhiên (max-content)
