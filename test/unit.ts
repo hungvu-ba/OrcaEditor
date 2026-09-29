@@ -1732,7 +1732,9 @@ const af20 = (): AreaFitColumn[] => [
     afColumn([afCell(afWords(2)), afCjk(90), afCjk(80), afCjk(70)], 288),
     afColumn([afCell(afWords(2)), afText(12), afText(10), afText(11)]),
   ];
-  eq('solveAreaFit CJK: tight budget holds the CJK column at its readFloorW', afSolve(cols, afOpts(432)).widths[1], 288);
+  const tight = afSolve(cols, afOpts(456));
+  eq('solveAreaFit CJK: budget = Σ floor assignment → no scroll', tight.scroll, false);
+  eq('solveAreaFit CJK: tight budget holds the CJK column at its readFloorW', tight.widths[1], 288);
   for (const budgetW of [460, 600, 800, 1200]) {
     const w = afSolve(cols, afOpts(budgetW)).widths[1];
     check(`solveAreaFit CJK: budget ${budgetW} → CJK column never below readFloorW`, w >= 288, `  CJK ${w}`);
@@ -1746,14 +1748,16 @@ const af20 = (): AreaFitColumn[] => [
     ...[1, 2, 3].map(() => afColumn([afCell(afWords(2)), afText(20), afText(14), afText(26)])),
   ];
   const floor = afSolve(cols, afOpts(0));
-  const tiedEveryRow = afRowHeights(cols, floor.widths).every(
-    (h, r) => cols.filter((c, j) => cellLineCount(c.cells[r], floor.widths[j] - AF_PAD) * AF_LINE === h).length >= 2,
+  // Moves act on P (every column at readFloorW clamped to [hardMinW, maxW]), not on the free-shrunk widths.
+  const floorP = cols.map((c) => Math.min(c.maxW, Math.max(c.hardMinW, c.readFloorW)));
+  const tiedEveryRow = afRowHeights(cols, floorP).every(
+    (h, r) => cols.filter((c, j) => cellLineCount(c.cells[r], floorP[j] - AF_PAD) * AF_LINE === h).length >= 2,
   );
   check('solveAreaFit #8b: every row tied at the floor assignment → no single move lowers H', tiedEveryRow);
   const res = afSolve(cols, afOpts(1000));
   const hFloor = afH(cols, floor.widths);
   const hRes = afH(cols, res.widths);
-  check('solveAreaFit #8b: joint moves reach a lower H than single moves alone', hRes < hFloor, `  joint ${hRes}px, single-only ${hFloor}px`);
+  check('solveAreaFit #8b: joint moves lower H below the floor assignment', hRes < hFloor, `  joint ${hRes}px, floor ${hFloor}px`);
   const spare = 1000 - afSum(res.widths);
   const unspent: string[] = [];
   res.rowHeights.forEach((h, r) => {
@@ -1769,6 +1773,13 @@ const af20 = (): AreaFitColumn[] => [
   });
   eq('solveAreaFit #8b: no budget left unused while a joint move still lowers H', unspent, []);
   eq('solveAreaFit: same input twice → identical output', solveAreaFit(cols, afOpts(1000)), res);
+}
+
+// Tie-break (contract 4): two mirrored columns, each strictly topping its own
+// row; the budget affords one equal-ratio move → the lower column index widens.
+{
+  const cols = [afColumn([afCell(afWords(2)), afText(20), afText(2)]), afColumn([afCell(afWords(2)), afText(2), afText(20)])];
+  eq('solveAreaFit tie-break: equal ratio → lower column index takes width first', afSolve(cols, afOpts(560)).widths, [320, 240]);
 }
 
 // fixedH: a row held tall by a 120px image gives its text columns no width.
@@ -1796,8 +1807,11 @@ const af20 = (): AreaFitColumn[] => [
 // Fractional floors / padding / line height still give integer widths.
 {
   const cols = af20().map((c) => ({ ...c, hardMinW: c.hardMinW + 0.4, readFloorW: 233.6, looseFloorW: 117.3, maxW: c.maxW + 0.7 }));
-  afSolve(cols, { budgetW: 987.5, padX: 16.5, lineH: 22.4 });
-  afSolve(cols, { budgetW: 400.2, padX: 16.5, lineH: 22.4 });
+  for (const budgetW of [987.5, 400.2]) {
+    const res = afSolve(cols, { budgetW, padX: 16.5, lineH: 22.4 });
+    eq(`solveAreaFit fractional ${budgetW}: rowHeights match the line model`, res.rowHeights, afRowHeights(cols, res.widths, 16.5, 22.4));
+    check(`solveAreaFit fractional ${budgetW}: scroll or within budget`, res.scroll || afSum(res.widths) <= budgetW, `  ${JSON.stringify(res)}`);
+  }
 }
 {
   const bad = afRuns.flatMap(({ cols, res }) =>
