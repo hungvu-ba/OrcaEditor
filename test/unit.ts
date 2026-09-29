@@ -139,6 +139,9 @@ import { countWords, estimateReadMinutes, formatCount } from '../media/webview/r
 import {
   cellLineCount,
   solveAreaFit,
+  AREA_FIT_KNEE_EPSILON,
+  AREA_FIT_KNEE_MAX_SHRINK,
+  AREA_FIT_RESIZE_HYSTERESIS,
   type AreaFitColumn,
   type AreaFitOptions,
   type AreaFitResult,
@@ -1759,7 +1762,10 @@ const af20 = (): AreaFitColumn[] => [
   const hRes = afH(cols, res.widths);
   check('solveAreaFit #8b: joint moves lower H below the floor assignment', hRes < hFloor, `  joint ${hRes}px, floor ${hFloor}px`);
   const spare = 1000 - afSum(res.widths);
-  const unspent: string[] = [];
+  // Case — superseded by contract 6: a leftover joint move within the spare
+  // is now allowed when its own gain sits inside the knee epsilon; only a
+  // move that would still drop H by more than that is a real miss.
+  const beyondKnee: string[] = [];
   res.rowHeights.forEach((h, r) => {
     const tied = cols.map((_, j) => j).filter((j) => cellLineCount(cols[j].cells[r], res.widths[j] - AF_PAD) * AF_LINE === h);
     if (tied.length < 2) return;
@@ -1769,9 +1775,11 @@ const af20 = (): AreaFitColumn[] => [
       if (w === undefined) return;
       next[j] = w;
     }
-    if (afSum(next) - afSum(res.widths) <= spare && afH(cols, next) < hRes) unspent.push(`row ${r}: ${JSON.stringify(next)}`);
+    if (afSum(next) - afSum(res.widths) > spare) return;
+    const nextH = afH(cols, next);
+    if (nextH < hRes / (1 + AREA_FIT_KNEE_EPSILON)) beyondKnee.push(`row ${r}: ${JSON.stringify(next)}`);
   });
-  eq('solveAreaFit #8b: no budget left unused while a joint move still lowers H', unspent, []);
+  eq('solveAreaFit #8b: no budget left unused beyond the knee epsilon (contract 6)', beyondKnee, []);
   eq('solveAreaFit: same input twice → identical output', solveAreaFit(cols, afOpts(1000)), res);
 }
 
@@ -1794,9 +1802,11 @@ const af20 = (): AreaFitColumn[] => [
   const text = (): AreaFitColumn[] => [afColumn([afCell(afWords(5)), afText(16)]), afColumn([afCell(afWords(4)), afText(10)])];
   const withImg = [photo(120), ...text()];
   const res = afSolve(withImg, afOpts(800));
+  // Case — superseded by contract 6: the knee-floor hand-back may widen the
+  // free-shrunk text columns again; the table only has to reach the knee floor.
   check(
-    'solveAreaFit fixedH: text columns free-shrink below readFloorW under a 120px image row',
-    res.widths[1] < 240 && res.widths[2] < 240,
+    'solveAreaFit fixedH: under a 120px image row the table still reaches the knee floor (contract 6)',
+    afSum(res.widths) >= 800 * (1 - AREA_FIT_KNEE_MAX_SHRINK) && afSum(res.widths) <= 800,
     `  ${JSON.stringify(res.widths)}`,
   );
   eq('solveAreaFit fixedH: the image sets the row height', res.rowHeights[1], 120);
@@ -1813,6 +1823,124 @@ const af20 = (): AreaFitColumn[] => [
     check(`solveAreaFit fractional ${budgetW}: scroll or within budget`, res.scroll || afSum(res.widths) <= budgetW, `  ${JSON.stringify(res)}`);
   }
 }
+
+// Knee (contract 6): a 30-word target column diluted by 40 one-line baseline
+// rows makes every further line-count reduction worth < 5% of H once it is
+// already close to the trajectory's reachable minimum — the solver should
+// stop short of the full budget instead of spending it all for a sliver of H.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const fillerCol: AreaFitColumn = {
+    cells: Array.from({ length: 41 }, () => ({ segments: [], cjkUnits: 0, units: 0 })),
+    hardMinW: 32,
+    readFloorW: 32,
+    looseFloorW: 32,
+    maxW: 1000,
+  };
+  const budgetW = 1450;
+  const res = afSolve([idCol, targetCol, fillerCol], afOpts(budgetW));
+  const total = afSum(res.widths);
+  check('solveAreaFit knee: stops short of the full budget once H gains are marginal', total < budgetW, `  Σ ${total} / budget ${budgetW}`);
+  check(
+    'solveAreaFit knee: knee floor still hands back to ≥ (1 − AREA_FIT_KNEE_MAX_SHRINK) of the budget',
+    total >= budgetW * (1 - AREA_FIT_KNEE_MAX_SHRINK),
+    `  Σ ${total} / floor ${budgetW * (1 - AREA_FIT_KNEE_MAX_SHRINK)}`,
+  );
+}
+
+// Knee floor at the ①a boundary (contract 6): Σ maxW only 20px over budget →
+// the min() picks Σ maxW − budgetW (20), not the 15% cap → hand-back should
+// land within 20px of the budget and push the flexible column near its maxW.
+{
+  const budgetW = 500;
+  const fixed: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 100, readFloorW: 100, looseFloorW: 100, maxW: 100 };
+  const flex: AreaFitColumn = {
+    cells: [{ segments: [], cjkUnits: 0, units: 0 }],
+    hardMinW: 50,
+    readFloorW: 50,
+    looseFloorW: 50,
+    maxW: budgetW + 20 - 100,
+  };
+  const res = afSolve([fixed, flex], afOpts(budgetW));
+  const total = afSum(res.widths);
+  check('solveAreaFit knee floor ①a boundary: Σ widths ≥ budget − 20', total >= budgetW - 20, `  Σ ${total}`);
+  check(
+    'solveAreaFit knee floor ①a boundary: the widest (flexible) column ends within 40px of its maxW',
+    flex.maxW - res.widths[1] <= 40,
+    `  width ${res.widths[1]} maxW ${flex.maxW}`,
+  );
+}
+
+// Hysteresis (contract 8): prevWidths is kept unless the fresh solve drops H
+// by more than the hysteresis fraction; infeasible or undefined entries are
+// handled per contract. Reuses the diluted target column above so a 1-line
+// difference is a small (~2%) H change and a 4-line difference is a large one.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const cols = [idCol, targetCol];
+  const budgetW = 800; // affords the mid trajectory but not the final (1-line) move.
+  const bpWidth = (maxLines: number): number => {
+    for (let w = targetCol.hardMinW; w <= targetCol.maxW; w++) {
+      if (cellLineCount(targetCol.cells[0], w - AF_PAD) <= maxLines) return w;
+    }
+    return targetCol.maxW;
+  };
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const idW = fresh.widths[0];
+  const kFresh = cellLineCount(targetCol.cells[0], fresh.widths[1] - AF_PAD);
+  const wSmallDrop = bpWidth(kFresh + 1);
+  const wBigDrop = bpWidth(kFresh + 4);
+
+  const kept = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wSmallDrop] });
+  eq('solveAreaFit hysteresis: H drop within the default hysteresis → prevWidths kept', kept.widths, [idW, wSmallDrop]);
+
+  const tighter = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wSmallDrop], hysteresis: AREA_FIT_RESIZE_HYSTERESIS });
+  eq('solveAreaFit hysteresis: AREA_FIT_RESIZE_HYSTERESIS honoured → the same drop now replaces', tighter.widths, fresh.widths);
+
+  const bigDrop = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wBigDrop] });
+  eq('solveAreaFit hysteresis: H drop beyond the default hysteresis → fresh solution wins', bigDrop.widths, fresh.widths);
+
+  const infeasible = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, targetCol.maxW] });
+  eq('solveAreaFit hysteresis: prevWidths wider than the budget → ignored, fresh solution wins', infeasible.widths, fresh.widths);
+
+  const undef = afSolve(cols, { ...afOpts(budgetW), prevWidths: [undefined, wSmallDrop] });
+  eq('solveAreaFit hysteresis: undefined prevWidths entries filled from the fresh solution', undef.widths, kept.widths);
+}
+
+// growOnlyCol (contract 8): every other column keeps its prev width; the
+// grow-only column only widens, never past the budget, and no spare leaves
+// prevWidths unchanged.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const cols = [idCol, targetCol];
+  const idW = 32; // idCol is forced to its single word width regardless of budget.
+  const prevW = 452;
+  const bpWidth = (maxLines: number): number => {
+    for (let w = targetCol.hardMinW; w <= targetCol.maxW; w++) {
+      if (cellLineCount(targetCol.cells[0], w - AF_PAD) <= maxLines) return w;
+    }
+    return targetCol.maxW;
+  };
+  const prevLines = cellLineCount(targetCol.cells[0], prevW - AF_PAD);
+  const grownBudget = idW + bpWidth(prevLines - 1) + 20;
+  const grown = afSolve(cols, { ...afOpts(grownBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  check('solveAreaFit growOnlyCol: only the grow-only column changes', grown.widths[0] === idW, `  ${JSON.stringify(grown.widths)}`);
+  check('solveAreaFit growOnlyCol: never narrower than the prev width', grown.widths[1] >= prevW, `  ${grown.widths[1]}`);
+  check('solveAreaFit growOnlyCol: stays within the budget', afSum(grown.widths) <= grownBudget, `  ${afSum(grown.widths)} / ${grownBudget}`);
+  check(
+    'solveAreaFit growOnlyCol: widened to fewer lines than the prev width',
+    cellLineCount(targetCol.cells[0], grown.widths[1] - AF_PAD) < prevLines,
+    `  widths ${JSON.stringify(grown.widths)}`,
+  );
+
+  const noSpareBudget = idW + prevW;
+  const noSpare = afSolve(cols, { ...afOpts(noSpareBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  eq('solveAreaFit growOnlyCol: no spare → prevWidths unchanged', noSpare.widths, [idW, prevW]);
+}
+
 {
   const bad = afRuns.flatMap(({ cols, res }) =>
     res.widths.flatMap((w, j) => (Number.isInteger(w) && w >= cols[j].hardMinW ? [] : [`${w} (hardMinW ${cols[j].hardMinW})`])),

@@ -23,6 +23,10 @@ export interface AreaFitOptions {
   growOnlyCol?: number;                   // contract 8: only this column may widen; needs prevWidths
 }
 export interface AreaFitResult { widths: number[]; rowHeights: number[]; scroll: boolean } // rowHeights px (contract 4)
+export const AREA_FIT_KNEE_EPSILON = 0.05;
+export const AREA_FIT_KNEE_MAX_SHRINK = 0.15;
+export const AREA_FIT_HYSTERESIS = 0.05;
+export const AREA_FIT_RESIZE_HYSTERESIS = 0.02;
 
 /**
  * Line model (contract 9): greedy fill of break units into `contentW`. A unit
@@ -105,15 +109,17 @@ interface FitState {
 interface FitMove { state: FitState; dH: number; cost: number; firstCol: number }
 
 /**
- * Solver steps 1–3 and 5 (knee + hysteresis are T1.8): floor assignment →
- * scroll when it is wider than the budget (contract 7); otherwise a greedy
- * height-first trajectory of single and joint row moves until no affordable
- * move lowers H (contract 4). Free shrink (contract 5) is applied at every
+ * Solver steps 1–6: floor assignment → scroll when it is wider than the
+ * budget (contract 7); otherwise a greedy height-first trajectory of single
+ * and joint row moves until no affordable move lowers H (contract 4), the
+ * knee point on that trajectory (contract 6), then hysteresis against
+ * `prevWidths` (contract 8). Free shrink (contract 5) is applied at every
  * trajectory point, so a move's cost counts the columns it forces back out of
  * their free shrink and width a free shrink releases stays spendable.
  */
 export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaFitResult {
-  const { budgetW, padX, lineH } = opts;
+  const { budgetW, padX, lineH, prevWidths, growOnlyCol } = opts;
+  const hysteresis = opts.hysteresis ?? AREA_FIT_HYSTERESIS;
   const n = cols.length;
   const rows = cols.reduce((m, c) => Math.max(m, c.cells.length), 0);
   // Contracts 3 + 5: integer px, hardMinW ≤ looseFloorW ≤ readFloorW ≤ maxW.
@@ -126,6 +132,39 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   );
   const cellH = (j: number, r: number, lines: number): number => Math.max(lines * lineH, fits[j][r].fixedH);
   const colLines = (j: number, w: number): number[] => fits[j].map((f) => linesAtWidth(f, w));
+  const sum = (a: number[]): number => a.reduce((s, w) => s + w, 0);
+  /** Row heights at arbitrary widths (clamped into each column's fit range). */
+  const heightsAt = (widths: number[]): number[] => {
+    const rowH = new Array<number>(rows).fill(0);
+    const lines = widths.map((w, j) => colLines(j, Math.max(loose[j], Math.min(hi[j], w))));
+    for (let r = 0; r < rows; r++) for (let j = 0; j < n; j++) rowH[r] = Math.max(rowH[r], cellH(j, r, lines[j][r]));
+    return rowH;
+  };
+
+  // Step 6, growOnlyCol (contract 8): skip steps 1–5. Every other column keeps
+  // its prev width; growOnlyCol widens (never narrows) to the candidate
+  // minimizing H within the spare the others leave under budgetW.
+  if (growOnlyCol !== undefined && prevWidths) {
+    const others = cols.map((_, j) => (j === growOnlyCol ? 0 : prevWidths[j] ?? hard[j]));
+    const prevJ = prevWidths[growOnlyCol] ?? hard[growOnlyCol];
+    const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
+    const widths = cols.map((_, j) => prevWidths[j] ?? hard[j]);
+    if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
+    const candidates = new Set<number>([prevJ]);
+    for (const f of fits[growOnlyCol]) for (const w of f.need) if (w > prevJ && w <= maxAllowed) candidates.add(w);
+    let bestW = prevJ;
+    let bestH = Infinity;
+    for (const w of [...candidates].sort((x, y) => x - y)) {
+      widths[growOnlyCol] = w;
+      const h = sum(heightsAt(widths));
+      if (h < bestH) {
+        bestH = h;
+        bestW = w;
+      }
+    }
+    widths[growOnlyCol] = bestW;
+    return { widths, rowHeights: heightsAt(widths), scroll: false };
+  }
 
   const settle = (P: number[], lines: number[][]): FitState => {
     const rowH = new Array<number>(rows).fill(-1);
@@ -231,7 +270,45 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     trajectory.push(s);
   }
 
-  // Step 5 on the trajectory's last point: its E is already free-shrunk, integer px.
-  const end = trajectory[trajectory.length - 1];
-  return { widths: end.E, rowHeights: end.rowH, scroll: false };
+  // Step 4 (contract 6): knee — the earliest (smallest Σ widths) trajectory
+  // point within AREA_FIT_KNEE_EPSILON of the trajectory's final H. Its E is
+  // already free-shrunk (step 5), integer px. Below the knee floor, hand the
+  // gap back ∝ (maxW − width), capped at maxW (no hand-back after this point).
+  const hEnd = trajectory[trajectory.length - 1].H;
+  const kneeThreshold = hEnd * (1 + AREA_FIT_KNEE_EPSILON);
+  const knee = trajectory.find((p) => p.H <= kneeThreshold) ?? trajectory[trajectory.length - 1];
+  const kneeFloor = budgetW - Math.min(AREA_FIT_KNEE_MAX_SHRINK * budgetW, sum(hi) - budgetW);
+  let widths = knee.E;
+  if (knee.sumE < kneeFloor) {
+    const gap = Math.min(Math.ceil(kneeFloor - knee.sumE), Math.floor(budgetW - knee.sumE));
+    const room = widths.map((w, j) => hi[j] - w);
+    const roomSum = sum(room);
+    if (roomSum > 0) {
+      // Floor each share, then hand the remainder px to lower column indices first (contract 4).
+      widths = widths.map((w, j) => w + Math.min(room[j], Math.floor((gap * room[j]) / roomSum)));
+      let rest = Math.min(gap, roomSum) - (sum(widths) - knee.sumE);
+      for (let j = 0; j < n && rest > 0; j++) {
+        const add = Math.min(rest, hi[j] - widths[j]);
+        widths[j] += add;
+        rest -= add;
+      }
+    }
+  }
+  let rowH = heightsAt(widths);
+
+  // Step 6 (contract 8): hysteresis against prevWidths.
+  if (prevWidths) {
+    const candidate = cols.map((_, j) => prevWidths[j] ?? widths[j]);
+    const feasible = sum(candidate) <= budgetW && candidate.every((w, j) => w >= hard[j]);
+    if (feasible) {
+      const candH = sum(heightsAt(candidate));
+      const freshH = sum(rowH);
+      if (!(freshH < candH * (1 - hysteresis))) {
+        widths = candidate;
+        rowH = heightsAt(candidate);
+      }
+    }
+  }
+
+  return { widths, rowHeights: rowH, scroll: false };
 }
