@@ -9,7 +9,8 @@ import { isCjkBreakUnit } from './reading-stats';
 
 /**
  * Fixed-height content: each match is one atomic unit (its own text, e.g. KaTeX's
- * hidden MathML, is not walked) and its height feeds `fixedH`.
+ * hidden MathML, is not walked); `fixedH` sums, over hard lines, the tallest
+ * such box on each line.
  */
 const FIXED_BOX_SELECTOR = 'img,svg,video,.katex';
 
@@ -52,7 +53,9 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
   let seg: BreakUnit[] = [];
   let units = 0;
   let cjkUnits = 0;
+  // Σ over closed hard lines of each line's tallest fixed box; the open line's tallest.
   let fixedH: number | undefined;
+  let lineFixedH: number | undefined;
   // Whitespace width since the last unit; whether the last unit is a non-CJK
   // word with no whitespace after it yet (the next word run joins it).
   let gap = 0;
@@ -125,8 +128,15 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
     }
   };
   /** A block boundary ends the current line, if any, without opening an empty one. */
+  const closeLine = (): void => {
+    if (lineFixedH !== undefined) {
+      fixedH = (fixedH ?? 0) + lineFixedH;
+      lineFixedH = undefined;
+    }
+  };
   const endLine = (): void => {
     if (seg.length) {
+      closeLine();
       segments.push(seg);
       seg = [];
     }
@@ -139,13 +149,14 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
         addText(node);
       } else if (node instanceof Element) {
         if (node.tagName === 'BR') {
+          closeLine();
           segments.push(seg);
           seg = [];
           gap = 0;
           joinPrev = false;
         } else if (node.matches(FIXED_BOX_SELECTOR)) {
           const rect = node.getBoundingClientRect();
-          fixedH = Math.max(fixedH ?? 0, fixedBoxHeight(node, rect));
+          lineFixedH = Math.max(lineFixedH ?? 0, fixedBoxHeight(node, rect));
           push(rect.width, false);
         } else {
           const style = getComputedStyle(node);
@@ -182,6 +193,7 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
   };
 
   walk(cell);
+  closeLine();
   segments.push(seg);
   // A trailing <br> ends the last line without opening a new one.
   if (seg.length === 0) {

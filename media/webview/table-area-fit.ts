@@ -6,7 +6,7 @@
  */
 
 export interface BreakUnit { w: number; gap: number }            // w = unit px; gap = px added before it when not first on its line
-export interface CellLines { segments: BreakUnit[][]; cjkUnits: number; units: number; fixedH?: number } // one segment per hard line; empty cell = { segments: [], cjkUnits: 0, units: 0 }; fixedH = px height of img/svg/video/.katex content
+export interface CellLines { segments: BreakUnit[][]; cjkUnits: number; units: number; fixedH?: number } // one segment per hard line; empty cell = { segments: [], cjkUnits: 0, units: 0 }; fixedH = Σ over hard lines of the tallest img/svg/video/.katex box on that line (px)
 export interface AreaFitColumn {
   cells: CellLines[];   // every row incl. header, row order
   hardMinW: number;     // border-box px (contract 3)

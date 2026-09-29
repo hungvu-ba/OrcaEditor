@@ -163,6 +163,16 @@ test.describe('Table area fit — measureCellLines', () => {
     expect(Math.abs(lines.fixedH! - 120)).toBeLessThanOrEqual(1);
   });
 
+  test('fixedH sums the tallest box of each hard line', async ({ page }) => {
+    const img = (h: number): string => `<img src="${PIXEL}" style="width: 40px; height: ${h}px">`;
+    const [stacked, sameLine] = await measureCells(page, [
+      `${img(120)}<br>${img(80)}<br>text`,
+      `${img(120)} ${img(80)}`,
+    ]);
+    expect(Math.abs(stacked.lines.fixedH! - 200)).toBeLessThanOrEqual(1);
+    expect(Math.abs(sameLine.lines.fixedH! - 120)).toBeLessThanOrEqual(1);
+  });
+
   test('fixedH of inline math is the formula height, not its line box', async ({ page }) => {
     await openEditor(page, '| Case |\n| --- |\n| $\\dfrac{\\dfrac{a}{b}}{\\dfrac{c}{d}}$ |\n');
     await page.locator('#content td .katex').waitFor();
