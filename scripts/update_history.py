@@ -82,6 +82,8 @@ def main():
         write_atomic(ARCHIVE, join(a_head, a_rows + old))
     write_atomic(CURRENT, join(head, keep))
     print(f"Appended to Update History.md; archived {len(old)} older row(s).")
+    if old:
+        print('Stage both: git add "Update History.md" "Update History_Archived.md"')
 
 
 if __name__ == "__main__":
