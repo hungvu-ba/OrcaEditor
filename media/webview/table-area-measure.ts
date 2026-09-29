@@ -101,7 +101,7 @@ export function measureCellLines(cell: HTMLTableCellElement, range: Range): Cell
   };
   const addText = (node: Node): void => {
     const text = node.nodeValue ?? '';
-    const re = /([^\S   ﻿]+)|(?:\S|[   ﻿])+/g;
+    const re = /([^\S\u00A0\u2007\u202F\uFEFF]+)|(?:\S|[\u00A0\u2007\u202F\uFEFF])+/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
       if (m[1]) {
