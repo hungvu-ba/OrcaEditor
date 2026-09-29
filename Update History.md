@@ -11,3 +11,4 @@
 | 1.2.2 | 2026-09-29 | Feature: GATE A probe measures the area-fit line model against Chromium (99.8% exact); the solver's column upper bound now covers the model's one-line width (US-19.27, T1.3). |
 | 1.2.2 | 2026-09-29 | Fix: area-fit knee floor keeps Σ maxW after the model-line hi raise; GATE A probe counts atomic inline and wrapped KaTeX boxes, asserts pin drift. |
 | 1.2.2 | 2026-09-29 | Fix: area-fit cell measure keeps kinsoku glyphs (、。，．：；？！・closing brackets, 々ゝゞヽヾ〜) with the unit before them, matching Chromium line starts. |
+| 1.2.2 | 2026-09-29 | Fix: area-fit measure takes line-break units from Chromium itself (1px layout) instead of hand-written rules; GATE A 441/441 exact, CJK rows match. |

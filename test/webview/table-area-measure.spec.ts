@@ -1,8 +1,8 @@
 /**
- * US-19.27 area fit (T1.9): `measureCellLines` (media/webview/table-area-measure.ts)
- * turns a real rendered cell into the solver's CellLines. Driven via
- * window.TableAreaFitDebug (esbuild.js's tableAreaFitDebugConfig + _harness.ts),
- * with the table under the nowrap measure class the fit pass uses.
+ * US-19.27 area fit (T1.9, T1.3 review): `measureTableLines`
+ * (media/webview/table-area-measure.ts) turns every cell of a real rendered table
+ * into the solver's CellLines, with Chromium's own break opportunities. Driven via
+ * window.TableAreaFitDebug (esbuild.js's tableAreaFitDebugConfig + _harness.ts).
  */
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
@@ -22,14 +22,14 @@ interface Measured {
   lines: CellLines;
   /** One-line width of the cell's content (its Range bounding box). */
   lineW: number;
-  /** The call left the cell's HTML and the table's classes untouched. */
+  /** The call left the table's HTML (classes and inline styles included) untouched. */
   readOnly: boolean;
 }
 
 /** 1×1 transparent GIF; the CSS size sets the box. */
 const PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
-/** Renders a one-cell table, sets the body cell's HTML to each entry in turn and measures it under the nowrap measure class. */
+/** Renders a one-cell table, sets the body cell's HTML to each entry in turn and measures the table. */
 async function measureCells(page: Page, cellHtmls: string[]): Promise<Measured[]> {
   await openEditor(page, '| Case |\n| --- |\n| x |\n');
   await page.locator('#content table').waitFor();
@@ -37,16 +37,15 @@ async function measureCells(page: Page, cellHtmls: string[]): Promise<Measured[]
     const table = document.querySelector('#content table') as HTMLTableElement;
     const cell = table.tBodies[0].rows[0].cells[0];
     const debug = (window as unknown as {
-      TableAreaFitDebug: { measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines };
+      TableAreaFitDebug: { measureTableLines(table: HTMLTableElement): CellLines[][] };
     }).TableAreaFitDebug;
     const range = document.createRange();
     return htmls.map((html) => {
       cell.innerHTML = html;
+      const tableBefore = table.outerHTML;
+      const lines = debug.measureTableLines(table)[1][0];
+      const readOnly = table.outerHTML === tableBefore;
       table.classList.add('md-table-col-fit-measuring');
-      const htmlBefore = cell.innerHTML;
-      const classBefore = table.className;
-      const lines = debug.measureCellLines(cell, range);
-      const readOnly = cell.innerHTML === htmlBefore && table.className === classBefore;
       range.selectNodeContents(cell);
       const lineW = range.getBoundingClientRect().width;
       table.classList.remove('md-table-col-fit-measuring');
@@ -64,19 +63,18 @@ function oneLineWidth(lines: CellLines): number {
   return lines.segments[0].reduce((acc, u) => acc + u.w + u.gap, 0);
 }
 
-test.describe('Table area fit — measureCellLines', () => {
-  test('words: hyphenated tokens stay atomic, gaps are the whitespace widths', async ({ page }) => {
+test.describe('Table area fit — measureTableLines', () => {
+  test('words: Chromium breaks after a hyphen, even inside a date; gaps are the whitespace widths', async ({ page }) => {
     const { lines, lineW, readOnly } = await measureCell(page, 'alpha beta-gamma 2026-09-24');
     expect(readOnly).toBe(true);
     expect(lines.segments).toHaveLength(1);
     const seg = lines.segments[0];
-    expect(lines.units).toBe(3);
+    // alpha | beta- | gamma | 2026- | 09- | 24; no whitespace → gap 0 up to the 1/64 px layout rounding.
+    expect(lines.units).toBe(6);
     expect(lines.cjkUnits).toBe(0);
     expect(lines.fixedH).toBeUndefined();
-    expect(seg).toHaveLength(3);
-    expect(seg[0].gap).toBe(0);
-    expect(seg[1].gap).toBeGreaterThan(0);
-    expect(seg[2].gap).toBeGreaterThan(0);
+    expect(seg).toHaveLength(6);
+    expect(seg.map((u) => (Math.abs(u.gap) < 0.1 ? 0 : Math.sign(u.gap)))).toEqual([0, 1, 0, 1, 0, 0]);
     expect(Math.abs(oneLineWidth(lines) - lineW)).toBeLessThanOrEqual(2);
   });
 
@@ -87,13 +85,13 @@ test.describe('Table area fit — measureCellLines', () => {
     expect(lines.segments).toHaveLength(1);
     expect(lines.segments[0]).toHaveLength(10);
     for (const u of lines.segments[0]) {
-      expect(u.gap).toBe(0);
+      expect(Math.abs(u.gap)).toBeLessThan(0.1);
       expect(u.w).toBeGreaterThan(0);
     }
   });
 
   test('kinsoku: a glyph Chromium never starts a line with joins the unit before it', async ({ page }) => {
-    // 、 。 々 〜 cannot start a line in Chromium; ー and small kana can.
+    // Chromium's own kinsoku: 、 。 々 〜 cannot start a line; ー and small kana can.
     const [closing, allowed, leading, marks] = await measureCells(page, ['必要で、承認。', 'コーディネーター', '、あ', '人々〜']);
     expect(closing.lines.units).toBe(5);
     expect(closing.lines.cjkUnits).toBe(5);
@@ -109,7 +107,7 @@ test.describe('Table area fit — measureCellLines', () => {
     const { lines, lineW } = await measureCell(page, '48時間前');
     expect(lines.units).toBe(4);
     expect(lines.cjkUnits).toBe(3);
-    expect(lines.segments[0].map((u) => u.gap)).toEqual([0, 0, 0, 0]);
+    expect(lines.segments[0].map((u) => Math.abs(u.gap) < 0.1)).toEqual([true, true, true, true]);
     expect(Math.abs(oneLineWidth(lines) - lineW)).toBeLessThanOrEqual(2);
   });
 
@@ -193,11 +191,11 @@ test.describe('Table area fit — measureCellLines', () => {
       const table = document.querySelector('#content table') as HTMLTableElement;
       const cell = table.tBodies[0].rows[0].cells[0];
       const debug = (window as unknown as {
-        TableAreaFitDebug: { measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines };
+        TableAreaFitDebug: { measureTableLines(table: HTMLTableElement): CellLines[][] };
       }).TableAreaFitDebug;
+      const measured = debug.measureTableLines(table)[1][0];
       table.classList.add('md-table-col-fit-measuring');
       const range = document.createRange();
-      const measured = debug.measureCellLines(cell, range);
       range.selectNodeContents(cell);
       const result = {
         fixedH: measured.fixedH,
@@ -212,6 +210,30 @@ test.describe('Table area fit — measureCellLines', () => {
     expect(fixedH!).toBeLessThanOrEqual(contentH + 1);
   });
 
+  test('a fitted table (fit class, inline widths) is left exactly as found', async ({ page }) => {
+    await openEditor(page, TABLE_20);
+    await page.locator('#content table').waitFor();
+    const { same, units } = await page.evaluate(() => {
+      const table = document.querySelector('#content table') as HTMLTableElement;
+      const debug = (window as unknown as {
+        TableAreaFitDebug: { measureTableLines(table: HTMLTableElement): CellLines[][] };
+      }).TableAreaFitDebug;
+      table.classList.add('md-table-fit');
+      table.style.width = '900px';
+      for (const row of Array.from(table.rows)) {
+        for (const cell of Array.from(row.cells)) {
+          cell.style.width = '150px';
+          cell.style.maxWidth = '150px';
+        }
+      }
+      const before = table.outerHTML;
+      const measured = debug.measureTableLines(table);
+      return { same: table.outerHTML === before, units: measured.flat().reduce((n, c) => n + c.units, 0) };
+    });
+    expect(same).toBe(true);
+    expect(units).toBeGreaterThan(30);
+  });
+
   test('an empty cell has no segments', async ({ page }) => {
     const { lines } = await measureCell(page, '');
     expect(lines).toEqual({ segments: [], cjkUnits: 0, units: 0 });
@@ -223,18 +245,18 @@ test.describe('Table area fit — measureCellLines', () => {
     const result = await page.evaluate(() => {
       const table = document.querySelector('#content table') as HTMLTableElement;
       const debug = (window as unknown as {
-        TableAreaFitDebug: { measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines };
+        TableAreaFitDebug: { measureTableLines(table: HTMLTableElement): CellLines[][] };
       }).TableAreaFitDebug;
+      const measured = debug.measureTableLines(table);
       table.classList.add('md-table-col-fit-measuring');
       const range = document.createRange();
       const all: { lines: CellLines; lineW: number }[] = [];
-      for (const row of Array.from(table.rows)) {
-        for (const cell of Array.from(row.cells)) {
-          const lines = debug.measureCellLines(cell, range);
+      Array.from(table.rows).forEach((row, r) =>
+        Array.from(row.cells).forEach((cell, c) => {
           range.selectNodeContents(cell);
-          all.push({ lines, lineW: range.getBoundingClientRect().width });
-        }
-      }
+          all.push({ lines: measured[r][c], lineW: range.getBoundingClientRect().width });
+        })
+      );
       table.classList.remove('md-table-col-fit-measuring');
       return all;
     });

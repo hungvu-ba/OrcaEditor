@@ -1,21 +1,28 @@
 /**
- * US-19.27 area fit: DOM adapter turning a rendered table cell into the pure
- * solver's `CellLines` (Code Plan contracts 3, 9, 11). Read-only — call it with
- * the table under the nowrap measure class (`md-table-col-fit-measuring`), so
- * every hard line lays out on one line and each Range width is a one-line width.
+ * US-19.27 area fit: DOM adapter turning a rendered table's cells into the pure
+ * solver's `CellLines` (Code Plan contracts 3, 9, 11). Chromium decides the
+ * break units: with every column at 1px content width it takes every break
+ * opportunity, so the items sharing a line form one unbreakable unit; unit
+ * widths and gaps then come from the nowrap measure layout. Two layout states
+ * in one tick, and the table is left exactly as it was found.
  */
 import type { BreakUnit, CellLines } from './table-area-fit';
 import { isCjkBreakUnit } from './reading-stats';
+import { MD_TABLE_FIT_CLASS, TABLE_FIT_MEASURING_CLASS, TABLE_MIN_MEASURING_CLASS } from './constants';
 
 /**
- * Fixed-height content: each match is one atomic unit (its own text, e.g. KaTeX's
- * hidden MathML, is not walked); `fixedH` sums, over hard lines, the tallest
- * such box on each line.
+ * Fixed-height content: `fixedH` sums, over hard lines, the tallest such box on
+ * each line. img/svg/video are one atomic item; a `.katex` is walked, since
+ * Chromium breaks between its `.base` inline-blocks.
  */
 const FIXED_BOX_SELECTOR = 'img,svg,video,.katex';
 
-/** Kinsoku: CJK glyphs Chromium never starts a line with (probed; ー and small kana may start one). */
-const NO_LINE_START_RE = /[、。，．：；？！・）」』】〕〉》々ゝゞヽヾ〜]/u;
+/** Letters, digits and marks of scripts Chromium never breaks inside (no auto hyphenation, `word-break: normal`). */
+const WORD_RE = /^[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}]\p{M}*$/u;
+/** Collapsible whitespace: a break opportunity, never an item. */
+const SPACE_RE = /^[ \t\n\r\f]+$/;
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 const px = (value: string): number => parseFloat(value) || 0;
 
@@ -37,186 +44,266 @@ function fixedBoxHeight(el: Element, rect: DOMRect): number {
   return bottom - top;
 }
 
+/** A grapheme of a text node ([start, end)), or an atomic box (`node` is the element). */
+interface Item {
+  node: Node;
+  start: number;
+  end: number;
+  cjk: boolean;
+  /** Continues a letter/digit run with no whitespace: no break opportunity before it. */
+  glued: boolean;
+  /** Inline-box margin + border + padding opening before it / closing after it (px). */
+  lead: number;
+  trail: number;
+}
+
+interface HardLine {
+  items: Item[];
+  /** Left inset of the open block ancestors, added to the line's first unit. */
+  indent: number;
+  fixed: Element[];
+}
+
 /**
- * Break units of `cell`, one segment per hard line (`<br>`, or a block-level
- * child's boundary). A word is one unit whose gap is the Range width of the
- * whitespace before it (NBSP, figure space, narrow NBSP and BOM are no break
- * opportunity and stay inside the word); inside a word, each CJK glyph is its
- * own unit with gap 0 (the glyph run measured once, split evenly; a glyph
- * Chromium never starts a line with, e.g. 、。」, joins the unit before it) and every
- * non-CJK run between glyphs stays atomic — the split table.ts's
- * `widestWordWidth` uses. A word split across inline elements with no
- * whitespace between (`<b>foo</b>bar`) stays one unit. An inline element's
- * horizontal margin + border + padding goes to its first and last unit; an
- * atomic inline box (`inline-block`, `inline-flex`, …, e.g. a button) is one
- * unit of its margin-box width; a block child's left inset goes to the first
- * unit of each of its lines; `display: none` content is skipped.
+ * The cell's hard lines (`<br>`, or a block-level child's boundary) of items.
+ * An inline element's horizontal margin + border + padding goes to its first
+ * and last item; an atomic inline box (`inline-block`, …, e.g. a button) is one
+ * item with its margins; `display: none` and out-of-flow content is skipped.
+ * Style reads only.
  */
-export function measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines {
-  const segments: BreakUnit[][] = [];
-  let seg: BreakUnit[] = [];
-  let units = 0;
-  let cjkUnits = 0;
-  // Σ over closed hard lines of each line's tallest fixed box; the open line's tallest.
-  let fixedH: number | undefined;
-  let lineFixedH: number | undefined;
-  // Whitespace width since the last unit; whether the last unit is a non-CJK
-  // word with no whitespace after it yet (the next word run joins it).
-  let gap = 0;
-  let joinPrev = false;
-  // Left inset of the open block ancestors (added to a line's first unit);
-  // inline-box decoration waiting for the next unit.
+function collectLines(cell: HTMLTableCellElement): HardLine[] {
+  const lines: HardLine[] = [];
+  let line: HardLine = { items: [], indent: 0, fixed: [] };
   let indent = 0;
   let lead = 0;
+  let space = true;
+  let prevWord = false;
 
-  const width = (node: Node, start: number, end: number): number => {
-    range.setStart(node, start);
-    range.setEnd(node, end);
-    return range.getBoundingClientRect().width;
-  };
-  const push = (w: number, word: boolean, cjk = false): void => {
-    w += lead;
+  const add = (item: Item): void => {
+    if (!line.items.length) {
+      line.indent = indent;
+    }
+    item.lead += lead;
     lead = 0;
-    if (word && joinPrev) {
-      seg[seg.length - 1].w += w;
-    } else {
-      seg.push(seg.length ? { w, gap } : { w: w + indent, gap: 0 });
-      units++;
-      if (cjk) {
-        cjkUnits++;
-      }
-    }
-    gap = 0;
-    joinPrev = word;
+    line.items.push(item);
+    space = false;
   };
-  /** `cjkGlyphs` > 0 → [start, end) is a run of that many CJK glyphs. */
-  const addRun = (node: Node, start: number, end: number, cjkGlyphs: number): void => {
-    if (end <= start) {
-      return;
-    }
-    const w = width(node, start, end);
-    if (cjkGlyphs === 0) {
-      push(w, true);
-      return;
-    }
-    for (const ch of (node.nodeValue ?? '').slice(start, end)) {
-      if (NO_LINE_START_RE.test(ch) && seg.length && gap === 0) {
-        seg[seg.length - 1].w += w / cjkGlyphs + lead;
-        lead = 0;
-        joinPrev = false;
-        continue;
-      }
-      push(w / cjkGlyphs, false, true);
-    }
+  const atom = (el: Element, marginL: number, marginR: number): void => {
+    add({ node: el, start: 0, end: 0, cjk: false, glued: false, lead: marginL, trail: marginR });
+    prevWord = false;
   };
-  const addText = (node: Node): void => {
-    const text = node.nodeValue ?? '';
-    const re = /([^\S\u00A0\u2007\u202F\uFEFF]+)|(?:\S|[\u00A0\u2007\u202F\uFEFF])+/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      if (m[1]) {
-        gap += width(node, m.index, m.index + m[0].length);
-        joinPrev = false;
-        continue;
-      }
-      let runStart = m.index;
-      let offset = m.index;
-      let cjkGlyphs = 0;
-      for (const ch of m[0]) {
-        const cjk = isCjkBreakUnit(ch);
-        if (cjk !== (cjkGlyphs > 0) && offset > runStart) {
-          addRun(node, runStart, offset, cjkGlyphs);
-          runStart = offset;
-          cjkGlyphs = 0;
-        }
-        if (cjk) {
-          cjkGlyphs++;
-        }
-        offset += ch.length;
-      }
-      addRun(node, runStart, offset, cjkGlyphs);
-    }
+  const newLine = (): void => {
+    line = { items: [], indent, fixed: [] };
+    space = true;
   };
   /** A block boundary ends the current line, if any, without opening an empty one. */
-  const closeLine = (): void => {
-    if (lineFixedH !== undefined) {
-      fixedH = (fixedH ?? 0) + lineFixedH;
-      lineFixedH = undefined;
-    }
-  };
   const endLine = (): void => {
-    if (seg.length) {
-      closeLine();
-      segments.push(seg);
-      seg = [];
+    if (line.items.length) {
+      lines.push(line);
+      newLine();
     }
-    gap = 0;
-    joinPrev = false;
+    space = true;
+  };
+  const addText = (node: Text): void => {
+    for (const { segment, index } of graphemes.segment(node.data)) {
+      if (SPACE_RE.test(segment)) {
+        space = true;
+        continue;
+      }
+      const cjk = isCjkBreakUnit(String.fromCodePoint(segment.codePointAt(0) ?? 0));
+      const word = !cjk && WORD_RE.test(segment);
+      const glued = !space && prevWord && word && line.items.length > 0;
+      add({ node, start: index, end: index + segment.length, cjk, glued, lead: 0, trail: 0 });
+      prevWord = word;
+    }
   };
   const walk = (parent: Node): void => {
     for (let node = parent.firstChild; node; node = node.nextSibling) {
       if (node.nodeType === Node.TEXT_NODE) {
-        addText(node);
-      } else if (node instanceof Element) {
-        if (node.tagName === 'BR') {
-          closeLine();
-          segments.push(seg);
-          seg = [];
-          gap = 0;
-          joinPrev = false;
-        } else if (node.matches(FIXED_BOX_SELECTOR)) {
-          const rect = node.getBoundingClientRect();
-          lineFixedH = Math.max(lineFixedH ?? 0, fixedBoxHeight(node, rect));
-          push(rect.width, false);
+        addText(node as Text);
+        continue;
+      }
+      if (!(node instanceof Element)) {
+        continue;
+      }
+      if (node.tagName === 'BR') {
+        lines.push(line);
+        newLine();
+        continue;
+      }
+      if (node.matches(FIXED_BOX_SELECTOR)) {
+        line.fixed.push(node);
+        if (node.classList.contains('katex')) {
+          walk(node);
         } else {
-          const style = getComputedStyle(node);
-          const display = style.display;
-          if (display === 'none') {
-            continue;
-          }
-          const marginL = px(style.marginLeft);
-          const marginR = px(style.marginRight);
-          if (display.startsWith('inline-')) {
-            push(marginL + node.getBoundingClientRect().width + marginR, false);
-            continue;
-          }
-          const insetL = marginL + px(style.borderLeftWidth) + px(style.paddingLeft);
-          if (display === 'inline' || display === 'contents') {
-            lead += insetL;
-            walk(node);
-            const insetR = marginR + px(style.borderRightWidth) + px(style.paddingRight);
-            if (lead === 0 && seg.length) {
-              seg[seg.length - 1].w += insetR;
-            } else {
-              lead += insetR;
-            }
-          } else {
-            endLine();
-            indent += insetL;
-            walk(node);
-            indent -= insetL;
-            endLine();
-          }
+          atom(node, 0, 0);
         }
+        continue;
+      }
+      const style = getComputedStyle(node);
+      const display = style.display;
+      if (display === 'none' || style.position === 'absolute' || style.position === 'fixed') {
+        continue;
+      }
+      const marginL = px(style.marginLeft);
+      const marginR = px(style.marginRight);
+      if (display.startsWith('inline-')) {
+        atom(node, marginL, marginR);
+        continue;
+      }
+      const insetL = marginL + px(style.borderLeftWidth) + px(style.paddingLeft);
+      if (display === 'inline' || display === 'contents') {
+        lead += insetL;
+        walk(node);
+        const insetR = marginR + px(style.borderRightWidth) + px(style.paddingRight);
+        if (lead === 0 && line.items.length) {
+          line.items[line.items.length - 1].trail += insetR;
+        } else {
+          lead += insetR;
+        }
+      } else {
+        endLine();
+        indent += insetL;
+        walk(node);
+        indent -= insetL;
+        endLine();
       }
     }
   };
 
   walk(cell);
-  closeLine();
-  segments.push(seg);
+  lines.push(line);
   // A trailing <br> ends the last line without opening a new one.
-  if (seg.length === 0) {
-    segments.pop();
+  if (!line.items.length) {
+    lines.pop();
   }
+  return lines;
+}
+
+function itemRect(item: Item, range: Range): DOMRect {
+  if (item.node instanceof Element) {
+    return item.node.getBoundingClientRect();
+  }
+  range.setStart(item.node, item.start);
+  range.setEnd(item.node, item.end);
+  return range.getBoundingClientRect();
+}
+
+/** [first, last] item index of each unit: a new unit where Chromium broke the 1px layout. Layout reads only. */
+function unitSpans(line: HardLine, range: Range): [number, number][] {
+  const spans: [number, number][] = [];
+  let bottom = -Infinity;
+  line.items.forEach((item, k) => {
+    if (k > 0 && item.glued) {
+      spans[spans.length - 1][1] = k;
+      return;
+    }
+    const r = itemRect(item, range);
+    if (k > 0 && r.top < bottom - 1) {
+      spans[spans.length - 1][1] = k;
+      bottom = Math.max(bottom, r.bottom);
+      return;
+    }
+    spans.push([k, k]);
+    bottom = r.bottom;
+  });
+  return spans;
+}
+
+/** The cell's `CellLines` from its units' nowrap extents. Layout reads only. */
+function toCellLines(lines: HardLine[], spans: [number, number][][], range: Range): CellLines {
+  const segments: BreakUnit[][] = [];
+  let units = 0;
+  let cjkUnits = 0;
+  let fixedH: number | undefined;
+  lines.forEach((line, i) => {
+    let prevRight = 0;
+    segments.push(
+      spans[i].map(([a, b], k) => {
+        const first = line.items[a];
+        const last = line.items[b];
+        if (first.node instanceof Element) {
+          range.setStartBefore(first.node);
+        } else {
+          range.setStart(first.node, first.start);
+        }
+        if (last.node instanceof Element) {
+          range.setEndAfter(last.node);
+        } else {
+          range.setEnd(last.node, last.end);
+        }
+        const r = range.getBoundingClientRect();
+        const left = r.left - first.lead;
+        const right = r.right + last.trail;
+        const unit = k ? { w: right - left, gap: left - prevRight } : { w: right - left + line.indent, gap: 0 };
+        prevRight = right;
+        units++;
+        if (first.cjk) {
+          cjkUnits++;
+        }
+        return unit;
+      })
+    );
+    if (line.fixed.length) {
+      fixedH = (fixedH ?? 0) + Math.max(...line.fixed.map((el) => fixedBoxHeight(el, el.getBoundingClientRect())));
+    }
+  });
   // No unit and at most one (empty) hard line: an empty cell. `<br><br>` still
   // renders two lines.
   if (units === 0 && segments.length <= 1) {
     return { segments: [], cjkUnits: 0, units: 0 };
   }
-  const lines: CellLines = { segments, cjkUnits, units };
+  const cellLines: CellLines = { segments, cjkUnits, units };
   if (fixedH !== undefined) {
-    lines.fixedH = fixedH;
+    cellLines.fixedH = fixedH;
   }
-  return lines;
+  return cellLines;
+}
+
+/** Restores an attribute exactly, including its absence. */
+function restoreAttr(el: Element, name: string, value: string | null): void {
+  if (value === null) {
+    el.removeAttribute(name);
+  } else {
+    el.setAttribute(name, value);
+  }
+}
+
+/**
+ * Break units of every cell of `table` (`[row][cell]`, `table.rows` order), one
+ * segment per hard line. Pass 1: every column pinned to 1px content width in
+ * fixed layout — each line holds one unbreakable unit (a word, a CJK glyph with
+ * the kinsoku marks Chromium keeps with it, a KaTeX `.base` box, …). Pass 2:
+ * under the nowrap measure class, one Range per unit gives its width; its gap is
+ * the distance from the previous unit's right edge. A block child's left inset
+ * goes to the first unit of each of its lines.
+ */
+export function measureTableLines(table: HTMLTableElement): CellLines[][] {
+  const cells = Array.from(table.rows).map((row) => Array.from(row.cells));
+  const collected = cells.map((row) => row.map(collectLines));
+  const range = document.createRange();
+  const tableStyle = table.getAttribute('style');
+  const tableClass = table.getAttribute('class');
+  const cellStyles = cells.map((row) => row.map((cell) => cell.getAttribute('style')));
+
+  table.classList.add(MD_TABLE_FIT_CLASS, TABLE_MIN_MEASURING_CLASS);
+  table.style.width = `${Math.max(0, ...cells.map((row) => row.length))}px`;
+  table.style.maxWidth = 'none';
+  for (const row of cells) {
+    for (const cell of row) {
+      cell.style.boxSizing = 'content-box';
+      cell.style.width = '1px';
+      cell.style.minWidth = '0';
+      cell.style.maxWidth = '1px';
+    }
+  }
+  const spans = collected.map((row) => row.map((lines) => lines.map((line) => unitSpans(line, range))));
+  restoreAttr(table, 'style', tableStyle);
+  restoreAttr(table, 'class', tableClass);
+  cells.forEach((row, i) => row.forEach((cell, j) => restoreAttr(cell, 'style', cellStyles[i][j])));
+
+  table.classList.add(TABLE_FIT_MEASURING_CLASS);
+  const out = collected.map((row, i) => row.map((lines, j) => toCellLines(lines, spans[i][j], range)));
+  restoreAttr(table, 'class', tableClass);
+  return out;
 }

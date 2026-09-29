@@ -4,5 +4,5 @@
  * integration) measure real cells in Chromium and feed them to the solver.
  * Only built with --test, never shipped in the production dist/webview bundle.
  */
-export { measureCellLines } from './table-area-measure';
+export { measureTableLines } from './table-area-measure';
 export { cellLineCount, solveAreaFit } from './table-area-fit';

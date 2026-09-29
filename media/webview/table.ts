@@ -16,6 +16,8 @@ import {
 import {
   TABLE_TOOLBAR_HIDE_MS,
   MD_TABLE_FIT_CLASS as FIT_CLASS,
+  TABLE_FIT_MEASURING_CLASS as MEASURE_CLASS,
+  TABLE_MIN_MEASURING_CLASS as MIN_MEASURE_CLASS,
   DD_HOVER_OUTLINE_CLASS,
   DD_HOVER_OUTLINE_CELL_CLASS,
   DD_SOURCE_MUTED_CLASS,
@@ -264,10 +266,6 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
   return cell.closest('table');
 }
 
-/** Class tạm dùng để đo bề rộng tự nhiên (không wrap) của ô — xem markdown.css. */
-const MEASURE_CLASS = 'md-table-col-fit-measuring';
-/** US-19.25: class tạm ép cột về min-content (từ dài nhất) để đo sàn vật lý. */
-const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
 // US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap) — imported above as FIT_CLASS (US-23.21).
 
 // US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ

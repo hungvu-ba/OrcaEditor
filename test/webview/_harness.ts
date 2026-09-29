@@ -184,7 +184,7 @@ function harnessHtml(readability: InitConfig['readability']): string {
        list-ops-primitive.spec.ts can drive them directly without wiring into
        any real call site (Phase 2). -->
   <script src="./list-ops-debug.js"></script>
-  <!-- US-19.27: test-only bundle exposing measureCellLines/cellLineCount/
+  <!-- US-19.27: test-only bundle exposing measureTableLines/cellLineCount/
        solveAreaFit on window.TableAreaFitDebug, so area-fit specs measure real
        cells and feed them to the pure solver. -->
   <script src="./table-area-fit-debug.js"></script>

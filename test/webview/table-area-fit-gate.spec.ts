@@ -1,7 +1,7 @@
 /**
  * US-19.27 area fit — GATE A probe (T1.3; Code Plan "## GATE A — simulated vs
  * real line count"). Does the pure line model (`cellLineCount` over
- * `measureCellLines` units, contract 9) match Chromium's real line count well
+ * `measureTableLines` units, contract 9) match Chromium's real line count well
  * enough to drive the solver? Prints the number tables that section records:
  * (a) simulated vs real lines per fixture × content width, with and without
  * `text-wrap: pretty`; (b) CJK glyph width / 1ch per preset; (c) solver and
@@ -43,7 +43,7 @@ interface AreaFitResult {
   scroll: boolean;
 }
 interface Debug {
-  measureCellLines(cell: HTMLTableCellElement, range: Range): CellLines;
+  measureTableLines(table: HTMLTableElement): CellLines[][];
   cellLineCount(cell: CellLines, contentW: number): number;
   solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaFitResult;
 }
@@ -118,13 +118,13 @@ async function installGateA(page: Page): Promise<void> {
           };
         },
         measure(table) {
+          const measured = debug.measureTableLines(table);
           table.classList.add(measureClass);
           const range = document.createRange();
-          const out = Array.from(table.rows).map((row) =>
-            Array.from(row.cells).map((cell) => {
-              const lines = debug.measureCellLines(cell, range);
+          const out = Array.from(table.rows).map((row, r) =>
+            Array.from(row.cells).map((cell, c) => {
               range.selectNodeContents(cell);
-              return { lines, domOneLineW: range.getBoundingClientRect().width };
+              return { lines: measured[r][c], domOneLineW: range.getBoundingClientRect().width };
             })
           );
           table.classList.remove(measureClass);
@@ -501,7 +501,7 @@ test.describe('GATE A — area-fit line model vs Chromium', () => {
       return { measureMs, cells: measured.reduce((n, row) => n + row.length, 0), out, budgetW };
     });
     printTable('(c) solveAreaFit median of 5 runs (ms)', ['case', 'cols', 'rows', 'budgetW', 'branch', 'Σ widths', 'ms'], r.out);
-    console.log(`(c) measure time, rendered 20×50 (${r.cells} cells): measureCellLines + Range one-line width, median of 5 = ${r.measureMs.toFixed(1)} ms (widestWordWidth is private to table.ts, not timed); panel budgetW = ${r.budgetW}`);
+    console.log(`(c) measure time, rendered 20×50 (${r.cells} cells): measureTableLines + Range one-line width, median of 5 = ${r.measureMs.toFixed(1)} ms (widestWordWidth is private to table.ts, not timed); panel budgetW = ${r.budgetW}`);
     expect(r.out).toHaveLength(6);
   });
 

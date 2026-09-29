@@ -154,9 +154,13 @@ export const OUTSIDE_CONTENT_CLASSES: readonly string[] = [
   //     synchronous (table.ts:391/413, 430/437, 571/582) — no serialize can run
   //     between them. Introducing an `await`, a rAF, or an early `return` inside
   //     one of those pairs makes them leakable, and nothing here would notice;
-  //     recorded as deferred work rather than pretended away. ---
+  //     recorded as deferred work rather than pretended away. The same holds for
+  //     `table-area-measure.ts`'s `measureTableLines`: both passes run
+  //     straight-line and restore the table's class and style attributes. ---
   'table.ts | md-table-col-fit-measuring',
   'table.ts | md-table-col-min-measuring',
+  'table-area-measure.ts | md-table-col-fit-measuring',
+  'table-area-measure.ts | md-table-col-min-measuring',
 
   // --- `table.ts`, `table-sticky-header.ts`: table overlays mounted on
   //     `document.body` — the floating sticky header, the floating horizontal
