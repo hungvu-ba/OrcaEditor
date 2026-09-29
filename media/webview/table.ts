@@ -27,6 +27,8 @@ import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import { isCjkBreakUnit } from './reading-stats';
+import { solveAreaFit, type AreaFitColumn, type CellLines } from './table-area-fit';
+import { measureTableLines } from './table-area-measure';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -268,11 +270,12 @@ function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
 
 // US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap) — imported above as FIT_CLASS (US-23.21).
 
-// US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ
-// còn áp khi Σmax-content > budget (thiếu chỗ thật) — còn chỗ ngang thì không cắt.
-const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
-const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
-const FIT_COMFORT_FLOOR_CH = 30; // sàn dễ đọc: (a) không cắt cột lệch xuống dưới ngần này; (b) co cột cũng không xuống dưới ngần này (dưới nữa thì scroll)
+// US-19.27 area-fit floors by role (Code Plan contract 5).
+const FIT_READ_FLOOR_CH = 30;
+const FIT_READ_FLOOR_CJK_CH = 36; // ≈ 18 full-width glyphs
+const FIT_LOOSE_FLOOR_CH = 15;
+/** Share of a column's break units that are CJK glyphs from which it takes the CJK read floor. */
+const FIT_CJK_SHARE = 0.5;
 
 /** US-19.25: cờ Fit-mode global (đặt bởi main.ts từ InitConfig/broadcast). */
 let fitModeEnabled = false;
@@ -281,17 +284,24 @@ export function setTableFitMode(on: boolean): void {
 }
 
 /**
- * Phân vị `p` (0–100) theo NEAREST-RANK (`ceil`), để 1 ô lệch (nằm ở đỉnh sau khi
- * sort) KHÔNG kéo p75 lên bằng max ở bảng ít dòng — nếu dùng `floor` thì n≤4 sẽ
- * cho p75 = max và outlier cap không bao giờ kích hoạt.
+ * Hidden inline-block probe styled with the table cell's font and line height,
+ * appended to <body> (not to the table: table-layout:auto would force the probe
+ * to its column's width). The caller reads it, then removes it.
  */
-function percentile(values: number[], p: number): number {
-  if (values.length === 0) {
-    return 0;
+function appendCellProbe(sampleCell: HTMLTableCellElement | undefined): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;display:inline-block;padding:0;border:0;';
+  if (sampleCell) {
+    const cs = getComputedStyle(sampleCell);
+    span.style.fontFamily = cs.fontFamily;
+    span.style.fontSize = cs.fontSize;
+    span.style.fontWeight = cs.fontWeight;
+    span.style.fontStyle = cs.fontStyle;
+    span.style.letterSpacing = cs.letterSpacing;
+    span.style.lineHeight = cs.lineHeight;
   }
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-  return sorted[idx];
+  document.body.appendChild(span);
+  return span;
 }
 
 /**
@@ -300,19 +310,18 @@ function percentile(values: number[], p: number): number {
  * bề rộng probe = bề rộng cột chứa nó, sai lệch khỏi n·ch cần đo).
  */
 function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number): number {
-  const span = document.createElement('span');
-  span.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;display:inline-block;padding:0;border:0;';
+  const span = appendCellProbe(sampleCell);
   span.style.width = `${n}ch`;
-  if (sampleCell) {
-    const cs = getComputedStyle(sampleCell);
-    span.style.fontFamily = cs.fontFamily;
-    span.style.fontSize = cs.fontSize;
-    span.style.fontWeight = cs.fontWeight;
-    span.style.fontStyle = cs.fontStyle;
-    span.style.letterSpacing = cs.letterSpacing;
-  }
-  document.body.appendChild(span);
   const px = span.getBoundingClientRect().width;
+  span.remove();
+  return px;
+}
+
+/** Height px of one line of text in the table cell's font and line height. */
+function measureLineHeight(sampleCell: HTMLTableCellElement): number {
+  const span = appendCellProbe(sampleCell);
+  span.textContent = 'x';
+  const px = span.getBoundingClientRect().height;
   span.remove();
   return px;
 }
@@ -383,7 +392,7 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
     }
     // Replaced content makes the box far wider than its one word (e.g. an <a>
     // wrapping an <img> next to a short label) — the same inflation as a block
-    // child. Same selector list as isEmptyCell's embedded-content probe.
+    // child.
     if (el.querySelector('img,svg,video,input')) {
       continue;
     }
@@ -403,15 +412,6 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
 }
 
 /**
- * US-19.26: ô "rỗng" = không chữ và không nội dung nhúng (ảnh/SVG/video/checkbox).
- * Ô mới do `emptyCell()` tạo chỉ chứa `<br>` placeholder nên vẫn tính là rỗng. Xét
- * theo NỘI DUNG, không so bề rộng với padding (sai số sub-pixel, `&nbsp;`).
- */
-function isEmptyCell(cell: HTMLTableCellElement): boolean {
-  return (cell.textContent ?? '').trim() === '' && !cell.querySelector('img,svg,video,input');
-}
-
-/**
  * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
  * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
  * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
@@ -420,8 +420,8 @@ function isEmptyCell(cell: HTMLTableCellElement): boolean {
  *
  * US-19.26: chỉ ghim width/max-width khi THIẾU chỗ. Còn chỗ ngang → bail SỚM (không
  * cắt gì), để cột tự giãn theo layout auto — kể cả khi gõ thêm chữ, không cần đợi
- * debounced re-fit mới nới ra. Thiếu chỗ mới vào thang cắt: ①b (cắt xong dư thì trả
- * lại phần dư) → ② (co tỉ lệ) → ③ (scroll tại sàn).
+ * debounced re-fit mới nới ra. Short of room, the area-fit solver (US-19.27) picks
+ * the widths: lowest total row height, stopping at the knee, or scroll at the floors.
  */
 function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
   const parent = table.parentElement;
@@ -440,7 +440,6 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   if (!sampleCell) {
     return false;
   }
-  const comfortFloorPx = measureChWidth(sampleCell, FIT_COMFORT_FLOOR_CH);
 
   // Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
   // cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
@@ -456,8 +455,6 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   table.classList.add(MEASURE_CLASS);
   const range = document.createRange();
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
-  // US-19.26: cùng số đo nhưng CHỈ ô có nội dung — mẫu để tính p75 (xem dưới).
-  const contentWidths: number[][] = Array.from({ length: colCount }, () => []);
   // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
   // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
   const wordFloorByCol: number[] = new Array(colCount).fill(0);
@@ -466,9 +463,6 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
       range.selectNodeContents(row.cells[i]);
       const cellW = range.getBoundingClientRect().width + padBorderX;
       colWidths[i].push(cellW);
-      if (!isEmptyCell(row.cells[i])) {
-        contentWidths[i].push(cellW);
-      }
       const wf = widestWordWidth(row.cells[i], range) + padBorderX;
       if (wf > wordFloorByCol[i]) {
         wordFloorByCol[i] = wf;
@@ -490,6 +484,9 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   if (sumNatural <= budgetW) {
     return false;
   }
+  // Short of room: break units of every cell, measured once outside the
+  // MEASURE_CLASS window (sets and restores its own layout states).
+  const cellLines = measureTableLines(table);
 
   // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
   table.classList.add(MIN_MEASURE_CLASS);
@@ -508,57 +505,31 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
   }
 
-  // Comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max]. Chỉ chạy
-  // tới đây khi đã biết THIẾU chỗ (sumNatural > budgetW ở trên) nên cắt là cần thiết.
-  const comf: number[] = new Array(colCount);
+  // US-19.27: height-first area fit (Code Plan contracts 3–7). Floors by role in
+  // border-box px; the solver clamps them into [hardMinW, maxW] and returns
+  // integer widths with Σ ≤ budgetW unless it scrolls at the floor assignment.
+  const readFloorPx = measureChWidth(sampleCell, FIT_READ_FLOOR_CH);
+  const readFloorCjkPx = measureChWidth(sampleCell, FIT_READ_FLOOR_CJK_CH);
+  const looseFloorPx = measureChWidth(sampleCell, FIT_LOOSE_FLOOR_CH);
+  const emptyLines: CellLines = { segments: [], cjkUnits: 0, units: 0 };
+  const cols: AreaFitColumn[] = [];
   for (let i = 0; i < colCount; i++) {
-    const maxI = natural[i];
-    // US-19.26: p75 chỉ tính trên ô CÓ NỘI DUNG. Ô rỗng chỉ rộng bằng padding, để
-    // chúng vào mẫu thì bảng nhiều dòng trống (bảng "Các bước" đang điền dở) luôn có
-    // p75 ≈ padding → cột nào cũng bị coi là lệch và bị cắt, và cột co lại mỗi lần
-    // thêm một dòng trống. Cột TOÀN rỗng → dùng lại mẫu đầy đủ, vì mẫu trống sẽ cho
-    // p75 = 0 làm `max > K×p75` đúng vô điều kiện — đúng cái đang muốn tránh.
-    const sample = contentWidths[i].length > 0 ? contentWidths[i] : colWidths[i];
-    const p75I = percentile(sample, 75);
-    const capI = maxI > FIT_OUTLIER_K * p75I ? Math.min(maxI, Math.max(comfortFloorPx, p75I * FIT_CAP_M)) : maxI;
-    comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
+    const cells = cellLines.map((row) => row[i] ?? emptyLines);
+    const units = cells.reduce((a, c) => a + c.units, 0);
+    const cjkUnits = cells.reduce((a, c) => a + c.cjkUnits, 0);
+    cols.push({
+      cells,
+      hardMinW: minByCol[i],
+      readFloorW: units > 0 && cjkUnits / units >= FIT_CJK_SHARE ? readFloorCjkPx : readFloorPx,
+      looseFloorW: looseFloorPx,
+      maxW: natural[i],
+    });
   }
-
-  // Sàn dễ đọc mỗi cột khi CO: 30ch, nhưng KHÔNG dưới min-content (từ rộng nhất →
-  // chữ không vỡ) và KHÔNG trên comf (cột vốn hẹp hơn 30ch giữ nguyên comf, không
-  // thổi rộng ra). Co chỉ tới sàn này; qua đó thì scroll (xem nhánh ③).
-  const shrinkFloor = comf.map((c, i) => Math.min(c, Math.max(minByCol[i], comfortFloorPx)));
-
-  const desired = comf.reduce((a, b) => a + b, 0);
-  const sumFloor = shrinkFloor.reduce((a, b) => a + b, 0);
-  const totalSlack = comf.reduce((a, c, i) => a + (c - shrinkFloor[i]), 0);
-  // US-19.26: tổng phần đã bị cap cắt đi — dùng để trả lại khi khung còn chỗ (①b).
-  const capSlack = natural.reduce((a, n, i) => a + (n - comf[i]), 0);
-
-  let widths: number[];
-  let scroll = false;
-  if (desired <= budgetW) {
-    // ①b US-19.26: cắt outlier xong lại dư chỗ → trả phần dư về đúng những cột đã bị
-    // cắt, theo tỉ lệ phần bị cắt, trần là max-content → bảng lấp đúng budget, không
-    // chừa khoảng trắng cạnh cột đang wrap. capSlack > 0 vì desired < sumNatural.
-    const spare = budgetW - desired;
-    widths = comf.map((c, i) => c + (natural[i] - c) * (spare / capSlack));
-  } else if (sumFloor >= budgetW || totalSlack <= 0) {
-    // ③ co tới sàn dễ đọc vẫn không vừa → SCROLL ngang, GIỮ độ rộng = sàn. Đây đúng
-    // là độ rộng mà nhánh ② tiến tới ở tới hạn (deficit→totalSlack) nên qua mốc
-    // scroll KHÔNG có cú nhảy — chỉ hiện thêm thanh cuộn (thanh nổi US-19.24).
-    widths = shrinkFloor;
-    scroll = true;
-  } else {
-    // ② co tỉ lệ theo slack (comf → sàn dễ đọc), vừa khít budget.
-    const deficit = desired - budgetW;
-    widths = comf.map((c, i) => c - (c - shrinkFloor[i]) * (deficit / totalSlack));
-  }
-
-  // CEIL từng cột (không floor): ô 1-token (ngày/id, chỉ có 1 chỗ ngắt là chính dấu
-  // '-') mà mất <1px do làm tròn xuống sẽ NGẮT ở '-' (overflow-wrap:normal không
-  // chặn hyphen). Ceil đảm bảo bề rộng ≥ nội dung → không ngắt.
-  const finalW = widths.map((w) => Math.max(1, Math.ceil(w)));
+  const { widths: finalW, scroll } = solveAreaFit(cols, {
+    budgetW,
+    padX: padBorderX,
+    lineH: measureLineHeight(sampleCell),
+  });
 
   if (scroll) {
     // Scroll-island: KHÔNG gắn FIT_CLASS → giữ base `table{display:block;
@@ -579,28 +550,7 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     return true;
   }
 
-  // Vừa khung (① / ②): table-layout:fixed (FIT_CLASS) + width/max-width mỗi ô. Tổng
-  // ceil có thể dôi vài px > budget → gỡ dần khỏi cột RỘNG DƯ nhất (còn slack trên
-  // sàn) để không sinh scrollbar dư.
-  const ceilFloor = shrinkFloor.map((m) => Math.ceil(m));
-  const cap = Math.floor(budgetW);
-  let overflow = finalW.reduce((a, b) => a + b, 0) - cap;
-  while (overflow > 0) {
-    let best = -1;
-    let bestSlack = 0;
-    for (let i = 0; i < colCount; i++) {
-      const slack = finalW[i] - ceilFloor[i];
-      if (slack > bestSlack) {
-        bestSlack = slack;
-        best = i;
-      }
-    }
-    if (best < 0) {
-      break; // không còn slack (mọi cột đã ở sàn) — chấp nhận dôi ≤ vài px
-    }
-    finalW[best] -= 1;
-    overflow -= 1;
-  }
+  // Fits the panel: table-layout:fixed (FIT_CLASS) + width/max-width per cell.
   table.classList.add(FIT_CLASS);
   table.style.width = `${finalW.reduce((a, b) => a + b, 0)}px`;
   for (const row of rows) {
