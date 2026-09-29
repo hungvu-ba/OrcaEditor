@@ -148,11 +148,12 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     const others = cols.map((_, j) => (j === growOnlyCol ? 0 : prevWidths[j] ?? hard[j]));
     const prevJ = prevWidths[growOnlyCol] ?? hard[growOnlyCol];
     const widths = cols.map((_, j) => prevWidths[j] ?? hard[j]);
-    // prevWidths can go stale between re-fits (e.g. the panel narrowed, or a
-    // column's hardMinW grew, since they were applied); only trust the fast
-    // path when they are still feasible, else fall through to a full solve
-    // instead of returning an over-budget or below-hardMinW result.
-    if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j])) {
+    // prevWidths can go stale between re-fits (e.g. the panel narrowed, a
+    // column's hardMinW grew, or a column's own content shrank below its
+    // prev width, since they were applied); only trust the fast path when
+    // they are still feasible, else fall through to a full solve instead of
+    // returning an over-budget, below-hardMinW, or past-maxW result.
+    if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j] && w <= hi[j])) {
       const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
       if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
       const candidates = new Set<number>([prevJ]);
@@ -305,7 +306,7 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   // Step 6 (contract 8): hysteresis against prevWidths.
   if (prevWidths) {
     const candidate = cols.map((_, j) => prevWidths[j] ?? widths[j]);
-    const feasible = sum(candidate) <= budgetW && candidate.every((w, j) => w >= hard[j]);
+    const feasible = sum(candidate) <= budgetW && candidate.every((w, j) => w >= hard[j] && w <= hi[j]);
     if (feasible) {
       const candH = sum(heightsAt(candidate));
       const freshH = sum(rowH);

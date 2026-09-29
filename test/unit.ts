@@ -1909,6 +1909,20 @@ const af20 = (): AreaFitColumn[] => [
   eq('solveAreaFit hysteresis: undefined prevWidths entries filled from the fresh solution', undef.widths, kept.widths);
 }
 
+// Hysteresis maxW: a prevWidths entry wider than the column's OWN current
+// maxW (its content shrank since that width was applied) must be treated as
+// infeasible even when it still clears hardMinW and fits budgetW — kept
+// widths must never exceed the single-line max-content width.
+{
+  const a: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 80 };
+  const b: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 200 };
+  const budgetW = 300;
+  const cols = [a, b];
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const stale = afSolve(cols, { ...afOpts(budgetW), prevWidths: [a.maxW + 20, fresh.widths[1]] });
+  eq("solveAreaFit hysteresis: a prevWidths entry past the column's own maxW is infeasible, fresh solution wins", stale.widths, fresh.widths);
+}
+
 // growOnlyCol (contract 8): every other column keeps its prev width; the
 // grow-only column only widens, never past the budget, and no spare leaves
 // prevWidths unchanged.
@@ -1956,6 +1970,20 @@ const af20 = (): AreaFitColumn[] => [
     growOnlyCol: 1,
   });
   check('solveAreaFit growOnlyCol: a stale prevWidths entry below hardMinW is not copied through', staleHard.widths[0] >= idW, `  ${JSON.stringify(staleHard.widths)}`);
+}
+
+// growOnlyCol maxW: a non-grow column's prevWidths entry can also exceed its
+// OWN current maxW (its content shrank since that width was applied), even
+// while still clearing hardMinW and fitting the budget — must not be copied
+// through unshrunk.
+{
+  const shrunk: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 80 };
+  const grow: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 200 };
+  const cols = [shrunk, grow];
+  const budgetW = 400;
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const stale = afSolve(cols, { ...afOpts(budgetW), prevWidths: [shrunk.maxW + 20, fresh.widths[1]], growOnlyCol: 1 });
+  check("solveAreaFit growOnlyCol: a non-grow column's prevWidths past its own maxW is not copied through", stale.widths[0] <= shrunk.maxW, `  ${JSON.stringify(stale.widths)}`);
 }
 
 {
