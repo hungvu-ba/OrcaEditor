@@ -24,6 +24,7 @@ import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-po
 import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
+import { isCjkBreakUnit } from './reading-stats';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -336,18 +337,36 @@ function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number)
  */
 function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
   let widest = 0;
+  const measure = (node: Node, start: number, end: number): void => {
+    if (end <= start) {
+      return;
+    }
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    const w = range.getBoundingClientRect().width;
+    if (w > widest) {
+      widest = w;
+    }
+  };
   const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const text = node.nodeValue ?? '';
     const re = /\S+/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      range.setStart(node, m.index);
-      range.setEnd(node, m.index + m[0].length);
-      const w = range.getBoundingClientRect().width;
-      if (w > widest) {
-        widest = w;
+      // A CJK glyph is its own unit (the browser may break on either side); each
+      // non-CJK run between glyphs stays one atomic word.
+      let runStart = m.index;
+      let offset = m.index;
+      for (const ch of m[0]) {
+        if (isCjkBreakUnit(ch)) {
+          measure(node, runStart, offset);
+          measure(node, offset, offset + ch.length);
+          runStart = offset + ch.length;
+        }
+        offset += ch.length;
       }
+      measure(node, runStart, offset);
     }
   }
   // Inline boxes only: a block child (e.g. a <p>) stretches to the cell's full
@@ -357,6 +376,9 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
     const content = (el.textContent ?? '').trim();
     if (content === '' || /\s/.test(content)) {
       continue; // empty, or several words → the chip can wrap at its own whitespace
+    }
+    if (Array.from(content).some(isCjkBreakUnit)) {
+      continue; // CJK glyphs are break points → the text-node loop already measured them
     }
     if (!getComputedStyle(el).display.startsWith('inline')) {
       continue;

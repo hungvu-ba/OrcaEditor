@@ -20,6 +20,17 @@ const WORDS_PER_MINUTE = 200;
  */
 const CJK_CHAR_RE = /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/gu;
 
+/** Non-global (no lastIndex state): CJK scripts + CJK punctuation, prolonged sound mark, full-width forms. */
+const CJK_BREAK_UNIT_RE = new RegExp(`^(?:${CJK_CHAR_RE.source}|[\\u3000-\\u303F\\u30FC\\uFF00-\\uFFEF])$`, 'u');
+
+/**
+ * True when `ch` (one code point) is a glyph the browser may break a line on
+ * either side of — i.e. it is its own "word" for layout purposes.
+ */
+export function isCjkBreakUnit(ch: string): boolean {
+  return CJK_BREAK_UNIT_RE.test(ch);
+}
+
 /**
  * Rendered prose text of `content`: headings, blockquotes, table cells, and
  * link text are included by default (textContent); code (fenced + inline),
