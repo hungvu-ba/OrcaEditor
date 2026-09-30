@@ -1999,9 +1999,9 @@ const af20 = (): AreaFitColumn[] => [
 }
 
 // growOnlyCol maxW: a non-grow column's prevWidths entry can also exceed its
-// OWN current maxW (its content shrank since that width was applied), even
-// while still clearing hardMinW and fitting the budget — must not be copied
-// through unshrunk.
+// OWN current maxW (its content shrank since that width was applied), while
+// still clearing hardMinW and fitting the budget — grow-only keeps it; only the
+// settle narrows it (T1.7.p2).
 {
   const shrunk: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 80 };
   const grow: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 200 };
@@ -2009,7 +2009,9 @@ const af20 = (): AreaFitColumn[] => [
   const budgetW = 400;
   const fresh = afSolve(cols, afOpts(budgetW));
   const stale = afSolve(cols, { ...afOpts(budgetW), prevWidths: [shrunk.maxW + 20, fresh.widths[1]], growOnlyCol: 1 });
-  check("solveAreaFit growOnlyCol: a non-grow column's prevWidths past its own maxW is not copied through", stale.widths[0] <= shrunk.maxW, `  ${JSON.stringify(stale.widths)}`);
+  eq("solveAreaFit growOnlyCol: a non-grow column's prevWidths past its own maxW is kept (narrowing waits for settle)", stale.widths[0], shrunk.maxW + 20);
+  const settled = afSolve(cols, { ...afOpts(budgetW), prevWidths: [shrunk.maxW + 20, fresh.widths[1]] });
+  check('solveAreaFit hysteresis: the settle then narrows it to its maxW', settled.widths[0] <= shrunk.maxW, `  ${JSON.stringify(settled.widths)}`);
 }
 
 {

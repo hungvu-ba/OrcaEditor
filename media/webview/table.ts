@@ -33,6 +33,8 @@ import { measureTableLines } from './table-area-measure';
 export interface TableContext {
   scheduleSync: () => void;
   dom: DomHelpers;
+  /** US-19.27 T1.7.p2: fit mode takes a row delete like typing (re-fit later); false = re-fit now. */
+  deferRowDeleteFit?: (table: HTMLTableElement) => boolean;
 }
 
 export interface TableController {
@@ -770,7 +772,7 @@ function deleteRow(cell: HTMLTableCellElement): void {
       ctx.dom.placeCaretIn(next.cells[Math.min(cell.cellIndex, next.cells.length - 1)]);
     }
   }
-  afterTableEdit(table);
+  afterTableEdit(table, true);
 }
 
 /** Promotes `row` to become the table's header, swapping it with the current header row — the old
@@ -849,8 +851,8 @@ export function navigateCells(cell: HTMLTableCellElement, dir: 1 | -1): void {
   ctx.dom.placeCaretIn(cells[next], true);
 }
 
-function afterTableEdit(table?: HTMLTableElement): void {
-  if (table) {
+function afterTableEdit(table?: HTMLTableElement, rowDelete = false): void {
+  if (table && !(rowDelete && ctx.deferRowDeleteFit?.(table))) {
     fitTableColumns(table, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
   }
   ctx.scheduleSync();

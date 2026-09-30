@@ -180,7 +180,7 @@ const externalDrop = initExternalDrop(content, {
   insertMarkdown: insertMarkdownAtCaret,
   restoreSelection: dom.restoreSelection,
 });
-const table = initTable(content, toolbarEl, { scheduleSync, dom });
+const table = initTable(content, toolbarEl, { scheduleSync, dom, deferRowDeleteFit });
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
 
@@ -417,6 +417,16 @@ function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
       fitSessionBaseH = new Map();
     }
   }, FIT_IDLE_SETTLE_MS);
+}
+
+/** A row delete narrows like deleting text (T1.7.p2): no re-fit now; pressure/settle as for typing. */
+function deferRowDeleteFit(edited: HTMLTableElement): boolean {
+  const cell = caretTableCell();
+  if (!tableFitModeOn || !cell || cell.closest('table') !== edited) {
+    return false;
+  }
+  onTableFitInput(cell, 'deleteRow');
+  return true;
 }
 
 /**

@@ -312,6 +312,21 @@ test.describe('US-19.27 table area fit', () => {
     expectKept(await headerWidths(page), before, 'add row');
   });
 
+  // T1.7.p2: a row delete that narrows a column's content is handled like deleting
+  // text — no re-fit at once; the idle settle (FIT_IDLE_SETTLE_MS) narrows it later.
+  test('deleting the row that held a column\'s widest cell keeps every width until the table settles', async ({ page }) => {
+    const long = 'reads well only when this column gets a generous share of the panel width '.repeat(4);
+    const md = `| Key | Notes | Details |\n| --- | --- | --- |\n| a | ${long} | ${long} |\n| Supercalifragilistic expialidocious wording | x | y |\n| b | ${long} | ${long} |\n`;
+    await openStableTable(page, 1000, md);
+    const before = await headerWidths(page);
+    await tableEdit(page, '#content td:text-is("Supercalifragilistic expialidocious wording")', 'Delete current row');
+    expect(await page.evaluate(() => (document.querySelector('#content table') as HTMLTableElement).rows.length)).toBe(3);
+    expectKept(await headerWidths(page), before, 'delete row');
+    await page.waitForTimeout(700);
+    expectKept(await headerWidths(page), before, 'delete row, 1 s later');
+    await expect.poll(async () => (await headerWidths(page))[0], { timeout: 3000 }).toBeLessThan(before[0] - 20);
+  });
+
   // At viewport 1000 the knee leaves 76 px, less than the new column's 105 px:
   // keeping every width is infeasible there, so the column case runs at 1200.
   test('#20 at viewport 1200: inserting then deleting a column keeps the existing column widths', async ({ page }) => {

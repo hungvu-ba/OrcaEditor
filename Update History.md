@@ -11,3 +11,4 @@
 | 1.2.2 | 2026-09-30 | Fix: Table area fit no longer keeps a column wider than its content, and stacked images in a cell add one height per line (review fixes T1.8.p1, T1.9.p1). |
 | 1.2.2 | 2026-09-30 | Fix: Table area fit splits words correctly under a small line-height, in RTL text and at <wbr>; a pasted image re-fits the table once it has loaded. |
 | 1.2.2 | 2026-09-30 | Fix: Table area fit adds up a cell's hard lines, so an image with a wrapped caption under it counts both heights (T1.7.p3). |
+| 1.2.2 | 2026-09-30 | Fix: Fit-mode tables keep column widths after a row delete, like deleting text; columns narrow only when the table settles (2 s idle or caret leaves) (T1.7.p2). |

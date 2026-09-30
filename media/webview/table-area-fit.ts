@@ -188,12 +188,13 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     const others = cols.map((_, j) => (j === growOnlyCol ? 0 : prevWidths[j] ?? hard[j]));
     const prevJ = prevWidths[growOnlyCol] ?? hard[growOnlyCol];
     const widths = cols.map((_, j) => prevWidths[j] ?? hard[j]);
-    // prevWidths can go stale between re-fits (e.g. the panel narrowed, a
-    // column's hardMinW grew, or a column's own content shrank below its
-    // prev width, since they were applied); only trust the fast path when
-    // they are still feasible, else fall through to a full solve instead of
-    // returning an over-budget, below-hardMinW, or past-hi result.
-    if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j] && w <= hi[j])) {
+    // prevWidths can go stale between re-fits (e.g. the panel narrowed, or a
+    // column's hardMinW grew, since they were applied); only trust the fast
+    // path when they are still feasible, else fall through to a full solve
+    // instead of returning an over-budget or below-hardMinW result. A width
+    // past its column's hi (content shrank) is kept: narrowing waits for the
+    // settle (T1.7.p2).
+    if (sum(widths) <= budgetW && widths.every((w, j) => w >= hard[j])) {
       const maxAllowed = Math.min(hi[growOnlyCol], budgetW - sum(others));
       if (maxAllowed <= prevJ) return { widths, rowHeights: heightsAt(widths), scroll: false };
       const candidates = new Set<number>([prevJ]);
