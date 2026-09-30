@@ -221,8 +221,18 @@ test('a hover frame reads at most a few dozen rects', async ({ page }) => {
   await nextFrame(page);
   const reads = await rectReads(page);
   console.log(`[T2.3] getBoundingClientRect calls per hover frame (block 1000 -> 1001): ${reads}`);
+  expect(reads, 'the measured frame ran its hit-test').toBeGreaterThan(0);
   expect(reads).toBeLessThanOrEqual(RECT_READS_PER_FRAME_MAX);
   await expect(page.locator(BLOCK_HANDLE_SELECTOR)).toHaveCSS('display', 'flex');
+  const moved = await page.evaluate(
+    ({ sel }) => {
+      const handle = document.querySelector(sel) as HTMLElement;
+      const top = (window as unknown as { __dd: Probes }).__dd.blocks()[1001].getBoundingClientRect().top;
+      return Math.abs(parseFloat(handle.style.top) - top);
+    },
+    { sel: BLOCK_HANDLE_SELECTOR }
+  );
+  expect(moved, "the handle moved to block 1001's top").toBeLessThan(0.5);
 });
 
 test('dragging a mid-doc paragraph down past 3 blocks drops at the linear gapAt pick, reading few rects per frame', async ({
@@ -260,6 +270,7 @@ test('dragging a mid-doc paragraph down past 3 blocks drops at the linear gapAt 
   ]);
   await page.mouse.up();
 
+  expect(reads, 'the measured frame ran its hit-test').toBeGreaterThan(0);
   expect(reads).toBeLessThanOrEqual(RECT_READS_PER_FRAME_MAX);
   expect(gap, 'the drop lands below the source').toBeGreaterThan(src + 1);
   const md = await waitForEdit(page);

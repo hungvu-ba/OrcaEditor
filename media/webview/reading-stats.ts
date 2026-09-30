@@ -4,6 +4,7 @@
  * formatting. Pure logic, no DOM mutation of the live document.
  */
 
+import { textExcluding } from './dom-utils';
 import { MATH_BLOCK_CLASS, MATH_INLINE_CLASS, MERMAID_CLASS } from './render';
 
 const EXCLUDED_SELECTOR = `pre, code, .${MATH_BLOCK_CLASS}, .${MATH_INLINE_CLASS}, .${MERMAID_CLASS}`;
@@ -39,19 +40,7 @@ export function isCjkBreakUnit(ch: string): boolean {
  * read-only (no clone) — the excluded subtrees are rejected, not removed.
  */
 export function extractReadableText(content: HTMLElement): string {
-  const walker = document.createTreeWalker(content, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) =>
-      node.nodeType === Node.ELEMENT_NODE && (node as Element).matches(EXCLUDED_SELECTOR)
-        ? NodeFilter.FILTER_REJECT
-        : NodeFilter.FILTER_ACCEPT,
-  });
-  let text = '';
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      text += (node as Text).data;
-    }
-  }
-  return text;
+  return textExcluding(content, EXCLUDED_SELECTOR);
 }
 
 /** Non-CJK runs (split on whitespace) plus one word per CJK character. */
