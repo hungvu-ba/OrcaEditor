@@ -87,11 +87,16 @@ export function recallSvg(cache: Map<string, string>, key: string): string | und
   return svg;
 }
 
-/** Cache write; evicts the least recently used entries beyond DIAGRAM_SVG_CACHE_MAX. */
-export function rememberSvg(cache: Map<string, string>, key: string, svg: string): void {
+/**
+ * Cache write; evicts the least recently used entries beyond
+ * max(DIAGRAM_SVG_CACHE_MAX, keep). `keep` = the engine's diagram count on screen,
+ * so a render pass over more than 32 diagrams never evicts one it still shows.
+ */
+export function rememberSvg(cache: Map<string, string>, key: string, svg: string, keep = 0): void {
   cache.delete(key);
   cache.set(key, svg);
-  while (cache.size > DIAGRAM_SVG_CACHE_MAX) {
+  const max = Math.max(DIAGRAM_SVG_CACHE_MAX, keep);
+  while (cache.size > max) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) {
       break;

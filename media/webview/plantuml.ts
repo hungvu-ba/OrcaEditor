@@ -53,9 +53,11 @@ interface PlantumlEngine {
 
 const ERROR_CLASS = 'md-plantuml-error';
 
-// Cache SVG theo (cờ nền) + hash nội dung source — cùng một source nhưng nền
-// sáng/tối khác nhau là 2 SVG khác nhau.
+// Rendered SVG per (background flag, source): the same source on a light vs dark
+// background is 2 different SVGs. LRU, see rememberSvg.
 const svgCache = new Map<string, string>();
+// PlantUML diagrams in the document at the last renderAll (rememberSvg's keep floor).
+let liveDiagrams = 0;
 
 // Token tăng dần cho mỗi đợt render. Kết quả async chỉ được ghi vào DOM nếu
 // token của nó vẫn là mới nhất — tránh kết quả cũ đến muộn ghi đè đợt mới hơn.
@@ -125,6 +127,7 @@ export function initPlantuml(content: HTMLElement): PlantumlController {
 
   function renderAll(): void {
     const wrappers = Array.from(content.querySelectorAll<HTMLElement>(`.${PLANTUML_CLASS}`));
+    liveDiagrams = wrappers.length;
     if (wrappers.length === 0) {
       return; // không có biểu đồ nào → không đụng tới engine, đúng tinh thần lazy-load
     }
@@ -182,7 +185,7 @@ async function renderDiagram(
     // mới hơn chiếm chỗ có thể đang mang cờ nền cũ, cache nó sẽ trả sai màu về sau.
     // Sanitize before caching (S-4) so every cache hit is already clean too.
     const safeSvg = sanitizeSvgMarkup(svg);
-    rememberSvg(svgCache, key, safeSvg);
+    rememberSvg(svgCache, key, safeSvg, liveDiagrams);
     chart.innerHTML = safeSvg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {
