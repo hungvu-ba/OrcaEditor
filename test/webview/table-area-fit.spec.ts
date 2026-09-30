@@ -273,6 +273,61 @@ test.describe('US-19.27 table area fit', () => {
     expect(m.w).toBeGreaterThanOrEqual(0.85 * m.contentW - 1);
   });
 
+  // Contract 8: add/delete row/column re-fits against the applied widths
+  // (AREA_FIT_HYSTERESIS) instead of re-solving from scratch. Each case first
+  // widens Mitigation by 12 px into the knee's spare width (H can only drop),
+  // so a from-scratch re-solve would visibly undo it.
+  async function headerWidths(page: Page): Promise<number[]> {
+    return page.evaluate(() =>
+      Array.from((document.querySelector('#content table') as HTMLTableElement).rows[0].cells).map((c) => c.getBoundingClientRect().width)
+    );
+  }
+  async function widenMitigation(page: Page): Promise<number[]> {
+    await page.evaluate(() => {
+      const t = document.querySelector('#content table') as HTMLTableElement;
+      t.style.width = `${parseFloat(t.style.width) + 12}px`;
+      for (const row of Array.from(t.rows)) {
+        const c = row.cells[3];
+        const w = `${parseFloat(c.style.width) + 12}px`;
+        c.style.width = w;
+        c.style.maxWidth = w;
+      }
+    });
+    return headerWidths(page);
+  }
+  async function tableEdit(page: Page, cell: string, action: string): Promise<void> {
+    await page.locator(cell).first().click();
+    await page.locator(`#table-toolbar button[title="${action}"]`).click();
+    await page.waitForTimeout(300);
+  }
+  function expectKept(after: number[], before: number[], what: string): void {
+    before.forEach((w, i) => expect(Math.abs(after[i] - w), `column ${i} after ${what}`).toBeLessThanOrEqual(1));
+  }
+
+  test('#20 at viewport 1000: adding a row keeps every column width', async ({ page }) => {
+    await openStableTable(page, 1000, TABLE_20);
+    const before = await widenMitigation(page);
+    await tableEdit(page, '#content td:text-is("Binh")', 'Insert row below');
+    expect(await page.evaluate(() => (document.querySelector('#content table') as HTMLTableElement).rows.length)).toBe(6);
+    expectKept(await headerWidths(page), before, 'add row');
+  });
+
+  // At viewport 1000 the knee leaves 76 px, less than the new column's 105 px:
+  // keeping every width is infeasible there, so the column case runs at 1200.
+  test('#20 at viewport 1200: inserting then deleting a column keeps the existing column widths', async ({ page }) => {
+    await openStableTable(page, 1200, TABLE_20);
+    const before = await widenMitigation(page);
+    await tableEdit(page, '#content td:text-is("Binh")', 'Insert column right');
+    const inserted = await headerWidths(page);
+    expect(inserted.length).toBe(7);
+    expect(inserted.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual((await tableInfo(page)).contentWidth);
+    expectKept(inserted, before, 'insert column');
+    await tableEdit(page, '#content th:text-is("New Column")', 'Delete current column');
+    const deleted = await headerWidths(page);
+    expect(deleted.length).toBe(6);
+    expectKept(deleted, before, 'delete column');
+  });
+
   const fixtures: Record<string, string> = { '#1': TABLE_1, '#4': TABLE_4, '#8a': TABLE_8A, '#8b': TABLE_8B, '#20': TABLE_20 };
   for (const [name, md] of Object.entries(fixtures)) {
     for (const viewport of [700, 1000]) {

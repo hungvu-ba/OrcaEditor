@@ -27,7 +27,7 @@ import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import { isCjkBreakUnit } from './reading-stats';
-import { solveAreaFit, type AreaFitColumn, type CellLines } from './table-area-fit';
+import { solveAreaFit, AREA_FIT_HYSTERESIS, type AreaFitColumn, type AreaFitOptions, type CellLines } from './table-area-fit';
 import { measureTableLines } from './table-area-measure';
 
 export interface TableContext {
@@ -423,7 +423,11 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
  * debounced re-fit mới nới ra. Short of room, the area-fit solver (US-19.27) picks
  * the widths: lowest total row height, stopping at the knee, or scroll at the floors.
  */
-function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
+function applyFitColumns(
+  table: HTMLTableElement,
+  rows: HTMLTableRowElement[],
+  keep: Pick<AreaFitOptions, 'prevWidths' | 'hysteresis' | 'growOnlyCol'>
+): boolean {
   const parent = table.parentElement;
   if (!parent) {
     return false;
@@ -529,6 +533,7 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     budgetW,
     padX: padBorderX,
     lineH: measureLineHeight(sampleCell),
+    ...keep,
   });
 
   if (scroll) {
@@ -615,10 +620,24 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
  * (applyFitColumns trả false) → hành vi mặc định scroll-mode natural
  * (`applyDefaultColumnWidths`, US-19.3).
  */
-export function fitTableColumns(table: HTMLTableElement): void {
+export function fitTableColumns(table: HTMLTableElement, opts?: { keepPrevHysteresis?: number; growOnlyCol?: number }): void {
   const rows = Array.from(table.rows);
   if (rows.length === 0) {
     return;
+  }
+
+  // US-19.27 contract 8: the applied widths, read before the clear loop wipes
+  // them. A cell without an inline width (just-inserted column) → undefined; a
+  // deleted column's cells are gone, so survivors map by index. None at all
+  // (①a table, fit off) → no prev, fresh solve.
+  const keep: Pick<AreaFitOptions, 'prevWidths' | 'hysteresis' | 'growOnlyCol'> = {};
+  if (opts?.keepPrevHysteresis !== undefined) {
+    const prev = Array.from(rows[0].cells, (c) => parseFloat(c.style.width) || undefined);
+    if (prev.some((w) => w !== undefined)) {
+      keep.prevWidths = prev;
+      keep.hysteresis = opts.keepPrevHysteresis;
+      keep.growOnlyCol = opts.growOnlyCol;
+    }
   }
 
   // Dọn mọi bề rộng inline + fit-class trước (để đo sạch VÀ để tắt fit-mode
@@ -634,7 +653,7 @@ export function fitTableColumns(table: HTMLTableElement): void {
     }
   }
 
-  if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows)) {
+  if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows, keep)) {
     return;
   }
   applyDefaultColumnWidths(table, rows);
@@ -831,7 +850,7 @@ export function navigateCells(cell: HTMLTableCellElement, dir: 1 | -1): void {
 
 function afterTableEdit(table?: HTMLTableElement): void {
   if (table) {
-    fitTableColumns(table);
+    fitTableColumns(table, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
   }
   ctx.scheduleSync();
   updateTableToolbar();
