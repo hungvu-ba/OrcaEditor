@@ -451,9 +451,10 @@ test("an engine load that never settles: after the timeout a held 'init' renders
     config
   );
   await expect.poll(() => engineScripts(page)).toBe(1);
+  await page.clock.fastForward(9_000);
   expect(await page.evaluate(() => document.getElementById('content')?.childNodes.length)).toBe(0);
 
-  await page.clock.fastForward(10_000);
+  await page.clock.fastForward(1_000);
   await expect(page.locator('#content .katex-fallback')).toHaveCount(1);
   expect(await readAnnotations(page)).toEqual(['x']);
   expect(await page.evaluate(() => document.getElementById('content')?.isContentEditable)).toBe(true);

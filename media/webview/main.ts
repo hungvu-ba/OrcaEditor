@@ -44,6 +44,7 @@ import {
   PLANTUML_CLASS,
   PLANTUML_CHART_CLASS,
   MATH_BLOCK_CLASS,
+  MATH_DISPLAY_SELECTOR,
   LINE_NUMBER_ATTR,
   LINE_NUMBER_END_ATTR,
   type LineRange,
@@ -1370,9 +1371,9 @@ function snapshotRenderKeys(keys: string[]): void {
   hasRenderSnapshot = true;
 }
 
-/** `.katex-display` nodes on or under `el` — the unit postProcessMathDom zips the math ranges against. */
+/** Display formulas (MATH_DISPLAY_SELECTOR) on or under `el` — the unit postProcessMathDom zips the math ranges against. */
 function katexDisplayCount(el: Element): number {
-  return (el.classList.contains('katex-display') ? 1 : 0) + el.querySelectorAll('.katex-display').length;
+  return (el.matches(MATH_DISPLAY_SELECTOR) ? 1 : 0) + el.querySelectorAll(MATH_DISPLAY_SELECTOR).length;
 }
 
 /**

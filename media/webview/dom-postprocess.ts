@@ -50,7 +50,7 @@ export function postProcessMathDom(
 ): void {
   // @vscode/markdown-it-katex: inline → <span class="katex">, block → <span class="katex-display"> (trong <p>)
   // TeX it cannot parse → KATEX_ERROR_BLOCK_SELECTOR / KATEX_ERROR_INLINE_SELECTOR, wrapped the same way.
-  const displays = Array.from(root.querySelectorAll(`.katex-display, ${KATEX_ERROR_BLOCK_SELECTOR}`));
+  const displays = Array.from(root.querySelectorAll(MATH_DISPLAY_SELECTOR));
   const ranges = mathBlockRanges.length === displays.length ? mathBlockRanges : [];
   displays.forEach((el, i) => {
     const tex = errorTexOrExtract(el);
@@ -183,6 +183,9 @@ export function extractTex(katexEl: Element): string {
  */
 const KATEX_ERROR_BLOCK_SELECTOR = 'p.katex-block.katex-error[title]:not([title=""])';
 const KATEX_ERROR_INLINE_SELECTOR = 'span.katex-error[title]:not([title=""]):not(.katex-block):not([style])';
+
+/** A rendered display formula, valid or not — the unit the math block ranges zip against. */
+export const MATH_DISPLAY_SELECTOR = `.katex-display, ${KATEX_ERROR_BLOCK_SELECTOR}`;
 
 /** The TeX a formula element was rendered from: `title` for the plugin's error element, else the annotation. */
 function errorTexOrExtract(el: Element): string {

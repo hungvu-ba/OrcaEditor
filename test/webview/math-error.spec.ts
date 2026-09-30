@@ -41,7 +41,7 @@ async function clickRightEdge(page: Page, selector: string): Promise<void> {
 }
 
 test('invalid inline formula: wrapped like a valid one, its message not editable', async ({ page }) => {
-  await openEditor(page, 'Bad $\\frac{$\n\nEnd\n');
+  await openEditor(page, 'Bad $\\frac{$ tex.\n\nEnd\n');
 
   const wrapper = page.locator('#content .md-math-inline');
   await expect(wrapper).toHaveAttribute('data-tex', '\\frac{');
@@ -50,8 +50,10 @@ test('invalid inline formula: wrapped like a valid one, its message not editable
   expect(message).toContain('ParseError');
 
   // Before the wrapper the click landed inside the error span and the typed text went into it.
+  await clearPosted(page);
   await clickRightEdge(page, '#content > p');
   await page.keyboard.type(' more');
+  expect(await waitForEdit(page)).toBe('Bad $\\frac{$ tex. more\n\nEnd\n');
   await expect(wrapper.locator('.katex-error')).toHaveText(message);
 });
 
@@ -103,6 +105,20 @@ test('invalid $$ block: Backspace at the start of the next paragraph acts as aft
 test('invalid $$ block: every math block keeps its source line', async ({ page }) => {
   // One error block used to drop data-line from every valid block (range count != display count).
   await openEditor(page, 'Before\n\n$$\n\\frac{\n$$\n\n$$\nx\n$$\n\nEnd\n');
+  const lines = await page
+    .locator('#content .md-math-block')
+    .evaluateAll((els) => els.map((el) => [el.getAttribute('data-line'), el.getAttribute('data-line-end')]));
+  expect(lines).toEqual([
+    ['3', '5'],
+    ['7', '9'],
+  ]);
+});
+
+test('invalid $$ block: a block-patch update keeps every math block\'s source line', async ({ page }) => {
+  // The patch path counted only `.katex-display`, so one error block dropped data-line from every math block.
+  await openEditor(page, 'Before\n\n$$\n\\frac{\n$$\n\n$$\nx\n$$\n\nEnd\n');
+  await page.evaluate(() => window.postMessage({ type: 'update', text: 'Before\n\n$$\n\\frac{\n$$\n\n$$\nx\n$$\n\nEnd changed\n' }, '*'));
+  await expect(page.locator('#content > p').last()).toHaveText('End changed');
   const lines = await page
     .locator('#content .md-math-block')
     .evaluateAll((els) => els.map((el) => [el.getAttribute('data-line'), el.getAttribute('data-line-end')]));
