@@ -36,7 +36,7 @@ import {
 } from '../src/text-utils';
 import { isWindowsDrivePath, isWindowsUncPath, hasUrlScheme } from '../src/shared/link-scheme';
 import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
-import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
+import { EntityIndex, parseEntities, nearestEnclosingHeading, sameEntityRows, type IndexedEntity } from '../src/entity-index';
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
@@ -2647,6 +2647,40 @@ check(
   check('truncate: result length is 30 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(30) + '…');
   check('truncate: empty string unchanged', truncateDisplay('') === '');
   check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(40)) === '😀'.repeat(30) + '…');
+}
+
+// ---------------------------------------------------------------------------
+// T3.3 (audit L-13) — onFileChanged reports whether a file's rows changed, so
+// the provider pings open panels only when the index really moved.
+// ---------------------------------------------------------------------------
+{
+  const row = (over: Partial<IndexedEntity> = {}): IndexedEntity => ({
+    namespace: 'UC',
+    id: '01',
+    file: 'file:///a.md',
+    line: 1,
+    title: 'Login',
+    preview: 'Login',
+    label: 'UC01 Login',
+    ...over,
+  });
+  check('entity T3.3: sameEntityRows identical rows -> true', sameEntityRows([row()], [row()]));
+  check('entity T3.3: sameEntityRows id change -> false', !sameEntityRows([row()], [row({ id: '02' })]));
+  check('entity T3.3: sameEntityRows title change -> false', !sameEntityRows([row()], [row({ title: 'Logout' })]));
+  check('entity T3.3: sameEntityRows namespace change -> false', !sameEntityRows([row()], [row({ namespace: 'BR' })]));
+  check('entity T3.3: sameEntityRows preview change -> false', !sameEntityRows([row()], [row({ preview: 'Other' })]));
+  check('entity T3.3: sameEntityRows length change -> false', !sameEntityRows([row()], [row(), row({ id: '02' })]));
+  check('entity T3.3: sameEntityRows line-only shift -> true', sameEntityRows([row()], [row({ line: 7 })]));
+}
+{
+  const idx = new EntityIndex();
+  check('entity T3.3: no declarations -> unchanged', !idx.onFileChanged('file:///a.md', '# H\nplain text\n'));
+  check('entity T3.3: still no declarations -> unchanged', !idx.onFileChanged('file:///a.md', '# H\nplain text, more\n'));
+  check('entity T3.3: first declaration -> changed', idx.onFileChanged('file:///a.md', '# H\ncaption::UC01\n'));
+  check('entity T3.3: identical re-index -> unchanged', !idx.onFileChanged('file:///a.md', '# H\ncaption::UC01\n'));
+  check('entity T3.3: line shift above the declaration -> unchanged', !idx.onFileChanged('file:///a.md', '# H\n\ncaption::UC01\n'));
+  check('entity T3.3: dropped file -> changed', idx.onFileChanged('file:///a.md', ''));
+  check('entity T3.3: dropped again -> unchanged', !idx.onFileChanged('file:///a.md', ''));
 }
 
 // ---------------------------------------------------------------------------
