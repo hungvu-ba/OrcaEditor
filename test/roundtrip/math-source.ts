@@ -135,4 +135,49 @@ keepsBytes('invalid TeX holding a dollar', 'Bad $\\text{\\$5}\\frac{$ here.\n', 
   runner.eq('invalid inline, raw-HTML table: stable on a 2nd render->serialize pass', reserialize(md), md);
 }
 
+// Block form in a list item and in a pipe-table cell. There the editor already
+// normalizes a VALID `$$` block, so the invalid one is held to the bytes the
+// valid one gets, with only the TeX swapped.
+for (const [name, withTex] of [
+  ['invalid $$ block in a list item', (tex: string) => `*   item\n\n    $$\n    ${tex}\n    $$\n`],
+  ['invalid $$ block in a table cell', (tex: string) => `| A | B |\n| --- | --- |\n| $$${tex}$$ | x |\n`],
+] as const) {
+  const source = withTex('\\frac{');
+  const out = reserialize(source);
+  runner.check(`${name}: fixture carries the error element`, renderer.render(source).html.includes('katex-block katex-error'));
+  runner.eq(`${name}: same bytes as a valid block`, out, reserialize(withTex('\\alpha')).split('\\alpha').join('\\frac{'));
+  runner.eq(`${name}: stable on a 2nd render->serialize pass`, reserialize(out), out);
+}
+
+// Block form, raw-HTML table path: `$$` delimiter, and the `<pre>` carrier for
+// a multi-line formula holding a `%` comment.
+for (const [name, tex, expected] of [
+  ['invalid $$ block, raw-HTML table', '\\frac{', '$$\\frac{$$'],
+  ['invalid $$ block with a % comment, raw-HTML table', '\\frac{ % c\nx', '<pre>$$\n\\frac{ % c\nx\n$$</pre>'],
+] as const) {
+  const cell = renderer.render(`$$\n${tex}\n$$`).html.trim();
+  const md = serializeHtml(
+    `<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>${cell}</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check(`${name}: fixture carries the error element`, cell.includes('katex-block katex-error'), cell);
+  runner.check(`${name}: the cell holds the source`, md.includes(expected), md);
+  runner.eq(`${name}: stable on a 2nd render->serialize pass`, reserialize(md), md);
+}
+
+// Only the plugin's two shapes are read from `title`: a `.katex-error` with no
+// title, or KaTeX's own error span (title = message, text = TeX), keeps the
+// default handling — never `$$` or the message.
+{
+  const noTitle = serializeHtml('<p>a <span class="katex-error">x</span> b</p>');
+  runner.check('katex-error with no title: its text is kept, no math opener', noTitle.includes('x') && !noTitle.includes('$'), noTitle);
+  const katexOwn = serializeHtml(
+    '<p>a <span class="katex-error" title="ParseError: KaTeX parse error: boom" style="color:#cc0000">\\frac{</span> b</p>'
+  );
+  runner.check("KaTeX's own error span: its text is kept, not the message", katexOwn.includes('frac{') && !katexOwn.includes('ParseError'), katexOwn);
+  const rawNoTitle = serializeHtml(
+    `<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td><span class="katex-error">kept</span></td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check('katex-error with no title, raw-HTML table: kept', rawNoTitle.startsWith('<table') && rawNoTitle.includes('>kept<'), rawNoTitle);
+}
+
 runner.finish('math-source');

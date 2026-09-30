@@ -55,6 +55,14 @@ import {
  */
 const KATEX_ERROR_CLASS = 'katex-error';
 const KATEX_BLOCK_CLASS = 'katex-block';
+/**
+ * Exactly those two shapes. KaTeX's own error span (`throwOnError: false`, the
+ * math-edit popover) carries `style` and holds the roles the other way round
+ * (title = message, text = TeX); raw HTML may use the class with no `title`.
+ */
+const KATEX_ERROR_SELECTOR =
+  `span.${KATEX_ERROR_CLASS}[title]:not(.${KATEX_BLOCK_CLASS}):not([style]), ` +
+  `p.${KATEX_ERROR_CLASS}.${KATEX_BLOCK_CLASS}[title]`;
 
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
@@ -587,7 +595,10 @@ export function createTurndown(): TurndownService {
   // error message it shows (KATEX_ERROR_CLASS). As an added rule it is checked
   // before turndown's paragraph rule, so the block form never becomes a `<p>`.
   td.addRule('mathError', {
-    filter: (node) => (node as HTMLElement).classList?.contains(KATEX_ERROR_CLASS) ?? false,
+    // A blank `title` would write a bare `$$`, an unterminated math opener.
+    filter: (node) =>
+      ((node as HTMLElement).matches?.(KATEX_ERROR_SELECTOR) ?? false) &&
+      ((node as HTMLElement).getAttribute('title') ?? '').trim() !== '',
     replacement: (_content, node) => {
       const el = node as HTMLElement;
       const tex = el.getAttribute('title') ?? '';
@@ -849,11 +860,11 @@ const WRAPPER_SELECTOR = [
   CAPTION_CLASS,
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
-  KATEX_ERROR_CLASS,
   MERMAID_CLASS,
   PLANTUML_CLASS,
 ]
   .map((cls) => `.${cls}`)
+  .concat(KATEX_ERROR_SELECTOR)
   .join(', ');
 
 /**
