@@ -16,3 +16,4 @@
 | 1.2.2 | 2026-09-30 | Fix: TOC panel slides with a transform and the content reflows once per toggle, removing show/hide lag on large tables |
 | 1.2.2 | 2026-09-30 | Feature: TOC reading stats count words without cloning the document, and debounced TOC builds keep the list when no heading changed. |
 | 1.2.2 | 2026-09-30 | Fix: TOC toggle keeps the reading line with one scroll correction and two re-holds instead of a per-frame pin loop |
+| 1.2.2 | 2026-09-30 | Feature: Documents with an indented code block now serialize per block on each sync instead of re-serializing the whole document (audit L-10). |

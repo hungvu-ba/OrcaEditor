@@ -173,9 +173,9 @@ test('typing after a host update re-render does not serve cached blocks of the o
   await expectFinalEdit(page, REPLACED.replace('Alpha.', 'Alpha. edited'));
 });
 
-test('a document with a top-level indented code block keeps it indented (full pass)', async ({ page }) => {
+test('a document with a top-level indented code block keeps it indented', async ({ page }) => {
   // turndown re-fences an indented block that follows a list, reading a sibling the
-  // per-block wrapper cannot show it — so the whole document must take the full pass.
+  // per-block wrapper cannot show it — so the block is serialized with its neighbours.
   const INDENTED = 'Intro.\n\n    indented code\n\nOutro.\n';
   await openEditor(page, INDENTED);
   await clearPosted(page);
