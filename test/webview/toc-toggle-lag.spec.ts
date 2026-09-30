@@ -3,10 +3,14 @@
  * panel slides with a compositor-only transform and body/#toolbar ease no
  * padding/margin, so #content reflows once per toggle instead of on every frame
  * of the slide. The fixture is one 302 × 13 table between three headings — the
- * shape that made a toggle cost 35–39 layouts.
+ * shape that made a toggle cost 35–39 layouts — plus a long paragraph after the
+ * table whose rewrap moves the caret line below it (browser scroll anchoring
+ * keeps a table row still, not that line).
  *
- * LayoutCount per open/close is logged, not asserted (T2.3 reads it as its
- * before number and adds the bound).
+ * The anchor is held once in the toggle's task, after build's layout reads, and
+ * re-held on the next frame and after the fit settle — no per-frame pin loop, no
+ * layout of its own (T2.3). Close costs ≤ 8 LayoutCount; open still costs 11:
+ * build's four forced layouts and the toolbar overflow's four are outside T2.3.
  */
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
@@ -20,7 +24,8 @@ function bigTableDoc(): string {
   const row = (r: number): string => `| ${Array.from({ length: COLS }, (_, c) => cell(r, c)).join(' | ')} |`;
   const lines = [row(0), `|${Array.from({ length: COLS }, () => ' --- ').join('|')}|`];
   for (let r = 1; r < ROWS; r++) lines.push(row(r));
-  return `# Before table\n\nIntro paragraph.\n\n## The table\n\n${lines.join('\n')}\n\n## After table\n\nOutro paragraph.\n`;
+  const wrapping = 'Wrapping lorem ipsum dolor sit amet. '.repeat(40);
+  return `# Before table\n\nIntro paragraph.\n\n## The table\n\n${lines.join('\n')}\n\n## After table\n\n${wrapping}\n\nOutro paragraph.\n`;
 }
 
 async function openFixture(page: Page, cfg: Partial<InitConfig> = {}): Promise<void> {
@@ -75,6 +80,65 @@ test('closed panel is off-canvas without page scroll; open slides it to transfor
   expect(await noHScroll()).toBe(true);
 
   console.log(`[toc-toggle-lag] LayoutCount open=${openLayouts} close=${closeLayouts}`);
+  expect(openLayouts).toBeLessThanOrEqual(11);
+  expect(closeLayouts).toBeLessThanOrEqual(8);
+});
+
+/** Puts the caret in the paragraph below the table, scrolls it on screen and
+ * returns its viewport top. */
+async function caretInOutro(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const p = Array.from(document.querySelectorAll('#content p')).find((el) =>
+      el.textContent!.includes('Outro paragraph')
+    ) as HTMLElement;
+    p.scrollIntoView({ block: 'center' });
+    const range = document.createRange();
+    range.setStart(p.firstChild!, 2);
+    range.collapse(true);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return p.getBoundingClientRect().top;
+  });
+}
+
+function outroTop(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      (Array.from(document.querySelectorAll('#content p')).find((el) =>
+        el.textContent!.includes('Outro paragraph')
+      ) as HTMLElement).getBoundingClientRect().top
+  );
+}
+
+async function clickToggle(page: Page): Promise<void> {
+  await page.evaluate(() => document.getElementById('toc-toggle')!.click());
+  await page.waitForTimeout(400);
+}
+
+test('fit mode: the caret line below the table keeps its viewport top across open and close', async ({ page }) => {
+  await openFixture(page, { tableFitMode: true });
+  const before = await caretInOutro(page);
+
+  await clickToggle(page);
+  const afterOpen = await outroTop(page);
+  expect(Math.abs(afterOpen - before)).toBeLessThanOrEqual(2);
+
+  await clickToggle(page);
+  const afterClose = await outroTop(page);
+  expect(Math.abs(afterClose - afterOpen)).toBeLessThanOrEqual(2);
+});
+
+test('fit mode: a wheel right after opening still scrolls the page', async ({ page }) => {
+  await openFixture(page, { tableFitMode: true });
+  const before = await caretInOutro(page);
+  await page.mouse.move(300, 450);
+
+  await page.evaluate(() => document.getElementById('toc-toggle')!.click());
+  await page.mouse.wheel(0, -400);
+  await page.waitForTimeout(400);
+
+  expect((await outroTop(page)) - before).toBeGreaterThan(300);
 });
 
 test('body and #toolbar ease no padding/margin, so the content reflows once per toggle', async ({ page }) => {

@@ -11,9 +11,9 @@
  *  3. A mouse click on a TOC row does not leave it focused (no yellow focus ring);
  *     focus moves into #content.
  *
- * reduced-motion is emulated so scrollBehavior() is instant and the padding
- * transition collapses — the anchor pin then corrects on the first frame,
- * making the assertions deterministic.
+ * reduced-motion is emulated so scrollBehavior() is instant — the one-shot
+ * anchor hold then corrects in the toggle's own task, making the assertions
+ * deterministic.
  *
  * Toggles/link-clicks are dispatched via el.click() inside page.evaluate rather
  * than Playwright's locator.click(): locator.click scrolls the page to bring the

@@ -10,7 +10,7 @@
  *  - Rebuild (debounce) khi nội dung đổi để bám theo heading vừa sửa.
  */
 
-import { REBUILD_DEBOUNCE_MS } from './constants';
+import { REBUILD_DEBOUNCE_MS, FIT_RESIZE_SETTLE_MS } from './constants';
 import { scrollBehavior } from './dom-utils';
 import { createTabDock, type RightDockTab, type TabDock } from './right-dock';
 import { showTooltip, hideTooltip } from './tooltip';
@@ -44,7 +44,7 @@ interface TocEntry {
 const HEADING_SEL = 'h1, h2, h3, h4, h5, h6';
 
 /** Keys that scroll the page — the only keydowns that should cancel the toggle
- *  anchor-pin (typing/modifiers/IME composition must not). `' '` is Space. */
+ *  anchor re-holds (typing/modifiers/IME composition must not). `' '` is Space. */
 const SCROLL_KEYS = new Set([
   'ArrowUp',
   'ArrowDown',
@@ -272,9 +272,9 @@ export function initToc(
   }
 
   function scrollToHeading(heading: HTMLElement): void {
-    // A deliberate jump supersedes any in-flight toggle anchor-pin (opening the
-    // panel then clicking a row within the pin window would otherwise fight this
-    // scroll) — see pinAnchorAcrossReflow.
+    // A deliberate jump supersedes any pending toggle anchor re-hold (opening the
+    // panel then clicking a row before the fit settle would otherwise fight this
+    // scroll) — see holdScrollAnchor.
     cancelReflowPin();
     const top = heading.getBoundingClientRect().top + window.scrollY - toolbarHeight() - 8;
     window.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
@@ -597,13 +597,10 @@ export function initToc(
   // Keep the focused line in place when toggling the panel
   // -------------------------------------------------------------------------
 
-  /** How long to keep re-pinning the anchor — a hair over body's 0.3s
-   *  padding-right transition (editor.css) so the pin outlasts the reflow. */
-  const TOC_REFLOW_PIN_MS = 350;
-  /** A between-frame scrollY jump larger than this is a foreign scroll (a wheel
-   *  the listener missed, a programmatic scrollIntoView, a link jump) — the pin
-   *  yields to it instead of dragging it back. The gradual reflow the pin itself
-   *  corrects moves scrollY only a few px per frame, well under this. */
+  /** A scrollY move since the last hold larger than this is a foreign scroll (a
+   *  wheel the listener missed, a programmatic scrollIntoView, a link jump) — the
+   *  pending re-holds yield to it instead of dragging it back. The hold's own
+   *  scrollBy is excluded (scrollY is recorded after it). */
   const TOC_FOREIGN_SCROLL_PX = 40;
 
   /**
@@ -611,7 +608,7 @@ export function initToc(
    * caret's line when the selection sits in #content and that line is on screen
    * (the "focused line" the user is reading), otherwise the top-most block still
    * visible below the toolbar. Returns it together with its current viewport
-   * top so pinAnchorAcrossReflow can restore that top after the reflow.
+   * top so holdScrollAnchor can restore that top after the reflow.
    */
   function pickScrollAnchor(): { el: HTMLElement; top: number } | undefined {
     const threshold = toolbarHeight();
@@ -640,35 +637,34 @@ export function initToc(
     return undefined;
   }
 
-  /**
-   * Opening/closing the panel eases body's padding-right over 0.3s, reflowing
-   * #content; a single post-toggle scrollBy (measured at t=0) sees no drift yet.
-   * So capture the anchor's viewport top BEFORE the class flip, then re-assert it
-   * every frame for the transition's length — the read line stays fixed on screen
-   * through the whole slide, in both directions.
-   */
-  // Token identifying the current pin loop. Bumping it makes any running loop
-  // exit on its next frame — used to supersede an old pin (re-toggle) and to let
-  // a deliberate scroll (scrollToHeading) cancel the pin instead of fighting it.
+  // Token identifying the current hold. Bumping it makes its pending re-holds
+  // exit — used to supersede an old hold (re-toggle) and to let a deliberate
+  // scroll (scrollToHeading) cancel the re-holds instead of fighting them.
   let pinToken = 0;
+  let releaseHoldListeners: (() => void) | undefined;
 
   function cancelReflowPin(): void {
     pinToken++;
+    releaseHoldListeners?.();
+    releaseHoldListeners = undefined;
   }
 
-  function pinAnchorAcrossReflow(): void {
-    const anchor = pickScrollAnchor();
-    if (!anchor) {
-      cancelReflowPin();
-      return;
-    }
-    const token = ++pinToken;
-    const start = performance.now();
-    // The pin's own window.scrollBy fires no 'wheel', so a real wheel during the
-    // pin window means the user wants to move — yield instead of dragging the
+  /**
+   * Opening/closing the panel changes #content's width once (no padding
+   * transition), so the anchor's drift is corrected right away — called after
+   * the class flip, in the same task, before paint. Fit mode then re-fits
+   * its tables on the next frame and again FIT_RESIZE_SETTLE_MS after the width
+   * change (main.ts fitReflowObserver), so the anchor is re-held on the next frame
+   * and once more FIT_RESIZE_SETTLE_MS + one frame after that — no per-frame loop.
+   */
+  function holdScrollAnchor(anchor: { el: HTMLElement; top: number }): void {
+    cancelReflowPin();
+    const token = pinToken;
+    // The hold's own window.scrollBy fires no 'wheel', so a real wheel before the
+    // last re-hold means the user wants to move — yield instead of dragging the
     // viewport back (a wheel right after opening must scroll, see
     // toc-reading-stats/toc-filter). Keydown yields ONLY for the keys that scroll
-    // the page — typing/modifiers/IME composition must NOT abort the pin (this is
+    // the page — typing/modifiers/IME composition must NOT abort the hold (this is
     // a heavy-IME editor), and non-scroll keys don't move the reading line anyway.
     const onUserWheel = (): void => cancelReflowPin();
     const onUserKey = (e: KeyboardEvent): void => {
@@ -678,37 +674,47 @@ export function initToc(
     };
     window.addEventListener('wheel', onUserWheel, { passive: true });
     window.addEventListener('keydown', onUserKey);
-    const cleanup = (): void => {
+    releaseHoldListeners = (): void => {
       window.removeEventListener('wheel', onUserWheel);
       window.removeEventListener('keydown', onUserKey);
     };
-    // Also catch programmatic jumps (scrollIntoView, a link jump) that don't emit
-    // wheel/keydown: any scrollY move between frames that the pin didn't make is
-    // foreign, so back off. lastPinScrollY = -1 marks the first frame, which
-    // absorbs the reflow (and any near-bottom clamp) before the guard arms.
-    let lastPinScrollY = -1;
-    const step = (): void => {
-      if (token !== pinToken) {
-        cleanup();
-        return;
-      }
-      if (lastPinScrollY >= 0 && Math.abs(window.scrollY - lastPinScrollY) > TOC_FOREIGN_SCROLL_PX) {
-        cancelReflowPin();
-        cleanup();
-        return;
-      }
+    let lastHoldScrollY = 0;
+    const hold = (): void => {
       const drift = anchor.el.getBoundingClientRect().top - anchor.top;
       if (drift !== 0) {
         window.scrollBy(0, drift);
       }
-      lastPinScrollY = window.scrollY;
-      if (performance.now() - start < TOC_REFLOW_PIN_MS) {
-        requestAnimationFrame(step);
-      } else {
-        cleanup();
-      }
+      lastHoldScrollY = window.scrollY;
     };
-    requestAnimationFrame(step);
+    // Programmatic jumps (scrollIntoView, a link jump) emit no wheel/keydown: any
+    // scrollY move since the last hold that the hold didn't make is foreign.
+    const stillHolding = (): boolean => {
+      if (token !== pinToken) {
+        return false;
+      }
+      if (Math.abs(window.scrollY - lastHoldScrollY) > TOC_FOREIGN_SCROLL_PX) {
+        cancelReflowPin();
+        return false;
+      }
+      return true;
+    };
+    hold();
+    requestAnimationFrame(() => {
+      if (!stillHolding()) {
+        return;
+      }
+      hold();
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          if (!stillHolding()) {
+            return;
+          }
+          hold();
+          // Last re-hold done: drop the listeners.
+          cancelReflowPin();
+        });
+      }, FIT_RESIZE_SETTLE_MS);
+    });
   }
 
   /**
@@ -729,9 +735,9 @@ export function initToc(
       dock.activate(tabId);
       return;
     }
-    // Capture the anchor at the current (pre-reflow) layout, then flip the class
-    // so the padding transition starts; the pin loop holds the anchor afterwards.
-    pinAnchorAcrossReflow();
+    // Capture the anchor at the current (pre-reflow) layout and flip the class
+    // (one #content reflow); the anchor is held at its old viewport top below.
+    const anchor = pickScrollAnchor();
     open = !open;
     document.body.classList.toggle('toc-open', open);
     if (open) {
@@ -745,6 +751,12 @@ export function initToc(
       // `openToc` host command, the `/toc` slash command, the narrow-viewport
       // auto-hide — so this is the one place that can guarantee no orphan menu.
       dock.closeMenu();
+    }
+    // Same task, after build's layout reads, so the hold forces no extra layout.
+    if (anchor) {
+      holdScrollAnchor(anchor);
+    } else {
+      cancelReflowPin();
     }
   }
 

@@ -16,6 +16,9 @@ export const SYNC_DEBOUNCE_MS = 250;
 /** Trễ trước khi dựng lại mục lục sau khi nội dung đổi (toc.ts). */
 export const REBUILD_DEBOUNCE_MS = 250;
 
+/** Quiet period after the last #content width change before fit mode re-fits its tables (main.ts, toc.ts re-holds after it). */
+export const FIT_RESIZE_SETTLE_MS = 150;
+
 /** Trễ trước khi chạy lại tìm kiếm sau khi nội dung đổi (search.ts). */
 export const REFRESH_DEBOUNCE_MS = 200;
 

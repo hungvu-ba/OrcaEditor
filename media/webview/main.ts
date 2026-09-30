@@ -101,7 +101,13 @@ import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS, MD_TABLE_FIT_CLASS } from './constants';
+import {
+  SYNC_DEBOUNCE_MS,
+  SCROLL_SAVE_DEBOUNCE_MS,
+  MD_CODE_WRAPPED_CLASS,
+  MD_TABLE_FIT_CLASS,
+  FIT_RESIZE_SETTLE_MS,
+} from './constants';
 import { AREA_FIT_HYSTERESIS, AREA_FIT_RESIZE_HYSTERESIS } from './table-area-fit';
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -201,7 +207,6 @@ function applyTableFitMode(on: boolean): void {
 // US-19.27 contract 13 (resize): while events keep arriving, keep the applied
 // widths whenever they still fit (hysteresis 1); FIT_RESIZE_SETTLE_MS after the
 // last event, a full re-fit with AREA_FIT_RESIZE_HYSTERESIS.
-const FIT_RESIZE_SETTLE_MS = 150;
 let lastFitContentWidth = 0;
 let fitReflowRaf: number | undefined;
 let fitResizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
