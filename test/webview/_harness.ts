@@ -491,9 +491,9 @@ export async function dismissAnchorLost(page: Page): Promise<void> {
 export async function openCommentTab(page: Page): Promise<void> {
   // force: toolbar overflow math can transiently report #toc-toggle as offscreen.
   await page.locator('#toc-toggle').click({ force: true });
-  // The dock animates its width open; measuring a row mid-transition would give
+  // The dock slides open by transform; measuring a row mid-transition would give
   // a box that has moved by the time the pointer gets there.
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('transform', 'none');
   await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
   await expect(page.locator('#comment-tabpanel')).toBeVisible();
 }

@@ -84,7 +84,7 @@ export function initToc(
 ): TocController {
   // --- Panel bên phải ---
   // Không dùng thuộc tính `hidden` — show/hide panel giờ chạy bằng transition
-  // CSS (width/opacity/visibility, xem #toc-panel trong editor.css) để có hiệu
+  // CSS (transform/opacity/visibility, xem #toc-panel trong editor.css) để có hiệu
   // ứng trượt mở/đóng theo design handoff thay vì bật/tắt tức thời.
   const panel = document.createElement('aside');
   panel.id = 'toc-panel';
