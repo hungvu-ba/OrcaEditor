@@ -382,6 +382,7 @@
     "test:roundtrip:toolbar-format": "node esbuild.js --test && node dist/test/roundtrip/toolbar-format.js",
     "test:roundtrip:toolbar-insert": "node esbuild.js --test && node dist/test/roundtrip/toolbar-insert.js",
     "test:roundtrip:math-edit": "node esbuild.js --test && node dist/test/roundtrip/math-edit.js",
+    "test:roundtrip:math-source": "node esbuild.js --test && node dist/test/roundtrip/math-source.js",
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
     "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",
