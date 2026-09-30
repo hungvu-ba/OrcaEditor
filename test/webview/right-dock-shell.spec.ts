@@ -38,7 +38,7 @@ const GUTTED = '# Alpha\n';
 async function openDock(page: Page): Promise<void> {
   // force: toolbar overflow math can transiently report #toc-toggle as offscreen.
   await page.locator('#toc-toggle').click({ force: true });
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
 }
 
 test('the panel renders as the TOC tab inside a tab strip with tablist semantics', async ({ page }) => {
@@ -180,12 +180,12 @@ test('Escape closes the container only when focus is inside it, and hands focus 
   // Ctrl+F box, the TeX editor, toolbar popovers, the drag-handle menu.
   await page.locator('#content').click();
   await page.keyboard.press('Escape');
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
 
   // Focus inside the container: now Escape owns it.
   await page.locator('.right-dock-tab').first().focus();
   await page.keyboard.press('Escape');
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '0px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'hidden');
   // Focus must not be orphaned on a control inside a panel that is collapsing
   // and will go visibility:hidden.
   await expect(page.locator('#content')).toBeFocused();
@@ -202,7 +202,7 @@ test('the Ctrl+F box still owns Escape while the container is open', async ({ pa
   await page.keyboard.press('Escape');
 
   await expect(page.locator('#search-box')).toBeHidden();
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
 });
 
 test('a comment popover consumes Escape and leaves the container open', async ({ page }) => {
@@ -215,7 +215,7 @@ test('a comment popover consumes Escape and leaves the container open', async ({
 
   await page.keyboard.press('Escape');
   await expect(page.locator('.comment-popover')).toBeHidden();
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
 });
 
 test('the tab strip switches tabs inside one dock, and ☰ always lands on the TOC', async ({ page }) => {
@@ -233,13 +233,13 @@ test('the tab strip switches tabs inside one dock, and ☰ always lands on the T
 
   // US-23.9 retired the mutual exclusion: the panel never closes, the tab does.
   await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
   await expect(page.locator('#comment-tabpanel')).toBeVisible();
   await expect(page.locator('#toc-tabpanel')).toBeHidden();
 
   // US-23.7 AC4: `☰` opens the dock on the TOC tab whatever tab was last shown.
   await page.locator('#toc-toggle').click({ force: true });
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
   await expect(page.locator('#toc-tabpanel')).toBeVisible();
   await expect(page.locator('#comment-tabpanel')).toBeHidden();
 });

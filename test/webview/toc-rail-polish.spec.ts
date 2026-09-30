@@ -1,8 +1,8 @@
 /**
  * TOC Rail wireframe-alignment polish (Plan/UI/TOC Rail — UI Implementation Plan.md):
- *  1. Resize-drag lag bug — while body.toc-resizing, #toc-panel's transition must
- *     drop `width` so a live drag is 1:1 with the cursor (the open/close slide,
- *     driven by body.toc-open only, keeps its width easing).
+ *  1. Resize-drag lag bug — `width` is in neither #toc-panel transition list (the
+ *     open/close slide is a transform), and body/#toolbar ease no padding/margin,
+ *     so a live drag of --toc-width is 1:1 with the cursor.
  *  3. Reading-palette theming — under a reading-mode-* palette the progress bar
  *     and the `⋯` menu's depth rows (US-10.8's home for the former depth pills)
  *     must adopt the palette accent, not the fixed VS Code blue.
@@ -68,41 +68,50 @@ async function openToc(page: Page, markdown = DOC, cfg: Partial<InitConfig> = {}
 
 // --- Item 1: resize-drag lag ---------------------------------------------
 
-test('open panel eases width, but while dragging (body.toc-resizing) width is dropped from the transition', async ({ page }) => {
-  await openToc(page);
+test('the panel slides by transform at full width; width is never eased, open or closed', async ({ page }) => {
+  await openEditor(page, DOC);
+  const panel = page.locator('#toc-panel');
+  const read = () =>
+    panel.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { width: cs.width, transform: cs.transform, props: cs.transitionProperty };
+    });
 
-  const open = await page.locator('#toc-panel').evaluate((el) => getComputedStyle(el).transitionProperty);
-  expect(open).toContain('width'); // toggle-driven slide still animates width
+  const closed = await read();
+  expect(closed.width).toBe('300px');
+  expect(closed.transform).not.toBe('none');
+  expect(closed.props).toContain('transform');
+  expect(closed.props).not.toContain('width');
 
-  const dragging = await page.locator('#toc-panel').evaluate((el) => {
-    document.body.classList.add('toc-resizing');
-    const t = getComputedStyle(el).transitionProperty;
-    document.body.classList.remove('toc-resizing');
-    return t;
-  });
-  expect(dragging).not.toContain('width'); // live drag applies width instantly
+  await page.locator('#toc-toggle').click({ force: true });
+  await expect(panel).toHaveCSS('transform', 'none');
+  const open = await read();
+  expect(open.width).toBe('300px');
+  expect(open.props).toContain('transform');
+  expect(open.props).not.toContain('width');
 });
 
 test('while dragging, the content (body) and toolbar track the panel edge instantly (no transition lag)', async ({ page }) => {
   await openToc(page);
-  const toolbar = page.locator('#toolbar');
-
-  // Not dragging: body padding-right + toolbar margin/padding ease over the slide.
-  expect(await page.evaluate(() => getComputedStyle(document.body).transitionDuration)).not.toBe('0s');
-  expect(await toolbar.evaluate((el) => getComputedStyle(el).transitionDuration)).not.toBe('0s');
-
-  // Dragging: both must be instant so the editor doesn't lag behind the drag.
-  const { body, tb } = await page.evaluate(() => {
+  // No drag-only override is needed: body and #toolbar ease nothing that follows
+  // --toc-width, dragging or not.
+  const eased = await page.evaluate(() => {
     document.body.classList.add('toc-resizing');
-    const r = {
-      body: getComputedStyle(document.body).transitionDuration,
-      tb: getComputedStyle(document.getElementById('toolbar')!).transitionDuration,
+    const pick = (el: Element): string[] => {
+      const cs = getComputedStyle(el);
+      const props = cs.transitionProperty.split(',').map((x) => x.trim());
+      const durs = cs.transitionDuration.split(',').map((x) => parseFloat(x));
+      return props.filter((_, i) => durs[i % durs.length] > 0);
     };
+    const r = { body: pick(document.body), tb: pick(document.getElementById('toolbar')!) };
     document.body.classList.remove('toc-resizing');
     return r;
   });
-  expect(body).toBe('0s');
-  expect(tb).toBe('0s');
+  for (const list of [eased.body, eased.tb]) {
+    expect(list).not.toContain('padding-right');
+    expect(list).not.toContain('margin-right');
+    expect(list).not.toContain('all');
+  }
 });
 
 // --- Item 4: empty states -------------------------------------------------

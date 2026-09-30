@@ -13,3 +13,4 @@
 | 1.2.2 | 2026-09-30 | Fix: Table area fit adds up a cell's hard lines, so an image with a wrapped caption under it counts both heights (T1.7.p3). |
 | 1.2.2 | 2026-09-30 | Fix: Fit-mode tables keep column widths after a row delete, like deleting text; columns narrow only when the table settles (2 s idle or caret leaves) (T1.7.p2). |
 | 1.2.2 | 2026-09-30 | Fix: Cross-file search keeps file text across queries, checked by mtime and size, so repeat searches no longer re-read every file from disk (audit L-5). |
+| 1.2.2 | 2026-09-30 | Fix: TOC panel slides with a transform and the content reflows once per toggle, removing show/hide lag on large tables |
