@@ -2156,6 +2156,8 @@ body.toc-open #select-viewport-band {
 
 :root {
   --toc-width: 300px;
+  /* Content reserve: follows --toc-width, but lags it during a resize drag (toc.ts applyReserve). */
+  --toc-reserve: 300px;
   /* Standard baseline for the --toc-* contract (Plan/UI/READING_MODE_CONTROL_MATRIX.md):
    * every --toc-* consumer below reads through this single token set, same
    * pattern as content's --rp-*. Standard maps straight to --vscode-*, so it
@@ -2195,7 +2197,7 @@ body.vscode-high-contrast-light {
 }
 
 body.toc-open {
-  padding-right: calc(26px + var(--toc-width));
+  padding-right: calc(26px + var(--toc-reserve));
 }
 
 /* Toolbar bù lại margin/padding phải để LUÔN tràn hết viewport bất kể TOC mở
@@ -2207,7 +2209,7 @@ body.toc-open {
  * dài toolbar khác nhau khi mở TOC, gây confuse; bỏ hẳn việc co hẹp để cả 2
  * mode nhất quán full-width. */
 body.toc-open #toolbar {
-  margin-right: calc(-26px - var(--toc-width));
+  margin-right: calc(-26px - var(--toc-reserve));
   padding-right: calc(var(--toolbar-edge-pad) + var(--toc-width));
 }
 

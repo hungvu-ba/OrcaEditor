@@ -34,9 +34,8 @@ async function openFixture(page: Page, cfg: Partial<InitConfig> = {}): Promise<v
   await expect(page.locator('#content table tr')).toHaveCount(ROWS);
 }
 
-/** Toggles the panel with a DOM click (no Playwright actionability layout) and
- * returns the LayoutCount delta read 400 ms later. */
-async function toggleLayoutCount(page: Page): Promise<number> {
+/** Runs `action` and returns the CDP LayoutCount delta across it. */
+async function layoutCountDelta(page: Page, action: () => Promise<void>): Promise<number> {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable');
   const layoutCount = async (): Promise<number> => {
@@ -44,11 +43,19 @@ async function toggleLayoutCount(page: Page): Promise<number> {
     return metrics.find((m) => m.name === 'LayoutCount')?.value ?? 0;
   };
   const before = await layoutCount();
-  await page.evaluate(() => document.getElementById('toc-toggle')!.click());
-  await page.waitForTimeout(400);
+  await action();
   const delta = (await layoutCount()) - before;
   await cdp.detach();
   return delta;
+}
+
+/** Toggles the panel with a DOM click (no Playwright actionability layout) and
+ * returns the LayoutCount delta read 400 ms later. */
+function toggleLayoutCount(page: Page): Promise<number> {
+  return layoutCountDelta(page, async () => {
+    await page.evaluate(() => document.getElementById('toc-toggle')!.click());
+    await page.waitForTimeout(400);
+  });
 }
 
 /** Transition properties of `el` whose duration is non-zero. */
@@ -158,4 +165,114 @@ test('Zen keeps the #toolbar transform slide', async ({ page }) => {
   await openFixture(page, { readability: { enabled: false, mode: 'standard', fontFamily: '', zen: true } });
   const tb = await page.locator('#toolbar').evaluate((el) => getComputedStyle(el).transitionProperty);
   expect(tb).toContain('transform');
+});
+
+// --- Resize drag (T2.2): only --toc-width follows the pointer; --toc-reserve
+// (body padding-right) catches up 150 ms after the pointer rests and on release.
+
+function rootVar(page: Page, name: string): Promise<number> {
+  return page.evaluate((n) => parseFloat(document.documentElement.style.getPropertyValue(n)), name);
+}
+
+function bodyPaddingRight(page: Page): Promise<number> {
+  return page.evaluate(() => parseFloat(getComputedStyle(document.body).paddingRight));
+}
+
+/** Opens the panel and presses a real pointer on #toc-resize; returns the press x. */
+async function pressResizer(page: Page): Promise<number> {
+  await clickToggle(page);
+  const box = (await page.locator('#toc-resize').boundingBox())!;
+  const x = Math.round(box.x + box.width / 2);
+  await page.mouse.move(x, box.y + box.height / 2);
+  await page.mouse.down();
+  return x;
+}
+
+test('resize drag: --toc-width follows each move, body padding waits for a 150 ms rest', async ({ page }) => {
+  await openFixture(page);
+  const x0 = await pressResizer(page);
+  const y = 450;
+  const padBefore = await bodyPaddingRight(page);
+  const innerWidth = await page.evaluate(() => window.innerWidth);
+
+  let x = x0;
+  for (let i = 0; i < 20; i++) {
+    x -= 5;
+    await page.mouse.move(x, y);
+    expect(await rootVar(page, '--toc-width')).toBe(innerWidth - x);
+    expect(await bodyPaddingRight(page)).toBe(padBefore);
+    await page.waitForTimeout(16);
+  }
+
+  await page.waitForTimeout(200);
+  expect(await bodyPaddingRight(page)).toBe(26 + innerWidth - x);
+  await page.mouse.up();
+});
+
+// LayoutCount cannot tell a panel-only layout from a table re-layout: the panel
+// width and the #toolbar padding (still --toc-width, contract 4) lay out on
+// every move either way (~7 per move). What the debounce removes is the
+// #content width change, so that is what this counts.
+test('resize drag: 20 moves never resize #content', async ({ page }) => {
+  await openFixture(page);
+  let x = await pressResizer(page);
+  await page.evaluate(() => {
+    const w = window as unknown as { contentResizes: number };
+    w.contentResizes = 0;
+    let first = true;
+    new ResizeObserver(() => {
+      if (first) first = false;
+      else w.contentResizes++;
+    }).observe(document.getElementById('content')!);
+  });
+  await page.waitForTimeout(50);
+  const layouts = await layoutCountDelta(page, async () => {
+    for (let i = 0; i < 20; i++) {
+      x -= 5;
+      await page.mouse.move(x, 450);
+      await page.waitForTimeout(16);
+    }
+  });
+  const contentResizes = () => page.evaluate(() => (window as unknown as { contentResizes: number }).contentResizes);
+  console.log(`[toc-toggle-lag] resize drag LayoutCount over 20 moves=${layouts}`);
+  expect(await contentResizes()).toBe(0);
+
+  await page.mouse.up();
+  await expect.poll(contentResizes).toBe(1);
+});
+
+test('resize drag: pointerup right after a move applies the content reserve at once', async ({ page }) => {
+  await openFixture(page);
+  const x = (await pressResizer(page)) - 60;
+  const innerWidth = await page.evaluate(() => window.innerWidth);
+  await page.mouse.move(x, 450);
+  await page.mouse.up();
+  expect(await bodyPaddingRight(page)).toBe(26 + innerWidth - x);
+});
+
+test('window narrowing after a drag to 480px clamps panel and reserve together', async ({ page }) => {
+  await openFixture(page);
+  await pressResizer(page);
+  const innerWidth = await page.evaluate(() => window.innerWidth);
+  await page.mouse.move(innerWidth - 480, 450);
+  await page.mouse.up();
+  expect(await rootVar(page, '--toc-width')).toBe(480);
+
+  // 1200 × 0.35 = 420 clamps the panel; 1200 ≥ 560 + 420 + 26 keeps it out of isNarrowViewport.
+  await page.setViewportSize({ width: 1200, height: 900 });
+  // Both vars are read in one evaluate, so equal values mean one handler wrote them together.
+  await expect
+    .poll(() => page.evaluate(() => ['--toc-width', '--toc-reserve'].map((n) => document.documentElement.style.getPropertyValue(n))))
+    .toEqual(['420px', '420px']);
+  await expect(page.locator('body')).toHaveClass(/toc-open/);
+});
+
+test('Zen + TOC open: #toolbar right edge sits on the viewport edge', async ({ page }) => {
+  await openFixture(page, { readability: { enabled: false, mode: 'standard', fontFamily: '', zen: true } });
+  await clickToggle(page);
+  const { right, clientWidth } = await page.locator('#toolbar').evaluate((el) => ({
+    right: el.getBoundingClientRect().right,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+  expect(right).toBe(clientWidth);
 });

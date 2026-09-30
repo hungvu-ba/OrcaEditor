@@ -18,3 +18,4 @@
 | 1.2.2 | 2026-09-30 | Fix: TOC toggle keeps the reading line with one scroll correction and two re-holds instead of a per-frame pin loop |
 | 1.2.2 | 2026-09-30 | Feature: Documents with an indented code block now serialize per block on each sync instead of re-serializing the whole document (audit L-10). |
 | 1.2.2 | 2026-09-30 | Feature: drag-and-drop hover and drop-gap hit tests binary-search the top-level blocks, and large table/list drag ghosts carry only their first 10 rows (L-11) |
+| 1.2.2 | 2026-09-30 | Fix: dragging the TOC resize handle moves only the panel; content re-lays out after a 150 ms pause and on release |

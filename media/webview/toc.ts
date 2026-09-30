@@ -66,6 +66,8 @@ const TOC_MAX_WIDTH = 600;
 const TOC_SHRINK_RATIO = 0.35;
 /** Preferred width when the user hasn't resized (mirrors --toc-width in editor.css). */
 const TOC_DEFAULT_WIDTH = 300;
+/** During a resize drag, --toc-reserve (content reserve) catches up with the panel this long after the last pointermove. */
+const TOC_RESIZE_REFLOW_DELAY_MS = 150;
 
 /** US-10.6: heading-level filter — số heading tối đa (level <= 3, khớp default) trước khi mặc định thu về H2. */
 const TOC_FILTER_DEFAULT_MAX_COUNT = 20;
@@ -204,6 +206,12 @@ export function initToc(
     document.documentElement.style.setProperty('--toc-width', `${px}px`);
   }
 
+  /** Writes the content reserve (re-lays out #content), then refreshes the scrollspy. */
+  function applyReserve(px: number): void {
+    document.documentElement.style.setProperty('--toc-reserve', `${px}px`);
+    scheduleUpdateActive();
+  }
+
   // preferredWidth is the width the user wants (default, or dragged/restored).
   // The applied width always clamps preferred to a fraction of the window
   // (reflowWidth), so the panel shrinks proportionally as the window narrows;
@@ -214,8 +222,11 @@ export function initToc(
     preferredWidth = savedWidth;
   }
 
+  // Writes the reserve directly: at init, scheduleUpdateActive's state is not declared yet.
   function reflowWidth(): void {
-    applyWidth(clampWidth(preferredWidth));
+    const px = clampWidth(preferredWidth);
+    applyWidth(px);
+    document.documentElement.style.setProperty('--toc-reserve', `${px}px`);
   }
 
   reflowWidth();
@@ -224,19 +235,25 @@ export function initToc(
     e.preventDefault();
     resizer.setPointerCapture(e.pointerId);
     document.body.classList.add('toc-resizing');
+    // Only the panel follows each move; the content reserve waits for a rest or the release.
+    let reserveTimer: ReturnType<typeof setTimeout> | undefined;
 
     const onMove = (ev: PointerEvent): void => {
       // Panel neo mép phải (right:0) → width = mép phải viewport trừ vị trí con trỏ.
       const width = clampWidth(window.innerWidth - ev.clientX);
       applyWidth(width);
-      scheduleUpdateActive();
+      clearTimeout(reserveTimer);
+      reserveTimer = setTimeout(() => applyReserve(width), TOC_RESIZE_REFLOW_DELAY_MS);
     };
     const onUp = (ev: PointerEvent): void => {
+      clearTimeout(reserveTimer);
       resizer.releasePointerCapture(ev.pointerId);
       document.body.classList.remove('toc-resizing');
       resizer.removeEventListener('pointermove', onMove);
       resizer.removeEventListener('pointerup', onUp);
       const width = clampWidth(window.innerWidth - ev.clientX);
+      applyWidth(width);
+      applyReserve(width);
       preferredWidth = width;
       // merge: giữ scrollTop do main.ts ghi.
       vscode?.setState({ ...vscode.getState(), tocWidth: width });
