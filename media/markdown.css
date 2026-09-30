@@ -1344,21 +1344,21 @@ body[class*='reading-mode-'] #content {
   font-style: normal;
   font-weight: normal;
   font-display: swap;
-  src: url('fonts/et-book/et-book-roman.woff') format('woff');
+  src: url('fonts/et-book/et-book-roman.woff2') format('woff2');
 }
 @font-face {
   font-family: 'et-book';
   font-style: italic;
   font-weight: normal;
   font-display: swap;
-  src: url('fonts/et-book/et-book-italic.woff') format('woff');
+  src: url('fonts/et-book/et-book-italic.woff2') format('woff2');
 }
 @font-face {
   font-family: 'et-book';
   font-style: normal;
   font-weight: bold;
   font-display: swap;
-  src: url('fonts/et-book/et-book-bold.woff') format('woff');
+  src: url('fonts/et-book/et-book-bold.woff2') format('woff2');
 }
 
 /* --- Reading Mode heading scale (US-19.24) ---
@@ -1688,15 +1688,16 @@ body[class*='reading-mode-'] #content a {
  * switching palette OFF also transitions smoothly, not just ON. JS side also
  * debounces the preview trigger itself (READING_PREVIEW_DEBOUNCE_MS,
  * toolbar.ts) so quickly scanning past dropdown rows doesn't fire a flurry of
- * these transitions. prefers-reduced-motion (below) neutralizes this globally. */
+ * these transitions. prefers-reduced-motion (below) neutralizes this globally.
+ * Table cells are deliberately NOT listed: a palette switch would run thousands
+ * of concurrent transitions on a big table. Cell text still fades through the
+ * `color` it inherits from #content; cell background/border switch at once. */
 body,
 #content,
 #content a,
 #content pre,
 #content :not(pre) > code,
-#content blockquote,
-#content th,
-#content td {
+#content blockquote {
   transition:
     background-color 0.18s ease,
     color 0.18s ease,
