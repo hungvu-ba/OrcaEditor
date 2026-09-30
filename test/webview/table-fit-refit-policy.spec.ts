@@ -5,9 +5,14 @@
  * composition is skipped; no spare width → full re-fit; every re-fit keeps the edited cell's viewport top.
  * Needs real layout, keyboard and Selection, so it lives here, not roundtrip.
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
 import { TABLE_20 } from './table-area-fixtures';
+
+/** Same dist/webview dir the harness HTML is served from (file://) — a `src="assets/..."` on a pasted <img> resolves here. */
+const DIST_WEBVIEW_ASSETS = path.join(__dirname, '..', '..', 'dist', 'webview', 'assets');
 
 const MITIGATION = 3;
 const LIKELIHOOD = 1;
@@ -145,6 +150,49 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
     }, ` ${TOKEN_60}`);
     expect(after[LIKELIHOOD]).toBeGreaterThan(before[LIKELIHOOD] + 1);
     expect(Math.abs((await cellTop(page, LIKELIHOOD)) - top)).toBeLessThanOrEqual(2);
+  });
+
+  test('pasting an image into a cell (async host round-trip) re-fits, not just the debounced pressure path', async ({ page }) => {
+    await openTable20(page);
+    await caretAtEnd(page, LIKELIHOOD);
+    const before = await widths(page);
+    // A real, loadable image (not a broken src): 250x200 at the ~90px-wide Likelihood
+    // column renders ~90x72 — tall enough to be the row's tallest cell by far, but it
+    // never overflows its own width (CSS max-width: 100%) and, being a single DOM
+    // mutation with no prior state, never trips the "grown >= 2 lines from baseline"
+    // pressure signal either (the baseline is captured AFTER the insert). Only the
+    // discrete paste hook (`insertImageAt` -> `ctx.afterInsert`) can re-fit this.
+    const dataUrl = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 250;
+      canvas.height = 200;
+      canvas.getContext('2d')!.fillRect(0, 0, 250, 200);
+      return canvas.toDataURL('image/png');
+    });
+    fs.mkdirSync(DIST_WEBVIEW_ASSETS, { recursive: true });
+    const assetName = 'table-fit-refit-policy-test-image.png';
+    fs.writeFileSync(path.join(DIST_WEBVIEW_ASSETS, assetName), Buffer.from(dataUrl.split(',')[1], 'base64'));
+
+    await page.evaluate(async (blobDataUrl) => {
+      const blob = await (await fetch(blobDataUrl)).blob();
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], 'wide.png', { type: 'image/png' }));
+      document.getElementById('content')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, dataUrl);
+    // requestSave() reads the blob and measures it async before posting to the host —
+    // wait for that 'pasteImage' request, then reply as the host would.
+    const handle = await page.waitForFunction(() => {
+      const posted = (window as unknown as { __posted: Array<{ type: string; requestId: number }> }).__posted;
+      return posted.find((m) => m.type === 'pasteImage')?.requestId ?? null;
+    });
+    const requestId = (await handle.jsonValue()) as number;
+    await page.evaluate(
+      ({ requestId, relativePath }) => window.postMessage({ type: 'pasteImageResult', requestId, relativePath }, '*'),
+      { requestId, relativePath: `assets/${assetName}` }
+    );
+    await expect
+      .poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1000, intervals: [50] })
+      .toBeGreaterThan(before[LIKELIHOOD] + 1);
   });
 
   test('IME: an input with isComposing never re-fits; compositionend does', async ({ page }) => {

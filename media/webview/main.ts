@@ -171,7 +171,7 @@ const dragDrop = initDragDrop(content, {
     ensureTrailingParagraph();
   },
 });
-const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
+const pasteImage = initPasteImage(vscode, { scheduleSync, dom, afterInsert: fitAfterPaste });
 // US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
 // its save+insert flow) and insertMarkdownAtCaret (hoisted function, declared below).
 const externalDrop = initExternalDrop(content, {

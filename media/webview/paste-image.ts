@@ -39,7 +39,7 @@ export interface PasteImageController {
 
 export function initPasteImage(
   vscode: VsCodeApi,
-  ctx: { scheduleSync: () => void; dom: DomHelpers }
+  ctx: { scheduleSync: () => void; dom: DomHelpers; afterInsert?: () => void }
 ): PasteImageController {
   let seq = 0;
   /** Mỗi request đang chờ host lưu file: caret lúc dán + độ rộng hiển thị đo được (px, đã chia devicePixelRatio) + có chèn vào ô bảng (US-17.4, width:100%) hay không. */
@@ -168,6 +168,7 @@ export function initPasteImage(
     pending.delete(requestId);
     if (relPath) {
       insertImageAt(entry?.range, relPath, entry?.width, entry?.fillCell);
+      ctx.afterInsert?.();
     } else if (error) {
       showToast(error);
     }
