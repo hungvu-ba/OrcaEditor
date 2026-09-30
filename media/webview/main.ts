@@ -101,7 +101,8 @@ import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS } from './constants';
+import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS, MD_TABLE_FIT_CLASS } from './constants';
+import { AREA_FIT_HYSTERESIS } from './table-area-fit';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -218,40 +219,168 @@ const fitReflowObserver = new ResizeObserver((entries) => {
   });
 });
 fitReflowObserver.observe(content);
-// US-19.25: gõ chữ trong ô bảng KHÔNG tự re-fit (input chỉ serialize, không render)
-// → cột đang bị ghim width ở fit-mode không nở theo chữ vừa gõ, wrap rất sớm (cột
-// mới thêm còn hẹp bằng đúng header). Re-fit ĐÚNG bảng đang gõ SAU KHI ngừng gõ
-// (debounce) để cột giãn theo nội dung. Chỉ khi Fit-mode BẬT (scroll-mode mặc định
-// tự giãn qua max-content nên không cần). Debounce (không mỗi phím) vì fitTableColumns
-// toggle class đo layout — tránh giật; đo gọn trong 1 tick nên không nháy.
-const FIT_TYPING_REFIT_MS = 200;
-let fitTypingTimer: ReturnType<typeof setTimeout> | undefined;
-let fitTypingTable: HTMLTableElement | null = null;
-function scheduleFitRefit(table: HTMLTableElement): void {
+// US-19.27 contract 13: edit-time re-fit policy (fit mode only). A keystroke never
+// re-fits or reads layout — the browser wraps inside the pinned width and the row
+// grows. FIT_PRESSURE_MS after the last input, a pressure signal widens only the
+// edited column (growOnlyCol); paste/drop/undo/redo re-fit the table at once. Every
+// re-fit keeps the edited cell's viewport top. Layout reads live in timer/rAF callbacks.
+const FIT_PRESSURE_MS = 300;
+const FIT_DISCRETE_INPUT_TYPES = new Set(['insertFromPaste', 'insertFromDrop', 'historyUndo', 'historyRedo']);
+let fitPressureTimer: ReturnType<typeof setTimeout> | undefined;
+let fitDiscreteRaf: number | undefined;
+let fitEditCell: HTMLTableCellElement | null = null;
+let fitComposing = false;
+// Edit session = caret inside one table; baseline = each edited cell's content
+// height at its first input of the session (read in a rAF, not in the handler).
+let fitSessionTable: HTMLTableElement | null = null;
+let fitSessionBaseH = new Map<HTMLTableCellElement, number>();
+
+function caretTableCell(): HTMLTableCellElement | null {
+  const sel = window.getSelection();
+  const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
+  return cell && content.contains(cell) ? (cell as HTMLTableCellElement) : null;
+}
+
+function cellContentHeight(cell: HTMLTableCellElement): number {
+  const r = document.createRange();
+  r.selectNodeContents(cell);
+  return r.getBoundingClientRect().height;
+}
+
+/** Re-fit `table`, refresh the sticky header, and keep `cell` where the user sees it. */
+function refitAnchored(table: HTMLTableElement, cell: HTMLTableCellElement | null, opts: { keepPrevHysteresis: number; growOnlyCol?: number }): void {
+  const anchor = cell && cell.isConnected && table.contains(cell) ? cell : null;
+  const topBefore = anchor?.getBoundingClientRect().top;
+  fitTableColumns(table, opts);
+  stickyTableHeader.refresh();
+  if (!anchor || topBefore === undefined) {
+    return;
+  }
+  const delta = anchor.getBoundingClientRect().top - topBefore;
+  if (Math.abs(delta) >= 1) {
+    window.scrollBy(0, delta);
+  }
+  if (!table.classList.contains(MD_TABLE_FIT_CLASS)) {
+    // Scroll branch: keep the edited cell inside the table's horizontal viewport.
+    const t = table.getBoundingClientRect();
+    const c = anchor.getBoundingClientRect();
+    if (c.left < t.left) {
+      table.scrollLeft -= t.left - c.left;
+    } else if (c.right > t.right) {
+      table.scrollLeft += Math.min(c.right - t.right, c.left - t.left);
+    }
+  }
+}
+
+function onFitPressure(): void {
+  fitPressureTimer = undefined;
+  const cell = fitEditCell;
+  const table = cell?.closest('table') as HTMLTableElement | null | undefined;
+  if (!cell || !table || !cell.isConnected || fitComposing) {
+    return;
+  }
+  const pinned = Array.from(table.rows[0]?.cells ?? []).some((c) => c.style.width !== '');
+  if (!pinned) {
+    // ①a table: no pinned widths, so only a panel overflow calls for a (full) re-fit.
+    if (table.scrollWidth > table.clientWidth) {
+      refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+    }
+    return;
+  }
+  const overflows = cell.scrollWidth > cell.clientWidth;
+  let grew = false;
+  const baseH = fitSessionBaseH.get(cell);
+  const row = cell.parentElement as HTMLTableRowElement | null;
+  if (!overflows && baseH !== undefined && row) {
+    const h = cellContentHeight(cell);
+    const style = getComputedStyle(cell);
+    const lineH = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+    const tallest = Array.from(row.cells).every((c) => c === cell || cellContentHeight(c) <= h);
+    grew = tallest && h - baseH >= 2 * lineH - 1;
+  }
+  if (!overflows && !grew) {
+    return;
+  }
+  const prevW = cell.style.width;
+  refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS, growOnlyCol: cell.cellIndex });
+  if (overflows && cell.style.width === prevW) {
+    // No spare width for the edited column → full re-fit (hysteresis-guarded).
+    refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+  }
+  // A grow-only re-fit may reflow the row; restart the growth count from here.
+  fitSessionBaseH.set(cell, cellContentHeight(cell));
+}
+
+/** Fit-mode input inside a table cell (also called for compositionend). */
+function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
   if (!tableFitModeOn) {
     return;
   }
-  fitTypingTable = table;
-  if (fitTypingTimer !== undefined) {
-    clearTimeout(fitTypingTimer);
+  const table = cell.closest('table') as HTMLTableElement;
+  fitEditCell = cell;
+  if (FIT_DISCRETE_INPUT_TYPES.has(inputType)) {
+    if (fitPressureTimer !== undefined) {
+      clearTimeout(fitPressureTimer);
+      fitPressureTimer = undefined;
+    }
+    if (fitDiscreteRaf === undefined) {
+      fitDiscreteRaf = requestAnimationFrame(() => {
+        fitDiscreteRaf = undefined;
+        if (table.isConnected) {
+          refitAnchored(table, caretTableCell() ?? fitEditCell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+          fitSessionBaseH = new Map();
+        }
+      });
+    }
+    return;
   }
-  fitTypingTimer = setTimeout(() => {
-    fitTypingTimer = undefined;
-    const t = fitTypingTable;
-    fitTypingTable = null;
-    if (!t || !t.isConnected) {
-      return; // bảng đã bị dựng lại/xoá giữa chừng
-    }
-    fitTableColumns(t);
-    stickyTableHeader.refresh();
-    // Cột nở → bảng có thể rộng thêm/đổi scroll ngang; kéo ô đang gõ về tầm nhìn.
-    const sel = window.getSelection();
-    const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
-    if (cell && content.contains(cell)) {
-      cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    }
-  }, FIT_TYPING_REFIT_MS);
+  if (table !== fitSessionTable) {
+    fitSessionTable = table;
+    fitSessionBaseH = new Map();
+  }
+  if (!fitSessionBaseH.has(cell)) {
+    fitSessionBaseH.set(cell, Number.NaN);
+    requestAnimationFrame(() => {
+      if (Number.isNaN(fitSessionBaseH.get(cell))) {
+        fitSessionBaseH.set(cell, cellContentHeight(cell));
+      }
+    });
+  }
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+  }
+  fitPressureTimer = setTimeout(onFitPressure, FIT_PRESSURE_MS);
 }
+
+/** Paste runs through execCommand (inputType insertText/insertHTML) → mark it discrete here. */
+function fitAfterPaste(): void {
+  const cell = caretTableCell();
+  if (cell) {
+    onTableFitInput(cell, 'insertFromPaste');
+  }
+}
+
+content.addEventListener('compositionstart', () => {
+  fitComposing = true;
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+    fitPressureTimer = undefined;
+  }
+});
+content.addEventListener('compositionend', () => {
+  fitComposing = false;
+  const cell = caretTableCell();
+  if (cell) {
+    onTableFitInput(cell, 'insertCompositionText');
+  }
+});
+// The session ends when the caret leaves the table (no layout read).
+document.addEventListener('selectionchange', () => {
+  if (fitSessionTable && caretTableCell()?.closest('table') !== fitSessionTable) {
+    fitSessionTable = null;
+    fitSessionBaseH = new Map();
+  }
+});
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
@@ -1954,8 +2083,11 @@ content.addEventListener('input', (e) => {
   const editedTable = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('table') : null;
   if (editedTable && content.contains(editedTable)) {
     stickyTableHeader.refresh();
-    // US-19.25: cột (fit-mode) không nở khi gõ vì bị ghim width → re-fit có debounce.
-    scheduleFitRefit(editedTable as HTMLTableElement);
+    // US-19.27 contract 13: edit-time re-fit policy; skipped while an IME composes.
+    const editedCell = caretTableCell();
+    if (editedCell && !(e as InputEvent).isComposing) {
+      onTableFitInput(editedCell, inputType ?? '');
+    }
   }
 });
 
@@ -2286,9 +2418,11 @@ function insertPastedMarkdown(text: string): void {
   const html = renderPasteHtml(text);
   if (!html) {
     document.execCommand('insertText', false, text);
+    fitAfterPaste();
     return;
   }
   document.execCommand('insertHTML', false, applySmartGap(html, text));
+  fitAfterPaste();
   // Có thể vừa chèn một khối ```mermaid``` mới — dựng SVG cho nó (renderAll
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
