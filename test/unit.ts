@@ -2669,6 +2669,7 @@ check(
   check('entity T3.3: sameEntityRows title change -> false', !sameEntityRows([row()], [row({ title: 'Logout' })]));
   check('entity T3.3: sameEntityRows namespace change -> false', !sameEntityRows([row()], [row({ namespace: 'BR' })]));
   check('entity T3.3: sameEntityRows preview change -> false', !sameEntityRows([row()], [row({ preview: 'Other' })]));
+  check('entity T3.3: sameEntityRows label change -> false', !sameEntityRows([row()], [row({ label: 'UC01 Other' })]));
   check('entity T3.3: sameEntityRows length change -> false', !sameEntityRows([row()], [row(), row({ id: '02' })]));
   check('entity T3.3: sameEntityRows line-only shift -> true', sameEntityRows([row()], [row({ line: 7 })]));
 }

@@ -858,6 +858,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       await new Promise<void>((r) => setTimeout(r, 0));
     }
     this.entityIndex.markReady();
+    // Panels opened mid-scan checked a partial index — re-check them once now.
+    this.notifyEntityIndexUpdated();
   }
 
   /**
@@ -2191,6 +2193,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       messageSubscription.dispose();
       viewStateSubscription.dispose();
       existCheckTokenSource?.dispose();
+      entityExistCheckTokenSource?.cancel();
       entityExistCheckTokenSource?.dispose();
       // US-23.15 AC1: only this panel's no-workspace-folder fallback watcher, if
       // it needed one — the provider-level watcher lives as long as the extension.
