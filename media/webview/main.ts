@@ -56,9 +56,9 @@ import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './brok
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid, setMermaidEngineConfig } from './mermaid';
-import { setLazyEngineConfig } from './lazy-engines';
+import { lazyEngineFailed, loadLazyEngine, setLazyEngineConfig, takeEngineMisses, type LazyEngine } from './lazy-engines';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
-import { initMathEdit } from './math-edit';
+import { initMathEdit, upgradeMathFallbacks } from './math-edit';
 import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, type BlockEntry } from './block-map';
@@ -784,12 +784,52 @@ function applyTriggerMode(mode: TriggerMode): void {
   triggerAt.setTriggerMode(mode);
 }
 
+/**
+ * Audit L-9 render lifecycle: defined while a document render waits on a lazy
+ * engine (see holdForEngines) — every host message queues here instead of
+ * running, and replays in arrival order once the load settles.
+ */
+let heldMessages: HostToWebview[] | undefined;
+
 window.addEventListener('message', (event) => {
   const msg = event.data as HostToWebview;
+  if (heldMessages) {
+    heldMessages.push(msg);
+  } else {
+    handleHostMessage(msg);
+  }
+});
+
+function handleHostMessage(msg: HostToWebview): void {
   switch (msg.type) {
     case 'init': {
       const cfg: Partial<InitConfig> = msg.config ?? { breaks: false, linkify: true };
       renderer = new MarkdownRenderer({ breaks: !!cfg.breaks, linkify: !!cfg.linkify });
+      // L-9 (Performance Low-End — Audit.md): the math and front-matter engines
+      // load lazily, same URI + nonce contract as PlantUML / Mermaid below. Set
+      // before the render just below, which may be the first to need them.
+      if (cfg.mathEngineUri) {
+        setLazyEngineConfig('math', {
+          engineUri: cfg.mathEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      if (cfg.frontMatterEngineUri) {
+        setLazyEngineConfig('frontMatter', {
+          engineUri: cfg.frontMatterEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      // L-9: render off the page before any other side effect, so an 'init'
+      // held for an engine has touched nothing; #content stays read-only until
+      // the replayed 'init' renders.
+      const prepared = prepareRender(msg.text ?? '');
+      if (Array.isArray(prepared)) {
+        content.contentEditable = 'false';
+        holdForEngines(prepared, msg);
+        break;
+      }
+      content.contentEditable = 'true';
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
@@ -809,20 +849,6 @@ window.addEventListener('message', (event) => {
       if (cfg.mermaidEngineUri) {
         setMermaidEngineConfig({
           engineUri: cfg.mermaidEngineUri,
-          scriptNonce: cfg.scriptNonce ?? '',
-        });
-      }
-      // L-9 (Performance Low-End — Audit.md): same contract for the math and
-      // front-matter engines.
-      if (cfg.mathEngineUri) {
-        setLazyEngineConfig('math', {
-          engineUri: cfg.mathEngineUri,
-          scriptNonce: cfg.scriptNonce ?? '',
-        });
-      }
-      if (cfg.frontMatterEngineUri) {
-        setLazyEngineConfig('frontMatter', {
-          engineUri: cfg.frontMatterEngineUri,
           scriptNonce: cfg.scriptNonce ?? '',
         });
       }
@@ -884,7 +910,7 @@ window.addEventListener('message', (event) => {
           content.clientWidth - parseFloat(ics.paddingLeft || '0') - parseFloat(ics.paddingRight || '0')
         );
       }
-      renderDocument(msg.text ?? '');
+      renderDocument(prepared);
       // P-8: this text IS now currentText — adopt its rev as the diff base.
       appliedRev = msg.rev ?? 0;
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
@@ -953,7 +979,15 @@ window.addEventListener('message', (event) => {
         };
         break;
       }
-      applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
+      {
+        const misses = applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
+        if (misses.length > 0) {
+          // L-9: nothing applied — replayed once the engine settles; the rev is
+          // adopted only then.
+          holdForEngines(misses, msg);
+          break;
+        }
+      }
       appliedRev = msg.rev ?? 0;
       break;
     }
@@ -1206,7 +1240,32 @@ window.addEventListener('message', (event) => {
       break;
     }
   }
-});
+}
+
+/**
+ * L-9: hold the host channel until `engines` settle (loaded or failed), then
+ * flush a deferred update and replay the held messages in arrival order. A
+ * replayed message that holds again takes the rest of the queue with it.
+ */
+function holdForEngines(engines: LazyEngine[], first?: HostToWebview): void {
+  const queue: HostToWebview[] = first ? [first] : [];
+  heldMessages = queue;
+  void Promise.allSettled(engines.map((engine) => loadLazyEngine(engine))).then(() => {
+    heldMessages = undefined;
+    if (!hasInputOwner()) {
+      flushPendingUpdate();
+    }
+    for (let i = 0; i < queue.length; i++) {
+      // Re-read each time: the previous replay (or the flush) may have held again.
+      const heldAgain = heldMessages as HostToWebview[] | undefined;
+      if (heldAgain) {
+        heldAgain.push(...queue.slice(i));
+        return;
+      }
+      handleHostMessage(queue[i]);
+    }
+  });
+}
 
 postToHost({ type: 'ready' });
 
@@ -1445,19 +1504,39 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   return inserted;
 }
 
-function renderDocument(markdown: string): void {
+interface PreparedRender {
+  markdown: string;
+  cleanHtml: string;
+  mathRanges: LineRange[];
+}
+
+/**
+ * L-9: render `markdown` off the page. Returns the engines a shim had to answer
+ * without (minus those whose load already failed — their stand-in is final)
+ * and leaves the page untouched; else the render, ready for renderDocument.
+ */
+function prepareRender(markdown: string): PreparedRender | LazyEngine[] {
   if (!renderer) {
-    return;
+    return [];
   }
+  // Drop leftovers (a paste or math-edit miss) so they are not charged to this render.
+  takeEngineMisses();
+  const { html } = renderer.render(markdown);
+  const misses = takeEngineMisses().filter((engine) => !lazyEngineFailed(engine));
+  if (misses.length > 0) {
+    return misses;
+  }
+  return { markdown, cleanHtml: stripMetaRefresh(html), mathRanges: renderer.getLastMathBlockRanges() };
+}
+
+function renderDocument(prepared: PreparedRender): void {
+  const { markdown, cleanHtml, mathRanges } = prepared;
   currentText = markdown;
   // Performance Audit P-7: the rebuild below replaces every node, so its records
   // would only mark blocks that are about to be dropped from the cache anyway.
   contentMutations.disconnect();
   resetBlockSerializeState();
   const scrollTop = window.scrollY;
-  const { html } = renderer.render(markdown);
-  const cleanHtml = stripMetaRefresh(html);
-  const mathRanges = renderer.getLastMathBlockRanges();
   // Performance Audit P-9: splice only the blocks this update changed; null =
   // nothing to diff against yet (first render) → full innerHTML rebuild.
   const inserted = tryPatchRender(cleanHtml, mathRanges);
@@ -1559,6 +1638,12 @@ interface PendingUpdate {
   baseText: string;
   /** P-8: the push's rev — adopted into `appliedRev` only if this update is actually rendered. */
   rev: number;
+  /**
+   * L-9: already found current at release and kept only while its render waits
+   * on an engine — a local edit made during that hold does not drop it (the
+   * host text wins, as for an 'update' held for an engine).
+   */
+  heldForEngines?: boolean;
 }
 let pendingUpdate: PendingUpdate | undefined;
 
@@ -1589,19 +1674,29 @@ function resolveUpdateText(msg: HostToWebview & { type: 'update' }): string | un
 
 /** Render a host document 'update' and restore the caret (undo/redo carries an
  * explicit caretLine; a caret-less update snapshots the source caret and restores
- * it so it doesn't jump to the top of the file). */
-function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): void {
+ * it so it doesn't jump to the top of the file). L-9: returns the engines the
+ * render waits on — nothing applied — or `[]` once applied. */
+function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): LazyEngine[] {
+  const prepared = prepareRender(text);
+  if (Array.isArray(prepared)) {
+    return prepared;
+  }
   const preservedCaret = caretLine === undefined ? captureCaretSource() : undefined;
-  renderDocument(text);
+  renderDocument(prepared);
   if (caretLine !== undefined) {
     restoreCaretAtSource(caretLine, caretCol ?? 0);
   } else if (preservedCaret) {
     restoreCaretAtSource(preservedCaret.line, preservedCaret.col);
   }
+  return [];
 }
 
 // Flush a deferred update when the trigger popup releases the editor keyboard.
-onInputOwnerRelease(() => {
+function flushPendingUpdate(): void {
+  // L-9: the channel is held — holdForEngines flushes once the engines settle.
+  if (heldMessages) {
+    return;
+  }
   const u = pendingUpdate;
   pendingUpdate = undefined;
   if (!u) {
@@ -1609,13 +1704,20 @@ onInputOwnerRelease(() => {
   }
   // A local edit (e.g. the popup's own commit) advanced the doc since we
   // deferred → the deferred host text is stale; drop it, the local DOM wins.
-  if (currentText !== u.baseText || u.text === currentText) {
+  if ((currentText !== u.baseText && !u.heldForEngines) || u.text === currentText) {
     return;
   }
-  applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  const misses = applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  if (misses.length > 0) {
+    // L-9: keep it deferred until the engines settle.
+    pendingUpdate = { ...u, heldForEngines: true };
+    holdForEngines(misses);
+    return;
+  }
   // P-8: rendered at last — only now does currentText belong to that push's rev.
   appliedRev = u.rev;
-});
+}
+onInputOwnerRelease(flushPendingUpdate);
 
 /**
  * Sau khi render lại vì undo/redo, đặt caret về vị trí nguồn (`line` 1-based,
@@ -2647,6 +2749,16 @@ function renderPasteHtml(text: string): string {
   postProcessMermaidDom(tmp, document);
   postProcessPlantumlDom(tmp, document);
   postProcessCodeHeaders(tmp, document);
+  // L-9: never waits — a formula rendered without the engine is a stand-in now,
+  // swapped in place once the engine arrives.
+  for (const engine of takeEngineMisses()) {
+    if (!lazyEngineFailed(engine)) {
+      loadLazyEngine(engine).then(
+        () => upgradeMathFallbacks(content),
+        () => undefined
+      );
+    }
+  }
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;
   }

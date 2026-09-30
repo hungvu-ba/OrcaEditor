@@ -29,3 +29,4 @@
 | 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse keeps its original text when the document is saved instead of being replaced by the error message |
 | 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse now behaves like a valid one, one unit with an Edit button; Enter or Backspace beside it no longer duplicates it or loses text |
 | 1.2.2 | 2026-09-30 | Feature: math and front-matter engines build as separate lazily loadable bundles, groundwork for keeping KaTeX, js-yaml and smol-toml out of the preview's startup script |
+| 1.2.2 | 2026-09-30 | Fix: previews without math no longer load the KaTeX engine at startup; it loads on the first formula, rendering and saved Markdown unchanged |

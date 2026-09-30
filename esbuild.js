@@ -30,10 +30,11 @@ const webviewConfig = {
   target: 'es2020',
   sourcemap: !production,
   minify: production,
-  // Routes both math-edit.ts's ESM import and @vscode/markdown-it-katex's
-  // require('katex') to the same katex.mjs, instead of bundling both katex.mjs
-  // and katex.js (~270 KB).
-  alias: { katex: 'katex/dist/katex.mjs' },
+  // Audit L-9: routes both math-edit.ts's ESM import and
+  // @vscode/markdown-it-katex's require('katex') to katex-shim.ts, which
+  // forwards to the lazily loaded math-engine.js — so main.js carries no KaTeX
+  // (~270 KB). Only mathEngineConfig below keeps the real katex.mjs.
+  alias: { katex: path.resolve(__dirname, 'media/webview/katex-shim.ts') },
 };
 
 /**

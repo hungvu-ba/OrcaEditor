@@ -10,6 +10,7 @@ import taskLists from 'markdown-it-task-lists';
 import frontMatterPlugin from 'markdown-it-front-matter';
 import katexPlugin from '@vscode/markdown-it-katex';
 import hljs from 'highlight.js/lib/common';
+import { engineMissCount } from './lazy-engines';
 import { buildFrontMatterFields, buildFrontMatterHtml, parseFrontMatterFields, parseTomlFrontMatterFields, type FrontMatterFormat } from './front-matter';
 
 export interface PipelineConfig {
@@ -243,12 +244,26 @@ export class MarkdownRenderer {
     // Audit L-8: the KaTeX rules read only `tokens[idx].content` and the plugin
     // gets no options (no shared `macros`), so the output is a pure function of
     // rule + source — a host re-render reuses it for every unchanged formula.
+    // Audit L-9: output computed while the math engine was missing (the
+    // katex-shim stand-in) is served once and never kept.
     const rules = this.md.renderer.rules;
     for (const ruleName of ['math_inline', 'math_inline_block', 'math_inline_bare_block', 'math_block']) {
       const rule = rules[ruleName];
       if (rule) {
-        rules[ruleName] = (tokens, idx, options, env, self) =>
-          memoLookup(this.mathMemo, `${ruleName}\u0000${tokens[idx].content}`, () => rule(tokens, idx, options, env, self));
+        rules[ruleName] = (tokens, idx, options, env, self) => {
+          const key = `${ruleName}\u0000${tokens[idx].content}`;
+          const missesBefore = engineMissCount();
+          let missed = false;
+          const value = memoLookup(this.mathMemo, key, () => {
+            const out = rule(tokens, idx, options, env, self);
+            missed = engineMissCount() !== missesBefore;
+            return out;
+          });
+          if (missed) {
+            this.mathMemo.delete(key);
+          }
+          return value;
+        };
       }
     }
 
