@@ -18,6 +18,8 @@ interface MathFixture {
   katex: number;
   /** Every `.katex-display` under #content. */
   display: number;
+  /** Every `.katex-error` under #content (a formula KaTeX cannot parse); 0 when omitted. */
+  katexError?: number;
   /** TeX of every formula, in document order. */
   tex: string[];
   /** What the document serializes to when that is not `source` itself. */
@@ -46,6 +48,9 @@ const FIXTURES: MathFixture[] = [
   },
   { name: 'escaped \\$ alone', source: 'Pay \\$a\\$ now.\n\nEnd\n', katex: 0, display: 0, tex: [] },
   { name: 'two formulas on one line', source: 'Both $a$ and $b$ on one line.\n\nEnd\n', katex: 2, display: 0, tex: ['a', 'b'] },
+  // The serializer writes an invalid formula back from its TeX, not the error message it shows (T4.8).
+  { name: 'invalid inline', source: 'Bad $\\frac{$ tex.\n\nEnd\n', katex: 0, display: 0, katexError: 1, tex: [] },
+  { name: 'invalid $$ block', source: 'Before\n\n$$\n\\frac{\n$$\n\nEnd\n', katex: 0, display: 0, katexError: 1, tex: [] },
 ];
 
 /** TeX annotation of every rendered formula, in document order. */
@@ -83,6 +88,7 @@ for (const fixture of FIXTURES) {
     // Real KaTeX layout, not a source-carrying stand-in: a lazy engine that never loads fails here.
     await expect(page.locator('#content .katex:not(:has(.katex-html .base))')).toHaveCount(0);
     await expect(page.locator('#content .katex-display')).toHaveCount(fixture.display);
+    await expect(page.locator('#content .katex-error')).toHaveCount(fixture.katexError ?? 0);
     expect(await readAnnotations(page)).toEqual(fixture.tex);
 
     // No block is cached right after a render, so this one edit serializes the

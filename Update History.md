@@ -26,3 +26,4 @@
 | 1.2.2 | 2026-09-30 | Fix: mermaid and PlantUML keep at most 32 rendered diagrams in memory per tab instead of every diagram ever shown |
 | 1.2.2 | 2026-09-30 | Fix: in documents with more than 32 mermaid or PlantUML diagrams, paste, undo and external changes no longer re-render existing diagrams |
 | 1.2.2 | 2026-09-30 | Fix: an escaped dollar sign keeps its backslash when the document is saved, so it no longer turns into a formula after reopening |
+| 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse keeps its original text when the document is saved instead of being replaced by the error message |

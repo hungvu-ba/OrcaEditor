@@ -13,7 +13,7 @@
  *
  * Run alone: node esbuild.js --test && node dist/test/roundtrip/math-source.js
  */
-import { Runner, serializeHtml, renderer } from './_lib';
+import { COMPLEX_CELL, Runner, serializeHtml, renderer } from './_lib';
 
 const runner = new Runner();
 
@@ -107,6 +107,32 @@ runner.eq('escaped dollar that cannot be math comes back bare', reserialize('Cos
       '<span class="md-math-render" contenteditable="false"><span class="katex">K</span></span></span> b</p>'
   );
   runner.eq('data-tex is written raw', md, 'a $\\text{\\$5}$ b\n');
+}
+
+// ---------------------------------------------------------------------------
+// A formula KaTeX cannot parse (T4.8): the math plugin renders the error
+// message as the element text and keeps the TeX in `title` only. What is
+// written is the TeX, never the message.
+// ---------------------------------------------------------------------------
+keepsBytes('invalid inline', 'Bad $\\frac{$ tex.\n', 0);
+keepsBytes('invalid $$ block', 'Before\n\n$$\n\\frac{\n$$\n\nAfter\n', 0);
+keepsBytes('invalid inline in a list item', '*   bad $\\frac{$ here\n', 0);
+keepsBytes('invalid inline in a table cell', '| A | B |\n| --- | --- |\n| $\\frac{$ | x |\n', 0);
+keepsBytes('valid formula next to an invalid one', 'Good $x$ and bad $\\frac{$ here.\n', 1);
+keepsBytes('invalid TeX holding a dollar', 'Bad $\\text{\\$5}\\frac{$ here.\n', 0);
+
+// Raw-HTML table path (complexTableAsHtml): no turndown rule runs inside the
+// table, so the error element must be restored to its source form there too.
+{
+  const cell = renderer.render('Bad $\\frac{$ tex.').html.trim();
+  const md = serializeHtml(
+    `<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>${cell}</td>${COMPLEX_CELL}</tr></tbody></table>`
+  );
+  runner.check('invalid inline, raw-HTML table: fixture carries the error element', cell.includes('katex-error'), cell);
+  runner.check('invalid inline, raw-HTML table: took the raw-HTML path', md.startsWith('<table'), md);
+  runner.check('invalid inline, raw-HTML table: the cell holds the source', md.includes('Bad $\\frac{$ tex.'), md);
+  runner.check('invalid inline, raw-HTML table: no error message or class leaks', !/ParseError|katex/.test(md), md);
+  runner.eq('invalid inline, raw-HTML table: stable on a 2nd render->serialize pass', reserialize(md), md);
 }
 
 runner.finish('math-source');

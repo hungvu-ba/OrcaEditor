@@ -47,6 +47,15 @@ import {
   MD_CHROME_MARKER_ATTR,
 } from './constants';
 
+/**
+ * @vscode/markdown-it-katex's output for TeX KaTeX cannot parse: inline
+ * `<span class="katex-error" title="TEX">`, block `<p class="katex-block
+ * katex-error" title="TEX">`. The element text is the KaTeX error message; the
+ * TeX lives in `title` only.
+ */
+const KATEX_ERROR_CLASS = 'katex-error';
+const KATEX_BLOCK_CLASS = 'katex-block';
+
 export function createTurndown(): TurndownService {
   // Orca convention (Template/markdown-syntax-guide.md, decided 2026-07-17):
   // '*' bullets and backslash hard breaks — see US-18.4b. Named so
@@ -574,6 +583,17 @@ export function createTurndown(): TurndownService {
       return `$${tex}$`;
     },
   });
+  // A formula KaTeX cannot parse is written back from `title`, never from the
+  // error message it shows (KATEX_ERROR_CLASS). As an added rule it is checked
+  // before turndown's paragraph rule, so the block form never becomes a `<p>`.
+  td.addRule('mathError', {
+    filter: (node) => (node as HTMLElement).classList?.contains(KATEX_ERROR_CLASS) ?? false,
+    replacement: (_content, node) => {
+      const el = node as HTMLElement;
+      const tex = el.getAttribute('title') ?? '';
+      return el.classList.contains(KATEX_BLOCK_CLASS) ? `\n\n$$\n${tex.trim()}\n$$\n\n` : `$${tex}$`;
+    },
+  });
 
   // --- mermaid: bỏ qua toolbar + biểu đồ SVG đã dựng, chỉ serialize mã nguồn
   //     trong .md-mermaid-source (giữ nguyên logic fence với fencedCodeWithLang) ---
@@ -823,11 +843,13 @@ function cloneAndStrip(el: HTMLElement): HTMLElement {
  * owned by a turndown RULE on the normal path (`mathBlock`/`mathInline`/
  * `mermaidDiagram`/`plantumlDiagram`, and turndown's SPAN default for
  * `.md-caption`); `restoreWrapperSourceForms` is the raw-HTML path's equivalent.
+ * The math plugin's error element (`mathError`) is restored the same way.
  */
 const WRAPPER_SELECTOR = [
   CAPTION_CLASS,
   MATH_INLINE_CLASS,
   MATH_BLOCK_CLASS,
+  KATEX_ERROR_CLASS,
   MERMAID_CLASS,
   PLANTUML_CLASS,
 ]
@@ -893,9 +915,9 @@ function wrapperSourceForm(wrapper: Element, doc: Document): Node {
     // purely for display (dom-postprocess.ts).
     return doc.createTextNode(wrapper.textContent ?? '');
   }
-  if (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS)) {
-    const delimiter = cl.contains(MATH_BLOCK_CLASS) ? '$$' : '$';
-    const tex = (wrapper.getAttribute('data-tex') ?? '').trim();
+  if (cl.contains(MATH_INLINE_CLASS) || cl.contains(MATH_BLOCK_CLASS) || cl.contains(KATEX_ERROR_CLASS)) {
+    const delimiter = cl.contains(MATH_BLOCK_CLASS) || cl.contains(KATEX_BLOCK_CLASS) ? '$$' : '$';
+    const tex = (wrapper.getAttribute(cl.contains(KATEX_ERROR_CLASS) ? 'title' : 'data-tex') ?? '').trim();
     if (!tex) {
       // Nothing to write. A bare `$$`/`$` would be an unterminated math opener
       // the day this cell stops needing HTML serialization.
