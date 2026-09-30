@@ -2765,7 +2765,9 @@ function renderPasteHtml(text: string): string {
     if (!lazyEngineFailed(engine)) {
       loadLazyEngine(engine).then(
         () => (engine === 'math' ? upgradeMathFallbacks(content) : upgradeFrontMatterFallbacks(content)),
-        () => undefined
+        // A failed load: the shims throw now, so a rebuilt front-matter card takes
+        // the failed-engine look (YAML raw rows, TOML invalid frame), not 0 fields.
+        () => (engine === 'frontMatter' ? upgradeFrontMatterFallbacks(content) : undefined)
       );
     }
   }

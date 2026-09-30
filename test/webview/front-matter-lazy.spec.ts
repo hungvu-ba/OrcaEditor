@@ -172,9 +172,8 @@ test('YAML front matter and math on slow front-matter engine: both engine script
   expect(await page.evaluate(() => document.getElementById('content')?.getAttribute('data-render-generation'))).toBe('1');
 });
 
-test('pasting YAML front-matter text before the load: the card shows its field once the engine loads', async ({ page }) => {
-  await serveEngineLate(page);
-  await openEditor(page, 'Alpha\n\nEnd\n', SLOW_ENGINE);
+/** Select the first paragraph and paste `text` over it as plain text. */
+async function pasteOverFirstParagraph(page: Page, text: string): Promise<void> {
   await page.evaluate(() => {
     const content = document.getElementById('content') as HTMLElement;
     const p = content.querySelector(':scope > p') as HTMLElement;
@@ -192,12 +191,32 @@ test('pasting YAML front-matter text before the load: the card shows its field o
     document
       .getElementById('content')
       ?.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-  }, '---\ntitle: Pasted\n---');
+  }, text);
+}
+
+test('pasting YAML front-matter text before the load: the card shows its field once the engine loads', async ({ page }) => {
+  await serveEngineLate(page);
+  await openEditor(page, 'Alpha\n\nEnd\n', SLOW_ENGINE);
+  await pasteOverFirstParagraph(page, '---\ntitle: Pasted\n---');
+  const fm = page.locator('#content .md-front-matter');
+  // Paste never waits: the stand-in card is in place before the engine arrives.
+  await expect(fm).toHaveAttribute('data-fm-engine-miss', '', { timeout: ENGINE_DELAY_MS / 3 });
+  await expect(fm.locator('.md-fm-count')).toHaveText('0 fields', { timeout: ENGINE_DELAY_MS / 3 });
   expect(await waitForEdit(page)).toContain('---\ntitle: Pasted\n---');
 
-  const fm = page.locator('#content .md-front-matter');
   await expect(fm.locator('.md-fm-row-title')).toHaveText('Pasted');
   await expect(fm.locator('.md-fm-count')).toHaveText('1 field');
   await expect(fm).not.toHaveAttribute('data-fm-engine-miss', '');
   expect(await engineScripts(page, 'front-matter-engine.js')).toBe(1);
+});
+
+test('pasting YAML front-matter text when the engine 404s: the card falls back to its raw rows', async ({ page }) => {
+  await openEditor(page, 'Alpha\n\nEnd\n', MISSING_ENGINE);
+  await pasteOverFirstParagraph(page, '---\ntitle: Pasted\n---');
+  expect(await waitForEdit(page)).toContain('---\ntitle: Pasted\n---');
+
+  const fm = page.locator('#content .md-front-matter');
+  await expect(fm.locator('.md-fm-count')).toHaveText('1 line');
+  await expect(fm.locator('.md-fm-grid-row-raw')).toHaveText('title: Pasted');
+  await expect(fm).not.toHaveAttribute('data-fm-engine-miss', '');
 });
