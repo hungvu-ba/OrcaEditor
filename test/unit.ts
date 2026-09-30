@@ -1461,12 +1461,20 @@ check('contract: HostToWebview phủ đủ 13 biến thể (init có/không reve
   eq('lazy engines: engineMissCount is monotonic (a take does not lower it)', engineMissCount() - before, 3);
   eq('lazy engines: lazyEngineApi is undefined under Node', lazyEngineApi('math'), undefined);
   check('lazy engines: lazyEngineFailed is false before any load', !lazyEngineFailed('math'));
+  const firstLoad = loadLazyEngine('math');
+  check('lazy engines: concurrent loadLazyEngine calls share one promise', loadLazyEngine('math') === firstLoad);
   pendingChecks.push(
-    loadLazyEngine('math').then(
+    firstLoad.then(
       () => check('lazy engines: loadLazyEngine without a config rejects', false, '  resolved'),
-      () => {
-        check('lazy engines: loadLazyEngine without a config rejects', true);
+      (err: unknown) => {
+        check('lazy engines: loadLazyEngine without a config rejects', /not provided by the host/.test(String(err)), `  ${String(err)}`);
         check('lazy engines: lazyEngineFailed is true after the rejected load', lazyEngineFailed('math'));
+        const retry = loadLazyEngine('math');
+        check('lazy engines: a rejected load is dropped, the next call retries', retry !== firstLoad);
+        return retry.then(
+          () => check('lazy engines: the retry without a config rejects', false, '  resolved'),
+          () => check('lazy engines: the retry without a config rejects', true)
+        );
       }
     )
   );
@@ -5786,7 +5794,16 @@ check(
   eq('FileTextCache (audit L-5): delete removes the entry', del.get('a', 's'), undefined);
 }
 
+let summaryPrinted = false;
+// An unsettled pending check lets Node exit 0 without a summary; fail instead.
+process.on('beforeExit', () => {
+  if (!summaryPrinted) {
+    console.log('\nFAIL  a pending check never settled; no summary printed');
+    process.exitCode = 1;
+  }
+});
 void Promise.all(pendingChecks).then(() => {
+  summaryPrinted = true;
   console.log(`\n${pass} pass, ${fail} fail`);
   if (failures.length) {
     console.log('\n' + failures.join('\n\n'));
