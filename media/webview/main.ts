@@ -42,6 +42,9 @@ import {
   MERMAID_CHART_CLASS,
   PLANTUML_CLASS,
   PLANTUML_CHART_CLASS,
+  MATH_BLOCK_CLASS,
+  LINE_NUMBER_ATTR,
+  LINE_NUMBER_END_ATTR,
   type LineRange,
 } from './pipeline';
 import { initSearch } from './search';
@@ -1233,14 +1236,13 @@ function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
 // ---------------------------------------------------------------------------
 
 /**
- * The passes every fresh render must go through before it is shown or diffed.
- * Runs on the live #content for a full rebuild and on the detached staging
- * container for a P-9 block patch — every pass takes a plain root and reads no
+ * The passes every fresh render must go through before it is shown.
+ * Runs on the live #content for a full rebuild and on the detached run of
+ * inserted blocks for a P-9 block patch — every pass takes a plain root and reads no
  * layout. First entry is US-2.7: reapply the last known collapsed/expanded/raw
  * state onto the fresh `.md-front-matter` node — that state is in-memory only
  * (no extension-host persistence), so it must run on every render, not just
- * cold-open, and it must run before the snapshot/diff so both sides key the
- * front-matter block at the same stage.
+ * cold-open.
  */
 function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): void {
   applyFrontMatterViewState(root);
@@ -1256,7 +1258,7 @@ function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): voi
 
 /**
  * Performance Audit P-9: each live top-level node's render-time key (the
- * lineAgnosticKey of its post-postprocess DOM). A local mutation overwrites
+ * lineAgnosticKey of its RAW, pre-post-process render — T3.2). A local mutation overwrites
  * the node's entry with NO_RENDER_KEY via markDirtyFrom (the same
  * MutationObserver feed P-7 uses), so a REAL key always means "this node still
  * shows exactly what its render produced" — only such a node may be kept by
@@ -1272,17 +1274,43 @@ function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): voi
  */
 let renderKeyByBlock = new WeakMap<Element, string>();
 let hasRenderSnapshot = false;
-/** Key stand-in for a poisoned live block — never equal to any real key (keys are outerHTML, starting with '<'). */
+/** Key stand-in for a poisoned live block — never equal to any real key (keys are `${length}:${hash}`, starting with a digit). */
 const NO_RENDER_KEY = ' ';
 /** Monotonic render counter behind RENDER_GENERATION_ATTR (see block-patch.ts). */
 let renderGeneration = 0;
 
-function snapshotRenderKeys(): void {
+/** `keys` = the raw children's keys, in order — post-process swaps top-level nodes 1:1, so they map by index. */
+function snapshotRenderKeys(keys: string[]): void {
   renderKeyByBlock = new WeakMap();
-  for (const child of Array.from(content.children)) {
-    renderKeyByBlock.set(child, lineAgnosticKey(child));
-  }
+  Array.from(content.children).forEach((child, i) => renderKeyByBlock.set(child, keys[i]));
   hasRenderSnapshot = true;
+}
+
+/** `.katex-display` nodes on or under `el` — the unit postProcessMathDom zips the math ranges against. */
+function katexDisplayCount(el: Element): number {
+  return (el.classList.contains('katex-display') ? 1 : 0) + el.querySelectorAll('.katex-display').length;
+}
+
+/**
+ * T3.2: a kept block's MATH_BLOCK_CLASS wrappers take their lines from the new
+ * render's math ranges, not from its raw HTML (copySrcLines skips them).
+ * `ranges` = this block's slice, [] when the render's display count did not
+ * match — the wrappers then end without lines, as a full render leaves them.
+ */
+function syncMathBlockLines(block: Element, ranges: LineRange[]): void {
+  const wrappers = block.classList.contains(MATH_BLOCK_CLASS)
+    ? [block]
+    : Array.from(block.querySelectorAll(`.${MATH_BLOCK_CLASS}`));
+  wrappers.forEach((wrapper, i) => {
+    const range = ranges[i];
+    if (range) {
+      wrapper.setAttribute(LINE_NUMBER_ATTR, String(range.start));
+      wrapper.setAttribute(LINE_NUMBER_END_ATTR, String(range.end));
+    } else {
+      wrapper.removeAttribute(LINE_NUMBER_ATTR);
+      wrapper.removeAttribute(LINE_NUMBER_END_ATTR);
+    }
+  });
 }
 
 /** `cls` present on or under any of the freshly inserted top-level nodes. */
@@ -1333,9 +1361,20 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   }
   const staging = document.createElement('div');
   staging.innerHTML = html;
-  postProcessRenderedDom(staging, mathRanges);
+  // T3.2: keys come from the RAW render; only the inserted run is post-processed below.
   const fresh = Array.from(staging.children);
   const freshKeys = fresh.map((el) => lineAgnosticKey(el));
+  // Display-math index each fresh block starts at (last entry = total). The
+  // math ranges zip against `.katex-display` in document order and apply only
+  // when the whole render's count matches — postProcessMathDom's rule, kept
+  // across the split into kept blocks and the inserted run.
+  const displayStart = [0];
+  for (const el of fresh) {
+    displayStart.push(displayStart[displayStart.length - 1] + katexDisplayCount(el));
+  }
+  const mathApplies = displayStart[fresh.length] === mathRanges.length;
+  const rangesBetween = (from: number, to: number): LineRange[] =>
+    mathApplies ? mathRanges.slice(displayStart[from], displayStart[to]) : [];
   // Live blocks that take part in the diff: keyed (pristine since their
   // render) or at least a real markdown block (poisoned → NO_RENDER_KEY →
   // always lands in the replaced run). Everything else (caret-trap <p>s) is
@@ -1354,15 +1393,22 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
     cursor = next;
   }
 
-  // Move the fresh changed run in (same anchoring, keeping text nodes).
-  const inserted = fresh.slice(prefix, fresh.length - suffix);
+  // Move the fresh changed run (same anchoring, keeping text nodes) into its
+  // own container, post-process only it, then splice it in. Post-process swaps
+  // top-level nodes 1:1, so `inserted` lines up with freshKeys[prefix..].
   const freshStop: ChildNode | null = suffix > 0 ? fresh[fresh.length - suffix] : null;
   let src: ChildNode | null = prefix === 0 ? staging.firstChild : fresh[prefix - 1].nextSibling;
-  const frag = document.createDocumentFragment();
+  const run = document.createElement('div');
   while (src && src !== freshStop) {
     const next: ChildNode | null = src.nextSibling;
-    frag.appendChild(src);
+    run.appendChild(src);
     src = next;
+  }
+  postProcessRenderedDom(run, rangesBetween(prefix, fresh.length - suffix));
+  const inserted = Array.from(run.children);
+  const frag = document.createDocumentFragment();
+  while (run.firstChild) {
+    frag.appendChild(run.firstChild);
   }
   content.insertBefore(frag, liveStop);
 
@@ -1370,10 +1416,12 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   // moved them even though their content did not change) and re-key.
   for (let i = 0; i < prefix; i++) {
     copySrcLines(fresh[i], live[i]);
+    syncMathBlockLines(live[i], rangesBetween(i, i + 1));
     renderKeyByBlock.set(live[i], freshKeys[i]);
   }
   for (let k = 1; k <= suffix; k++) {
     copySrcLines(fresh[fresh.length - k], live[live.length - k]);
+    syncMathBlockLines(live[live.length - k], rangesBetween(fresh.length - k, fresh.length - k + 1));
     renderKeyByBlock.set(live[live.length - k], freshKeys[freshKeys.length - k]);
   }
   for (let i = 0; i < inserted.length; i++) {
@@ -1400,8 +1448,9 @@ function renderDocument(markdown: string): void {
   const inserted = tryPatchRender(cleanHtml, mathRanges);
   if (!inserted) {
     content.innerHTML = cleanHtml;
+    const rawKeys = Array.from(content.children, (el) => lineAgnosticKey(el));
     postProcessRenderedDom(content, mathRanges);
-    snapshotRenderKeys();
+    snapshotRenderKeys(rawKeys);
   }
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();

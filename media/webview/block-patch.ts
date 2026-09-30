@@ -10,7 +10,8 @@
  * line shift) does not count as a change. main.ts owns the splice itself; the
  * pure pieces live here so they stay unit-testable.
  */
-import { LINE_NUMBER_ATTR, LINE_NUMBER_END_ATTR } from './render';
+import { hashSource } from './diagram-frame';
+import { LINE_NUMBER_ATTR, LINE_NUMBER_END_ATTR, MATH_BLOCK_CLASS } from './render';
 
 /**
  * Stamped on #content by renderDocument after EVERY render, full or patched.
@@ -23,8 +24,11 @@ import { LINE_NUMBER_ATTR, LINE_NUMBER_END_ATTR } from './render';
 export const RENDER_GENERATION_ATTR = 'data-render-generation';
 
 /**
- * A block's identity for the patch diff: its outerHTML with the line-number
- * attribute VALUES normalized away. Computed on a clone via the DOM — never by
+ * A block's identity for the patch diff: `${length}:${hash}` of its outerHTML
+ * with the line-number attribute VALUES normalized away — a short stamp, so the
+ * retained keys do not hold the document's HTML a second time. main.ts keys the
+ * RAW (pre-post-process) render, so only inserted blocks get post-processed.
+ * The normalization is computed on a clone via the DOM — never by
  * regex over the serialized string: text nodes keep literal `"` when an element
  * is re-serialized, so prose/code that CONTAINS ` data-line="5"` would match a
  * regex and alias two different blocks to one key (review finding, iter 1).
@@ -44,7 +48,8 @@ export function lineAgnosticKey(el: Element): string {
       carrier.setAttribute(LINE_NUMBER_END_ATTR, '');
     }
   }
-  return clone.outerHTML;
+  const outer = clone.outerHTML;
+  return `${outer.length}:${hashSource(outer)}`;
 }
 
 export interface BlockPatchPlan {
@@ -85,17 +90,20 @@ function lineCarriers(el: Element): Element[] {
 }
 
 /**
- * Copy the data-line/data-line-end values of `from` (a freshly rendered block)
- * onto `to` (the kept live block with the same line-agnostic key). Copying the
- * exact values — rather than shifting by a start-line delta — keeps every
- * carrier correct even when inter-block gaps changed non-uniformly. Because
- * the key includes carrier presence/position (see lineAgnosticKey), equal keys
- * imply identical carrier lists, so the zip below always aligns 1:1; the
- * length guard is defensive only (copy nothing rather than misalign).
+ * Copy the data-line/data-line-end values of `from` (a freshly rendered RAW
+ * block) onto `to` (the kept, post-processed live block with the same
+ * line-agnostic key). Copying the exact values — rather than shifting by a
+ * start-line delta — keeps every carrier correct even when inter-block gaps
+ * changed non-uniformly. Because the key includes carrier presence/position
+ * (see lineAgnosticKey), equal keys imply identical raw carrier lists. The only
+ * carriers post-processing adds are MATH_BLOCK_CLASS wrappers, whose lines come
+ * from the math ranges rather than the raw HTML — they are skipped on `to`
+ * (main.ts sets them), so the zip aligns 1:1; the length guard is defensive
+ * only (copy nothing rather than misalign).
  */
 export function copySrcLines(from: Element, to: Element): void {
   const src = lineCarriers(from);
-  const dst = lineCarriers(to);
+  const dst = lineCarriers(to).filter((el) => !el.classList.contains(MATH_BLOCK_CLASS));
   if (src.length !== dst.length) {
     return;
   }

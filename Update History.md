@@ -21,3 +21,4 @@
 | 1.2.2 | 2026-09-30 | Fix: dragging the TOC resize handle moves only the panel; content re-lays out after a 150 ms pause and on release |
 | 1.2.2 | 2026-09-30 | Fix: TOC show/hide and resize lag on large tables closed — one content reflow per toggle, debounced reserve while dragging |
 | 1.2.2 | 2026-09-30 | Fix: re-render after undo/redo reuses cached code highlighting and math typesetting for unchanged blocks |
+| 1.2.2 | 2026-09-30 | Fix: external or undo updates post-process only the changed blocks and keep a short hash per block instead of its full HTML |
