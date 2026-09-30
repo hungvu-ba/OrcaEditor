@@ -23,3 +23,4 @@
 | 1.2.2 | 2026-09-30 | Fix: re-render after undo/redo reuses cached code highlighting and math typesetting for unchanged blocks |
 | 1.2.2 | 2026-09-30 | Fix: external or undo updates post-process only the changed blocks and keep a short hash per block instead of its full HTML |
 | 1.2.2 | 2026-09-30 | Fix: typing in a file without entity declarations no longer makes every open editor re-check entity references; declaration files are stat-ed once per check |
+| 1.2.2 | 2026-09-30 | Fix: mermaid and PlantUML keep at most 32 rendered diagrams in memory per tab instead of every diagram ever shown |

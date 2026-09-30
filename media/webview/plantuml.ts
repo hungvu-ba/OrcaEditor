@@ -27,6 +27,8 @@ import {
   initDiagramFrameToolbar,
   isDarkBackground,
   readDiagramFrame,
+  recallSvg,
+  rememberSvg,
 } from './diagram-frame';
 import { loadNoncedEngineScript, type EngineConfig } from './engine-loader';
 
@@ -164,7 +166,7 @@ async function renderDiagram(
   const dark = isDarkBackground();
   lastDark = dark;
   const key = `${dark ? 'dark' : 'light'}:${hashSource(source)}`;
-  const cached = svgCache.get(key);
+  const cached = recallSvg(svgCache, key);
   if (cached !== undefined) {
     chart.innerHTML = cached;
     chart.classList.remove(ERROR_CLASS);
@@ -181,7 +183,7 @@ async function renderDiagram(
     // mới hơn chiếm chỗ có thể đang mang cờ nền cũ, cache nó sẽ trả sai màu về sau.
     // Sanitize before caching (S-4) so every cache hit is already clean too.
     const safeSvg = sanitizeSvgMarkup(svg);
-    svgCache.set(key, safeSvg);
+    rememberSvg(svgCache, key, safeSvg);
     chart.innerHTML = safeSvg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {

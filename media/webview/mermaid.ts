@@ -17,7 +17,14 @@
  */
 import { MERMAID_CLASS, MERMAID_CHART_CLASS, MERMAID_SOURCE_CLASS } from './pipeline';
 import { openLightbox } from './lightbox';
-import { MERMAID_FRAME, hashSource, initDiagramFrameToolbar, isDarkBackground } from './diagram-frame';
+import {
+  MERMAID_FRAME,
+  hashSource,
+  initDiagramFrameToolbar,
+  isDarkBackground,
+  recallSvg,
+  rememberSvg,
+} from './diagram-frame';
 import { loadNoncedEngineScript, type EngineConfig } from './engine-loader';
 
 export interface MermaidController {
@@ -206,7 +213,7 @@ async function renderDiagram(
 
   // Cache hit: source + color signature unchanged → reuse the existing SVG instead of re-calling mermaid.render.
   const key = `${colorSignature}:${hashSource(source)}`;
-  const cached = svgCache.get(key);
+  const cached = recallSvg(svgCache, key);
   if (cached !== undefined) {
     chart.innerHTML = cached;
     chart.classList.remove(ERROR_CLASS);
@@ -227,7 +234,7 @@ async function renderDiagram(
     // pass with different colors) store an SVG under the wrong
     // `signature:hash` key → a later cache hit would then return the wrong colors.
     // A pass that clears the guard is guaranteed the newest, so its SVG matches its key's signature.
-    svgCache.set(key, svg);
+    rememberSvg(svgCache, key, svg);
     chart.innerHTML = svg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {
