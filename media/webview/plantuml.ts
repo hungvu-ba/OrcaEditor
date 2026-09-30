@@ -23,7 +23,6 @@ import { openLightbox } from './lightbox';
 import { sanitizeSvgMarkup } from './svg-sanitize';
 import {
   PLANTUML_FRAME,
-  hashSource,
   initDiagramFrameToolbar,
   isDarkBackground,
   readDiagramFrame,
@@ -165,7 +164,7 @@ async function renderDiagram(
 
   const dark = isDarkBackground();
   lastDark = dark;
-  const key = `${dark ? 'dark' : 'light'}:${hashSource(source)}`;
+  const key = `${dark ? 'dark' : 'light'}:${source}`;
   const cached = recallSvg(svgCache, key);
   if (cached !== undefined) {
     chart.innerHTML = cached;

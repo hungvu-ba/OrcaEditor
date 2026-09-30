@@ -19,7 +19,6 @@ import { MERMAID_CLASS, MERMAID_CHART_CLASS, MERMAID_SOURCE_CLASS } from './pipe
 import { openLightbox } from './lightbox';
 import {
   MERMAID_FRAME,
-  hashSource,
   initDiagramFrameToolbar,
   isDarkBackground,
   recallSvg,
@@ -212,7 +211,7 @@ async function renderDiagram(
   const { theme, colors, signature: colorSignature } = computeColorSignature();
 
   // Cache hit: source + color signature unchanged → reuse the existing SVG instead of re-calling mermaid.render.
-  const key = `${colorSignature}:${hashSource(source)}`;
+  const key = `${colorSignature}:${source}`;
   const cached = recallSvg(svgCache, key);
   if (cached !== undefined) {
     chart.innerHTML = cached;

@@ -32,7 +32,9 @@ async function showOnly(page: Page, n: number): Promise<string> {
   const svg = page.locator('.md-mermaid-chart svg');
   await expect(svg).toHaveCount(1);
   await expect(svg).toContainText('B' + n);
-  return (await svg.getAttribute('id')) ?? '';
+  const id = await svg.getAttribute('id');
+  expect(id).toMatch(/^md-mermaid-svg-\d+$/);
+  return id ?? '';
 }
 
 test('mermaid SVG cache keeps 32 entries, least recently used out', async ({ page }) => {

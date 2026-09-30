@@ -408,7 +408,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const reindex = (uri: vscode.Uri): void => provider.scheduleReindex(uri);
     const watcherSubs = [
       watcher.onDidChange(reindex),
-      watcher.onDidCreate(reindex),
+      // A new file can resolve a file link in another panel even with no declarations.
+      watcher.onDidCreate((uri) => provider.scheduleReindex(uri, true)),
       watcher.onDidDelete((uri) => provider.forgetIndexedFile(uri)),
       watcher,
     ];
@@ -538,6 +539,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * other occurrence(s)` count, NOT any correctness guarantee.
    */
   private occurrenceCache = new Map<string, { file: string; line: number }[]>();
+  /** L-13: an open scan changed a count panels have not re-checked yet (cleared by notifyEntityIndexUpdated). */
+  private occurrencesChanged = false;
 
   /**
    * Req 21 US-21.3: re-scan one just-opened markdown document for entity
@@ -557,10 +560,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         for (let i = rows.length - 1; i >= 0; i--) {
           if (rows[i].file === fileKey) {
             rows.splice(i, 1);
+            this.occurrencesChanged = true;
           }
         }
       }
       for (const { id, line } of scanEntityOccurrences(text)) {
+        this.occurrencesChanged = true;
         const bucket = this.occurrenceCache.get(id);
         if (bucket) {
           bucket.push({ file: fileKey, line });
@@ -604,9 +609,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     'coverage',
   ]);
   private readonly reindexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** URIs whose pending reindex must notify even when their rows did not change (watcher create). */
+  private readonly forcedReindex = new Set<string>();
 
   /** X-16: debounced, dir-scoped entry point for watcher change/create events. */
-  private scheduleReindex(uri: vscode.Uri): void {
+  private scheduleReindex(uri: vscode.Uri, force = false): void {
     if (uri.path.split('/').some((seg) => MarkdownWysiwygProvider.WATCHER_EXCLUDE_DIRS.has(seg))) {
       return;
     }
@@ -615,11 +622,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (existing !== undefined) {
       clearTimeout(existing);
     }
+    if (force) {
+      this.forcedReindex.add(key);
+    }
     this.reindexTimers.set(
       key,
       setTimeout(() => {
         this.reindexTimers.delete(key);
-        void this.reindexFile(uri);
+        void this.reindexFile(uri, this.forcedReindex.delete(key));
       }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
     );
   }
@@ -632,11 +642,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       clearTimeout(existing);
       this.reindexTimers.delete(key);
     }
-    const changed = this.entityIndex.onFileChanged(key, '');
+    this.forcedReindex.delete(key);
+    this.entityIndex.onFileChanged(key, '');
     this.crossFileTextCache.delete(documentStateKey(key, CASE_INSENSITIVE_FS));
-    if (changed) {
-      this.notifyEntityIndexUpdated();
-    }
+    // Always notify: a deleted file breaks file links in other panels even with no declarations.
+    this.notifyEntityIndexUpdated();
   }
 
   /**
@@ -804,10 +814,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
-  private async reindexFile(uri: vscode.Uri): Promise<void> {
+  private async reindexFile(uri: vscode.Uri, force = false): Promise<void> {
     try {
-      // L-13: a file whose declarations did not change leaves every panel's markers valid.
-      if (this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri))) {
+      // L-13: a file whose declarations did not change leaves every panel's markers valid,
+      // unless it was just created or an open scan changed an occurrence count since the last notify.
+      const changed = this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+      if (changed || force || this.occurrencesChanged) {
         this.notifyEntityIndexUpdated();
       }
     } catch (err) {
@@ -822,6 +834,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * absorbed by the webview's own recompute debounce.
    */
   private notifyEntityIndexUpdated(): void {
+    this.occurrencesChanged = false;
     for (const panels of this.panelsByUri.values()) {
       for (const panel of panels) {
         void panel.webview.postMessage({ type: 'entityIndexUpdated' } satisfies HostToWebview);
