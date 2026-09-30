@@ -22,6 +22,7 @@ import {
   classifyLink,
   computeMinimalEdit,
   documentStateKey,
+  FileTextCache,
   imageNamePrefix,
   driveMismatchHint,
   isPathTooLongError,
@@ -632,6 +633,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       this.reindexTimers.delete(key);
     }
     this.entityIndex.onFileChanged(key, '');
+    this.crossFileTextCache.delete(documentStateKey(key, CASE_INSENSITIVE_FS));
     this.notifyEntityIndexUpdated();
   }
 
@@ -2495,6 +2497,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // return raw `{"schema_version":1,...}` lines instead of document text.
     // US-23.20 AC8: its timestamped `.bak` sibling is the same machine data.
     '**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
+  /** Audit L-5: char budget of the cross-query file text cache (~16 MB as UTF-16). */
+  private static readonly CROSS_FILE_SEARCH_CACHE_MAX_CHARS = 8_000_000;
+  /** Audit L-5: disk-read file text kept across crossFileSearch requests, stamp-checked by mtime + size. */
+  private readonly crossFileTextCache = new FileTextCache(MarkdownWysiwygProvider.CROSS_FILE_SEARCH_CACHE_MAX_CHARS);
 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
@@ -2662,8 +2668,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             if (openDoc) {
               text = openDoc.getText();
             } else {
-              const bytes = await vscode.workspace.fs.readFile(uri);
-              text = new TextDecoder().decode(bytes);
+              const stat = await vscode.workspace.fs.stat(uri);
+              const stamp = `${stat.mtime}:${stat.size}`;
+              const diskKey = documentStateKey(uriKey, CASE_INSENSITIVE_FS);
+              const kept = this.crossFileTextCache.get(diskKey, stamp);
+              if (kept !== undefined) {
+                text = kept; // unchanged since an earlier request (audit L-5)
+              } else {
+                const bytes = await vscode.workspace.fs.readFile(uri);
+                text = new TextDecoder().decode(bytes);
+                this.crossFileTextCache.set(diskKey, stamp, text);
+              }
             }
           } catch (err) {
             // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được

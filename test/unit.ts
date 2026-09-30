@@ -19,6 +19,7 @@ import {
   driveMismatchHint,
   entityFollowingLabel,
   entityFollowingPreview,
+  FileTextCache,
   imageNamePrefix,
   isPathTooLongError,
   normalizeAssetName,
@@ -5677,6 +5678,35 @@ check(
   eq('US-23.26 locateQuote: an absent quote is null', locateQuote('Alpha beta.', 'gamma'), null);
   eq('US-23.26 locateQuote: an empty quote is null', locateQuote('Alpha beta.', ''), null);
   eq('US-23.26 locateQuote: a marker-only quote is null', locateQuote('Alpha ** beta.', ' ** `` '), null);
+}
+
+// --- FileTextCache (audit L-5) ---------------------------------------------
+{
+  const hit = new FileTextCache(100);
+  hit.set('a', '1:5', 'alpha');
+  eq('FileTextCache (audit L-5): an equal stamp returns the kept text', hit.get('a', '1:5'), 'alpha');
+
+  const stale = new FileTextCache(100);
+  stale.set('a', '1:5', 'alpha');
+  eq('FileTextCache (audit L-5): a changed stamp returns undefined', stale.get('a', '2:5'), undefined);
+  eq('FileTextCache (audit L-5): ...and drops the entry', stale.get('a', '1:5'), undefined);
+
+  const lru = new FileTextCache(10);
+  lru.set('a', 's', 'aaaa');
+  lru.set('b', 's', 'bbbb');
+  lru.get('a', 's');
+  lru.set('c', 's', 'cccc');
+  eq('FileTextCache (audit L-5): past budget evicts the least recently used (b), not a just-read entry (a)',
+    [lru.get('a', 's'), lru.get('b', 's'), lru.get('c', 's')], ['aaaa', undefined, 'cccc']);
+
+  const big = new FileTextCache(4);
+  big.set('a', 's', 'aaaaa');
+  eq('FileTextCache (audit L-5): a text longer than the budget is not stored', big.get('a', 's'), undefined);
+
+  const del = new FileTextCache(100);
+  del.set('a', 's', 'alpha');
+  del.delete('a');
+  eq('FileTextCache (audit L-5): delete removes the entry', del.get('a', 's'), undefined);
 }
 
 console.log(`\n${pass} pass, ${fail} fail`);
