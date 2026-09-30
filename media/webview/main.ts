@@ -38,6 +38,7 @@ import {
   MD_CODE_WRAP_CLASS,
   initFrontMatterToggle,
   applyFrontMatterViewState,
+  upgradeFrontMatterFallbacks,
   MERMAID_CLASS,
   MERMAID_CHART_CLASS,
   PLANTUML_CLASS,
@@ -2749,12 +2750,12 @@ function renderPasteHtml(text: string): string {
   postProcessMermaidDom(tmp, document);
   postProcessPlantumlDom(tmp, document);
   postProcessCodeHeaders(tmp, document);
-  // L-9: never waits — a formula rendered without the engine is a stand-in now,
-  // swapped in place once the engine arrives.
+  // L-9: never waits — a formula or front-matter card rendered without its
+  // engine is a stand-in now, rebuilt in place once the engine arrives.
   for (const engine of takeEngineMisses()) {
     if (!lazyEngineFailed(engine)) {
       loadLazyEngine(engine).then(
-        () => upgradeMathFallbacks(content),
+        () => (engine === 'math' ? upgradeMathFallbacks(content) : upgradeFrontMatterFallbacks(content)),
         () => undefined
       );
     }

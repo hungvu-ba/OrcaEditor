@@ -30,3 +30,4 @@
 | 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse now behaves like a valid one, one unit with an Edit button; Enter or Backspace beside it no longer duplicates it or loses text |
 | 1.2.2 | 2026-09-30 | Feature: math and front-matter engines build as separate lazily loadable bundles, groundwork for keeping KaTeX, js-yaml and smol-toml out of the preview's startup script |
 | 1.2.2 | 2026-09-30 | Fix: previews without math no longer load the KaTeX engine at startup; it loads on the first formula, rendering and saved Markdown unchanged |
+| 1.2.2 | 2026-09-30 | Fix: previews without YAML or TOML front matter no longer load the YAML/TOML parsers at startup; they load on first use |

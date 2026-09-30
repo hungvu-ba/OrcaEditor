@@ -38,6 +38,7 @@ import { load } from 'js-yaml';
 import { parse as parseToml } from 'smol-toml';
 import { FRONT_MATTER_CLASS, LINE_NUMBER_ATTR } from './render';
 import { escapeHtml, escapeAttr } from './dom-utils';
+import { engineMissCount } from './lazy-engines';
 
 /** Which delimiter the block was written with. Picks the parser and the fence, and nothing else — no field, badge or grid rendering branches on it. `json` has no delimiter at all (US-2.11). */
 export type FrontMatterFormat = 'yaml' | 'toml' | 'json';
@@ -71,6 +72,9 @@ const PARSE_ERROR_TEXT = 'Parse error';
 
 /** The time-of-day part of an ISO string whose UTC clock reads exactly midnight — such a value displays as a bare date. */
 const MIDNIGHT_UTC_SUFFIX = 'T00:00:00.000Z';
+
+/** Marks a card parsed before the front-matter engine loaded (audit L-9); `upgradeFrontMatterFallbacks` rebuilds it. */
+const ENGINE_MISS_ATTR = 'data-fm-engine-miss';
 
 /** Keys promoted out of the key/value grid into the title/badge/meta slots (tokens.json `fieldMapping`). */
 const PROMOTED_KEYS = new Set(['title', 'status', 'type', 'priority', 'created', 'updated']);
@@ -110,6 +114,8 @@ export interface FrontMatterParseResult {
   titleKey: string | undefined;
   /** `status` field's promotable text, for the coloured badge — `undefined` when absent, blank, or not promotable. */
   status: string | undefined;
+  /** Parsed through a shim before the front-matter engine loaded (audit L-9): the fields are not the block's own. */
+  engineMiss?: boolean;
 }
 
 /** A plain `{}` map — deliberately NOT `typeof v === 'object'`, which a `Date` and a `Uint8Array` both pass. */
@@ -311,8 +317,14 @@ function buildRawLineFallback(raw: string, errorLine: number | undefined): Front
   };
 }
 
+/** `result`, flagged when a shim answered without the front-matter engine since `missesBefore` was read. */
+function withEngineMiss(result: FrontMatterParseResult, missesBefore: number): FrontMatterParseResult {
+  return engineMissCount() === missesBefore ? result : { ...result, engineMiss: true };
+}
+
 /** YAML entry point — the only place `js-yaml` is used. See the module docstring for the `{ json: true }` duplicate-key rule and the throw-is-not-invalid rule. */
 export function parseFrontMatterFields(raw: string): FrontMatterParseResult {
+  const missesBefore = engineMissCount();
   let parsed: unknown;
   try {
     parsed = load(raw, { json: true });
@@ -321,7 +333,7 @@ export function parseFrontMatterFields(raw: string): FrontMatterParseResult {
     const mark = (err as { mark?: { line?: number } }).mark;
     return buildRawLineFallback(raw, typeof mark?.line === 'number' ? mark.line + 1 : undefined);
   }
-  return buildFrontMatterFields(parsed);
+  return withEngineMiss(buildFrontMatterFields(parsed), missesBefore);
 }
 
 /**
@@ -351,6 +363,7 @@ export function tomlErrorLine(err: unknown): number {
  * render as an error frame.
  */
 export function parseTomlFrontMatterFields(raw: string): FrontMatterParseResult {
+  const missesBefore = engineMissCount();
   let parsed: unknown;
   // Only the parse call belongs inside the try. Wrapping the field-building
   // too would relabel any rendering bug as a syntax error the user does not
@@ -360,7 +373,7 @@ export function parseTomlFrontMatterFields(raw: string): FrontMatterParseResult 
   } catch (err) {
     return buildInvalidParseResult(tomlErrorLine(err));
   }
-  return buildFrontMatterFields(parsed);
+  return withEngineMiss(buildFrontMatterFields(parsed), missesBefore);
 }
 
 /** `unit` is `line` on a raw-row fallback card: those rows are source lines, not fields the parser resolved. */
@@ -618,7 +631,7 @@ export function buildFrontMatterHtml(raw: string, line: number, parsed: FrontMat
   const rawBody = buildRawBodyHtml(raw, format);
 
   return (
-    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-format="${format}" data-fm-view="collapsed" data-fm-raw="false">` +
+    `<div class="${FRONT_MATTER_CLASS}" ${LINE_NUMBER_ATTR}="${line}" contenteditable="false" data-raw="${rawAttr}" data-fm-format="${format}" data-fm-view="collapsed" data-fm-raw="false"${parsed.engineMiss ? ` ${ENGINE_MISS_ATTR}=""` : ''}>` +
     `<div class="md-fm-topline">${topline}</div>` +
     body +
     rawBody +
@@ -732,4 +745,18 @@ export function applyFrontMatterViewState(content: HTMLElement): void {
   wrapper.setAttribute('data-fm-raw', String(lastRaw));
   wrapper.querySelector('.md-fm-toggle')?.setAttribute('aria-expanded', String(lastView === 'expanded'));
   wrapper.querySelector('.md-fm-raw-toggle')?.setAttribute('aria-pressed', String(lastRaw));
+}
+
+/**
+ * Rebuilds every card under `root` that was parsed before the front-matter
+ * engine loaded (a pasted block, audit L-9) from its own `data-raw` /
+ * `data-fm-format`. main.ts's renderPasteHtml calls it once the engine loads.
+ */
+export function upgradeFrontMatterFallbacks(root: Element): void {
+  for (const card of Array.from(root.querySelectorAll(`.${FRONT_MATTER_CLASS}[${ENGINE_MISS_ATTR}]`))) {
+    const raw = card.getAttribute('data-raw') ?? '';
+    const format: FrontMatterFormat = card.getAttribute('data-fm-format') === 'toml' ? 'toml' : 'yaml';
+    const parsed = format === 'toml' ? parseTomlFrontMatterFields(raw) : parseFrontMatterFields(raw);
+    card.outerHTML = buildFrontMatterHtml(raw, Number(card.getAttribute(LINE_NUMBER_ATTR)), parsed, format).trimEnd();
+  }
 }

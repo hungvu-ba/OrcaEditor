@@ -33,8 +33,13 @@ const webviewConfig = {
   // Audit L-9: routes both math-edit.ts's ESM import and
   // @vscode/markdown-it-katex's require('katex') to katex-shim.ts, which
   // forwards to the lazily loaded math-engine.js — so main.js carries no KaTeX
-  // (~270 KB). Only mathEngineConfig below keeps the real katex.mjs.
-  alias: { katex: path.resolve(__dirname, 'media/webview/katex-shim.ts') },
+  // (~270 KB). Only mathEngineConfig below keeps the real katex.mjs. js-yaml and
+  // smol-toml go the same way to front-matter-engine.js (~54 KB).
+  alias: {
+    katex: path.resolve(__dirname, 'media/webview/katex-shim.ts'),
+    'js-yaml': path.resolve(__dirname, 'media/webview/yaml-shim.ts'),
+    'smol-toml': path.resolve(__dirname, 'media/webview/toml-shim.ts'),
+  },
 };
 
 /**
