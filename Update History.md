@@ -7,3 +7,4 @@
 | 1.2.2 | 2026-09-30 | Feature: Fit-mode tables keep column edges still while typing; only the edited column widens under overflow or growth pressure, paste/undo re-fit at once, IME-safe, caret row anchored. |
 | 1.2.2 | 2026-09-30 | Fix: pasted/dropped images inside a fit-mode table cell now re-fit immediately, not only on overflow/2-line-growth heuristics that a single insert never trips |
 | 1.2.2 | 2026-09-30 | Feature: fit-mode tables settle a typing-widened column back on table leave, editor blur or 2 s idle; panel resize keeps widths until 150 ms after the last event. |
+| 1.2.2 | 2026-09-30 | Feature: Fit-mode tables use area-optimal column widths with calm re-fits (US-19.27 shipped); phase gate green: unit 1041, roundtrip 25/25, webview 915, 0 flaky. |
