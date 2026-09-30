@@ -23,7 +23,7 @@ interface CellLines {
   segments: BreakUnit[][];
   cjkUnits: number;
   units: number;
-  fixedH?: number;
+  fixedH?: number[];
 }
 interface AreaFitColumn {
   cells: CellLines[];

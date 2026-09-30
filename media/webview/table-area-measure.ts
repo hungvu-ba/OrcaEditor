@@ -11,8 +11,8 @@ import { isCjkBreakUnit } from './reading-stats';
 import { MD_TABLE_FIT_CLASS, TABLE_FIT_MEASURING_CLASS, TABLE_MIN_MEASURING_CLASS } from './constants';
 
 /**
- * Fixed-height content: `fixedH` sums, over hard lines, the tallest such box on
- * each line. img/svg/video are one atomic item; a `.katex` is walked, since
+ * Fixed-height content: `fixedH[s]` is the tallest such box on hard line s.
+ * img/svg/video are one atomic item; a `.katex` is walked, since
  * Chromium breaks between its `.base` inline-blocks.
  */
 const FIXED_BOX_SELECTOR = 'img,svg,video,.katex';
@@ -221,7 +221,7 @@ function toCellLines(lines: HardLine[], spans: [number, number][][], range: Rang
   const segments: BreakUnit[][] = [];
   let units = 0;
   let cjkUnits = 0;
-  let fixedH: number | undefined;
+  let fixedH: number[] | undefined;
   lines.forEach((line, i) => {
     let prevLeft = 0;
     let prevRight = 0;
@@ -255,7 +255,8 @@ function toCellLines(lines: HardLine[], spans: [number, number][][], range: Rang
       })
     );
     if (line.fixed.length) {
-      fixedH = (fixedH ?? 0) + Math.max(...line.fixed.map((el) => fixedBoxHeight(el, el.getBoundingClientRect())));
+      fixedH ??= new Array<number>(lines.length).fill(0);
+      fixedH[i] = Math.max(...line.fixed.map((el) => fixedBoxHeight(el, el.getBoundingClientRect())));
     }
   });
   // No unit and at most one (empty) hard line: an empty cell. `<br><br>` still

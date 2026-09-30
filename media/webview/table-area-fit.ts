@@ -6,7 +6,7 @@
  */
 
 export interface BreakUnit { w: number; gap: number }            // w = unit px; gap = px added before it when not first on its line
-export interface CellLines { segments: BreakUnit[][]; cjkUnits: number; units: number; fixedH?: number } // one segment per hard line; empty cell = { segments: [], cjkUnits: 0, units: 0 }; fixedH = Σ over hard lines of the tallest img/svg/video/.katex box on that line (px)
+export interface CellLines { segments: BreakUnit[][]; cjkUnits: number; units: number; fixedH?: number[] } // one segment per hard line; empty cell = { segments: [], cjkUnits: 0, units: 0 }; fixedH[s] = tallest img/svg/video/.katex box on hard line s (px, 0 = none), absent when the cell has none
 export interface AreaFitColumn {
   cells: CellLines[];   // every row incl. header, row order
   hardMinW: number;     // border-box px (contract 3)
@@ -37,20 +37,29 @@ const AREA_FIT_MAX_CANDIDATES = 16;
  */
 export function cellLineCount(cell: CellLines, contentW: number): number {
   let lines = 0;
-  for (const seg of cell.segments) {
-    lines++;
-    let lineW = seg.length ? seg[0].w : 0;
-    for (let i = 1; i < seg.length; i++) {
-      const u = seg[i];
-      if (lineW + u.gap + u.w > contentW) {
-        lines++;
-        lineW = u.w;
-      } else {
-        lineW += u.gap + u.w;
-      }
+  for (const seg of cell.segments) lines += segmentLineCount(seg, contentW);
+  return Math.max(1, lines);
+}
+
+function segmentLineCount(seg: BreakUnit[], contentW: number): number {
+  let lines = 1;
+  let lineW = seg.length ? seg[0].w : 0;
+  for (let i = 1; i < seg.length; i++) {
+    const u = seg[i];
+    if (lineW + u.gap + u.w > contentW) {
+      lines++;
+      lineW = u.w;
+    } else {
+      lineW += u.gap + u.w;
     }
   }
-  return Math.max(1, lines);
+  return lines;
+}
+
+/** Contract 4: Σ over hard lines of max(lines × lineH, that line's fixed box); an empty cell is 1 line. */
+function cellHeight(cell: CellLines, contentW: number, lineH: number): number {
+  if (!cell.segments.length) return lineH;
+  return cell.segments.reduce((h, seg, s) => h + Math.max(segmentLineCount(seg, contentW) * lineH, cell.fixedH?.[s] ?? 0), 0);
 }
 
 const EMPTY_CELL: CellLines = { segments: [], cjkUnits: 0, units: 0 };
@@ -59,11 +68,12 @@ const EMPTY_CELL: CellLines = { segments: [], cjkUnits: 0, units: 0 };
 interface CellFit {
   /** need[k] = smallest border-box width in [lo, hi] giving ≤ k lines; Infinity when even hi gives more. need[need.length - 1] = lo. */
   need: number[];
-  fixedH: number;
+  /** h[k] = cell height (px) at need[k]: k lines fix every hard line's count; Infinity where need[k] is. */
+  h: number[];
 }
 
 /** Solver step 2: breakpoints by binary search on `cellLineCount` (monotone non-increasing in width). */
-function fitCell(cell: CellLines, lo: number, hi: number, padX: number): CellFit {
+function fitCell(cell: CellLines, lo: number, hi: number, padX: number, lineH: number): CellFit {
   const linesAt = (w: number): number => cellLineCount(cell, w - padX);
   const linesLo = linesAt(lo);
   const linesHi = linesAt(hi);
@@ -84,7 +94,7 @@ function fitCell(cell: CellLines, lo: number, hi: number, padX: number): CellFit
     }
     need[k] = b;
   }
-  return { need, fixedH: cell.fixedH ?? 0 };
+  return { need, h: need.map((w) => (w < Infinity ? cellHeight(cell, w - padX, lineH) : Infinity)) };
 }
 
 /** Widest hard line of the column's cells in the model: max Σ (unit widths + gaps), px. */
@@ -148,7 +158,7 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
   const read = cols.map((c, j) => Math.min(hi[j], Math.max(hard[j], Math.ceil(c.readFloorW))));
   const loose = cols.map((c, j) => Math.min(read[j], Math.max(hard[j], Math.ceil(c.looseFloorW))));
   const fits = cols.map((c, j) =>
-    Array.from({ length: rows }, (_, r) => fitCell(c.cells[r] ?? EMPTY_CELL, loose[j], hi[j], padX)),
+    Array.from({ length: rows }, (_, r) => fitCell(c.cells[r] ?? EMPTY_CELL, loose[j], hi[j], padX, lineH)),
   );
   // Contract 11: at most AREA_FIT_MAX_CANDIDATES trajectory widths per column —
   // evenly spaced by rank over the sorted union of its cells' breakpoints, the
@@ -160,7 +170,7 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     return Array.from({ length: AREA_FIT_MAX_CANDIDATES }, (_, i) => all[Math.ceil((i + 1) * step) - 1]);
   });
   const snapUp = (j: number, w: number): number => candidates[j].find((c) => c >= w) ?? w;
-  const cellH = (j: number, r: number, lines: number): number => Math.max(lines * lineH, fits[j][r].fixedH);
+  const cellH = (j: number, r: number, lines: number): number => fits[j][r].h[lines];
   const colLines = (j: number, w: number): number[] => fits[j].map((f) => linesAtWidth(f, w));
   const sum = (a: number[]): number => a.reduce((s, w) => s + w, 0);
   /** Row heights at arbitrary widths (clamped into each column's fit range). */
@@ -225,7 +235,8 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
       let w = bottleneck[j] ? read[j] : loose[j];
       for (let r = 0; r < rows; r++) {
         const f = fits[j][r];
-        const k = Math.min(f.need.length - 1, Math.floor(rowH[r] / lineH + 1e-9));
+        let k = f.need.length - 1;
+        while (f.h[k] > rowH[r] + 1e-9) k--;
         w = Math.max(w, f.need[k]);
       }
       return w;
@@ -241,10 +252,12 @@ export function solveAreaFit(cols: AreaFitColumn[], opts: AreaFitOptions): AreaF
     };
   };
 
-  /** Smallest width lowering cell (j, r) by one line; Infinity when an image holds it or maxW is reached. */
+  /** Smallest width lowering cell (j, r)'s height; Infinity when fixed boxes hold it or maxW is reached. */
   const oneLineLess = (s: FitState, j: number, r: number): number => {
+    const f = fits[j][r];
     const L = s.lines[j][r];
-    return L * lineH > fits[j][r].fixedH ? snapUp(j, fits[j][r].need[L - 1]) : Infinity;
+    for (let k = L - 1; k > 0 && f.need[k] < Infinity; k--) if (f.h[k] < f.h[L]) return snapUp(j, f.need[k]);
+    return Infinity;
   };
 
   /** Candidate P's: (a) single — a column to its smallest breakpoint lowering a row it alone tops; (b) joint — every tied tallest cell of a row one line down together. */

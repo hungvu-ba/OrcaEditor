@@ -10,3 +10,4 @@
 | 1.2.2 | 2026-09-30 | Feature: Fit-mode tables use area-optimal column widths with calm re-fits (US-19.27 shipped); phase gate green: unit 1041, roundtrip 25/25, webview 915, 0 flaky. |
 | 1.2.2 | 2026-09-30 | Fix: Table area fit no longer keeps a column wider than its content, and stacked images in a cell add one height per line (review fixes T1.8.p1, T1.9.p1). |
 | 1.2.2 | 2026-09-30 | Fix: Table area fit splits words correctly under a small line-height, in RTL text and at <wbr>; a pasted image re-fits the table once it has loaded. |
+| 1.2.2 | 2026-09-30 | Fix: Table area fit adds up a cell's hard lines, so an image with a wrapped caption under it counts both heights (T1.7.p3). |

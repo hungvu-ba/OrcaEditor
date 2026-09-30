@@ -1657,10 +1657,13 @@ function afColumn(cells: CellLines[], readFloorW = 240, looseFloorW = 120): Area
 }
 const afOpts = (budgetW: number): AreaFitOptions => ({ budgetW, padX: AF_PAD, lineH: AF_LINE });
 const afSum = (ws: number[]): number => ws.reduce((s, w) => s + w, 0);
+/** Contract 4 cell height: Σ over hard lines of max(lines × lineH, that line's fixed box); an empty cell is 1 line. */
+function afCellH(cell: CellLines, contentW: number, lineH: number): number {
+  if (!cell.segments.length) return lineH;
+  return cell.segments.reduce((h, seg, s) => h + Math.max(cellLineCount({ ...cell, segments: [seg] }, contentW) * lineH, cell.fixedH?.[s] ?? 0), 0);
+}
 function afRowHeights(cols: AreaFitColumn[], widths: number[], padX = AF_PAD, lineH = AF_LINE): number[] {
-  return cols[0].cells.map((_, r) =>
-    Math.max(...cols.map((c, j) => Math.max(cellLineCount(c.cells[r], widths[j] - padX) * lineH, c.cells[r].fixedH ?? 0))),
-  );
+  return cols[0].cells.map((_, r) => Math.max(...cols.map((c, j) => afCellH(c.cells[r], widths[j] - padX, lineH))));
 }
 const afH = (cols: AreaFitColumn[], widths: number[]): number => afSum(afRowHeights(cols, widths));
 /** Smallest integer width in (w, maxW] giving the cell fewer lines; undefined when none. */
@@ -1806,7 +1809,7 @@ const af20 = (): AreaFitColumn[] => [
 // fixedH: a row held tall by a 120px image gives its text columns no width.
 {
   const photo = (fixedH?: number): AreaFitColumn => ({
-    cells: [afCell(afWords(5)), { segments: [], cjkUnits: 0, units: 0, fixedH }],
+    cells: [afCell(afWords(5)), { segments: [[{ w: 120, gap: 0 }]], cjkUnits: 0, units: 1, ...(fixedH ? { fixedH: [fixedH] } : {}) }],
     hardMinW: 136,
     readFloorW: 240,
     looseFloorW: 120,
@@ -1825,6 +1828,16 @@ const af20 = (): AreaFitColumn[] => [
   eq('solveAreaFit fixedH: the image sets the row height', res.rowHeights[1], 120);
   const noImg = afSolve([photo(), ...text()], afOpts(800));
   check('solveAreaFit fixedH: without the image the tallest text column gets width', noImg.widths[1] >= 240, `  ${JSON.stringify(noImg.widths)}`);
+}
+
+// fixedH per hard line (T1.7.p3): an image line and the caption lines under it add up.
+{
+  // Hard line 0: a 100px-wide, 200px-tall image; hard line 1: an 8-word caption (348px on one line).
+  const imgCaption: CellLines = { segments: [[{ w: 100, gap: 0 }], afWords(5, 5, 5, 5, 5, 5, 5, 5)], cjkUnits: 0, units: 9, fixedH: [200, 0] };
+  const col = afColumn([afCell(afWords(3)), imgCaption]);
+  eq('solveAreaFit fixedH per hard line: image 200 + a 2-line caption = 248', afSolve([col], afOpts(200)).rowHeights[1], 200 + 2 * AF_LINE);
+  const wide = afSolve([col], afOpts(400));
+  eq('solveAreaFit fixedH per hard line: widening the caption to 1 line lowers the row', [wide.widths[0], wide.rowHeights[1]], [364, 200 + AF_LINE]);
 }
 
 // Fractional floors / padding / line height still give integer widths.

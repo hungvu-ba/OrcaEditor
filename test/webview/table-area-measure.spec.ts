@@ -16,7 +16,7 @@ interface CellLines {
   segments: BreakUnit[][];
   cjkUnits: number;
   units: number;
-  fixedH?: number;
+  fixedH?: number[];
 }
 interface Measured {
   lines: CellLines;
@@ -190,18 +190,18 @@ test.describe('Table area fit — measureTableLines', () => {
 
   test('fixedH is the height of the cell image', async ({ page }) => {
     const { lines } = await measureCell(page, `<img src="${PIXEL}" style="width: 40px; height: 120px">`);
-    expect(lines.fixedH).toBeDefined();
-    expect(Math.abs(lines.fixedH! - 120)).toBeLessThanOrEqual(1);
+    expect(lines.fixedH).toHaveLength(1);
+    expect(Math.abs(lines.fixedH![0] - 120)).toBeLessThanOrEqual(1);
   });
 
-  test('fixedH sums the tallest box of each hard line', async ({ page }) => {
+  test('fixedH holds the tallest box of each hard line', async ({ page }) => {
     const img = (h: number): string => `<img src="${PIXEL}" style="width: 40px; height: ${h}px">`;
     const [stacked, sameLine] = await measureCells(page, [
       `${img(120)}<br>${img(80)}<br>text`,
       `${img(120)} ${img(80)}`,
     ]);
-    expect(Math.abs(stacked.lines.fixedH! - 200)).toBeLessThanOrEqual(1);
-    expect(Math.abs(sameLine.lines.fixedH! - 120)).toBeLessThanOrEqual(1);
+    expect(stacked.lines.fixedH!.map(Math.round)).toEqual([120, 80, 0]);
+    expect(sameLine.lines.fixedH!.map(Math.round)).toEqual([120]);
   });
 
   test('fixedH of inline math is the formula height, not its line box', async ({ page }) => {
@@ -218,7 +218,7 @@ test.describe('Table area fit — measureTableLines', () => {
       const range = document.createRange();
       range.selectNodeContents(cell);
       const result = {
-        fixedH: measured.fixedH,
+        fixedH: measured.fixedH?.[0],
         lineBoxH: cell.querySelector('.katex')!.getBoundingClientRect().height,
         contentH: range.getBoundingClientRect().height,
       };
