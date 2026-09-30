@@ -205,7 +205,7 @@ test.describe('US-19.25 table fit-mode', () => {
     // US-19.26: plenty of room → applyFitColumns bails entirely (no cap needed), so
     // the table falls back to the natural default (no `.md-table-fit`, cells are not
     // pinned by max-width — typing more text can grow a column immediately instead
-    // of waiting for a debounced re-fit).
+    // of waiting for a pressure/settle re-fit).
     expect(m.fit).toBe(false);
     // Compact: the small table must NOT fill the wide panel either way.
     expect(m.rectWidth).toBeLessThan(m.contentWidth * 0.7);
@@ -399,7 +399,7 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(await bodyCellWidth(page, 0)).toBeLessThan(350); // kept slack (462 if pinned)
   });
 
-  test('ON: typing into a pinned narrow column re-fits it (debounced) so it grows with content', async ({ page }) => {
+  test('ON: typing into a pinned narrow column re-fits it (pressure / idle settle) so it grows with content', async ({ page }) => {
     // Narrow enough that Σmax-content > budget — genuinely pinned territory (①b/②),
     // not the US-19.26 bail (plenty of room), which is covered by the next test.
     await page.setViewportSize({ width: 560, height: 600 });
@@ -424,7 +424,7 @@ test.describe('US-19.25 table fit-mode', () => {
     });
     await page.keyboard.type(' alpha beta gamma delta epsilon');
 
-    // The column is frozen (max-width pin) until the debounced re-fit fires; after it,
+    // The column is frozen (max-width pin) until a pressure or idle-settle re-fit fires; after it,
     // the column has grown to accommodate the typed content.
     await expect.poll(colAWidth, { timeout: 3000 }).toBeGreaterThan(before + 40);
   });
@@ -454,7 +454,7 @@ test.describe('US-19.25 table fit-mode', () => {
     await page.keyboard.type(' a fairly long phrase to widen this column');
 
     // No max-width was ever set on this cell, so the browser's own auto layout grows
-    // the column as the text lands — no polling/waiting for the 200ms debounced
+    // the column as the text lands — no polling/waiting for the pressure/settle
     // re-fit that the PINNED-column test above depends on. If a stale pin were
     // applied here, this assertion right after typing (no poll) would still see the
     // old, narrower width.

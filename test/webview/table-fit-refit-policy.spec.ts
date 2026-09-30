@@ -7,14 +7,9 @@
  * edit-time re-fit that narrows back; a panel resize keeps widths until FIT_RESIZE_SETTLE_MS.
  * Needs real layout, keyboard and Selection, so it lives here, not roundtrip.
  */
-import * as fs from 'fs';
-import * as path from 'path';
 import { test, expect, type Page } from '@playwright/test';
 import { openEditor } from './_harness';
 import { TABLE_20 } from './table-area-fixtures';
-
-/** Same dist/webview dir the harness HTML is served from (file://) — a `src="assets/..."` on a pasted <img> resolves here. */
-const DIST_WEBVIEW_ASSETS = path.join(__dirname, '..', '..', 'dist', 'webview', 'assets');
 
 const MITIGATION = 3;
 const LIKELIHOOD = 1;
@@ -155,7 +150,7 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
     expect(Math.abs((await cellTop(page, LIKELIHOOD)) - top)).toBeLessThanOrEqual(2);
   });
 
-  test('pasting an image into a cell (async host round-trip) re-fits, not just the debounced pressure path', async ({ page }) => {
+  test('pasting an image into a cell (async host round-trip) re-fits once the image has loaded, not just the debounced pressure path', async ({ page }) => {
     await openTable20(page);
     await caretAtEnd(page, LIKELIHOOD);
     const before = await widths(page);
@@ -172,9 +167,20 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
       canvas.getContext('2d')!.fillRect(0, 0, 250, 200);
       return canvas.toDataURL('image/png');
     });
-    fs.mkdirSync(DIST_WEBVIEW_ASSETS, { recursive: true });
+    // The saved asset loads after the insert: serve it 600 ms late (past FIT_PRESSURE_MS,
+    // before FIT_IDLE_SETTLE_MS), so only a re-fit that waits for the image sees its size.
+    // A <base> sends the relative `assets/...` src to the routed origin.
     const assetName = 'table-fit-refit-policy-test-image.png';
-    fs.writeFileSync(path.join(DIST_WEBVIEW_ASSETS, assetName), Buffer.from(dataUrl.split(',')[1], 'base64'));
+    const png = Buffer.from(dataUrl.split(',')[1], 'base64');
+    await page.route('http://asset.test/assets/**', async (route) => {
+      await new Promise((r) => setTimeout(r, 600));
+      await route.fulfill({ body: png, contentType: 'image/png' });
+    });
+    await page.evaluate(() => {
+      const base = document.createElement('base');
+      base.href = 'http://asset.test/';
+      document.head.prepend(base);
+    });
 
     await page.evaluate(async (blobDataUrl) => {
       const blob = await (await fetch(blobDataUrl)).blob();
@@ -194,7 +200,7 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
       { requestId, relativePath: `assets/${assetName}` }
     );
     await expect
-      .poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1000, intervals: [50] })
+      .poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1500, intervals: [50] })
       .toBeGreaterThan(before[LIKELIHOOD] + 1);
   });
 

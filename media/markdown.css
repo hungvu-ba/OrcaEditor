@@ -531,6 +531,8 @@ td {
 #content table.md-table-fit td {
   min-width: 0;
   white-space: normal;
+  /* Chromium < 130: the white-space shorthand resets text-wrap → restate contract 12. */
+  text-wrap: pretty;
   /* US-19.25: KHÔNG cắt giữa từ. Sàn cột (fitTableColumns) đã đảm bảo bề rộng ≥
    * từ rộng nhất nên không cần cắt khẩn cấp; nếu lệch sub-pixel thì từ tràn vô
    * hình thay vì gãy kiểu "Cod|e". Ngắt dòng chỉ xảy ra ở khoảng trắng. */

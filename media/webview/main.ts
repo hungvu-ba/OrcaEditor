@@ -419,12 +419,25 @@ function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
   }, FIT_IDLE_SETTLE_MS);
 }
 
-/** Paste runs through execCommand (inputType insertText/insertHTML) → mark it discrete here. */
+/**
+ * Paste runs through execCommand (inputType insertText/insertHTML) → mark it discrete here,
+ * once the cell's still-loading images (the one just inserted) have a size to measure.
+ */
 function fitAfterPaste(): void {
   const cell = caretTableCell();
-  if (cell) {
-    onTableFitInput(cell, 'insertFromPaste');
+  if (!cell) {
+    return;
   }
+  const loading = Array.from(cell.querySelectorAll('img')).filter((img) => !img.complete);
+  if (!loading.length) {
+    onTableFitInput(cell, 'insertFromPaste');
+    return;
+  }
+  void Promise.all(loading.map((img) => img.decode().catch(() => undefined))).then(() => {
+    if (cell.isConnected) {
+      onTableFitInput(cell, 'insertFromPaste');
+    }
+  });
 }
 
 content.addEventListener('compositionstart', () => {

@@ -122,6 +122,26 @@ test.describe('Table area fit — measureTableLines', () => {
     expect(lines.units).toBe(2);
   });
 
+  test('<wbr> is a break opportunity inside a word', async ({ page }) => {
+    const { lines } = await measureCell(page, 'foo<wbr>bar baz');
+    expect(lines.units).toBe(3);
+  });
+
+  test('a line-height below the glyph box still gives one unit per word', async ({ page }) => {
+    // At 1px each word is its own line; the lines' glyph boxes overlap (as with a
+    // tall CJK fallback font under a small markdown.preview.lineHeight).
+    const { lines } = await measureCell(page, '<div style="line-height: 0.6">alpha beta gamma delta</div>');
+    expect(lines.segments).toHaveLength(1);
+    expect(lines.units).toBe(4);
+  });
+
+  test('an RTL run: gaps are the whitespace widths, never negative', async ({ page }) => {
+    const { lines, lineW } = await measureCell(page, 'שלום עולם גדול מאוד');
+    expect(lines.units).toBe(4);
+    expect(lines.segments[0].every((u) => u.gap > -0.1)).toBe(true);
+    expect(Math.abs(oneLineWidth(lines) - lineW)).toBeLessThanOrEqual(2);
+  });
+
   test('inline box padding counts in the unit width; an inline-block is one unit', async ({ page }) => {
     const { lines, lineW } = await measureCell(
       page,

@@ -131,6 +131,11 @@ function collectLines(cell: HTMLTableCellElement): HardLine[] {
         newLine();
         continue;
       }
+      // A break opportunity: the next item is not glued, its rect decides.
+      if (node.tagName === 'WBR') {
+        space = true;
+        continue;
+      }
       if (node.matches(FIXED_BOX_SELECTOR)) {
         line.fixed.push(node);
         if (node.classList.contains('katex')) {
@@ -199,7 +204,8 @@ function unitSpans(line: HardLine, range: Range): [number, number][] {
       return;
     }
     const r = itemRect(item, range);
-    if (k > 0 && r.top < bottom - 1) {
+    // Midpoint, not top: a glyph box taller than the line-height overlaps the next line.
+    if (k > 0 && (r.top + r.bottom) / 2 < bottom) {
       spans[spans.length - 1][1] = k;
       bottom = Math.max(bottom, r.bottom);
       return;
@@ -217,6 +223,7 @@ function toCellLines(lines: HardLine[], spans: [number, number][][], range: Rang
   let cjkUnits = 0;
   let fixedH: number | undefined;
   lines.forEach((line, i) => {
+    let prevLeft = 0;
     let prevRight = 0;
     segments.push(
       spans[i].map(([a, b], k) => {
@@ -235,7 +242,10 @@ function toCellLines(lines: HardLine[], spans: [number, number][][], range: Rang
         const r = range.getBoundingClientRect();
         const left = r.left - first.lead;
         const right = r.right + last.trail;
-        const unit = k ? { w: right - left, gap: left - prevRight } : { w: right - left + line.indent, gap: 0 };
+        // An RTL run lays units out right to left: the gap is then on the unit's right.
+        const gap = left >= prevLeft ? left - prevRight : prevLeft - right;
+        const unit = k ? { w: right - left, gap } : { w: right - left + line.indent, gap: 0 };
+        prevLeft = left;
         prevRight = right;
         units++;
         if (first.cjk) {

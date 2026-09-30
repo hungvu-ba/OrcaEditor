@@ -475,14 +475,15 @@ function applyFitColumns(
   }
   table.classList.remove(MEASURE_CLASS);
 
-  // US-19.26 (revised): max-content mỗi cột đã đủ để biết còn chỗ ngang hay không —
-  // bail NGAY tại đây, TRƯỚC khi đo min-content/tính cap, khi `Σmax ≤ W`. Lý do bail
-  // hẳn (không tự ghim width=natural như bản trước) thay vì áp rồi mới nới: nếu ghim
-  // `width`/`max-width` = bề rộng đo LÚC NÀY, gõ thêm chữ vào ô sẽ bị max-width cũ
-  // chặn wrap ngay, đợi đủ 200ms debounce (`scheduleFitRefit`) mới nới lại ra — co
-  // trước, giãn sau, giật hình. Bail để rơi về `applyDefaultColumnWidths` (chỉ đặt
-  // min-width, không đặt max-width) thì cột tự giãn theo layout auto ngay khi gõ,
-  // không cần đợi refit — vì hoàn toàn không cần bóp gì trong trường hợp này.
+  // US-19.26 (revised): each column's max-content already tells whether there is
+  // horizontal room — bail right here, BEFORE measuring min-content / computing the
+  // cap, when `Σmax ≤ W`. Bail outright (no pinning width=natural as before) rather
+  // than apply and loosen later: pinning `width`/`max-width` to the width measured
+  // NOW makes that max-width wrap newly typed text at once until a pressure/settle
+  // re-fit (US-19.27 contract 13) loosens it — shrink first, grow later, a visual jump.
+  // Falling back to `applyDefaultColumnWidths` (min-width only, no max-width) lets the
+  // column grow with auto layout as the user types, no re-fit needed — nothing needs
+  // squeezing in this case.
   const natural: number[] = colWidths.map((w) => (w.length ? Math.max(...w) : 0));
   const sumNatural = natural.reduce((a, b) => a + b, 0);
   if (sumNatural <= budgetW) {
