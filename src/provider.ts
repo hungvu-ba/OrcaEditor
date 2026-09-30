@@ -632,9 +632,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       clearTimeout(existing);
       this.reindexTimers.delete(key);
     }
-    this.entityIndex.onFileChanged(key, '');
+    const changed = this.entityIndex.onFileChanged(key, '');
     this.crossFileTextCache.delete(documentStateKey(key, CASE_INSENSITIVE_FS));
-    this.notifyEntityIndexUpdated();
+    if (changed) {
+      this.notifyEntityIndexUpdated();
+    }
   }
 
   /**
@@ -804,8 +806,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
   private async reindexFile(uri: vscode.Uri): Promise<void> {
     try {
-      this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
-      this.notifyEntityIndexUpdated();
+      // L-13: a file whose declarations did not change leaves every panel's markers valid.
+      if (this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri))) {
+        this.notifyEntityIndexUpdated();
+      }
     } catch (err) {
       MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
     }
@@ -854,6 +858,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       await new Promise<void>((r) => setTimeout(r, 0));
     }
     this.entityIndex.markReady();
+    // Panels opened mid-scan checked a partial index — re-check them once now.
+    this.notifyEntityIndexUpdated();
   }
 
   /**
@@ -2187,6 +2193,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       messageSubscription.dispose();
       viewStateSubscription.dispose();
       existCheckTokenSource?.dispose();
+      entityExistCheckTokenSource?.cancel();
+      entityExistCheckTokenSource?.dispose();
       // US-23.15 AC1: only this panel's no-workspace-folder fallback watcher, if
       // it needed one — the provider-level watcher lives as long as the extension.
       sidecarFallbackWatcher?.dispose();
@@ -3339,6 +3347,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     token: vscode.CancellationToken
   ): Promise<EntityExistResult[]> {
     const results: EntityExistResult[] = [];
+    // L-13: one guard + stat per declaration file per call, shared by every id it declares.
+    const liveFiles = new Map<string, Promise<boolean>>();
     for (const id of ids) {
       if (token.isCancellationRequested) {
         break;
@@ -3347,18 +3357,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       let exists = false;
       let preview = ''; // Req 21 tooltip: only a RESOLVED declaration contributes a preview.
       for (const row of rows) {
-        try {
-          const uri = vscode.Uri.parse(row.file);
-          // Same allowed-roots guard as checkTargetsExist — never leak existence
-          // of a declaration file outside the current document/workspace roots.
-          if (await this.isInsideAllowedRoots(document, uri)) {
-            await vscode.workspace.fs.stat(uri);
-            exists = true;
-            preview = row.preview;
-            break;
-          }
-        } catch {
-          // stat failed / file gone for this row — try the next declaration row.
+        const key = documentStateKey(row.file, CASE_INSENSITIVE_FS);
+        let live = liveFiles.get(key);
+        if (live === undefined) {
+          live = (async () => {
+            try {
+              const uri = vscode.Uri.parse(row.file);
+              // Same allowed-roots guard as checkTargetsExist — never leak existence
+              // of a declaration file outside the current document/workspace roots.
+              if (!(await this.isInsideAllowedRoots(document, uri))) {
+                return false;
+              }
+              await vscode.workspace.fs.stat(uri);
+              return true;
+            } catch {
+              // stat failed / file gone for this row — try the next declaration row.
+              return false;
+            }
+          })();
+          liveFiles.set(key, live);
+        }
+        if (await live) {
+          exists = true;
+          preview = row.preview;
+          break;
         }
       }
       const canonical = canonicalEntityId(id);
