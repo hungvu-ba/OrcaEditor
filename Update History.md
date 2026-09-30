@@ -20,3 +20,4 @@
 | 1.2.2 | 2026-09-30 | Feature: drag-and-drop hover and drop-gap hit tests binary-search the top-level blocks, and large table/list drag ghosts carry only their first 10 rows (L-11) |
 | 1.2.2 | 2026-09-30 | Fix: dragging the TOC resize handle moves only the panel; content re-lays out after a 150 ms pause and on release |
 | 1.2.2 | 2026-09-30 | Fix: TOC show/hide and resize lag on large tables closed — one content reflow per toggle, debounced reserve while dragging |
+| 1.2.2 | 2026-09-30 | Fix: re-render after undo/redo reuses cached code highlighting and math typesetting for unchanged blocks |

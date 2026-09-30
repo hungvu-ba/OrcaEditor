@@ -107,6 +107,29 @@ export interface LineRange {
   end: number;
 }
 
+/** Entry cap of each render memo (audit L-8). */
+const RENDER_MEMO_MAX = 500;
+
+/**
+ * Bounded LRU lookup shared by the render memos: a hit moves to the newest
+ * slot, a miss is computed and stored, and past `RENDER_MEMO_MAX` the oldest
+ * entry is dropped. A throwing `compute` stores nothing.
+ */
+function memoLookup(memo: Map<string, string>, key: string, compute: () => string): string {
+  const hit = memo.get(key);
+  if (hit !== undefined) {
+    memo.delete(key);
+    memo.set(key, hit);
+    return hit;
+  }
+  const value = compute();
+  memo.set(key, value);
+  if (memo.size > RENDER_MEMO_MAX) {
+    memo.delete(memo.keys().next().value as string);
+  }
+  return value;
+}
+
 /**
  * UTF-8 BOM — a Windows-authored file can carry one before the opening `{` of
  * JSON front matter (US-2.11). Written as an escape, never as the literal
@@ -183,6 +206,10 @@ export class MarkdownRenderer {
    * data-line/data-line-end lên wrapper .md-math-block trong postProcessMathDom.
    */
   private capturedMathBlockRanges: Array<[number, number]> = [];
+  /** Audit L-8: highlight.js output keyed by language + code, so a host re-render skips unchanged fences. */
+  private readonly highlightMemo = new Map<string, string>();
+  /** Audit L-8: KaTeX rule output keyed by rule name + formula source. */
+  private readonly mathMemo = new Map<string, string>();
 
   constructor(config: PipelineConfig) {
     this.md = new MarkdownIt({
@@ -194,7 +221,11 @@ export class MarkdownRenderer {
         const normalized = normalizeHighlightLang(lang);
         if (normalized && hljs.getLanguage(normalized)) {
           try {
-            return hljs.highlight(code, { language: normalized, ignoreIllegals: true }).value;
+            return memoLookup(
+              this.highlightMemo,
+              `${normalized}\u0000${code}`,
+              () => hljs.highlight(code, { language: normalized, ignoreIllegals: true }).value
+            );
           } catch {
             /* fall through */
           }
@@ -209,6 +240,17 @@ export class MarkdownRenderer {
     });
     const katex = (katexPlugin as unknown as { default?: unknown }).default ?? katexPlugin;
     this.md.use(katex as (md: MarkdownIt) => void);
+    // Audit L-8: the KaTeX rules read only `tokens[idx].content` and the plugin
+    // gets no options (no shared `macros`), so the output is a pure function of
+    // rule + source — a host re-render reuses it for every unchanged formula.
+    const rules = this.md.renderer.rules;
+    for (const ruleName of ['math_inline', 'math_inline_block', 'math_inline_bare_block', 'math_block']) {
+      const rule = rules[ruleName];
+      if (rule) {
+        rules[ruleName] = (tokens, idx, options, env, self) =>
+          memoLookup(this.mathMemo, `${ruleName}\u0000${tokens[idx].content}`, () => rule(tokens, idx, options, env, self));
+      }
+    }
 
     // Giống VS Code (markdownEngine.ts): không linkify domain trần kiểu "google.com",
     // chỉ URL có scheme hoặc www. — tránh round-trip biến text thành link.
