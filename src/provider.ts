@@ -1259,6 +1259,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'mermaid-engine.js')
       )
       .toString();
+    // L-9 (Performance Low-End — Audit.md): same contract for the math and
+    // front-matter engine bundles.
+    const mathEngineUri = webview
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'math-engine.js'))
+      .toString();
+    const frontMatterEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'front-matter-engine.js')
+      )
+      .toString();
     webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
@@ -1561,6 +1571,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               scriptNonce,
               // P-1: same mechanism, for mermaid.ts (see mermaidEngineUri above).
               mermaidEngineUri,
+              // L-9: same mechanism, for lazy-engines.ts.
+              mathEngineUri,
+              frontMatterEngineUri,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),

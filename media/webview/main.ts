@@ -56,6 +56,7 @@ import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './brok
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid, setMermaidEngineConfig } from './mermaid';
+import { setLazyEngineConfig } from './lazy-engines';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
 import { initMathEdit } from './math-edit';
 import { stripMetaRefresh } from './render-sanitize';
@@ -808,6 +809,20 @@ window.addEventListener('message', (event) => {
       if (cfg.mermaidEngineUri) {
         setMermaidEngineConfig({
           engineUri: cfg.mermaidEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      // L-9 (Performance Low-End — Audit.md): same contract for the math and
+      // front-matter engines.
+      if (cfg.mathEngineUri) {
+        setLazyEngineConfig('math', {
+          engineUri: cfg.mathEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      if (cfg.frontMatterEngineUri) {
+        setLazyEngineConfig('frontMatter', {
+          engineUri: cfg.frontMatterEngineUri,
           scriptNonce: cfg.scriptNonce ?? '',
         });
       }

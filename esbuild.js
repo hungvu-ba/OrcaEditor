@@ -84,6 +84,45 @@ const mermaidEngineConfig = {
 };
 
 /**
+ * Math engine (KaTeX) as its own bundle, audit L-9 (Performance Low-End —
+ * Audit.md): ~270 KB of main.js that only a document with `$...$` needs.
+ * math-engine.ts re-exports renderToString; lazy-engines.ts injects this file
+ * as a <script> on first use. Same katex.mjs alias as webviewConfig.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const mathEngineConfig = {
+  entryPoints: ['media/webview/math-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/math-engine.js',
+  format: 'iife',
+  globalName: 'OrcaMathEngine',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: !production,
+  minify: production,
+  alias: { katex: 'katex/dist/katex.mjs' },
+};
+
+/**
+ * Front-matter engine (js-yaml + smol-toml) as its own bundle, audit L-9:
+ * ~54 KB of main.js that only a document with front matter needs.
+ * front-matter-engine.ts re-exports load/parse; lazy-engines.ts injects this
+ * file as a <script> on first use.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const frontMatterEngineConfig = {
+  entryPoints: ['media/webview/front-matter-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/front-matter-engine.js',
+  format: 'iife',
+  globalName: 'OrcaFrontMatterEngine',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: !production,
+  minify: production,
+};
+
+/**
  * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
  * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
  * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
@@ -266,7 +305,14 @@ function copyAssets() {
 
 async function main() {
   copyAssets();
-  const configs = [extensionConfig, webviewConfig, plantumlEngineConfig, mermaidEngineConfig];
+  const configs = [
+    extensionConfig,
+    webviewConfig,
+    plantumlEngineConfig,
+    mermaidEngineConfig,
+    mathEngineConfig,
+    frontMatterEngineConfig,
+  ];
   if (buildTest)
     configs.push(
       testConfig,

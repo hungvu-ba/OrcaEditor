@@ -144,6 +144,17 @@ export interface InitConfig {
    * webview cannot call `asWebviewUri` itself; reuses `scriptNonce` above.
    */
   mermaidEngineUri: string;
+  /**
+   * L-9 (Performance Low-End — Audit.md): webview URI of the lazily-loaded math
+   * engine bundle (`dist/webview/math-engine.js`), same loading contract as
+   * `mermaidEngineUri`; reuses `scriptNonce` above.
+   */
+  mathEngineUri: string;
+  /**
+   * L-9: webview URI of the lazily-loaded front-matter engine bundle
+   * (`dist/webview/front-matter-engine.js`), same contract as `mathEngineUri`.
+   */
+  frontMatterEngineUri: string;
 }
 
 /**

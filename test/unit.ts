@@ -151,6 +151,14 @@ import {
 } from '../media/webview/table-area-fit';
 import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
 import {
+  engineMissCount,
+  lazyEngineApi,
+  lazyEngineFailed,
+  loadLazyEngine,
+  noteEngineMiss,
+  takeEngineMisses,
+} from '../media/webview/lazy-engines';
+import {
   collectClassConstants,
   exportedConstants,
   findAmbiguousConstants,
@@ -165,6 +173,8 @@ import {
 let pass = 0;
 let fail = 0;
 const failures: string[] = [];
+// Checks that must await a promise push it here; the summary waits for them.
+const pendingChecks: Promise<void>[] = [];
 
 function check(name: string, cond: boolean, detail?: string): void {
   if (cond) {
@@ -1403,6 +1413,8 @@ const toWebview: HostToWebview[] = [
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
+    mathEngineUri: 'vscode-resource://math-engine.js',
+    frontMatterEngineUri: 'vscode-resource://front-matter-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   } },
   { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
@@ -1411,6 +1423,8 @@ const toWebview: HostToWebview[] = [
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
+    mathEngineUri: 'vscode-resource://math-engine.js',
+    frontMatterEngineUri: 'vscode-resource://front-matter-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x', rev: 2 },
@@ -1429,6 +1443,34 @@ const toWebview: HostToWebview[] = [
 ];
 check('contract: WebviewToHost phủ đủ 15 biến thể (P-8 splits edit into diff + full-text; + requestFullPush)', fromWebview.length === 15);
 check('contract: HostToWebview phủ đủ 13 biến thể (init có/không reveal + update diff/full + requestFullSync + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 13);
+
+// ---------------------------------------------------------------------------
+// Lazy engines (audit L-9, media/webview/lazy-engines.ts): the miss ledger and
+// the loader's Node-side answers (no window, no config).
+// ---------------------------------------------------------------------------
+
+{
+  const before = engineMissCount();
+  takeEngineMisses();
+  noteEngineMiss('math');
+  noteEngineMiss('math');
+  noteEngineMiss('frontMatter');
+  eq('lazy engines: engineMissCount counts every miss', engineMissCount() - before, 3);
+  eq('lazy engines: takeEngineMisses dedups', takeEngineMisses().sort(), ['frontMatter', 'math']);
+  eq('lazy engines: takeEngineMisses clears', takeEngineMisses(), []);
+  eq('lazy engines: engineMissCount is monotonic (a take does not lower it)', engineMissCount() - before, 3);
+  eq('lazy engines: lazyEngineApi is undefined under Node', lazyEngineApi('math'), undefined);
+  check('lazy engines: lazyEngineFailed is false before any load', !lazyEngineFailed('math'));
+  pendingChecks.push(
+    loadLazyEngine('math').then(
+      () => check('lazy engines: loadLazyEngine without a config rejects', false, '  resolved'),
+      () => {
+        check('lazy engines: loadLazyEngine without a config rejects', true);
+        check('lazy engines: lazyEngineFailed is true after the rejected load', lazyEngineFailed('math'));
+      }
+    )
+  );
+}
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho
@@ -5744,8 +5786,10 @@ check(
   eq('FileTextCache (audit L-5): delete removes the entry', del.get('a', 's'), undefined);
 }
 
-console.log(`\n${pass} pass, ${fail} fail`);
-if (failures.length) {
-  console.log('\n' + failures.join('\n\n'));
-  process.exit(1);
-}
+void Promise.all(pendingChecks).then(() => {
+  console.log(`\n${pass} pass, ${fail} fail`);
+  if (failures.length) {
+    console.log('\n' + failures.join('\n\n'));
+    process.exit(1);
+  }
+});

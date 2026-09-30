@@ -39,6 +39,9 @@ const DEFAULT_CONFIG: InitConfig = {
   scriptNonce: '',
   // P-1: same file:// contract as plantumlEngineUri above.
   mermaidEngineUri: 'mermaid-engine.js',
+  // L-9: same file:// contract.
+  mathEngineUri: 'math-engine.js',
+  frontMatterEngineUri: 'front-matter-engine.js',
 };
 
 /** Default docUri echoed back to the harness's fake acquireVsCodeApi (Req 20 US-20.3). */
