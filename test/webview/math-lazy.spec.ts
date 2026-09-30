@@ -324,10 +324,10 @@ test('paste of a formula on a slow engine: the edit already holds it, the stand-
   await placeCaret(page, 'Alpha', 5);
   await clearPosted(page);
   await paste(page, ' and $x^2$ more');
+  // Still during the load: the formula is on the page as a stand-in (checked before the edit debounce).
+  await expect(page.locator('#content .katex-fallback')).toHaveCount(1);
   // Only the formula is asserted: the eager build writes this paste as `Alphaand\n\n$x^2$ more` too.
   expect(await waitForEdit(page)).toContain('$x^2$ more');
-  // Still during the load: the formula is on the page as a stand-in.
-  await expect(page.locator('#content .katex-fallback')).toHaveCount(1);
   await expectRealKatex(page, 1);
   await expect(page.locator('#content .md-math-inline')).toHaveAttribute('data-tex', 'x^2');
 });
@@ -340,8 +340,8 @@ test('toolbar Math on a slow engine: the edit already holds the formula, the sta
   await placeCaret(page, 'Alpha', 5);
   await clearPosted(page);
   await page.locator('#fmt-math').click();
-  expect(await waitForEdit(page)).toContain('$x^2+y^2=z^2$');
   await expect(page.locator('#content .katex-fallback')).toHaveCount(1);
+  expect(await waitForEdit(page)).toContain('$x^2+y^2=z^2$');
   await expectRealKatex(page, 1);
 });
 
@@ -407,4 +407,34 @@ test('a trigger popup open while the first formula arrives: rendered once the po
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __mirror: string }).__mirror))
     .toBe('Injected $x$ while open\n');
+});
+
+test('a popup reopened during the load: a commit made after the load still makes the deferred update stale', async ({
+  page,
+}) => {
+  await serveEngineLate(page);
+  await openEditor(page, '', SLOW_ENGINE);
+  await page.locator('#content').click();
+  await page.keyboard.type('/');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  await postUpdate(page, 'Injected $x$ while open\n');
+  // Escape releases the popup: the flush meets the first formula and holds for the engine.
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+  expect(await engineScripts(page)).toBe(1);
+  // A second popup opens during the load and still owns the keyboard when the engine settles.
+  await page.keyboard.press('Backspace');
+  await page.keyboard.type('/');
+  await expect(page.locator('.trigger-popup')).toBeVisible();
+  await page.waitForFunction(() => 'OrcaMathEngine' in window);
+  await page.waitForTimeout(100);
+  await expect(page.locator('#content')).not.toContainText('Injected');
+
+  // A commit after the load is a local edit the deferred host text never saw: stale, the local DOM wins (eager rule).
+  await page.keyboard.type('heading', { delay: 20 });
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.trigger-popup')).toBeHidden();
+  await expect(page.locator('#content :is(h1, h2, h3, h4, h5, h6)')).toHaveCount(1);
+  await page.waitForTimeout(100);
+  await expect(page.locator('#content')).not.toContainText('Injected');
 });

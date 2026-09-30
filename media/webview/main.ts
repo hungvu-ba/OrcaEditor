@@ -1255,6 +1255,9 @@ function holdForEngines(engines: LazyEngine[], first?: HostToWebview): void {
     heldMessages = undefined;
     if (!hasInputOwner()) {
       flushPendingUpdate();
+    } else if (pendingUpdate?.heldForEngines) {
+      // The hold is over: a local edit from here on makes the deferred text stale again.
+      pendingUpdate = { ...pendingUpdate, baseText: currentText, heldForEngines: false };
     }
     for (let i = 0; i < queue.length; i++) {
       // Re-read each time: the previous replay (or the flush) may have held again.
@@ -1263,7 +1266,13 @@ function holdForEngines(engines: LazyEngine[], first?: HostToWebview): void {
         heldAgain.push(...queue.slice(i));
         return;
       }
-      handleHostMessage(queue[i]);
+      // Each message ran in its own event dispatch before the hold: one that
+      // throws must not drop the rest of the queue.
+      try {
+        handleHostMessage(queue[i]);
+      } catch (err) {
+        console.error(err);
+      }
     }
   });
 }
