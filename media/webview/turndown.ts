@@ -118,12 +118,15 @@ export function createTurndown(): TurndownService {
   // parse lại thành HTML/entity thật nếu không escape):
   //  - '<' trước chữ cái, '/', '!' hoặc '?' → \<  (tránh thành thẻ HTML)
   //  - '&' của một entity hợp lệ → &amp;          (tránh bị decode)
+  //  - '$' that the math plugin would read as a delimiter → \$ (escapeMathDollars)
   const tdWithEscape = td as unknown as { escape(s: string): string };
   const originalEscape = tdWithEscape.escape.bind(td);
   tdWithEscape.escape = (s: string) =>
-    originalEscape(s)
-      .replace(/&(?=[a-zA-Z][a-zA-Z0-9]{1,31};|#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};)/g, '&amp;')
-      .replace(/<(?=[a-zA-Z/!?])/g, '\\<');
+    escapeMathDollars(
+      originalEscape(s)
+        .replace(/&(?=[a-zA-Z][a-zA-Z0-9]{1,31};|#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};)/g, '&amp;')
+        .replace(/<(?=[a-zA-Z/!?])/g, '\\<')
+    );
 
   // Giữ nguyên các thẻ HTML thường gặp trong markdown (html:true).
   td.keep([
@@ -1122,6 +1125,70 @@ function decodeSafe(s: string): string {
   } catch {
     return s;
   }
+}
+
+/**
+ * Escape every `$` of one text run that @vscode/markdown-it-katex would read as
+ * a math delimiter on the next render, so a literal dollar (source `\$a\$`)
+ * never turns into a formula. A dollar the plugin leaves alone (`$5 and $6`)
+ * stays bare: a file with plain prices is not rewritten.
+ *
+ * `md` is the run AFTER turndown's own escape, i.e. what markdown-it will read.
+ *  - `$$`, any run of two or more: always escaped (it opens a math block at a
+ *    line start, an inline one when a second `$$` follows).
+ *  - single `$`: the pairs `findInlineMathPair` reports. Escaping one pair can
+ *    hand an earlier opener a new closer, hence the loop.
+ * The run's two ends count as "no neighbour" (can open / can close): the markdown
+ * of the node next to it is not known here, and an extra backslash is harmless.
+ */
+function escapeMathDollars(md: string): string {
+  if (!md.includes('$')) {
+    return md;
+  }
+  let out = md.replace(/\${2,}/g, (run) => '\\$'.repeat(run.length));
+  for (let pair = findInlineMathPair(out); pair; pair = findInlineMathPair(out)) {
+    const [open, close] = pair;
+    out = out.slice(0, open) + '\\$' + out.slice(open + 1, close) + '\\$' + out.slice(close + 1);
+  }
+  return out;
+}
+
+/**
+ * First `$…$` the math plugin's inline rule would take in `md`, as the indexes
+ * of its two dollars; null when there is none. Mirrors `inlineMath` /
+ * `isValidInlineDelim` of @vscode/markdown-it-katex:
+ *  - markdown-it's escape rule runs first, so a backslash consumes the next char;
+ *  - an opener is not preceded by `$`, `\` or a word character;
+ *  - its closer is the NEXT unescaped `$` and no other, valid only when not
+ *    followed by `$` or a word character; otherwise the opener is plain text.
+ */
+function findInlineMathPair(md: string): [number, number] | null {
+  let pos = 0;
+  while (pos < md.length) {
+    if (md[pos] === '\\') {
+      pos += 2;
+      continue;
+    }
+    if (md[pos] === '$' && !/[\w$\\]/.test(md[pos - 1] ?? '')) {
+      let close = md.indexOf('$', pos + 1);
+      while (close !== -1 && precedingBackslashes(md, close) % 2 === 1) {
+        close = md.indexOf('$', close + 1);
+      }
+      if (close !== -1 && !/[\w$]/.test(md[close + 1] ?? '')) {
+        return [pos, close];
+      }
+    }
+    pos++;
+  }
+  return null;
+}
+
+function precedingBackslashes(s: string, index: number): number {
+  let count = 0;
+  while (s[index - 1 - count] === '\\') {
+    count++;
+  }
+  return count;
 }
 
 // Unrecognized tag → keep its outerHTML (never bleed inner blank lines that

@@ -36,16 +36,15 @@ const FIXTURES: MathFixture[] = [
   },
   { name: 'math in a list item', source: '-   first $a^2$\n-   second\n\nEnd\n', katex: 1, display: 0, tex: ['a^2'] },
   {
-    // The serializer writes an escaped dollar back without its backslash. Pinned
-    // as it is today: moving KaTeX must not change these bytes either way.
+    // The serializer writes an escaped dollar back with its backslash (T4.7).
     // Unescaped, `$a$` would be a second formula; `$b$` makes the count wait for a render.
     name: 'escaped \\$',
     source: 'Price \\$a\\$ vs $b$.\n\nEnd\n',
     katex: 1,
     display: 0,
     tex: ['b'],
-    serialized: 'Price $a$ vs $b$.\n\nEnd\n',
   },
+  { name: 'escaped \\$ alone', source: 'Pay \\$a\\$ now.\n\nEnd\n', katex: 0, display: 0, tex: [] },
   { name: 'two formulas on one line', source: 'Both $a$ and $b$ on one line.\n\nEnd\n', katex: 2, display: 0, tex: ['a', 'b'] },
 ];
 

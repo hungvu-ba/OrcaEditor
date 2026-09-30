@@ -25,3 +25,4 @@
 | 1.2.2 | 2026-09-30 | Fix: typing in a file without entity declarations no longer makes every open editor re-check entity references; declaration files are stat-ed once per check |
 | 1.2.2 | 2026-09-30 | Fix: mermaid and PlantUML keep at most 32 rendered diagrams in memory per tab instead of every diagram ever shown |
 | 1.2.2 | 2026-09-30 | Fix: in documents with more than 32 mermaid or PlantUML diagrams, paste, undo and external changes no longer re-render existing diagrams |
+| 1.2.2 | 2026-09-30 | Fix: an escaped dollar sign keeps its backslash when the document is saved, so it no longer turns into a formula after reopening |
