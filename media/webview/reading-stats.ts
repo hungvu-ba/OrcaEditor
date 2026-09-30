@@ -35,13 +35,23 @@ export function isCjkBreakUnit(ch: string): boolean {
  * Rendered prose text of `content`: headings, blockquotes, table cells, and
  * link text are included by default (textContent); code (fenced + inline),
  * math, and Mermaid blocks are excluded. Image alt text is never part of
- * textContent, so it is excluded without special-casing. Operates on a
- * detached clone — never mutates the live document.
+ * textContent, so it is excluded without special-casing. Walks the live tree
+ * read-only (no clone) — the excluded subtrees are rejected, not removed.
  */
 export function extractReadableText(content: HTMLElement): string {
-  const clone = content.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll(EXCLUDED_SELECTOR).forEach((el) => el.remove());
-  return clone.textContent ?? '';
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) =>
+      node.nodeType === Node.ELEMENT_NODE && (node as Element).matches(EXCLUDED_SELECTOR)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT,
+  });
+  let text = '';
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += (node as Text).data;
+    }
+  }
+  return text;
 }
 
 /** Non-CJK runs (split on whitespace) plus one word per CJK character. */

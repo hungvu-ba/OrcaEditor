@@ -252,6 +252,9 @@ export function initToc(
   // danh sách đầy đủ để tìm heading gần nhất rồi truy ngược tới tổ tiên còn
   // hiển thị khi heading gần nhất bị filter ẩn (xem updateActive()).
   let allHeadings: HTMLElement[] = [];
+  // Inputs of the last list rebuild (maxLevel + every heading's node, level, trimmed text).
+  let builtMaxLevel: number | undefined;
+  let builtSignature: { heading: HTMLElement; level: number; text: string }[] = [];
   let activeIndex = -1;
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollScheduled = false;
@@ -340,6 +343,28 @@ export function initToc(
       }
       maxLevelInitialized = true;
     }
+    // Same filter and the same heading nodes with the same level + text as the
+    // previous build: the list is already right, only the active entry may move.
+    const signature = allHeadings.map((heading) => ({
+      heading,
+      level: headingLevel(heading),
+      text: (heading.textContent ?? '').trim(),
+    }));
+    if (
+      builtMaxLevel === maxLevel &&
+      builtSignature.length === signature.length &&
+      signature.every(
+        (s, i) =>
+          s.heading === builtSignature[i].heading &&
+          s.level === builtSignature[i].level &&
+          s.text === builtSignature[i].text,
+      )
+    ) {
+      updateActive();
+      return;
+    }
+    builtMaxLevel = maxLevel;
+    builtSignature = signature;
     const headings = allHeadings.filter((h) => headingLevel(h) <= maxLevel);
     // Keep a reference to the currently-active heading so that, once the
     // matching new entry is rebuilt below, activeIndex can be set directly
