@@ -58,6 +58,9 @@ type DragKind = 'block' | 'li';
 
 const HEADING_RE = /^H([1-6])$/;
 const DRAG_THRESHOLD_PX = 4;
+/** Table body rows / list items a block drag ghost carries — enough to fill `.dd-ghost`'s
+ * 160 px cap, so a 300-row table is never cloned whole (Performance Low-End L-11). */
+const GHOST_MAX_ROWS = 10;
 /** Horizontal drag distance (px) that shifts the target nesting depth by one level during an li
  * drag (US-17.7, M6) — target depth is `liOrigDepth + round(dx / LIST_INDENT_THRESHOLD_PX)`,
  * clamped to whatever depths are valid at the chosen vertical gap (liDepthRangeAtGap). */
@@ -98,6 +101,71 @@ export function headingLevel(el: Element): number | null {
 
 function isAtomBlock(el: Element): boolean {
   return el.classList.contains(MERMAID_CLASS) || el.classList.contains(MATH_BLOCK_CLASS);
+}
+
+/** A block without a box (`display:none`) reports an all-zero rect, which breaks the Y order. */
+function isBoxless(r: DOMRect): boolean {
+  return r.top === 0 && r.bottom === 0 && r.left === 0 && r.right === 0;
+}
+
+/** Binary search over the Y-ordered top-level blocks: the first index whose rect satisfies
+ * `reached` (false -> true along the blocks), `blocks.length` when none. A boxless block is
+ * never reached — stepped past, never probed — the same result as a linear scan
+ * (Performance Low-End L-11: a hover/drag frame reads O(log n) rects, not n). */
+function firstBlockIndex(blocks: readonly HTMLElement[], reached: (r: DOMRect) => boolean): number {
+  let lo = 0;
+  let hi = blocks.length;
+  // First hit in [lo, hi), else `found`.
+  let found = blocks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    let i = mid;
+    let r = blocks[i].getBoundingClientRect();
+    while (isBoxless(r) && i + 1 < hi) {
+      i++;
+      r = blocks[i].getBoundingClientRect();
+    }
+    if (isBoxless(r)) {
+      hi = mid;
+    } else if (reached(r)) {
+      found = i;
+      hi = mid;
+    } else {
+      lo = i + 1;
+    }
+  }
+  return found;
+}
+
+/** Shallow clone of `el` with its child nodes up to and including the GHOST_MAX_ROWS-th `rowTag` child. */
+function cloneFirstRows(el: Element, rowTag: string): Node {
+  const clone = el.cloneNode(false);
+  let rows = 0;
+  for (const child of Array.from(el.childNodes)) {
+    if (child instanceof Element && child.tagName === rowTag && ++rows > GHOST_MAX_ROWS) {
+      break;
+    }
+    clone.appendChild(child.cloneNode(true));
+  }
+  return clone;
+}
+
+/** The drag ghost's copy of `block`: a table keeps every non-row child (thead, colgroup...) and
+ * its first GHOST_MAX_ROWS body rows, a list its first GHOST_MAX_ROWS items, anything else is
+ * cloned whole — the ghost is capped at 160 px anyway (Performance Low-End L-11). */
+function ghostCloneOf(block: HTMLElement): HTMLElement {
+  if (block.tagName === 'UL' || block.tagName === 'OL') {
+    return cloneFirstRows(block, 'LI') as HTMLElement;
+  }
+  if (block.tagName === 'TABLE') {
+    const clone = block.cloneNode(false) as HTMLElement;
+    for (const child of Array.from(block.childNodes)) {
+      const isBody = child instanceof Element && child.tagName === 'TBODY';
+      clone.appendChild(isBody ? cloneFirstRows(child, 'TR') : child.cloneNode(true));
+    }
+    return clone;
+  }
+  return block.cloneNode(true) as HTMLElement;
 }
 
 /**
@@ -214,13 +282,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   /** Gap index g means "insert before blocks[g]" (g === blocks.length means "insert at the end"). */
   function gapAt(blocks: HTMLElement[], clientY: number): number {
-    for (let i = 0; i < blocks.length; i++) {
-      const r = blocks[i].getBoundingClientRect();
-      if (clientY < r.top + r.height / 2) {
-        return i;
-      }
-    }
-    return blocks.length;
+    return firstBlockIndex(blocks, (r) => clientY < r.top + r.height / 2);
   }
 
   /** Performs the move (Range deleteContents/insertNode, via sibling-move.ts — see applyBlockMove for why not execCommand) and returns the moved block's new live element, for caret placement. */
@@ -250,15 +312,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   let hoveredBlock: HTMLElement | null = null;
 
   /** Excludes <table> so hovering a cell only shows table.ts's own row/col handles, never the whole-block handle on top of them (bug 0715 #11). draggableBlocks() itself stays unfiltered — section-move/menu-move (computeHeadingSectionSpan, moveBlockToGap) still need tables in the list so a table inside a dragged heading section is carried along. */
-  function findBlockAt(clientY: number): HTMLElement | null {
-    const blocks = draggableBlocks().filter((b) => b.tagName !== 'TABLE');
-    for (const b of blocks) {
-      const r = b.getBoundingClientRect();
-      if (clientY >= r.top && clientY <= r.bottom) {
-        return b;
-      }
+  function findBlockAt(blocks: HTMLElement[], clientY: number): HTMLElement | null {
+    const i = firstBlockIndex(blocks, (r) => clientY <= r.bottom);
+    const b = blocks[i];
+    if (!b || b.tagName === 'TABLE') {
+      return null;
     }
-    return null;
+    return clientY >= b.getBoundingClientRect().top ? b : null;
   }
 
   /** The blocks a drag starting on `block` would actually move — a heading's whole section
@@ -346,8 +406,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
    * can't reliably agree on, and which a real mouse can't reliably land on either) — the
    * "table handle can show together with row/column handles" acceptance criterion needs an
    * actually reachable overlap, not just a technically-non-conflicting one. */
-  function findTableBlockAt(clientX: number, clientY: number): HTMLElement | null {
-    for (const b of draggableBlocks()) {
+  function findTableBlockAt(blocks: HTMLElement[], clientX: number, clientY: number): HTMLElement | null {
+    for (const b of blocks) {
       if (b.tagName !== 'TABLE') {
         continue;
       }
@@ -932,8 +992,9 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       if (state !== 'idle') {
         return;
       }
+      const blocks = draggableBlocks();
       const li = findLiAt(hoverX, hoverY);
-      const block = li ? null : findBlockAt(hoverY);
+      const block = li ? null : findBlockAt(blocks, hoverY);
       if (block !== hoveredBlock) {
         setHighlightedBlock(block);
         positionHandle(block);
@@ -944,7 +1005,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
       // Independent of block/li above (bug 0716 round 2, #1) — must be able to show at the
       // same time as a row/column handle, so it never reads or writes hoveredBlock/hoveredLi.
-      const tableBlock = findTableBlockAt(hoverX, hoverY);
+      const tableBlock = findTableBlockAt(blocks, hoverX, hoverY);
       if (tableBlock !== hoveredTableBlock) {
         setHighlightedTableBlock(tableBlock);
         positionTableHandle(tableBlock);
@@ -993,7 +1054,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       if (!climbed) {
         // Past the outermost item's band — surface the block handle for the top-level block
         // spanning this y (the `<ul>`/`<ol>` itself when the list is a top-level block).
-        const block = findBlockAt(clientY);
+        const block = findBlockAt(draggableBlocks(), clientY);
         setHighlightedBlock(block);
         positionHandle(block);
       }
@@ -1030,7 +1091,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Independent of block/li below (bug 0716 round 2, #1) — findTableBlockAt is pure rect
     // math (no elementFromPoint), so it's safe to re-run directly at the exit point, unlike
     // findLiAt's climb.
-    const tableBlock = findTableBlockAt(e.clientX, e.clientY);
+    const tableBlock = findTableBlockAt(draggableBlocks(), e.clientX, e.clientY);
     if (tableBlock !== hoveredTableBlock) {
       setHighlightedTableBlock(tableBlock);
       positionTableHandle(tableBlock);
@@ -1427,7 +1488,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     tableHandleEl.style.display = 'none';
     if (kind === 'block') {
       const rect = dragSpan[0].getBoundingClientRect();
-      const clone = dragSpan[0].cloneNode(true) as HTMLElement;
+      const clone = ghostCloneOf(dragSpan[0]);
       clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;

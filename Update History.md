@@ -12,3 +12,4 @@
 | 1.2.2 | 2026-09-30 | Fix: Table area fit splits words correctly under a small line-height, in RTL text and at <wbr>; a pasted image re-fits the table once it has loaded. |
 | 1.2.2 | 2026-09-30 | Fix: Table area fit adds up a cell's hard lines, so an image with a wrapped caption under it counts both heights (T1.7.p3). |
 | 1.2.2 | 2026-09-30 | Fix: Fit-mode tables keep column widths after a row delete, like deleting text; columns narrow only when the table settles (2 s idle or caret leaves) (T1.7.p2). |
+| 1.2.2 | 2026-09-30 | Feature: drag-and-drop hover and drop-gap hit tests binary-search the top-level blocks, and large table/list drag ghosts carry only their first 10 rows (L-11) |
