@@ -102,7 +102,7 @@ import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
 import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS, MD_TABLE_FIT_CLASS } from './constants';
-import { AREA_FIT_HYSTERESIS } from './table-area-fit';
+import { AREA_FIT_HYSTERESIS, AREA_FIT_RESIZE_HYSTERESIS } from './table-area-fit';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -198,8 +198,17 @@ function applyTableFitMode(on: boolean): void {
 // US-19.25: đổi bề rộng panel (#content) → re-fit khi Fit-mode bật. Chỉ phản ứng
 // khi WIDTH đổi (không re-fit oan mỗi lần #content cao lên do gõ thêm dòng);
 // rAF-coalesce theo mẫu gutter.ts (Known Traps — throttle layout reads).
+// US-19.27 contract 13 (resize): while events keep arriving, keep the applied
+// widths whenever they still fit (hysteresis 1); FIT_RESIZE_SETTLE_MS after the
+// last event, a full re-fit with AREA_FIT_RESIZE_HYSTERESIS.
+const FIT_RESIZE_SETTLE_MS = 150;
 let lastFitContentWidth = 0;
 let fitReflowRaf: number | undefined;
+let fitResizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
+function refitAllTables(keepPrevHysteresis: number): void {
+  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement, { keepPrevHysteresis }));
+  stickyTableHeader.refresh();
+}
 const fitReflowObserver = new ResizeObserver((entries) => {
   if (!tableFitModeOn) {
     return;
@@ -209,13 +218,19 @@ const fitReflowObserver = new ResizeObserver((entries) => {
     return;
   }
   lastFitContentWidth = w;
+  if (fitResizeSettleTimer !== undefined) {
+    clearTimeout(fitResizeSettleTimer);
+  }
+  fitResizeSettleTimer = setTimeout(() => {
+    fitResizeSettleTimer = undefined;
+    refitAllTables(AREA_FIT_RESIZE_HYSTERESIS);
+  }, FIT_RESIZE_SETTLE_MS);
   if (fitReflowRaf !== undefined) {
     return;
   }
   fitReflowRaf = requestAnimationFrame(() => {
     fitReflowRaf = undefined;
-    content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
-    stickyTableHeader.refresh();
+    refitAllTables(1);
   });
 });
 fitReflowObserver.observe(content);
@@ -224,10 +239,16 @@ fitReflowObserver.observe(content);
 // grows. FIT_PRESSURE_MS after the last input, a pressure signal widens only the
 // edited column (growOnlyCol); paste/drop/undo/redo re-fit the table at once. Every
 // re-fit keeps the edited cell's viewport top. Layout reads live in timer/rAF callbacks.
+// Settle (full re-fit, the only edit-time trigger that narrows a column): the caret
+// leaves the session table, the editor loses focus, or FIT_IDLE_SETTLE_MS with no input.
 const FIT_PRESSURE_MS = 300;
+const FIT_IDLE_SETTLE_MS = 2000;
 const FIT_DISCRETE_INPUT_TYPES = new Set(['insertFromPaste', 'insertFromDrop', 'historyUndo', 'historyRedo']);
 let fitPressureTimer: ReturnType<typeof setTimeout> | undefined;
 let fitDiscreteRaf: number | undefined;
+let fitIdleTimer: ReturnType<typeof setTimeout> | undefined;
+let fitSettleRaf: number | undefined;
+let fitSettleTarget: { table: HTMLTableElement; cell: HTMLTableCellElement | null } | null = null;
 let fitEditCell: HTMLTableCellElement | null = null;
 let fitComposing = false;
 // Edit session = caret inside one table; baseline = each edited cell's content
@@ -311,6 +332,42 @@ function onFitPressure(): void {
   fitSessionBaseH.set(cell, cellContentHeight(cell));
 }
 
+/** Settle: full re-fit of `table` with its applied widths as prev (contract 13). */
+function settleFitTable(table: HTMLTableElement, cell: HTMLTableCellElement | null): void {
+  if (tableFitModeOn && table.isConnected && !fitComposing) {
+    refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+  }
+}
+
+/** End the edit session (caret left the table / editor lost focus) and settle it in the next frame. */
+function endFitSession(): void {
+  const table = fitSessionTable;
+  if (!table) {
+    return;
+  }
+  fitSessionTable = null;
+  fitSessionBaseH = new Map();
+  if (fitIdleTimer !== undefined) {
+    clearTimeout(fitIdleTimer);
+    fitIdleTimer = undefined;
+  }
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+    fitPressureTimer = undefined;
+  }
+  fitSettleTarget = { table, cell: fitEditCell };
+  if (fitSettleRaf === undefined) {
+    fitSettleRaf = requestAnimationFrame(() => {
+      fitSettleRaf = undefined;
+      const target = fitSettleTarget;
+      fitSettleTarget = null;
+      if (target) {
+        settleFitTable(target.table, target.cell);
+      }
+    });
+  }
+}
+
 /** Fit-mode input inside a table cell (also called for compositionend). */
 function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
   if (!tableFitModeOn) {
@@ -350,6 +407,16 @@ function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
     clearTimeout(fitPressureTimer);
   }
   fitPressureTimer = setTimeout(onFitPressure, FIT_PRESSURE_MS);
+  if (fitIdleTimer !== undefined) {
+    clearTimeout(fitIdleTimer);
+  }
+  fitIdleTimer = setTimeout(() => {
+    fitIdleTimer = undefined;
+    if (fitSessionTable === table) {
+      settleFitTable(table, fitEditCell);
+      fitSessionBaseH = new Map();
+    }
+  }, FIT_IDLE_SETTLE_MS);
 }
 
 /** Paste runs through execCommand (inputType insertText/insertHTML) → mark it discrete here. */
@@ -374,13 +441,19 @@ content.addEventListener('compositionend', () => {
     onTableFitInput(cell, 'insertCompositionText');
   }
 });
-// The session ends when the caret leaves the table (no layout read).
+// The session ends (and settles, in a rAF) when the caret leaves the table or the
+// editor loses focus; moving between cells of the same table is not a trigger.
 document.addEventListener('selectionchange', () => {
   if (fitSessionTable && caretTableCell()?.closest('table') !== fitSessionTable) {
-    fitSessionTable = null;
-    fitSessionBaseH = new Map();
+    endFitSession();
   }
 });
+content.addEventListener('focusout', (e) => {
+  if (!(e.relatedTarget instanceof Node && content.contains(e.relatedTarget))) {
+    endFitSession();
+  }
+});
+window.addEventListener('blur', endFitSession);
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.

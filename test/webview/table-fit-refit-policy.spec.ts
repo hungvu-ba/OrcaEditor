@@ -3,6 +3,8 @@
  * re-fits; pressure (overflow / edited cell grown ≥ 2 lines as its row's tallest)
  * widens only the edited column after FIT_PRESSURE_MS; paste re-fits at once; IME
  * composition is skipped; no spare width → full re-fit; every re-fit keeps the edited cell's viewport top.
+ * T1.11: settle (caret leaves the table / editor blur / FIT_IDLE_SETTLE_MS idle) is the
+ * edit-time re-fit that narrows back; a panel resize keeps widths until FIT_RESIZE_SETTLE_MS.
  * Needs real layout, keyboard and Selection, so it lives here, not roundtrip.
  */
 import * as fs from 'fs';
@@ -111,11 +113,12 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
     for (let i = 0; i < 8; i++) {
       await page.keyboard.press('Backspace');
     }
-    await page.waitForTimeout(1500);
+    // Both waits stay inside FIT_IDLE_SETTLE_MS (2000) of the last key — past it the idle settle runs.
+    await page.waitForTimeout(700);
     expectSame(await widths(page), grown);
 
     await page.keyboard.press('Tab');
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(700);
     expectSame(await widths(page), grown);
   });
 
@@ -215,5 +218,79 @@ test.describe('US-19.27 edit-time re-fit policy (TABLE_20, fit on, viewport 1000
       document.getElementById('content')!.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
     });
     await expect.poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1000 }).toBeGreaterThan(before[LIKELIHOOD] + 1);
+  });
+});
+
+/** Widen Likelihood with TOKEN_12 (grow-only), then delete it: the column stays wide until a settle. */
+async function widenThenClear(page: Page): Promise<{ before: number[]; grown: number[] }> {
+  const before = await widths(page);
+  await caretAtEnd(page, LIKELIHOOD);
+  await page.keyboard.type(` ${TOKEN_12}`);
+  await expect.poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1000, intervals: [50] }).toBeGreaterThan(before[LIKELIHOOD] + 1);
+  for (let i = 0; i < TOKEN_12.length + 1; i++) {
+    await page.keyboard.press('Backspace');
+  }
+  const grown = await widths(page);
+  expectSame(grown, before, LIKELIHOOD);
+  return { before, grown };
+}
+
+test.describe('US-19.27 settle and resize re-fits (TABLE_20, fit on, viewport 1000)', () => {
+  test('the caret leaving the table settles: the widened column narrows back, the cell top holds', async ({ page }) => {
+    await openTable20(page);
+    const { before, grown } = await widenThenClear(page);
+    const top = await cellTop(page, LIKELIHOOD);
+    await page.locator('#content p', { hasText: 'Filler paragraph 30.' }).click();
+    await expect.poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 1000, intervals: [50] }).toBeLessThan(grown[LIKELIHOOD] - 1);
+    expectSame(await widths(page), before);
+    expect(Math.abs((await cellTop(page, LIKELIHOOD)) - top)).toBeLessThanOrEqual(2);
+  });
+
+  test('2 s idle with the caret in the table settles', async ({ page }) => {
+    await openTable20(page);
+    const { before, grown } = await widenThenClear(page);
+    const top = await cellTop(page, LIKELIHOOD);
+    await page.waitForTimeout(1000);
+    expectSame(await widths(page), grown);
+    await expect.poll(async () => (await widths(page))[LIKELIHOOD], { timeout: 2500, intervals: [100] }).toBeLessThan(grown[LIKELIHOOD] - 1);
+    expectSame(await widths(page), before);
+    expect(Math.abs((await cellTop(page, LIKELIHOOD)) - top)).toBeLessThanOrEqual(2);
+  });
+
+  test('Tab between cells of the same table does not settle', async ({ page }) => {
+    await openTable20(page);
+    const { grown } = await widenThenClear(page);
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await page.waitForTimeout(600);
+    expectSame(await widths(page), grown);
+  });
+
+  test('a panel widening keeps widths while events arrive, re-fits 150 ms after the last', async ({ page }) => {
+    await openTable20(page);
+    const fresh = await widths(page);
+    // An applied layout that still fits but is far from optimal: 60 px moved from Mitigation to Contingency.
+    await page.evaluate(
+      ({ from, to }) => {
+        const t = document.querySelector('#content table') as HTMLTableElement;
+        for (const row of Array.from(t.rows)) {
+          for (const [i, d] of [[from, -60], [to, 60]]) {
+            const c = row.cells[i];
+            const w = `${parseFloat(c.style.width) + d}px`;
+            c.style.width = w;
+            c.style.maxWidth = w;
+          }
+        }
+      },
+      { from: MITIGATION, to: MITIGATION + 1 }
+    );
+    const shifted = await widths(page);
+    expect(shifted[MITIGATION]).toBeLessThan(fresh[MITIGATION] - 50);
+    for (let i = 1; i <= 5; i++) {
+      await page.setViewportSize({ width: 1000 + 2 * i, height: 700 });
+      await page.waitForTimeout(50);
+      expectSame(await widths(page), shifted);
+    }
+    await expect.poll(async () => (await widths(page))[MITIGATION], { timeout: 1000, intervals: [50] }).toBeGreaterThan(shifted[MITIGATION] + 30);
   });
 });
