@@ -438,3 +438,26 @@ test('a popup reopened during the load: a commit made after the load still makes
   await page.waitForTimeout(100);
   await expect(page.locator('#content')).not.toContainText('Injected');
 });
+
+test("an engine load that never settles: after the timeout a held 'init' renders stand-ins and the channel is free", async ({
+  page,
+}) => {
+  await page.clock.install();
+  // The request never answers: no load, no error event.
+  await page.route('http://asset.test/math-engine.js', () => new Promise<void>(() => undefined));
+  const config = await openBlankHarness(page, SLOW_ENGINE);
+  await page.evaluate(
+    (cfg) => window.postMessage({ type: 'init', text: 'Alpha $x$\n\nEnd\n', docUri: 'file:///harness.md', config: cfg }, '*'),
+    config
+  );
+  await expect.poll(() => engineScripts(page)).toBe(1);
+  expect(await page.evaluate(() => document.getElementById('content')?.childNodes.length)).toBe(0);
+
+  await page.clock.fastForward(10_000);
+  await expect(page.locator('#content .katex-fallback')).toHaveCount(1);
+  expect(await readAnnotations(page)).toEqual(['x']);
+  expect(await page.evaluate(() => document.getElementById('content')?.isContentEditable)).toBe(true);
+  await postUpdate(page, 'Alpha $y$ later\n\nEnd\n');
+  await expect(page.locator('#content > p').first()).toContainText('later');
+  expect(await readAnnotations(page)).toEqual(['y']);
+});

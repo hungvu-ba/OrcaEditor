@@ -26,6 +26,10 @@ const configs: Partial<Record<LazyEngine, EngineConfig>> = {};
 // <script> is injected. Dropped on failure so the next call retries.
 const loads: Partial<Record<LazyEngine, Promise<void>>> = {};
 
+// A held document render waits on the load (main.ts holdForEngines): a request
+// that never fires load or error must not hold the host channel forever.
+const LOAD_TIMEOUT_MS = 10_000;
+
 const failed = new Set<LazyEngine>();
 const missed = new Set<LazyEngine>();
 let missCount = 0;
@@ -35,27 +39,37 @@ export function setLazyEngineConfig(engine: LazyEngine, config: EngineConfig): v
   configs[engine] = config;
 }
 
-/** Loads the engine bundle once; rejects on a missing config or a failed load, and the next call retries. */
+/**
+ * Loads the engine bundle once; rejects on a missing config, a failed load, or
+ * no answer within LOAD_TIMEOUT_MS, and the next call retries.
+ */
 export function loadLazyEngine(engine: LazyEngine): Promise<void> {
   const pending = loads[engine];
   if (pending) {
     return pending;
   }
   const { globalKey, label } = ENGINES[engine];
-  const load = loadNoncedEngineScript<unknown>(globalKey, configs[engine], {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} engine did not load in time`)), LOAD_TIMEOUT_MS);
+  });
+  const script = loadNoncedEngineScript<unknown>(globalKey, configs[engine], {
     notConfigured: `${label} engine location was not provided by the host`,
     loadedButEmpty: `${label} engine loaded but exposed no API`,
     failed: `Failed to load the ${label} engine`,
-  }).then(
-    () => {
-      failed.delete(engine);
-    },
-    (err: unknown) => {
-      failed.add(engine);
-      loads[engine] = undefined; // allow a retry on the next call
-      throw err;
-    }
-  );
+  });
+  const load = Promise.race([script, timeout])
+    .finally(() => clearTimeout(timer))
+    .then(
+      () => {
+        failed.delete(engine);
+      },
+      (err: unknown) => {
+        failed.add(engine);
+        loads[engine] = undefined; // allow a retry on the next call
+        throw err;
+      }
+    );
   loads[engine] = load;
   return load;
 }
