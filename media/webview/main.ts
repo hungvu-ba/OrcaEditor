@@ -25,9 +25,8 @@ import {
   postProcessEntityRefs,
   postProcessEmptyLinks,
   prepareDomForSerialize,
-  hasSiblingSensitiveBlock,
+  siblingSensitiveBlockIds,
   serializeChildren,
-  serializeFull,
   stampBlockStyle,
   stampBlockStyles,
   type BlockMarkdownCache,
@@ -708,14 +707,6 @@ let syncTimer: ReturnType<typeof setTimeout> | undefined;
 let blockMap: BlockEntry[] = [];
 /** Performance Audit P-7: `BlockEntry` by id, so stamping ONE block's style is O(1). */
 let blockById = new Map<string, BlockEntry>();
-/**
- * Performance Audit P-7: the document holds a block that depends on its
- * neighbours, so no block in it may be serialized on its own (see
- * hasSiblingSensitiveBlock). Only ever changes with blockMap in renderDocument:
- * the "indented" style comes from mdSlice alone, so it cannot appear between two
- * renders.
- */
-let siblingSensitiveDocument = false;
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -1432,7 +1423,7 @@ function renderDocument(markdown: string): void {
   freshTables.forEach((t) => fitTableColumns(t));
   blockMap = buildBlockMap(content, markdown, blockMap);
   blockById = new Map(blockMap.map((entry) => [entry.id, entry]));
-  siblingSensitiveDocument = hasSiblingSensitiveBlock(blockMap);
+  serializeOptions.siblingSensitiveIds = siblingSensitiveBlockIds(blockMap);
   // P-9: a patched render keeps untouched nodes, so "my cached node detached"
   // no longer signals "a render happened" — consumers holding a cached DOM
   // walk (the re-attach picker) compare this stamp instead.
@@ -2081,12 +2072,6 @@ function serialize(): string {
   // pending records here, or the block just edited still counts as clean.
   contentMutations.takeRecords().forEach(markDirtyFromRecord);
   markCheckboxDrift();
-  if (siblingSensitiveDocument) {
-    // Keep the dirty marks, like serializeChildren's own fallback: the full pass
-    // fills no cache, so dropping them could serve stale markdown if the document
-    // ever returned to the per-block path.
-    return serializeFull(content, serializeOptions);
-  }
   return serializeChildren(content, serializeOptions, blockMarkdownCache, dirtyBlocks);
 }
 
