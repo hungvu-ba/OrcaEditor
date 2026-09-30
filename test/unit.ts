@@ -19,6 +19,7 @@ import {
   driveMismatchHint,
   entityFollowingLabel,
   entityFollowingPreview,
+  evictToByteBudget,
   FileTextCache,
   imageNamePrefix,
   isPathTooLongError,
@@ -5792,6 +5793,44 @@ check(
   del.set('a', 's', 'alpha');
   del.delete('a');
   eq('FileTextCache (audit L-5): delete removes the entry', del.get('a', 's'), undefined);
+}
+
+// --- evictToByteBudget (audit C-3) + host cleanup order (L-12, C-4, C-5) ------
+{
+  const bytes = (n: number) => new Uint8Array(n);
+  const under = new Map([['a', bytes(4)], ['b', bytes(4)]]);
+  evictToByteBudget(under, 10);
+  eq('evictToByteBudget (audit C-3): under budget keeps every entry', [...under.keys()], ['a', 'b']);
+
+  const over = new Map([['a', bytes(4)], ['b', bytes(4)], ['c', bytes(4)]]);
+  evictToByteBudget(over, 8);
+  eq('evictToByteBudget (audit C-3): over budget drops the oldest first', [...over.keys()], ['b', 'c']);
+
+  const huge = new Map([['a', bytes(20)]]);
+  evictToByteBudget(huge, 8);
+  eq('evictToByteBudget (audit C-3): a single entry larger than the budget is kept', [...huge.keys()], ['a']);
+
+  const newest = new Map([['a', bytes(2)], ['b', bytes(2)], ['c', bytes(20)]]);
+  evictToByteBudget(newest, 8);
+  eq('evictToByteBudget (audit C-3): the newest entry is never dropped', [...newest.keys()], ['c']);
+
+  const anchorCase = providerSrc.match(/case 'commentAnchorUpdate': \{[\s\S]*?\n        \}\n/)?.[0] ?? '';
+  check(
+    'audit L-12: the accepted anchor-update path schedules a coalesced re-sync',
+    /this\.scheduleAnchorSync\(document\);\s*break;\s*\}\s*$/.test(anchorCase)
+  );
+  const siblingBody = providerSrc.match(/private async readSiblingMdTexts\([\s\S]*?\n  \}/)?.[0] ?? '';
+  check(
+    'audit C-4: readSiblingMdTexts reads siblings without opening a TextDocument',
+    siblingBody !== '' && !/openTextDocument/.test(siblingBody) && /readMarkdownText\(/.test(siblingBody)
+  );
+  const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+  const referencedAt = restoreBody.indexOf('referencedAssetBasenames(');
+  const allowedDirAt = restoreBody.indexOf('resolveAllowedAssetsDir(');
+  check(
+    'audit C-5: restoreUndoneImageDeletions checks referenced names before the allowed-roots walk',
+    referencedAt !== -1 && allowedDirAt !== -1 && referencedAt < allowedDirAt
+  );
 }
 
 let summaryPrinted = false;

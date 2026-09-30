@@ -22,6 +22,7 @@ import {
   classifyLink,
   computeMinimalEdit,
   documentStateKey,
+  evictToByteBudget,
   FileTextCache,
   imageNamePrefix,
   driveMismatchHint,
@@ -657,6 +658,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private readonly sidecarReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
+   * Audit L-12: pending thread re-syncs after accepted `commentAnchorUpdate`s,
+   * keyed by `documentStateKey`. One inserted line above N anchored threads
+   * posts N updates; they collapse into a single `commentThreadsSync`.
+   */
+  private readonly anchorSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly ANCHOR_SYNC_DEBOUNCE_MS = 100;
+
+  /**
    * Req 24 US-23.18 AC6: per-document undo/redo depth, keyed the same normalized way as
    * every other per-document map here. Provider-level rather than per-panel on purpose —
    * two panels on one document must share one count, and a per-panel subscription would
@@ -759,6 +768,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     );
   }
 
+  /** Audit L-12: coalesce the thread re-sync of a burst of accepted anchor updates. */
+  private scheduleAnchorSync(document: vscode.TextDocument): void {
+    const key = documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS);
+    const existing = this.anchorSyncTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.anchorSyncTimers.set(
+      key,
+      setTimeout(() => {
+        this.anchorSyncTimers.delete(key);
+        this.syncCommentThreads(document);
+      }, MarkdownWysiwygProvider.ANCHOR_SYNC_DEBOUNCE_MS)
+    );
+  }
+
   /**
    * Req 24 US-23.15 AC2: the sidecar itself is gone (branch switch, `git rm`, or
    * by hand). `forgetDocument` drops every thread for that document and releases
@@ -811,6 +836,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       clearTimeout(timer);
     }
     this.sidecarReloadTimers.clear();
+    for (const timer of this.anchorSyncTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.anchorSyncTimers.clear();
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
@@ -2056,7 +2085,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // webview then re-applied — pure amplification of a no-op.
             break;
           }
-          this.syncCommentThreads(document);
+          this.scheduleAnchorSync(document);
           break;
         }
         case 'replyToComment': {
@@ -3057,18 +3086,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * không bao giờ undo; key là tên file (đã unique nhờ hash ngẫu nhiên trong
    * savePastedImage nên không cần phân biệt theo document).
    */
-  private static readonly MAX_RECENTLY_DELETED_IMAGES = 20;
+  private static readonly MAX_RECENTLY_DELETED_BYTES = 16 * 1024 * 1024;
   private readonly recentlyDeletedImages = new Map<string, Uint8Array>();
 
   private rememberDeletedImage(fileName: string, bytes: Uint8Array): void {
     this.recentlyDeletedImages.set(fileName, bytes);
-    while (this.recentlyDeletedImages.size > MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_IMAGES) {
-      const oldest = this.recentlyDeletedImages.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.recentlyDeletedImages.delete(oldest);
-    }
+    evictToByteBudget(this.recentlyDeletedImages, MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_BYTES);
   }
 
   /**
@@ -3190,7 +3213,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         continue;
       }
       try {
-        texts.push((await vscode.workspace.openTextDocument(uri)).getText());
+        texts.push(await this.readMarkdownText(uri));
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }
@@ -3230,6 +3253,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
+    // Same normalizer as cleanupOrphanImages: match the normalized name against
+    // the link/image/HTML targets so undo restores the right file even when its
+    // name has diacritics / spaces / parens (X-1).
+    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
+    // Audit C-5: no cached name is referenced -> nothing to restore, so skip the
+    // allowed-roots symlink walk below on this doc change.
+    const cached = [...this.recentlyDeletedImages.keys()];
+    if (!cached.some((fileName) => referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS)))) {
+      return;
+    }
     // X-15: same allowed-roots guard as every other writer (savePastedImage /
     // saveDroppedFile / cleanupOrphanImages) — a mis-configured customFolderPath
     // must not let undo write a restored file outside the workspace. Skip when
@@ -3238,10 +3271,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (!imagesDir) {
       return;
     }
-    // Same normalizer as cleanupOrphanImages: match the normalized name against
-    // the link/image/HTML targets so undo restores the right file even when its
-    // name has diacritics / spaces / parens (X-1).
-    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
       if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;

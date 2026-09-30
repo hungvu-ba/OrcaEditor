@@ -465,6 +465,25 @@ export function documentStateKey(uriStr: string, caseInsensitive: boolean): stri
 }
 
 /**
+ * Audit C-3: drop the oldest entries (Map insertion order) while the summed
+ * `byteLength` exceeds `maxBytes`. The newest entry is never dropped, even when
+ * it alone is over budget.
+ */
+export function evictToByteBudget(entries: Map<string, Uint8Array>, maxBytes: number): void {
+  let total = 0;
+  for (const bytes of entries.values()) {
+    total += bytes.byteLength;
+  }
+  for (const [key, bytes] of entries) {
+    if (total <= maxBytes || entries.size <= 1) {
+      break;
+    }
+    entries.delete(key);
+    total -= bytes.byteLength;
+  }
+}
+
+/**
  * Audit L-5: file text kept across cross-file search queries, so a repeated
  * query does not re-read and re-decode every scanned file from disk. Bounded by
  * total chars (LRU by Map insertion order) and validated by a caller-supplied
