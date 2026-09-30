@@ -585,13 +585,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * (catches unsaved edits) and falling back to disk — same source-of-truth
    * order as crossFileSearch.
    */
-  private async readMarkdownText(uri: vscode.Uri): Promise<string> {
-    const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  private async readMarkdownText(uri: vscode.Uri, fatal = false): Promise<string> {
+    const key = documentStateKey(uri.toString(), CASE_INSENSITIVE_FS);
+    const openDoc = vscode.workspace.textDocuments.find(
+      (d) => documentStateKey(d.uri.toString(), CASE_INSENSITIVE_FS) === key
+    );
     if (openDoc) {
       return openDoc.getText();
     }
     const bytes = await vscode.workspace.fs.readFile(uri);
-    return new TextDecoder().decode(bytes);
+    return new TextDecoder('utf-8', { fatal }).decode(bytes);
   }
 
   /**
@@ -770,7 +773,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /** Audit L-12: coalesce the thread re-sync of a burst of accepted anchor updates. */
   private scheduleAnchorSync(document: vscode.TextDocument): void {
-    const key = documentStateKey(document.uri.toString(), CASE_INSENSITIVE_FS);
+    const key = document.uri.toString();
     const existing = this.anchorSyncTimers.get(key);
     if (existing !== undefined) {
       clearTimeout(existing);
@@ -3090,6 +3093,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
   private readonly recentlyDeletedImages = new Map<string, Uint8Array>();
 
   private rememberDeletedImage(fileName: string, bytes: Uint8Array): void {
+    // Map.set keeps an existing key's old position; re-insert so it counts as newest.
+    this.recentlyDeletedImages.delete(fileName);
     this.recentlyDeletedImages.set(fileName, bytes);
     evictToByteBudget(this.recentlyDeletedImages, MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_BYTES);
   }
@@ -3213,7 +3218,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         continue;
       }
       try {
-        texts.push(await this.readMarkdownText(uri));
+        texts.push(await this.readMarkdownText(uri, true));
+        continue;
+      } catch {
+        // Not valid UTF-8 (UTF-16, a legacy code page): let VS Code decode it per
+        // files.encoding below, so a reference in that file is not missed.
+      }
+      try {
+        texts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
       }

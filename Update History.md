@@ -7,3 +7,4 @@
 | 1.2.2 | 2026-10-01 | Fix: an external edit or undo beside an invalid $$ formula no longer strips the source line from every math block (line map, scroll sync) |
 | 1.2.2 | 2026-10-01 | Fix: switching reading palette no longer animates every table cell; ET Book font ships as smaller woff2 |
 | 1.2.2 | 2026-10-01 | Fix: fewer host round trips on low-end machines — one comment re-sync per anchor burst, deleted-image undo cache capped at 16 MB, sibling notes read without opening them |
+| 1.2.2 | 2026-10-01 | Fix: image cleanup no longer misses references in unsaved or non-UTF-8 sibling notes; a re-deleted image stays undo-restorable |

@@ -5810,6 +5810,10 @@ check(
   evictToByteBudget(huge, 8);
   eq('evictToByteBudget (audit C-3): a single entry larger than the budget is kept', [...huge.keys()], ['a']);
 
+  const exact = new Map([['a', bytes(4)], ['b', bytes(4)]]);
+  evictToByteBudget(exact, 8);
+  eq('evictToByteBudget (audit C-3): a total equal to the budget keeps every entry', [...exact.keys()], ['a', 'b']);
+
   const newest = new Map([['a', bytes(2)], ['b', bytes(2)], ['c', bytes(20)]]);
   evictToByteBudget(newest, 8);
   eq('evictToByteBudget (audit C-3): the newest entry is never dropped', [...newest.keys()], ['c']);
@@ -5822,14 +5826,22 @@ check(
   const siblingBody = providerSrc.match(/private async readSiblingMdTexts\([\s\S]*?\n  \}/)?.[0] ?? '';
   check(
     'audit C-4: readSiblingMdTexts reads siblings without opening a TextDocument',
-    siblingBody !== '' && !/openTextDocument/.test(siblingBody) && /readMarkdownText\(/.test(siblingBody)
+    siblingBody !== '' &&
+      /readMarkdownText\(uri, true\)[\s\S]*openTextDocument/.test(siblingBody) &&
+      !/openTextDocument[\s\S]*readMarkdownText\(/.test(siblingBody)
+  );
+  const rememberBody = providerSrc.match(/private rememberDeletedImage\([\s\S]*?\n  \}/)?.[0] ?? '';
+  check(
+    'audit C-3: rememberDeletedImage re-inserts a known name as the newest entry',
+    /recentlyDeletedImages\.delete\(fileName\);\s*this\.recentlyDeletedImages\.set\(fileName/.test(rememberBody)
   );
   const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
   const referencedAt = restoreBody.indexOf('referencedAssetBasenames(');
   const allowedDirAt = restoreBody.indexOf('resolveAllowedAssetsDir(');
+  const guardAt = restoreBody.search(/if \(!cached\.some\([\s\S]*?\)\) \{\s*return;/);
   check(
     'audit C-5: restoreUndoneImageDeletions checks referenced names before the allowed-roots walk',
-    referencedAt !== -1 && allowedDirAt !== -1 && referencedAt < allowedDirAt
+    referencedAt !== -1 && guardAt !== -1 && allowedDirAt !== -1 && referencedAt < guardAt && guardAt < allowedDirAt
   );
 }
 
