@@ -38,12 +38,13 @@ const FIXTURES: MathFixture[] = [
   {
     // The serializer writes an escaped dollar back without its backslash. Pinned
     // as it is today: moving KaTeX must not change these bytes either way.
+    // Unescaped, `$a$` would be a second formula; `$b$` makes the count wait for a render.
     name: 'escaped \\$',
-    source: 'Costs \\$5 and \\$6 today.\n\nEnd\n',
-    katex: 0,
+    source: 'Price \\$a\\$ vs $b$.\n\nEnd\n',
+    katex: 1,
     display: 0,
-    tex: [],
-    serialized: 'Costs $5 and $6 today.\n\nEnd\n',
+    tex: ['b'],
+    serialized: 'Price $a$ vs $b$.\n\nEnd\n',
   },
   { name: 'two formulas on one line', source: 'Both $a$ and $b$ on one line.\n\nEnd\n', katex: 2, display: 0, tex: ['a', 'b'] },
 ];
@@ -80,6 +81,8 @@ for (const fixture of FIXTURES) {
     await openEditor(page, fixture.source);
 
     await expect(page.locator('#content .katex')).toHaveCount(fixture.katex);
+    // Real KaTeX layout, not a source-carrying stand-in: a lazy engine that never loads fails here.
+    await expect(page.locator('#content .katex:not(:has(.katex-html .base))')).toHaveCount(0);
     await expect(page.locator('#content .katex-display')).toHaveCount(fixture.display);
     expect(await readAnnotations(page)).toEqual(fixture.tex);
 
