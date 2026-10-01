@@ -19,3 +19,4 @@
 | 1.2.2 | 2026-10-01 | Fix: packaged extension no longer carries the removed ET Book .woff fonts beside the .woff2 (font output folder cleaned on build) |
 | 1.2.2 | 2026-10-01 | Fix: table column resize ends a drag after a lost mouseup or a mid-drag re-render, ignores ragged-row edges, keeps a lock off tables inserted above |
 | 1.2.2 | 2026-10-01 | Fix: table column-width lock follows the resized table by header text across host updates, never moving to a same-width table inserted above |
+| 1.3.1 | 2026-10-01 | Fix: updated markdown-it to 14.3.2 (npm audit), removing quadratic slowdown on large documents with linkified URLs |
