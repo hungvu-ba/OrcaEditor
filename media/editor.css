@@ -306,6 +306,26 @@ li.task-list-item.dd-source-muted.dd-hover-outline::before {
   border-radius: 1px;
 }
 
+/* --- Table column resize (US-6.10): edge line + cursor classes on body. --- */
+.table-col-resize-line {
+  position: fixed;
+  width: 2px;
+  z-index: 25;
+  pointer-events: none;
+  background: var(--vscode-focusBorder);
+}
+
+body.table-col-resize-hover,
+body.table-col-resize-hover * {
+  cursor: col-resize !important;
+}
+
+body.table-col-resizing,
+body.table-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 /* --- Table row/column drag & drop (HLR section 17, US-17.4, M2) ---
  * Row/column handles reuse .dd-handle's look (same class list); .dd-row-handle
  * sits just left of the table (same offset as the block handle's own left
@@ -922,6 +942,14 @@ body.reading-mode:not(.reading-zen) #content {
 
 #table-toolbar button:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+#table-toolbar button:disabled,
+#table-toolbar button:disabled:hover,
+body[class*='reading-mode-'] #table-toolbar button:disabled:hover {
+  opacity: 0.4;
+  cursor: default;
+  background: transparent;
 }
 
 #table-toolbar .toolbar-sep {

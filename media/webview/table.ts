@@ -29,13 +29,15 @@ import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escap
 import { isCjkBreakUnit } from './reading-stats';
 import { solveAreaFit, AREA_FIT_HYSTERESIS, type AreaFitColumn, type AreaFitOptions, type CellLines } from './table-area-fit';
 import { measureTableLines } from './table-area-measure';
-import { lockedWidths, type LockedWidths } from './table-col-resize';
+import { initTableColResize, lockedWidths, type LockedWidths } from './table-col-resize';
 
 export interface TableContext {
   scheduleSync: () => void;
   dom: DomHelpers;
   /** US-19.27 T1.7.p2: fit mode takes a row delete like typing (re-fit later); false = re-fit now. */
   deferRowDeleteFit?: (table: HTMLTableElement) => boolean;
+  /** US-6.10: a column resize changed a table's widths (sticky header etc. must follow). */
+  onColumnWidthsChanged?: () => void;
 }
 
 export interface TableController {
@@ -196,6 +198,12 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
   });
 
   initTableDragDrop();
+  initTableColResize(content, {
+    measureHardMin: measureColumnHardMin,
+    refit: (t) => fitTableColumns(t),
+    isDragBusy: () => tdState !== 'idle',
+    onColumnWidthsChanged: () => ctx.onColumnWidthsChanged?.(),
+  });
 
   return { hideTableToolbar, closeRowMenu };
 }
@@ -649,8 +657,10 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
 
 /**
  * US-6.10: pins each locked column in auto layout like the scroll branch of
- * `applyFitColumns` (no FIT_CLASS, no table width). An `undefined` entry (column
- * inserted after the lock) gets no inline width.
+ * `applyFitColumns` (no FIT_CLASS, no table width), minus `max-width`: Chromium
+ * honours it on a cell, which would let a typed word wider than the column
+ * overflow instead of widening it. An `undefined` entry (column inserted after
+ * the lock) gets no inline width.
  */
 function applyLockedWidths(_table: HTMLTableElement, rows: HTMLTableRowElement[], widths: LockedWidths): void {
   for (const row of rows) {
@@ -663,7 +673,6 @@ function applyLockedWidths(_table: HTMLTableElement, rows: HTMLTableRowElement[]
       const w = `${widths[i]}px`;
       cell.style.width = w;
       cell.style.minWidth = w;
-      cell.style.maxWidth = w;
     }
   }
 }
