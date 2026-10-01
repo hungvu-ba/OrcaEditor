@@ -88,6 +88,7 @@ import {
 } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns, setTableFitMode } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
+import { snapshotTableLocks, restoreTableLocks } from './table-col-resize';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
 import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
@@ -191,7 +192,19 @@ const externalDrop = initExternalDrop(content, {
   insertMarkdown: insertMarkdownAtCaret,
   restoreSelection: dom.restoreSelection,
 });
-const table = initTable(content, toolbarEl, { scheduleSync, dom, deferRowDeleteFit });
+const table = initTable(content, toolbarEl, {
+  scheduleSync,
+  dom,
+  deferRowDeleteFit,
+  // US-6.10: a column resize changed widths — re-measure the sticky header clone
+  // (declared below; only called after init) and the line gutter.
+  onColumnWidthsChanged: () => {
+    stickyTableHeader.refresh();
+    if (lineNumbersEnabled) {
+      lineGutter.refreshFromDom();
+    }
+  },
+});
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
 
@@ -1548,6 +1561,8 @@ function renderDocument(prepared: PreparedRender): void {
   contentMutations.disconnect();
   resetBlockSerializeState();
   const scrollTop = window.scrollY;
+  // US-6.10 contract 8: replaced tables lose their column-width lock — remember it by ordinal.
+  const tableLocks = snapshotTableLocks(content);
   // Performance Audit P-9: splice only the blocks this update changed; null =
   // nothing to diff against yet (first render) → full innerHTML rebuild.
   const inserted = tryPatchRender(cleanHtml, mathRanges);
@@ -1579,6 +1594,7 @@ function renderDocument(prepared: PreparedRender): void {
   // sàn 14ch của cột dài nhất) — phải chạy TRƯỚC stickyTableHeader.refresh() vì
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   const freshTables = inserted ? tablesWithin(inserted) : (Array.from(content.querySelectorAll('table')) as HTMLTableElement[]);
+  restoreTableLocks(content, tableLocks);
   freshTables.forEach((t) => fitTableColumns(t));
   blockMap = buildBlockMap(content, markdown, blockMap);
   blockById = new Map(blockMap.map((entry) => [entry.id, entry]));

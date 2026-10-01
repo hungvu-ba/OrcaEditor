@@ -346,3 +346,108 @@ test.describe('US-6.10 table column resize', () => {
     expect(await fitted()).toBe(true);
   });
 });
+
+/** Send a host `update` and wait until #content shows `marker`. */
+async function hostUpdate(page: Page, text: string, marker: string): Promise<void> {
+  await page.evaluate((t) => window.postMessage({ type: 'update', text: t }, '*'), text);
+  await expect(page.locator('#content')).toContainText(marker);
+  await page.waitForTimeout(100);
+}
+
+/** Remember the current first table node so a later check can tell kept from replaced. */
+async function tagTable(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as unknown as { __oldTable: Element }).__oldTable = document.querySelector('#content table')!;
+  });
+}
+
+function sameTable(page: Page): Promise<boolean> {
+  return page.evaluate(
+    () => (window as unknown as { __oldTable: Element }).__oldTable === document.querySelector('#content table')
+  );
+}
+
+test.describe('US-6.10 lock across host re-render', () => {
+  test('an update editing a cell of the locked table replaces the node and keeps the pinned widths', async ({ page }) => {
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 80);
+    const locked = await headerWidths(page);
+    await tagTable(page);
+
+    await hostUpdate(page, DOC.replace('| x |', '| xx |'), 'xx');
+
+    expect(await sameTable(page)).toBe(false);
+    expectWidths(await headerWidths(page), locked);
+  });
+
+  test('an update adding a column drops the lock: auto widths', async ({ page }) => {
+    const DOC4 = DOC.replace('| Notes |', '| Notes | Extra |')
+      .replace('| --- | --- | --- |', '| --- | --- | --- | --- |')
+      .replace('| x |', '| x | e |')
+      .replace('| y |', '| y | f |');
+    await openEditor(page, DOC4);
+    const auto = await headerWidths(page);
+
+    await hostUpdate(page, DOC, 'Notes');
+    await dragColumnEdge(page, 0, 80);
+    await tagTable(page);
+
+    await hostUpdate(page, DOC4, 'Extra');
+
+    expect(await sameTable(page)).toBe(false);
+    expectWidths(await headerWidths(page), auto);
+  });
+
+  test('an update editing only another block keeps the same table node, still locked', async ({ page }) => {
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 80);
+    const locked = await headerWidths(page);
+    // The drag's width writes mark the table changed, so the next update replaces
+    // it (lock restored); only a table pristine since that render is kept.
+    const edited = DOC.replace('| x |', '| xx |');
+    await hostUpdate(page, edited, 'xx');
+    await tagTable(page);
+
+    await hostUpdate(page, edited.replace('Some paragraph above', 'Another paragraph above'), 'Another paragraph');
+
+    expect(await sameTable(page)).toBe(true);
+    expectWidths(await headerWidths(page), locked);
+    await refitAll(page);
+    expectWidths(await headerWidths(page), locked);
+  });
+
+  test('after a drag with the sticky header shown, the clone column widths follow the table', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 600 });
+    const rows = Array.from({ length: 40 }, (_, i) => `| r${i} | text ${i} | n${i} |`).join('\n');
+    await openEditor(page, DOC + rows + '\n\nAfter the table.\n');
+    // Scroll the header row under the toolbar so the sticky clone shows.
+    await page.evaluate(() => {
+      const t = document.querySelector('#content table') as HTMLTableElement;
+      window.scrollBy(0, t.getBoundingClientRect().top + 200);
+    });
+    await expect(page.locator('#sticky-table-header')).toHaveClass(/\bvisible\b/);
+
+    // Drag the first column's edge on a body row in the middle of the viewport.
+    const { x, y } = await page.evaluate(() => {
+      const t = document.querySelector('#content table') as HTMLTableElement;
+      const mid = document.documentElement.clientHeight / 2;
+      const row = Array.from(t.rows).find((r) => r.getBoundingClientRect().top > mid)!;
+      const r = row.cells[0].getBoundingClientRect();
+      return { x: r.right, y: r.top + r.height / 2 };
+    });
+    await page.mouse.move(x - 1, y);
+    await expect(page.locator(LINE)).toBeVisible();
+    await page.mouse.down();
+    await page.mouse.move(x - 1 + 80, y, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.locator('#sticky-table-header')).toHaveClass(/\bvisible\b/);
+
+    const cloneWidths = await page.evaluate(() =>
+      Array.from(
+        (document.querySelector('#sticky-table-header table') as HTMLTableElement).rows[0].cells,
+        (c) => c.getBoundingClientRect().width
+      )
+    );
+    expectWidths(cloneWidths, await headerWidths(page));
+  });
+});

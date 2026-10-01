@@ -13,3 +13,4 @@
 | 1.2.2 | 2026-10-01 | Feature: drag a table column edge to resize it — hover highlight, whole table locks on first drag, minimum = widest word, session-only |
 | 1.2.2 | 2026-10-01 | Fix: pressing a table column edge without dragging no longer locks the table; the lock starts at the first movement |
 | 1.2.2 | 2026-10-01 | Feature: resized table column widths survive insert/delete/move column; table toolbar Reset column widths button restores automatic widths |
+| 1.2.2 | 2026-10-01 | Feature: resized table column widths carry over host re-render when the column count is unchanged; sticky header follows while resizing |
