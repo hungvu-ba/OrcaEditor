@@ -47,6 +47,7 @@ import { copySrcLines, lineAgnosticKey, planBlockPatch } from '../media/webview/
 import domino from '@mixmark-io/domino';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { remapWidths } from '../media/webview/table-col-resize';
 import { buildGroups } from '../media/webview/comment-gutter';
 import { orphanKindLabel } from '../media/webview/comment-panel';
 import type { ThreadAnchor } from '../media/webview/comment-resolve';
@@ -5843,6 +5844,33 @@ check(
     'audit C-5: restoreUndoneImageDeletions checks referenced names before the allowed-roots walk',
     referencedAt !== -1 && guardAt !== -1 && allowedDirAt !== -1 && referencedAt < guardAt && guardAt < allowedDirAt
   );
+}
+
+// ---------------------------------------------------------------------------
+// US-6.10 — table-col-resize lock state (media/webview/table-col-resize.ts)
+// ---------------------------------------------------------------------------
+
+{
+  const w = [100, undefined, 300];
+  eq('table-col-resize remapWidths: insert at 0', remapWidths(w, { kind: 'insert', index: 0 }), [undefined, 100, undefined, 300]);
+  eq('table-col-resize remapWidths: insert in the middle', remapWidths(w, { kind: 'insert', index: 1 }), [100, undefined, undefined, 300]);
+  eq('table-col-resize remapWidths: insert at the end', remapWidths(w, { kind: 'insert', index: 3 }), [100, undefined, 300, undefined]);
+  eq('table-col-resize remapWidths: delete first', remapWidths(w, { kind: 'delete', index: 0 }), [undefined, 300]);
+  eq('table-col-resize remapWidths: delete last', remapWidths(w, { kind: 'delete', index: 2 }), [100, undefined]);
+  eq('table-col-resize remapWidths: move left', remapWidths(w, { kind: 'move', from: 2, to: 0 }), [300, 100, undefined]);
+  eq('table-col-resize remapWidths: move right', remapWidths(w, { kind: 'move', from: 0, to: 2 }), [undefined, 300, 100]);
+  eq('table-col-resize remapWidths: move to the same index', remapWidths(w, { kind: 'move', from: 1, to: 1 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: undefined entry survives a move', remapWidths(w, { kind: 'move', from: 1, to: 2 }), [100, 300, undefined]);
+  eq('table-col-resize remapWidths: undefined entry survives a delete elsewhere', remapWidths(w, { kind: 'delete', index: 0 }).includes(undefined), true);
+  eq('table-col-resize remapWidths: delete out of range', remapWidths(w, { kind: 'delete', index: 3 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: delete negative index', remapWidths(w, { kind: 'delete', index: -1 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: insert past the end', remapWidths(w, { kind: 'insert', index: 4 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: move out of range', remapWidths(w, { kind: 'move', from: 0, to: 3 }), [100, undefined, 300]);
+  const unchanged = remapWidths(w, { kind: 'delete', index: 9 });
+  check('table-col-resize remapWidths: out-of-range result is a copy', unchanged !== w);
+  remapWidths(w, { kind: 'insert', index: 0 });
+  remapWidths(w, { kind: 'move', from: 0, to: 2 });
+  eq('table-col-resize remapWidths: input array is not mutated', w, [100, undefined, 300]);
 }
 
 let summaryPrinted = false;
