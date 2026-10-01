@@ -29,7 +29,14 @@ import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escap
 import { isCjkBreakUnit } from './reading-stats';
 import { solveAreaFit, AREA_FIT_HYSTERESIS, type AreaFitColumn, type AreaFitOptions, type CellLines } from './table-area-fit';
 import { measureTableLines } from './table-area-measure';
-import { initTableColResize, lockedWidths, type LockedWidths } from './table-col-resize';
+import {
+  initTableColResize,
+  isTableLocked,
+  lockedWidths,
+  remapTableLock,
+  unlockTable,
+  type LockedWidths,
+} from './table-col-resize';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -96,6 +103,7 @@ const TABLE_ICONS = {
     '<path d="M2.5 4h11M6 4V2.5h4V4M4.5 4l.6 9.5h5.8L11.5 4M6.75 6.5v4.5M9.25 6.5v4.5" ' +
       'stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
   ),
+  resetWidths: svgIcon(`<path d="M2 2.5v11M14 2.5v11M4.5 8h7M6.5 6l-2 2 2 2M9.5 6l2 2-2 2" ${STROKE}/>`),
 };
 
 interface TableAction {
@@ -116,7 +124,11 @@ const tableActions: TableAction[] = [
   { icon: TABLE_ICONS.delRow, title: 'Delete current row', action: deleteRow, separatorBefore: true },
   { icon: TABLE_ICONS.delCol, title: 'Delete current column', action: deleteColumn },
   { icon: TABLE_ICONS.trash, title: 'Delete entire table', action: deleteTable, separatorBefore: true },
+  { icon: TABLE_ICONS.resetWidths, title: 'Reset column widths', action: resetColumnWidths, separatorBefore: true },
 ];
+
+/** The "Reset column widths" button; enabled only while the current cell's table is locked (US-6.10). */
+let resetWidthsBtn: HTMLButtonElement | null = null;
 
 /** Toolbar bảng tự ẩn sau TABLE_TOOLBAR_HIDE_MS; chỉ hiện lại khi CLICK chuột vào bảng (gõ phím không tính). */
 let tableToolbarHideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -144,6 +156,9 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
     btn.type = 'button';
     btn.innerHTML = item.icon;
     btn.title = item.title;
+    if (item.action === resetColumnWidths) {
+      resetWidthsBtn = btn;
+    }
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => {
       if (currentCell && currentCell.isConnected) {
@@ -202,7 +217,13 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
     measureHardMin: measureColumnHardMin,
     refit: (t) => fitTableColumns(t),
     isDragBusy: () => tdState !== 'idle',
-    onColumnWidthsChanged: () => ctx.onColumnWidthsChanged?.(),
+    onColumnWidthsChanged: () => {
+      // A drag locks the table: refresh the Reset button state of a visible toolbar.
+      if (currentCell && tableToolbar.classList.contains('visible')) {
+        positionTableToolbar(currentCell);
+      }
+      ctx.onColumnWidthsChanged?.();
+    },
   });
 
   return { hideTableToolbar, closeRowMenu };
@@ -273,6 +294,9 @@ function positionTableToolbar(cell: Element): void {
   const minTop = window.scrollY + toolbarEl.offsetHeight + 4;
   tableToolbar.style.top = `${Math.max(top, minTop)}px`;
   tableToolbar.style.left = `${rect.left + window.scrollX}px`;
+  if (resetWidthsBtn) {
+    resetWidthsBtn.disabled = !isTableLocked(table);
+  }
 }
 
 function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
@@ -785,6 +809,7 @@ function insertColumn(cell: HTMLTableCellElement, where: 'left' | 'right'): void
     }
     row.insertBefore(el, row.cells[index] ?? null);
   }
+  remapTableLock(table, { kind: 'insert', index });
   if (newHeaderCell) {
     // Chọn sẵn tên placeholder — gõ là thay được tên ngay
     ctx.dom.placeCaretIn(newHeaderCell, true);
@@ -885,10 +910,23 @@ function deleteColumn(cell: HTMLTableCellElement): void {
       r.deleteCell(index);
     }
   }
+  remapTableLock(table, { kind: 'delete', index });
   if (row) {
     ctx.dom.placeCaretIn(row.cells[Math.min(index, row.cells.length - 1)]);
   }
   afterTableEdit(table);
+}
+
+/** Drops the table's column-width lock and returns it to the current mode's automatic widths. No sync: widths never reach the .md. */
+function resetColumnWidths(cell: HTMLTableCellElement): void {
+  const table = cellTable(cell);
+  if (!table) {
+    return;
+  }
+  unlockTable(table);
+  fitTableColumns(table);
+  ctx.onColumnWidthsChanged?.();
+  positionTableToolbar(cell);
 }
 
 function deleteTable(cell: HTMLTableCellElement): void {
@@ -1374,6 +1412,7 @@ function finishColMove(): void {
     // `gap` indexes the pre-move order; `undefined` (gap past the last cell) means append.
     row.insertBefore(moved, cells[gap] ?? null);
   }
+  remapTableLock(table, { kind: 'move', from: fromIdx, to: insertionIndex });
   // No fitTableColumns: per-cell widths moved with their cells, and its strip-then-measure
   // pass can shrink scrollWidth mid-layout and clamp the island's scrollLeft.
   const headerCell = table.tHead?.rows[0]?.cells[insertionIndex];

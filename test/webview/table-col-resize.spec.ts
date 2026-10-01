@@ -64,6 +64,35 @@ function expectWidths(actual: number[], expected: number[]): void {
   actual.forEach((w, i) => expect(Math.abs(w - expected[i]), `column ${i}: ${w} vs ${expected[i]}`).toBeLessThanOrEqual(1));
 }
 
+const RESET = '#table-toolbar button[title="Reset column widths"]';
+
+/** Click inside header cell `col` (shows the table toolbar, caret in that cell). */
+async function clickHeaderCell(page: Page, col: number): Promise<void> {
+  const { x, y } = await headerEdge(page, col);
+  await page.mouse.click(x - 30, y);
+  await expect(page.locator('#table-toolbar')).toHaveClass(/\bvisible\b/);
+}
+
+/** Click the table toolbar button titled `title`. */
+async function clickToolbar(page: Page, title: string): Promise<void> {
+  await page.locator(`#table-toolbar button[title="${title}"]`).click();
+}
+
+/** Re-fit every table (fit mode on, then off) so the lock is re-applied from its widths array. */
+async function refitAll(page: Page): Promise<void> {
+  for (const on of [true, false]) {
+    await page.evaluate(() => window.postMessage({ type: 'runCommand', command: 'toggleTableFitMode' }, '*'));
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains('table-fit-mode'))).toBe(on);
+  }
+  await page.waitForTimeout(100);
+}
+
+function editCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as unknown as { __posted: Array<{ type: string }> }).__posted.filter((m) => m.type === 'edit').length
+  );
+}
+
 test.describe('US-6.10 table column resize', () => {
   test('hover near a header edge shows the line and the resize cursor class; moving away clears both', async ({ page }) => {
     await openEditor(page, DOC);
@@ -214,5 +243,106 @@ test.describe('US-6.10 table column resize', () => {
     await page.waitForTimeout(150);
     await expect(page.locator(LINE)).toBeHidden();
     await expect(page.locator('body')).not.toHaveClass(/\btable-col-resize-hover\b/);
+  });
+
+  test('insert column right keeps the locked widths; the new column is auto-sized', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 60);
+    const locked = await headerWidths(page);
+
+    await clickHeaderCell(page, 0);
+    await clickToolbar(page, 'Insert column right');
+    await refitAll(page);
+
+    const after = await headerWidths(page);
+    expectWidths([after[0], after[2], after[3]], locked);
+    const newColPinned = await page.evaluate(
+      () => (document.querySelector('#content table') as HTMLTableElement).rows[0].cells[1].style.width
+    );
+    expect(newColPinned).toBe('');
+    expect(after[1]).toBeGreaterThan(20);
+  });
+
+  test('delete column keeps the remaining locked widths', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 60);
+    const locked = await headerWidths(page);
+
+    await clickHeaderCell(page, 1);
+    await clickToolbar(page, 'Delete current column');
+    await refitAll(page);
+
+    expectWidths(await headerWidths(page), [locked[0], locked[2]]);
+  });
+
+  test('add row leaves the locked widths unchanged', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 60);
+    const locked = await headerWidths(page);
+
+    await clickHeaderCell(page, 0);
+    await clickToolbar(page, 'Insert row below');
+
+    expectWidths(await headerWidths(page), locked);
+    await refitAll(page);
+    expectWidths(await headerWidths(page), locked);
+  });
+
+  test('drag-moving a locked column carries its width to the new position', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await openEditor(page, DOC);
+    await dragColumnEdge(page, 0, 120);
+    const locked = await headerWidths(page);
+
+    await page.locator('#content thead th').nth(0).hover();
+    const colHandle = page.locator('.dd-col-handle');
+    await expect(colHandle).toHaveCSS('display', 'flex');
+    const handleBox = (await colHandle.boundingBox())!;
+    const nextBox = (await page.locator('#content thead th').nth(1).boundingBox())!;
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    // Right half of the neighbour: the column drops after it.
+    await page.mouse.move(nextBox.x + nextBox.width - 4, nextBox.y + nextBox.height / 2, { steps: 10 });
+    await page.mouse.up();
+    await expect(page.locator('#content thead th').nth(1)).toHaveText('Name');
+
+    await refitAll(page);
+    expectWidths(await headerWidths(page), [locked[1], locked[0], locked[2]]);
+  });
+
+  test('Reset column widths: disabled until a drag, restores pre-drag widths, posts no edit', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await openEditor(page, DOC);
+    const before = await headerWidths(page);
+    await clickHeaderCell(page, 2);
+    await expect(page.locator(RESET)).toBeDisabled();
+
+    await dragColumnEdge(page, 0, 80);
+    await expect(page.locator(RESET)).toBeEnabled();
+    expect((await headerWidths(page))[0]).toBeGreaterThan(before[0] + 40);
+    await clearPosted(page);
+
+    await page.locator(RESET).click();
+    expectWidths(await headerWidths(page), before);
+    await expect(page.locator(RESET)).toBeDisabled();
+    await page.waitForTimeout(800);
+    expect(await editCount(page)).toBe(0);
+  });
+
+  test('fit mode: Reset gives a previously fitted table its md-table-fit class back', async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 700 });
+    await openEditor(page, DOC, { tableFitMode: true });
+    const fitted = (): Promise<boolean> =>
+      page.evaluate(() => (document.querySelector('#content table') as HTMLTableElement).classList.contains('md-table-fit'));
+    await expect.poll(fitted).toBe(true);
+    await dragColumnEdge(page, 0, 20);
+    expect(await fitted()).toBe(false);
+
+    await clickHeaderCell(page, 1);
+    await page.locator(RESET).click();
+    expect(await fitted()).toBe(true);
   });
 });
