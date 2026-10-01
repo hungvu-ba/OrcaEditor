@@ -113,6 +113,24 @@ test.describe('US-6.10 table column resize', () => {
     await expect(page.locator('#table-toolbar')).toHaveClass(/\bvisible\b/);
   });
 
+  test('a press on an edge without movement leaves the fit-mode table unlocked', async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 700 });
+    await openEditor(page, DOC, { tableFitMode: true });
+    const fitted = (): Promise<boolean> =>
+      page.evaluate(() => (document.querySelector('#content table') as HTMLTableElement).classList.contains('md-table-fit'));
+    await expect.poll(fitted).toBe(true);
+    const { x, y } = await headerEdge(page, 0);
+    await page.mouse.move(x - 1, y);
+    await expect(page.locator(LINE)).toBeVisible();
+    await page.mouse.down();
+    await page.mouse.up();
+    expect(await fitted()).toBe(true);
+
+    // Control: a real drag locks the table, which drops the fit class.
+    await dragColumnEdge(page, 0, 20);
+    expect(await fitted()).toBe(false);
+  });
+
   test('dragging far left stops at the widest word, which stays on one line', async ({ page }) => {
     await openEditor(page, DOC);
     await dragColumnEdge(page, 1, -600);

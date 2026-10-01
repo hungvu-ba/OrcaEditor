@@ -103,6 +103,8 @@ interface ResizeDrag {
   widths: LockedWidths;
   x: number;
   raf: number;
+  /** False until the first applied width: a press without movement leaves the table unlocked. */
+  moved: boolean;
 }
 
 function hasSpans(table: HTMLTableElement): boolean {
@@ -217,6 +219,7 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
   );
 
   function applyDrag(d: ResizeDrag): void {
+    d.moved = true;
     d.widths[d.col] = Math.max(d.minW, Math.round(d.startW + d.x - d.startX));
     lockTable(d.table, d.widths);
     hooks.refit(d.table);
@@ -231,6 +234,9 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
       return;
     }
     d.x = e.clientX;
+    if (!d.moved && d.x === d.startX) {
+      return;
+    }
     if (d.raf === 0) {
       d.raf = requestAnimationFrame(() => {
         d.raf = 0;
@@ -248,7 +254,9 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
     if (d) {
       cancelAnimationFrame(d.raf);
       d.x = e.clientX;
-      applyDrag(d);
+      if (d.moved || d.x !== d.startX) {
+        applyDrag(d);
+      }
     }
     document.body.classList.remove(RESIZING_BODY_CLASS);
     setHover(null);
@@ -278,13 +286,20 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
       // Contract 4: pin every column to its rendered width; contract 5: hard min measured once here.
       const widths: LockedWidths = Array.from(headerRow(table).cells, (c) => Math.ceil(c.getBoundingClientRect().width));
       // An all-unpinned lock makes the refit strip every applied width, so the measure sees bare cells.
+      const prevLock = lockedWidths(table)?.slice();
       lockTable(table, widths.map(() => undefined));
       hooks.refit(table);
       const minW = Math.ceil(hooks.measureHardMin(table)[col] ?? 0);
-      drag = { table, col, startX: e.clientX, startW: widths[col] ?? minW, minW, widths, x: e.clientX, raf: 0 };
+      // The lock is applied on the first move; a press without movement restores the table as it was.
+      if (prevLock) {
+        lockTable(table, prevLock);
+      } else {
+        unlockTable(table);
+      }
+      hooks.refit(table);
+      drag = { table, col, startX: e.clientX, startW: widths[col] ?? minW, minW, widths, x: e.clientX, raf: 0, moved: false };
       document.body.classList.remove(HOVER_BODY_CLASS);
       document.body.classList.add(RESIZING_BODY_CLASS);
-      applyDrag(drag);
       window.addEventListener('mousemove', onDragMove, true);
       window.addEventListener('mouseup', onDragEnd, true);
     },
