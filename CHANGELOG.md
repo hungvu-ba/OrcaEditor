@@ -4,6 +4,12 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.3.1\] - 2026-10-01
+
+### Security
+
+-   Updated markdown-it to 14.3.2, fixing a slowdown where a large document with auto-linked URLs could block the preview for tens of seconds.
+
 ## \[1.3.0\] - 2026-10-01
 
 ### Added
