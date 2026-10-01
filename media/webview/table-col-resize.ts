@@ -6,7 +6,7 @@ type ColumnOp =
   | { kind: 'delete'; index: number }
   | { kind: 'move'; from: number; to: number };
 export type LockedWidths = (number | undefined)[];
-interface TableLockSnapshot { entries: { ordinal: number; colCount: number; widths: LockedWidths }[] }
+interface TableLockSnapshot { entries: { table: HTMLTableElement; ordinal: number; colCount: number; widths: LockedWidths }[] }
 interface ColResizeHooks {
   measureHardMin(table: HTMLTableElement): number[];
   refit(table: HTMLTableElement): void;
@@ -69,7 +69,7 @@ export function snapshotTableLocks(content: HTMLElement): TableLockSnapshot {
   const entries: TableLockSnapshot['entries'] = [];
   Array.from(content.querySelectorAll('table')).forEach((table, ordinal) => {
     const widths = locks.get(table);
-    if (widths) entries.push({ ordinal, colCount: columnCount(table), widths: widths.slice() });
+    if (widths) entries.push({ table, ordinal, colCount: columnCount(table), widths: widths.slice() });
   });
   return { entries };
 }
@@ -77,7 +77,9 @@ export function snapshotTableLocks(content: HTMLElement): TableLockSnapshot {
 export function restoreTableLocks(content: HTMLElement, snap: TableLockSnapshot): void {
   if (snap.entries.length === 0) return;
   const tables = content.querySelectorAll('table');
-  for (const { ordinal, colCount, widths } of snap.entries) {
+  for (const { table: prev, ordinal, colCount, widths } of snap.entries) {
+    // A kept node still holds its own lock; its ordinal may now name a newly inserted table.
+    if (content.contains(prev)) continue;
     const table = tables[ordinal];
     if (table && !locks.has(table) && columnCount(table) === colCount) lockTable(table, widths);
   }
@@ -132,7 +134,9 @@ function hitTest(content: HTMLElement, x: number, y: number): ResizeEdge | null 
       }
       let best: ResizeEdge | null = null;
       let bestDist = RESIZE_HIT_PX;
-      for (let i = 0; i < row.cells.length; i++) {
+      // Widths are pinned per header cell: a ragged row's extra cells have no edge.
+      const cols = Math.min(row.cells.length, headerRow(table).cells.length);
+      for (let i = 0; i < cols; i++) {
         const c = row.cells[i].getBoundingClientRect();
         if (Math.abs(x - c.right) <= bestDist) {
           bestDist = Math.abs(x - c.right);
@@ -233,6 +237,11 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
     if (!d) {
       return;
     }
+    // A mouseup lost to a focus switch, or a re-render that replaced the table, ends the drag where it stood.
+    if ((e.buttons & 1) === 0 || !d.table.isConnected) {
+      onDragEnd(e, d.x);
+      return;
+    }
     d.x = e.clientX;
     if (!d.moved && d.x === d.startX) {
       return;
@@ -245,7 +254,7 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
     }
   }
 
-  function onDragEnd(e: MouseEvent): void {
+  function onDragEnd(e: MouseEvent, x = e.clientX): void {
     e.stopPropagation();
     window.removeEventListener('mousemove', onDragMove, true);
     window.removeEventListener('mouseup', onDragEnd, true);
@@ -253,8 +262,8 @@ export function initTableColResize(content: HTMLElement, hooks: ColResizeHooks):
     drag = null;
     if (d) {
       cancelAnimationFrame(d.raf);
-      d.x = e.clientX;
-      if (d.moved || d.x !== d.startX) {
+      d.x = x;
+      if (d.table.isConnected && (d.moved || d.x !== d.startX)) {
         applyDrag(d);
       }
     }

@@ -5880,14 +5880,18 @@ check(
   eq('table-col-resize remapTableLock: remaps the stored widths', lockedWidths(t1), [undefined, 30]);
   lockTable(t1, [10, undefined, 30]);
   const snap = snapshotTableLocks(before);
-  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap, { entries: [{ ordinal: 1, colCount: 3, widths: [10, undefined, 30] }] });
+  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap.entries.map(({ ordinal, colCount, widths }) => ({ ordinal, colCount, widths })), [{ ordinal: 1, colCount: 3, widths: [10, undefined, 30] }]);
   const after = mk().body.firstElementChild as HTMLElement;
   restoreTableLocks(after, snap);
   eq('table-col-resize restore: same ordinal and column count is locked', lockedWidths(after.querySelectorAll('table')[1] as unknown as HTMLTableElement), [10, undefined, 30]);
   eq('table-col-resize restore: other table stays unlocked', lockedWidths(after.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
   const mismatch = mk().body.firstElementChild as HTMLElement;
-  restoreTableLocks(mismatch, { entries: [{ ordinal: 0, colCount: 3, widths: [1, 2, 3] }] });
+  restoreTableLocks(mismatch, { entries: [{ table: t1, ordinal: 0, colCount: 3, widths: [1, 2, 3] }] });
   eq('table-col-resize restore: column-count mismatch drops the entry', lockedWidths(mismatch.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
+  const inserted = t1.cloneNode(true) as HTMLTableElement;
+  t1.parentNode!.insertBefore(inserted, t1);
+  restoreTableLocks(before, snap);
+  eq('table-col-resize restore: a kept locked node keeps its ordinal entry off a table inserted above it', lockedWidths(inserted), undefined);
   unlockTable(t1);
   eq('table-col-resize unlock: removes the lock', lockedWidths(t1), undefined);
 }

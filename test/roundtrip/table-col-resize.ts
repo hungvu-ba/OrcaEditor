@@ -1,6 +1,6 @@
 /**
  * Feature: Table column resize (US-6.10). DOM-outcome tests: a locked table carries
- * inline width/min-width/max-width/box-sizing on every pinned cell (applyLockedWidths);
+ * inline width/min-width/box-sizing on every pinned cell (applyLockedWidths; pin() adds a stray max-width too);
  * none of it may reach the .md on either serialization path, and the result must be
  * stable on a second round trip.
  *

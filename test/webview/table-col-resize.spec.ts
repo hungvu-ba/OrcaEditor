@@ -245,6 +245,49 @@ test.describe('US-6.10 table column resize', () => {
     await expect(page.locator('body')).not.toHaveClass(/\btable-col-resize-hover\b/);
   });
 
+  test('a raw-HTML row longer than the header row has no edge past the header cells', async ({ page }) => {
+    const md =
+      '# Heading\n\nSome paragraph above the table.\n\n' +
+      '<table>\n<tr><td>head</td></tr>\n<tr><td>left</td><td>right</td></tr>\n</table>\n';
+    await openEditor(page, md);
+    const edge = (i: number): Promise<{ x: number; y: number }> =>
+      page.evaluate((c) => {
+        const r = (document.querySelector('#content table') as HTMLTableElement).rows[1].cells[c].getBoundingClientRect();
+        return { x: r.right, y: r.top + r.height / 2 };
+      }, i);
+    // Control: the edge of a column the header row has is resizable.
+    const first = await edge(0);
+    await page.mouse.move(first.x - 1, first.y);
+    await expect(page.locator(LINE)).toBeVisible();
+    const extra = await edge(1);
+    await page.mouse.move(extra.x - 1, extra.y);
+    await page.mouse.move(extra.x, extra.y);
+    await page.waitForTimeout(150);
+    await expect(page.locator(LINE)).toBeHidden();
+  });
+
+  test('a move with no button held ends a drag whose mouseup was lost', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { x, y } = await headerEdge(page, 0);
+    await page.mouse.move(x - 1, y);
+    await expect(page.locator(LINE)).toBeVisible();
+    await page.mouse.down();
+    await page.mouse.move(x + 39, y, { steps: 4 });
+    await expect(page.locator('body')).toHaveClass(/\btable-col-resizing\b/);
+    await page.waitForTimeout(100);
+    const mid = await headerWidths(page);
+
+    await page.evaluate(
+      (p) => window.dispatchEvent(new MouseEvent('mousemove', { clientX: p.x + 120, clientY: p.y, buttons: 0, bubbles: true })),
+      { x, y }
+    );
+
+    await expect(page.locator('body')).not.toHaveClass(/\btable-col-resizing\b/);
+    await page.waitForTimeout(100);
+    expectWidths(await headerWidths(page), mid);
+    await page.mouse.up();
+  });
+
   test('insert column right keeps the locked widths; the new column is auto-sized', async ({ page }) => {
     await page.setViewportSize({ width: 1000, height: 700 });
     await openEditor(page, DOC);
@@ -414,6 +457,25 @@ test.describe('US-6.10 lock across host re-render', () => {
     expectWidths(await headerWidths(page), locked);
     await refitAll(page);
     expectWidths(await headerWidths(page), locked);
+  });
+
+  test('a re-render replacing the table mid-drag ends the drag', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { x, y } = await headerEdge(page, 0);
+    await page.mouse.move(x - 1, y);
+    await expect(page.locator(LINE)).toBeVisible();
+    await page.mouse.down();
+    await page.mouse.move(x + 39, y, { steps: 4 });
+    await expect(page.locator('body')).toHaveClass(/\btable-col-resizing\b/);
+    await tagTable(page);
+
+    await hostUpdate(page, DOC.replace('| x |', '| xx |'), 'xx');
+    expect(await sameTable(page)).toBe(false);
+    await page.mouse.move(x + 80, y, { steps: 2 });
+
+    await expect(page.locator('body')).not.toHaveClass(/\btable-col-resizing\b/);
+    await expect(page.locator(LINE)).toBeHidden();
+    await page.mouse.up();
   });
 
   test('after a drag with the sticky header shown, the clone column widths follow the table', async ({ page }) => {
