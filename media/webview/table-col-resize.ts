@@ -1,20 +1,20 @@
 // Session-only column-width locks for tables (US-6.10). Nothing here touches `document`/`window` at
 // module top level: test/unit.ts imports this module under Node.
 
-export type ColumnOp =
+type ColumnOp =
   | { kind: 'insert'; index: number }
   | { kind: 'delete'; index: number }
   | { kind: 'move'; from: number; to: number };
 export type LockedWidths = (number | undefined)[];
-export interface TableLockSnapshot { entries: { ordinal: number; colCount: number; widths: LockedWidths }[] }
-export interface ColResizeHooks {
+interface TableLockSnapshot { entries: { ordinal: number; colCount: number; widths: LockedWidths }[] }
+interface ColResizeHooks {
   measureHardMin(table: HTMLTableElement): number[];
   refit(table: HTMLTableElement): void;
   isDragBusy(): boolean;
   onColumnWidthsChanged(): void;
 }
 
-export const RESIZE_HIT_PX = 4;
+const RESIZE_HIT_PX = 4;
 
 const locks = new WeakMap<HTMLTableElement, LockedWidths>();
 
