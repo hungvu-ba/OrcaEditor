@@ -67,7 +67,7 @@ function columnCount(table: HTMLTableElement): number {
 
 export function snapshotTableLocks(content: HTMLElement): TableLockSnapshot {
   const entries: TableLockSnapshot['entries'] = [];
-  content.querySelectorAll('table').forEach((table, ordinal) => {
+  Array.from(content.querySelectorAll('table')).forEach((table, ordinal) => {
     const widths = locks.get(table);
     if (widths) entries.push({ ordinal, colCount: columnCount(table), widths: widths.slice() });
   });
