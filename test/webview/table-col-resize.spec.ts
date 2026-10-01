@@ -106,6 +106,13 @@ test.describe('US-6.10 table column resize', () => {
     expect(edits).toBe(0);
   });
 
+  test('control: a plain click inside a cell shows the table toolbar', async ({ page }) => {
+    await openEditor(page, DOC);
+    const { x, y } = await headerEdge(page, 0);
+    await page.mouse.click(x - 30, y);
+    await expect(page.locator('#table-toolbar')).toHaveClass(/\bvisible\b/);
+  });
+
   test('dragging far left stops at the widest word, which stays on one line', async ({ page }) => {
     await openEditor(page, DOC);
     await dragColumnEdge(page, 1, -600);
