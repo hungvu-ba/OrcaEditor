@@ -78,6 +78,12 @@ body.md-line-numbers #toolbar {
   user-select: none;
 }
 
+/* The gutter's ResizeObserver and drag-drop repaint numbers regardless of the
+ * setting, so visibility must follow the body class, not the gutter's contents. */
+body:not(.md-line-numbers) #line-gutter {
+  display: none;
+}
+
 .md-line-number {
   position: absolute;
   right: 10px;
@@ -298,6 +304,26 @@ li.task-list-item.dd-source-muted.dd-hover-outline::before {
   pointer-events: none;
   background: var(--vscode-focusBorder, #007acc);
   border-radius: 1px;
+}
+
+/* --- Table column resize (US-6.10): edge line + cursor classes on body. --- */
+.table-col-resize-line {
+  position: fixed;
+  width: 2px;
+  z-index: 25;
+  pointer-events: none;
+  background: var(--vscode-focusBorder);
+}
+
+body.table-col-resize-hover,
+body.table-col-resize-hover * {
+  cursor: col-resize !important;
+}
+
+body.table-col-resizing,
+body.table-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 /* --- Table row/column drag & drop (HLR section 17, US-17.4, M2) ---
@@ -916,6 +942,14 @@ body.reading-mode:not(.reading-zen) #content {
 
 #table-toolbar button:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+#table-toolbar button:disabled,
+#table-toolbar button:disabled:hover,
+body[class*='reading-mode-'] #table-toolbar button:disabled:hover {
+  opacity: 0.4;
+  cursor: default;
+  background: transparent;
 }
 
 #table-toolbar .toolbar-sep {
@@ -2150,6 +2184,8 @@ body.toc-open #select-viewport-band {
 
 :root {
   --toc-width: 300px;
+  /* Content reserve: follows --toc-width, but lags it during a resize drag (toc.ts applyReserve). */
+  --toc-reserve: 300px;
   /* Standard baseline for the --toc-* contract (Plan/UI/READING_MODE_CONTROL_MATRIX.md):
    * every --toc-* consumer below reads through this single token set, same
    * pattern as content's --rp-*. Standard maps straight to --vscode-*, so it
@@ -2188,16 +2224,8 @@ body.vscode-high-contrast-light {
   --toc-progress-track: var(--vscode-contrastBorder, var(--toc-fg));
 }
 
-/* Chừa chỗ cho panel: nội dung (#content) không bị che sau mục lục.
- * transition ở đây đồng bộ với transition width của #toc-panel (design handoff
- * Wireframe Handoff/Archived/design_handoff_toc_outline_rail) — nếu không, nội
- * dung sẽ nhảy khoảng trắng ngay lập tức trong khi panel còn đang trượt. */
-body {
-  transition: padding-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
 body.toc-open {
-  padding-right: calc(26px + var(--toc-width));
+  padding-right: calc(26px + var(--toc-reserve));
 }
 
 /* Toolbar bù lại margin/padding phải để LUÔN tràn hết viewport bất kể TOC mở
@@ -2208,12 +2236,8 @@ body.toc-open {
  * mode (#toolbar position:fixed, bỏ qua padding của body) KHÔNG co — 2 mode
  * dài toolbar khác nhau khi mở TOC, gây confuse; bỏ hẳn việc co hẹp để cả 2
  * mode nhất quán full-width. */
-#toolbar {
-  transition: margin-right 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
 body.toc-open #toolbar {
-  margin-right: calc(-26px - var(--toc-width));
+  margin-right: calc(-26px - var(--toc-reserve));
   padding-right: calc(var(--toolbar-edge-pad) + var(--toc-width));
 }
 
@@ -2238,21 +2262,24 @@ body.toc-open #select-overview {
  * trên cùng, cao = toolbarHeight) bị toolbar (full-width, opaque) đè lên,
  * giống title bar nằm trên sidebar — không hở, không cần né chồng lấn theo
  * cách "ai đứng dưới ai" nữa vì giờ LUÔN toolbar thắng ở cả 2 mode. */
-/* Show/hide animation (design handoff: Wireframe Handoff/Archived/
- * design_handoff_toc_outline_rail — railStyle transition: "width .3s
- * cubic-bezier(.4,0,.2,1), opacity .22s ease"). Default (closed) state is
- * width 0 + opacity 0; body.toc-open below drives it to var(--toc-width) + 1.
+/* Show/hide animation: the panel keeps its full var(--toc-width) and slides
+ * with a compositor-only transform (translateX(100%) closed -> none open), so
+ * the slide itself lays nothing out. The content reserve (body/#toolbar
+ * padding above) is not eased: #content reflows once per toggle instead of on
+ * every frame of the slide. `width` is in neither transition list, so a resize
+ * drag (--toc-width per pointermove) follows the cursor 1:1.
  * visibility uses a transition-delay instead of the old `hidden` attribute:
  * switches to visible immediately on open (delay 0s) but only becomes hidden
- * once the close animation finishes (delay .3s = the width duration), so the
- * panel stays focusable/hit-testable while it's still visibly sliding shut,
- * and isn't reachable by keyboard once fully collapsed. */
+ * once the close animation finishes (delay .3s = the transform duration), so
+ * the panel stays focusable/hit-testable while it's still visibly sliding
+ * shut, and isn't reachable by keyboard once fully hidden. */
 #toc-panel {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  width: 0;
+  width: var(--toc-width);
+  transform: translateX(100%);
   opacity: 0;
   visibility: hidden;
   overflow: hidden;
@@ -2270,25 +2297,15 @@ body.toc-open #select-overview {
   color: var(--toc-fg);
   border-left: 1px solid transparent;
   box-shadow: -6px 0 18px var(--toc-shadow);
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0.3s;
 }
 
 body.toc-open #toc-panel {
-  width: var(--toc-width);
+  transform: none;
   opacity: 1;
   visibility: visible;
   border-left-color: var(--toc-border);
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
-}
-
-/* Resize-drag lag fix: the open/close slide above eases `width` over 0.3s, but
- * the resize handle writes --toc-width on every pointermove — with `width` in
- * the transition list each drag tick eases toward its target, so the panel
- * visibly chases the cursor. While actively dragging (body.toc-resizing, set by
- * the resize pointer handler) drop `width` from the transition so the drag is
- * 1:1; the toggle-driven slide keeps its animation because it isn't dragging. */
-body.toc-resizing #toc-panel {
-  transition: opacity 0.22s ease;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease, visibility 0s linear 0s;
 }
 
 /* Handle kéo đổi rộng panel — nằm sát mép trái, phủ lên border-left. Trọn vẹn
@@ -2316,17 +2333,6 @@ body.toc-resizing #toc-resize {
 body.toc-resizing {
   cursor: ew-resize;
   user-select: none;
-}
-
-/* During a live resize-drag the content + toolbar must track the panel edge 1:1.
- * body's padding-right and #toolbar's margin/padding-right both follow
- * --toc-width and ease over 0.3s (the open/close slide); without dropping that
- * easing here the editor lags behind the dragged edge and only catches up 0.3s
- * later. The toggle-driven slide keeps its animation because it isn't dragging.
- * (Mirrors the same-purpose #toc-panel rule above.) */
-body.toc-resizing,
-body.toc-resizing #toolbar {
-  transition: none;
 }
 
 /*---------------------------------------------------------------------------

@@ -463,3 +463,73 @@ export function documentStateKey(uriStr: string, caseInsensitive: boolean): stri
   const nfc = uriStr.normalize('NFC');
   return caseInsensitive ? nfc.toLowerCase() : nfc;
 }
+
+/**
+ * Audit C-3: drop the oldest entries (Map insertion order) while the summed
+ * `byteLength` exceeds `maxBytes`. The newest entry is never dropped, even when
+ * it alone is over budget.
+ */
+export function evictToByteBudget(entries: Map<string, Uint8Array>, maxBytes: number): void {
+  let total = 0;
+  for (const bytes of entries.values()) {
+    total += bytes.byteLength;
+  }
+  for (const [key, bytes] of entries) {
+    if (total <= maxBytes || entries.size <= 1) {
+      break;
+    }
+    entries.delete(key);
+    total -= bytes.byteLength;
+  }
+}
+
+/**
+ * Audit L-5: file text kept across cross-file search queries, so a repeated
+ * query does not re-read and re-decode every scanned file from disk. Bounded by
+ * total chars (LRU by Map insertion order) and validated by a caller-supplied
+ * stamp (mtime + size) — an entry whose stamp no longer matches is dropped.
+ */
+export class FileTextCache {
+  private readonly entries = new Map<string, { stamp: string; text: string }>();
+  private totalChars = 0;
+
+  constructor(private readonly maxChars: number) {}
+
+  get(key: string, stamp: string): string | undefined {
+    const entry = this.entries.get(key);
+    if (entry === undefined) {
+      return undefined;
+    }
+    this.entries.delete(key);
+    if (entry.stamp !== stamp) {
+      this.totalChars -= entry.text.length;
+      return undefined;
+    }
+    this.entries.set(key, entry); // re-insert = most recently used
+    return entry.text;
+  }
+
+  set(key: string, stamp: string, text: string): void {
+    this.delete(key);
+    if (text.length > this.maxChars) {
+      return;
+    }
+    this.entries.set(key, { stamp, text });
+    this.totalChars += text.length;
+    for (const [oldestKey, oldest] of this.entries) {
+      if (this.totalChars <= this.maxChars) {
+        break;
+      }
+      this.entries.delete(oldestKey);
+      this.totalChars -= oldest.text.length;
+    }
+  }
+
+  delete(key: string): void {
+    const entry = this.entries.get(key);
+    if (entry !== undefined) {
+      this.entries.delete(key);
+      this.totalChars -= entry.text.length;
+    }
+  }
+}

@@ -2,6 +2,8 @@
 
 ## Mandatory Rule: Requirement Structure (HLR = master list)
 
+Requirements live in a separate repo: `/Users/hungvu/Documents/Dev/OrcaEditor-Requirements/` (`High-Level Requirement.md`, `Requirement - NN <Name>.md`). A US is found with `grep -n "US-<id>" "/Users/hungvu/Documents/Dev/OrcaEditor-Requirements/Requirement - "*.md` — never search this repo for it.
+
 Whenever a task creates or updates a requirement (HLR entry, detail file, status tag), read and follow [Plan/REQUIREMENT\_STRUCTURE.md](Plan/REQUIREMENT_STRUCTURE.md) — it defines the HLR ⇄ detail-file linking, naming, and status-tag rules.
 
 ## Mandatory Rule: Roundtrip Test for `.md`\-changing Features
@@ -18,6 +20,9 @@ Whenever a task touches real interactive webview behavior that can't be verified
 -   A tier 2/3 review never runs in the session that wrote the code: the code session commits once tests are green, records the hashes in the spec's `code_commits`, and hands off `/bmad-quick-dev-solo <spec_file>` to a fresh session, which reviews `git show <hashes>` — never the working tree.
 -   Independent review of any committed work: `/review-commit <hash...> | <a>..<b> | --spec <spec_file>` in a fresh session — it picks the tier, fixes pure defects in its own commit, holds behavior changes for the user. `bmad-quick-dev-solo` step-04 uses the same skill.
 -   Every review run (`/review-commit`, quick-dev step-04 / one-shot, `/code-review`, `/review-changes`) ends with `python3 scripts/review_log.py add ...` → `Plan/Skill Analysis/review-log.jsonl`. Pending items decided → `outcome <id> ...`; a bug found later that the review should have caught → `miss`; weekly read → `report --since <date>`.
+-   A plan whose first line is `<!-- GENERATED from harness DB …` (the 3 under `Plan/task breakdown/` since T2.8) is a mirror of `~/.claude/harness/harness.db`: never edit it by hand. Task CLI `T` = `python3 ~/Documents/Dev/agent-harness/tools/task.py`, ref = `<feature>/<id>` (e.g. `table-area-fit/T1.3`; `T list` prints them). Originals: `Plan/Archived/pre-db-2026-09-27/`.
+-   Mirror "plan file: <id> ☐→◐" / "◐→☑" → `python3 scripts/plan_tick.py <plan.md> <id> ◐|☑` (writes the DB, re-renders the mirror; ☑ hides that task's prompt blocks, `T show <ref> --part code` still prints them). "Edit that task's prompt" → `T set <ref> --part code|review|verify --file <f>` (`-` = stdin). "Add a Note" → `T note <ref> "<text>"`. Plan text the task CLI does not cover (new plan from a draft, header / §2 / phase intro, a whole task section, outline) → `P` = `python3 ~/Documents/Dev/agent-harness/tools/plan_db.py` (`/break-tasks` writes plans only through `T` and `P`).
+-   A mirror write that exits 1 with "DB updated, mirror not rendered" (someone edited the md) is already in the DB: run `T import --update "<plan.md>"`, never re-apply the edit by hand.
 -   Context usage per task: `python3 scripts/context_audit.py report --since <date>` (a SessionStart hook runs `sweep`). A session keys to its task by the quick-dev spec slug or the first prompt line `T<phase>.<n> Code:` / `Review:`.
 
 ## Mandatory Rule: Commit When Code Is Done
@@ -70,11 +75,11 @@ Only the **AI's chat/conversation replies** to the user are in Vietnamese. Don't
 
 ### 5\. Update History
 
--   Every bug fix or feature must get one line (max 30 words) appended to \[Update History.md\](Update History.md) at the repo root (`Markdown Preview VS Code/`).
--   Table format: `Date | Update Content`.
-    -   **Date**: `YYYY-MM-DD`.
-    -   **Update Content**: max 30 words, states whether it's a fix or feature.
--   Append only — never edit existing rows.
+-   Every bug fix or feature must get one row in \[Update History.md\](Update History.md) at the repo root (`Markdown Preview VS Code/`), added only via `python3 scripts/update_history.py "Fix: ..." | "Feature: ..."` (`--version` defaults to `package.json`).
+-   `Update History.md` holds today's rows only; the script first moves older-dated rows to `Update History_Archived.md`, then appends the new row.
+-   Table format: `Version | Date | Update Content` — **Update Content** max 30 words, starts with `Fix:` or `Feature:`.
+-   Never hand-edit either file or existing rows.
+-   Never read `Update History_Archived.md` whole — `grep -n` it by date or keyword.
 
 ## Mandatory Rule: Reuse Shared Modules
 
@@ -98,6 +103,15 @@ Before grep or opening a long file:
 -   Name unknown → `grep -n <word> .map/*/code.md` or read `.map/docs.md`. Maps rebuilt at session start (hook) + `python3 scripts/codemap.py build --all` if stale.
 -   `sym`/`doc` parse live and always search the whole repo, so they're never stale — only `.map/*/code.md` (per-area overview) can go stale between rebuilds.
 
+## Mandatory Rule: Round Trips & Context
+
+Every tool call is one API round trip that re-reads the whole context.
+
+-   Batch independent reads: all reads/greps of one step (e.g. a prompt step's `Read:` anchors) go in one Bash command, or as several tool calls in one response. End a batched grep command with `; true`. Look up by symbol (`codemap.py sym`, `grep -n "function <name>" -A<n>`), not by line range.
+-   Run the full gate and the webview suite in the foreground, in one call (`timeout` up to 600000). Never start them in the background and poll.
+-   One task per session. Model change → fresh session, never `/model` mid-task.
+-   Context past ~250K → stop at a green point: commit, set the plan task ◐ + `**Note**` "stopped at step <k>: <what is left>", continue in a fresh session from that Note. Same after > 1h idle on a large session: fresh session from a Note, not a resume.
+
 ## Mandatory Rule: Known Traps
 
 **Correctness trap (not performance):**
@@ -111,6 +125,7 @@ Before grep or opening a long file:
 **Cross-platform trap (macOS vs Windows):**
 
 -   **Never compare paths/filenames/text with a raw `===`/`startsWith`/`includes`.** Windows vs macOS differ in path separator, filesystem case-sensitivity, filename Unicode form (NFC/NFD), and line ending (CRLF/LF) — a raw comparison usually coincides on macOS and silently breaks on Windows. Route file/entity-name comparisons through a shared normalizer (decode → NFC → normalize separator → optional case-fold) and reconcile text to `document.eol` before diffing/writing. Keyboard-shortcut handlers must test both `metaKey` and `ctrlKey`; shortcut labels shown in UI must not hardcode `⌘`. See [Plan/Cross-Environment Defects — Audit.md](Plan/Cross-Environment%20Defects%20%E2%80%94%20Audit.md) for the full defect family and fix patterns.
+-   **`position: fixed` + `right`/`bottom` must be computed from `document.documentElement.clientWidth/clientHeight`, never `window.innerWidth/innerHeight`** — the difference is the classic scrollbar, which VS Code webviews always have. Use `fixedRightAt`/`fixedBottomAt` in `media/webview/dom-utils.ts`.
 
 **Test-infra trap:**
 

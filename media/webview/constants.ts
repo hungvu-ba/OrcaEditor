@@ -16,6 +16,9 @@ export const SYNC_DEBOUNCE_MS = 250;
 /** Trễ trước khi dựng lại mục lục sau khi nội dung đổi (toc.ts). */
 export const REBUILD_DEBOUNCE_MS = 250;
 
+/** Quiet period after the last #content width change before fit mode re-fits its tables (main.ts, toc.ts re-holds after it). */
+export const FIT_RESIZE_SETTLE_MS = 150;
+
 /** Trễ trước khi chạy lại tìm kiếm sau khi nội dung đổi (search.ts). */
 export const REFRESH_DEBOUNCE_MS = 200;
 
@@ -369,6 +372,10 @@ export const DD_HOVER_OUTLINE_CELL_CLASS = 'dd-hover-outline-cell';
 export const DD_SOURCE_MUTED_CLASS = 'dd-source-muted';
 /** DOM class marking a table fit to its column widths by `fitTableColumns` (US-19.25). */
 export const MD_TABLE_FIT_CLASS = 'md-table-fit';
+/** Transient table class (one tick): cells on one nowrap line, to measure one-line widths (US-19.25). */
+export const TABLE_FIT_MEASURING_CLASS = 'md-table-col-fit-measuring';
+/** Transient table class (one tick): cells at 1px with wrapping, images at natural size (US-19.25). */
+export const TABLE_MIN_MEASURING_CLASS = 'md-table-col-min-measuring';
 /**
  * State class on a code-block `<pre>` whose lines are word-wrapped (default ON,
  * Req 04). Removing it → horizontal scroll.

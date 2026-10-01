@@ -4,6 +4,49 @@ All notable changes to the **Orca Editor** extension are documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Multiple changes released on the same day are grouped under that day's latest version.
 
+## \[1.3.0\] - 2026-10-01
+
+### Added
+
+-   Tables: drag a column edge to resize it. The whole table locks on the first movement, a column cannot go narrower than its widest word, and a "Reset column widths" button in the table toolbar restores automatic widths. Resized widths survive inserting, deleting and moving columns, and a re-render from the host.
+-   Fit-mode tables now choose column widths that minimise total row height. They count each CJK glyph as a word and stop at a sensible width instead of filling the panel.
+-   Fit-mode tables stay calm while you edit. Column edges hold still while typing, widths are kept after adding or deleting a row or column, and the table re-settles when you leave it, blur the editor, or pause for 2 s. Pasting or dropping an image into a cell re-fits the table at once.
+
+### Changed
+
+-   Table cells are top-aligned and use `text-wrap: pretty`, which avoids one-word last lines.
+-   Performance: faster preview startup (math and front-matter engines load on demand), smoother TOC toggle and resize on large tables, lighter undo/redo, search and diagram rendering, and a smaller package.
+
+### Fixed
+
+-   Drag, list-item, table, row and column handles no longer shift left by the scrollbar width, and they follow their block on window resize, TOC toggle, image load and zoom.
+-   Math: escaped dollars (`\$`) and formulas KaTeX cannot parse now keep their source on save, an invalid formula behaves like a valid one, and a stalled math engine no longer breaks the preview.
+-   Image cleanup no longer misses references in unsaved or non-UTF-8 sibling notes, and a re-deleted image stays undo-restorable.
+-   Switching the reading palette no longer animates every table cell.
+-   Fit-mode tables no longer keep a column wider than its content, measure cell height correctly, and re-fit after an image is pasted into a cell.
+
+## \[1.2.2\] - 2026-09-24
+
+### Changed
+
+-   The line-number gutter (`orcaEditor.showLineNumbers`) is now hidden by default; enable it in Settings to show it.
+
+### Fixed
+
+-   With line numbers off, the gutter no longer draws numbers over the text.
+-   Dragging a table column to a new position no longer resets a wide table's horizontal scroll to the left.
+
+## \[1.2.1\] - 2026-09-24
+
+### Added
+
+-   The block-handle menu gains a "Delete" item.
+
+### Fixed
+
+-   Clicking a list-item (bullet) drag handle now opens a Move up / Move down / Delete menu.
+-   Right-click menu Cut/Copy/Paste now work.
+
 ## \[1.2.0\] - 2026-09-24
 
 ### Added

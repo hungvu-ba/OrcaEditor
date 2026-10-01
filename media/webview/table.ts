@@ -4,10 +4,20 @@
  * chuột vào bảng (gõ phím không tính).
  */
 import { fillSequenceColumn } from './pipeline';
-import { closestElement, emptyParagraph, showToast, svgIcon, type DomHelpers } from './dom-utils';
+import {
+  closestElement,
+  emptyParagraph,
+  fixedBottomAt,
+  fixedRightAt,
+  showToast,
+  svgIcon,
+  type DomHelpers,
+} from './dom-utils';
 import {
   TABLE_TOOLBAR_HIDE_MS,
   MD_TABLE_FIT_CLASS as FIT_CLASS,
+  TABLE_FIT_MEASURING_CLASS as MEASURE_CLASS,
+  TABLE_MIN_MEASURING_CLASS as MIN_MEASURE_CLASS,
   DD_HOVER_OUTLINE_CLASS,
   DD_HOVER_OUTLINE_CELL_CLASS,
   DD_SOURCE_MUTED_CLASS,
@@ -16,10 +26,25 @@ import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-po
 import { isValidSiblingGap } from './sibling-move';
 import { tableNeedsHtmlSerialization } from './dom-serialize-prep';
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
+import { isCjkBreakUnit } from './reading-stats';
+import { solveAreaFit, AREA_FIT_HYSTERESIS, type AreaFitColumn, type AreaFitOptions, type CellLines } from './table-area-fit';
+import { measureTableLines } from './table-area-measure';
+import {
+  initTableColResize,
+  isTableLocked,
+  lockedWidths,
+  remapTableLock,
+  unlockTable,
+  type LockedWidths,
+} from './table-col-resize';
 
 export interface TableContext {
   scheduleSync: () => void;
   dom: DomHelpers;
+  /** US-19.27 T1.7.p2: fit mode takes a row delete like typing (re-fit later); false = re-fit now. */
+  deferRowDeleteFit?: (table: HTMLTableElement) => boolean;
+  /** US-6.10: a column resize changed a table's widths (sticky header etc. must follow). */
+  onColumnWidthsChanged?: () => void;
 }
 
 export interface TableController {
@@ -78,6 +103,7 @@ const TABLE_ICONS = {
     '<path d="M2.5 4h11M6 4V2.5h4V4M4.5 4l.6 9.5h5.8L11.5 4M6.75 6.5v4.5M9.25 6.5v4.5" ' +
       'stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
   ),
+  resetWidths: svgIcon(`<path d="M2 2.5v11M14 2.5v11M4.5 8h7M6.5 6l-2 2 2 2M9.5 6l2 2-2 2" ${STROKE}/>`),
 };
 
 interface TableAction {
@@ -98,7 +124,11 @@ const tableActions: TableAction[] = [
   { icon: TABLE_ICONS.delRow, title: 'Delete current row', action: deleteRow, separatorBefore: true },
   { icon: TABLE_ICONS.delCol, title: 'Delete current column', action: deleteColumn },
   { icon: TABLE_ICONS.trash, title: 'Delete entire table', action: deleteTable, separatorBefore: true },
+  { icon: TABLE_ICONS.resetWidths, title: 'Reset column widths', action: resetColumnWidths, separatorBefore: true },
 ];
+
+/** The "Reset column widths" button; enabled only while the current cell's table is locked (US-6.10). */
+let resetWidthsBtn: HTMLButtonElement | null = null;
 
 /** Toolbar bảng tự ẩn sau TABLE_TOOLBAR_HIDE_MS; chỉ hiện lại khi CLICK chuột vào bảng (gõ phím không tính). */
 let tableToolbarHideTimer: ReturnType<typeof setTimeout> | undefined;
@@ -126,6 +156,9 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
     btn.type = 'button';
     btn.innerHTML = item.icon;
     btn.title = item.title;
+    if (item.action === resetColumnWidths) {
+      resetWidthsBtn = btn;
+    }
     btn.addEventListener('mousedown', (e) => e.preventDefault());
     btn.addEventListener('click', () => {
       if (currentCell && currentCell.isConnected) {
@@ -180,6 +213,18 @@ export function initTable(contentEl: HTMLElement, toolbarElArg: HTMLElement, con
   });
 
   initTableDragDrop();
+  initTableColResize(content, {
+    measureHardMin: measureColumnHardMin,
+    refit: (t) => fitTableColumns(t),
+    isDragBusy: () => tdState !== 'idle',
+    onColumnWidthsChanged: () => {
+      // A drag locks the table: refresh the Reset button state of a visible toolbar.
+      if (currentCell && tableToolbar.classList.contains('visible')) {
+        positionTableToolbar(currentCell);
+      }
+      ctx.onColumnWidthsChanged?.();
+    },
+  });
 
   return { hideTableToolbar, closeRowMenu };
 }
@@ -249,23 +294,23 @@ function positionTableToolbar(cell: Element): void {
   const minTop = window.scrollY + toolbarEl.offsetHeight + 4;
   tableToolbar.style.top = `${Math.max(top, minTop)}px`;
   tableToolbar.style.left = `${rect.left + window.scrollX}px`;
+  if (resetWidthsBtn) {
+    resetWidthsBtn.disabled = !isTableLocked(table);
+  }
 }
 
 function cellTable(cell: HTMLTableCellElement): HTMLTableElement | null {
   return cell.closest('table');
 }
 
-/** Class tạm dùng để đo bề rộng tự nhiên (không wrap) của ô — xem markdown.css. */
-const MEASURE_CLASS = 'md-table-col-fit-measuring';
-/** US-19.25: class tạm ép cột về min-content (từ dài nhất) để đo sàn vật lý. */
-const MIN_MEASURE_CLASS = 'md-table-col-min-measuring';
 // US-19.25: class trên <table> đang ở fit-mode (table-layout:fixed + wrap) — imported above as FIT_CLASS (US-23.21).
 
-// US-19.25 — hằng số fit-mode (chốt PO 2026-07-24). US-19.26: việc CẮT theo K/m chỉ
-// còn áp khi Σmax-content > budget (thiếu chỗ thật) — còn chỗ ngang thì không cắt.
-const FIT_OUTLIER_K = 1.8; // max > K×p75 → cột lệch, cắt bớt
-const FIT_CAP_M = 1.3; // trần cột lệch = p75 × m
-const FIT_COMFORT_FLOOR_CH = 30; // sàn dễ đọc: (a) không cắt cột lệch xuống dưới ngần này; (b) co cột cũng không xuống dưới ngần này (dưới nữa thì scroll)
+// US-19.27 area-fit floors by role (Code Plan contract 5).
+const FIT_READ_FLOOR_CH = 30;
+const FIT_READ_FLOOR_CJK_CH = 36; // ≈ 18 full-width glyphs
+const FIT_LOOSE_FLOOR_CH = 15;
+/** Share of a column's break units that are CJK glyphs from which it takes the CJK read floor. */
+const FIT_CJK_SHARE = 0.5;
 
 /** US-19.25: cờ Fit-mode global (đặt bởi main.ts từ InitConfig/broadcast). */
 let fitModeEnabled = false;
@@ -274,17 +319,24 @@ export function setTableFitMode(on: boolean): void {
 }
 
 /**
- * Phân vị `p` (0–100) theo NEAREST-RANK (`ceil`), để 1 ô lệch (nằm ở đỉnh sau khi
- * sort) KHÔNG kéo p75 lên bằng max ở bảng ít dòng — nếu dùng `floor` thì n≤4 sẽ
- * cho p75 = max và outlier cap không bao giờ kích hoạt.
+ * Hidden inline-block probe styled with the table cell's font and line height,
+ * appended to <body> (not to the table: table-layout:auto would force the probe
+ * to its column's width). The caller reads it, then removes it.
  */
-function percentile(values: number[], p: number): number {
-  if (values.length === 0) {
-    return 0;
+function appendCellProbe(sampleCell: HTMLTableCellElement | undefined): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;display:inline-block;padding:0;border:0;';
+  if (sampleCell) {
+    const cs = getComputedStyle(sampleCell);
+    span.style.fontFamily = cs.fontFamily;
+    span.style.fontSize = cs.fontSize;
+    span.style.fontWeight = cs.fontWeight;
+    span.style.fontStyle = cs.fontStyle;
+    span.style.letterSpacing = cs.letterSpacing;
+    span.style.lineHeight = cs.lineHeight;
   }
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-  return sorted[idx];
+  document.body.appendChild(span);
+  return span;
 }
 
 /**
@@ -293,21 +345,52 @@ function percentile(values: number[], p: number): number {
  * bề rộng probe = bề rộng cột chứa nó, sai lệch khỏi n·ch cần đo).
  */
 function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number): number {
-  const span = document.createElement('span');
-  span.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;display:inline-block;padding:0;border:0;';
+  const span = appendCellProbe(sampleCell);
   span.style.width = `${n}ch`;
-  if (sampleCell) {
-    const cs = getComputedStyle(sampleCell);
-    span.style.fontFamily = cs.fontFamily;
-    span.style.fontSize = cs.fontSize;
-    span.style.fontWeight = cs.fontWeight;
-    span.style.fontStyle = cs.fontStyle;
-    span.style.letterSpacing = cs.letterSpacing;
-  }
-  document.body.appendChild(span);
   const px = span.getBoundingClientRect().width;
   span.remove();
   return px;
+}
+
+/** Height px of one line of text in the table cell's font and line height. */
+function measureLineHeight(sampleCell: HTMLTableCellElement): number {
+  const span = appendCellProbe(sampleCell);
+  span.textContent = 'x';
+  const px = span.getBoundingClientRect().height;
+  span.remove();
+  return px;
+}
+
+interface FontProbes {
+  readFloorPx: number;
+  readFloorCjkPx: number;
+  looseFloorPx: number;
+  lineH: number;
+}
+
+const FONT_PROBE_CACHE_MAX = 8;
+/** Probe measures by font stamp of the sample cell; cleared whole when it would pass FONT_PROBE_CACHE_MAX keys. */
+const fontProbeCache = new Map<string, FontProbes>();
+
+/** The area-fit probe measures in `sampleCell`'s font, cached by its font stamp once fonts have loaded. */
+function fontProbes(sampleCell: HTMLTableCellElement, stamp: string): FontProbes {
+  const cached = fontProbeCache.get(stamp);
+  if (cached) {
+    return cached;
+  }
+  const probes: FontProbes = {
+    readFloorPx: measureChWidth(sampleCell, FIT_READ_FLOOR_CH),
+    readFloorCjkPx: measureChWidth(sampleCell, FIT_READ_FLOOR_CJK_CH),
+    looseFloorPx: measureChWidth(sampleCell, FIT_LOOSE_FLOOR_CH),
+    lineH: measureLineHeight(sampleCell),
+  };
+  if (document.fonts.status === 'loaded') {
+    if (fontProbeCache.size >= FONT_PROBE_CACHE_MAX) {
+      fontProbeCache.clear();
+    }
+    fontProbeCache.set(stamp, probes);
+  }
+  return probes;
 }
 
 /**
@@ -328,18 +411,36 @@ function measureChWidth(sampleCell: HTMLTableCellElement | undefined, n: number)
  */
 function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
   let widest = 0;
+  const measure = (node: Node, start: number, end: number): void => {
+    if (end <= start) {
+      return;
+    }
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    const w = range.getBoundingClientRect().width;
+    if (w > widest) {
+      widest = w;
+    }
+  };
   const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const text = node.nodeValue ?? '';
     const re = /\S+/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
-      range.setStart(node, m.index);
-      range.setEnd(node, m.index + m[0].length);
-      const w = range.getBoundingClientRect().width;
-      if (w > widest) {
-        widest = w;
+      // A CJK glyph is its own unit (the browser may break on either side); each
+      // non-CJK run between glyphs stays one atomic word.
+      let runStart = m.index;
+      let offset = m.index;
+      for (const ch of m[0]) {
+        if (isCjkBreakUnit(ch)) {
+          measure(node, runStart, offset);
+          measure(node, offset, offset + ch.length);
+          runStart = offset + ch.length;
+        }
+        offset += ch.length;
       }
+      measure(node, runStart, offset);
     }
   }
   // Inline boxes only: a block child (e.g. a <p>) stretches to the cell's full
@@ -350,12 +451,15 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
     if (content === '' || /\s/.test(content)) {
       continue; // empty, or several words → the chip can wrap at its own whitespace
     }
+    if (Array.from(content).some(isCjkBreakUnit)) {
+      continue; // CJK glyphs are break points → the text-node loop already measured them
+    }
     if (!getComputedStyle(el).display.startsWith('inline')) {
       continue;
     }
     // Replaced content makes the box far wider than its one word (e.g. an <a>
     // wrapping an <img> next to a short label) — the same inflation as a block
-    // child. Same selector list as isEmptyCell's embedded-content probe.
+    // child.
     if (el.querySelector('img,svg,video,input')) {
       continue;
     }
@@ -375,92 +479,110 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
 }
 
 /**
- * US-19.26: ô "rỗng" = không chữ và không nội dung nhúng (ảnh/SVG/video/checkbox).
- * Ô mới do `emptyCell()` tạo chỉ chứa `<br>` placeholder nên vẫn tính là rỗng. Xét
- * theo NỘI DUNG, không so bề rộng với padding (sai số sub-pixel, `&nbsp;`).
+ * Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
+ * cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
  */
-function isEmptyCell(cell: HTMLTableCellElement): boolean {
-  return (cell.textContent ?? '').trim() === '' && !cell.querySelector('img,svg,video,input');
-}
-
-/**
- * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
- * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
- * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
- * max-width) — khi còn đủ chỗ ngang (`Σ max-content ≤ W`, US-19.26), hết đường co
- * (`Σ min-content > W`), hay không đo được khung.
- *
- * US-19.26: chỉ ghim width/max-width khi THIẾU chỗ. Còn chỗ ngang → bail SỚM (không
- * cắt gì), để cột tự giãn theo layout auto — kể cả khi gõ thêm chữ, không cần đợi
- * debounced re-fit mới nới ra. Thiếu chỗ mới vào thang cắt: ①b (cắt xong dư thì trả
- * lại phần dư) → ② (co tỉ lệ) → ③ (scroll tại sàn).
- */
-function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): boolean {
-  const parent = table.parentElement;
-  if (!parent) {
-    return false;
-  }
-  const pcs = getComputedStyle(parent);
-  const budgetW = parent.clientWidth - parseFloat(pcs.paddingLeft || '0') - parseFloat(pcs.paddingRight || '0');
-  if (!(budgetW > 0)) {
-    return false;
-  }
-  const colCount = Math.max(...rows.map((r) => r.cells.length));
-  // Ô mẫu để lấy font/padding — dòng đầu có thể rỗng (ragged/đang dựng), tìm ô
-  // thật đầu tiên; không có ô nào → không đo được, rơi về mặc định.
-  const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
-  if (!sampleCell) {
-    return false;
-  }
-  const comfortFloorPx = measureChWidth(sampleCell, FIT_COMFORT_FLOOR_CH);
-
-  // Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
-  // cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
-  const ccs = getComputedStyle(sampleCell);
-  const padBorderX =
+function cellPadBorderX(cell: HTMLTableCellElement): number {
+  const ccs = getComputedStyle(cell);
+  return (
     parseFloat(ccs.paddingLeft || '0') +
     parseFloat(ccs.paddingRight || '0') +
     parseFloat(ccs.borderLeftWidth || '0') +
-    parseFloat(ccs.borderRightWidth || '0');
+    parseFloat(ccs.borderRightWidth || '0')
+  );
+}
 
-  // Pass 1 (nowrap): max-content TỪNG Ô qua Range — độc lập bề rộng cột (đo nội
-  // dung thật 1 dòng, không phải bề rộng cột chung của table-layout:auto).
-  table.classList.add(MEASURE_CLASS);
-  const range = document.createRange();
-  const colWidths: number[][] = Array.from({ length: colCount }, () => []);
-  // US-19.26: cùng số đo nhưng CHỈ ô có nội dung — mẫu để tính p75 (xem dưới).
-  const contentWidths: number[][] = Array.from({ length: colCount }, () => []);
-  // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
-  // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
+/** Per-cell content measures (px, without padding/border), valid while `key` matches the cell. */
+interface CellMeasure {
+  key: string;
+  maxContentW?: number;
+  lines?: CellLines;
+  wordW?: number;
+}
+
+/** Bounded by the live cells: a cell removed from the DOM drops its entry. */
+const cellMeasureMemo = new WeakMap<HTMLTableCellElement, CellMeasure>();
+
+/** Replaced content can change size on load, which triggers no refit. */
+const UNMEMOIZED_CELL_CONTENT = 'img, svg, video, canvas, iframe, object, embed, input';
+
+/** Font stamp per cell tag (`TH` / `TD`), read from the first cell of that tag. */
+function cellFontStamps(rows: HTMLTableRowElement[]): Map<string, string> {
+  const stamps = new Map<string, string>();
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      if (!stamps.has(cell.tagName)) {
+        const cs = getComputedStyle(cell);
+        stamps.set(cell.tagName, `${cs.font}|${cs.letterSpacing}`);
+      }
+    }
+  }
+  return stamps;
+}
+
+/** Each cell's memo entry: the stored one while font stamp + tag + innerHTML match, else a fresh one. */
+function cellMeasuresOf(rows: HTMLTableRowElement[], stamps: Map<string, string>): Map<HTMLTableCellElement, CellMeasure> {
+  const out = new Map<HTMLTableCellElement, CellMeasure>();
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      const key = `${stamps.get(cell.tagName)}|${cell.tagName}|${cell.innerHTML}`;
+      const stored = cellMeasureMemo.get(cell);
+      out.set(cell, stored?.key === key ? stored : { key });
+    }
+  }
+  return out;
+}
+
+/** Stores the entries once fonts have loaded, except for cells holding replaced content. */
+function storeCellMeasures(measures: Map<HTMLTableCellElement, CellMeasure>): void {
+  if (document.fonts.status !== 'loaded') {
+    return;
+  }
+  measures.forEach((m, cell) => {
+    if (!cell.querySelector(UNMEMOIZED_CELL_CONTENT)) {
+      cellMeasureMemo.set(cell, m);
+    }
+  });
+}
+
+/**
+ * Each column's hard minimum width (border-box px): its min-content, raised to its
+ * widest word. Fit-mode's `hardMinW` and the column-resize drag clamp (US-6.10).
+ */
+export function measureColumnHardMin(
+  table: HTMLTableElement,
+  measures?: Map<HTMLTableCellElement, CellMeasure>
+): number[] {
+  const rows = Array.from(table.rows);
+  const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
+  if (!sampleCell) {
+    return [];
+  }
+  const colCount = Math.max(...rows.map((r) => r.cells.length));
+  const padBorderX = cellPadBorderX(sampleCell);
+
+  // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong ngữ cảnh
+  // nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
+  // Only cells missing from the memo are measured.
+  const memo = measures ?? cellMeasuresOf(rows, cellFontStamps(rows));
+  const misses = Array.from(memo).filter(([, m]) => m.wordW === undefined);
+  if (misses.length) {
+    table.classList.add(MEASURE_CLASS);
+    const range = document.createRange();
+    for (const [cell, m] of misses) {
+      m.wordW = widestWordWidth(cell, range);
+    }
+    table.classList.remove(MEASURE_CLASS);
+    storeCellMeasures(memo);
+  }
   const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
-      range.selectNodeContents(row.cells[i]);
-      const cellW = range.getBoundingClientRect().width + padBorderX;
-      colWidths[i].push(cellW);
-      if (!isEmptyCell(row.cells[i])) {
-        contentWidths[i].push(cellW);
-      }
-      const wf = widestWordWidth(row.cells[i], range) + padBorderX;
+      const wf = (memo.get(row.cells[i])?.wordW ?? 0) + padBorderX;
       if (wf > wordFloorByCol[i]) {
         wordFloorByCol[i] = wf;
       }
     }
-  }
-  table.classList.remove(MEASURE_CLASS);
-
-  // US-19.26 (revised): max-content mỗi cột đã đủ để biết còn chỗ ngang hay không —
-  // bail NGAY tại đây, TRƯỚC khi đo min-content/tính cap, khi `Σmax ≤ W`. Lý do bail
-  // hẳn (không tự ghim width=natural như bản trước) thay vì áp rồi mới nới: nếu ghim
-  // `width`/`max-width` = bề rộng đo LÚC NÀY, gõ thêm chữ vào ô sẽ bị max-width cũ
-  // chặn wrap ngay, đợi đủ 200ms debounce (`scheduleFitRefit`) mới nới lại ra — co
-  // trước, giãn sau, giật hình. Bail để rơi về `applyDefaultColumnWidths` (chỉ đặt
-  // min-width, không đặt max-width) thì cột tự giãn theo layout auto ngay khi gõ,
-  // không cần đợi refit — vì hoàn toàn không cần bóp gì trong trường hợp này.
-  const natural: number[] = colWidths.map((w) => (w.length ? Math.max(...w) : 0));
-  const sumNatural = natural.reduce((a, b) => a + b, 0);
-  if (sumNatural <= budgetW) {
-    return false;
   }
 
   // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
@@ -479,58 +601,124 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
   for (let i = 0; i < colCount; i++) {
     minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
   }
+  return minByCol;
+}
 
-  // Comfortable width mỗi cột: cắt outlier (K/m/sàn), kẹp trong [min, max]. Chỉ chạy
-  // tới đây khi đã biết THIẾU chỗ (sumNatural > budgetW ở trên) nên cắt là cần thiết.
-  const comf: number[] = new Array(colCount);
+/**
+ * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
+ * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
+ * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
+ * max-width) — khi còn đủ chỗ ngang (`Σ max-content ≤ W`, US-19.26), hết đường co
+ * (`Σ min-content > W`), hay không đo được khung.
+ *
+ * US-19.26: chỉ ghim width/max-width khi THIẾU chỗ. Còn chỗ ngang → bail SỚM (không
+ * cắt gì), để cột tự giãn theo layout auto — kể cả khi gõ thêm chữ, không cần đợi
+ * debounced re-fit mới nới ra. Short of room, the area-fit solver (US-19.27) picks
+ * the widths: lowest total row height, stopping at the knee, or scroll at the floors.
+ */
+function applyFitColumns(
+  table: HTMLTableElement,
+  rows: HTMLTableRowElement[],
+  keep: Pick<AreaFitOptions, 'prevWidths' | 'hysteresis' | 'growOnlyCol'>
+): boolean {
+  const parent = table.parentElement;
+  if (!parent) {
+    return false;
+  }
+  const pcs = getComputedStyle(parent);
+  const budgetW = parent.clientWidth - parseFloat(pcs.paddingLeft || '0') - parseFloat(pcs.paddingRight || '0');
+  if (!(budgetW > 0)) {
+    return false;
+  }
+  const colCount = Math.max(...rows.map((r) => r.cells.length));
+  // Ô mẫu để lấy font/padding — dòng đầu có thể rỗng (ragged/đang dựng), tìm ô
+  // thật đầu tiên; không có ô nào → không đo được, rơi về mặc định.
+  const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
+  if (!sampleCell) {
+    return false;
+  }
+
+  const padBorderX = cellPadBorderX(sampleCell);
+
+  // Per-cell memo: each pass below measures only the cells it misses.
+  const stamps = cellFontStamps(rows);
+  const measures = cellMeasuresOf(rows, stamps);
+
+  // Pass 1 (nowrap): max-content TỪNG Ô qua Range — độc lập bề rộng cột (đo nội
+  // dung thật 1 dòng, không phải bề rộng cột chung của table-layout:auto).
+  const misses = Array.from(measures).filter(([, m]) => m.maxContentW === undefined);
+  if (misses.length) {
+    table.classList.add(MEASURE_CLASS);
+    const range = document.createRange();
+    for (const [cell, m] of misses) {
+      range.selectNodeContents(cell);
+      m.maxContentW = range.getBoundingClientRect().width;
+    }
+    table.classList.remove(MEASURE_CLASS);
+    storeCellMeasures(measures);
+  }
+  const colWidths: number[][] = Array.from({ length: colCount }, () => []);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      const cellW = (measures.get(row.cells[i])?.maxContentW ?? 0) + padBorderX;
+      colWidths[i].push(cellW);
+    }
+  }
+
+  // US-19.26 (revised): each column's max-content already tells whether there is
+  // horizontal room — bail right here, BEFORE measuring min-content / computing the
+  // cap, when `Σmax ≤ W`. Bail outright (no pinning width=natural as before) rather
+  // than apply and loosen later: pinning `width`/`max-width` to the width measured
+  // NOW makes that max-width wrap newly typed text at once until a pressure/settle
+  // re-fit (US-19.27 contract 13) loosens it — shrink first, grow later, a visual jump.
+  // Falling back to `applyDefaultColumnWidths` (min-width only, no max-width) lets the
+  // column grow with auto layout as the user types, no re-fit needed — nothing needs
+  // squeezing in this case.
+  const natural: number[] = colWidths.map((w) => (w.length ? Math.max(...w) : 0));
+  const sumNatural = natural.reduce((a, b) => a + b, 0);
+  if (sumNatural <= budgetW) {
+    return false;
+  }
+  // Short of room: break units of every cell, measured once outside the
+  // MEASURE_CLASS window (sets and restores its own layout states).
+  const cellLines = measureTableLines(table, (cell) => measures.get(cell)?.lines);
+  cellLines.forEach((row, r) =>
+    row.forEach((lines, i) => {
+      const m = measures.get(rows[r].cells[i]);
+      if (m) {
+        m.lines = lines;
+      }
+    })
+  );
+  const minByCol = measureColumnHardMin(table, measures);
+
+  // US-19.27: height-first area fit (Code Plan contracts 3–7). Floors by role in
+  // border-box px; the solver clamps them into [hardMinW, maxW] and returns
+  // integer widths with Σ ≤ budgetW unless it scrolls at the floor assignment.
+  const { readFloorPx, readFloorCjkPx, looseFloorPx, lineH } = fontProbes(
+    sampleCell,
+    stamps.get(sampleCell.tagName) ?? ''
+  );
+  const emptyLines: CellLines = { segments: [], cjkUnits: 0, units: 0 };
+  const cols: AreaFitColumn[] = [];
   for (let i = 0; i < colCount; i++) {
-    const maxI = natural[i];
-    // US-19.26: p75 chỉ tính trên ô CÓ NỘI DUNG. Ô rỗng chỉ rộng bằng padding, để
-    // chúng vào mẫu thì bảng nhiều dòng trống (bảng "Các bước" đang điền dở) luôn có
-    // p75 ≈ padding → cột nào cũng bị coi là lệch và bị cắt, và cột co lại mỗi lần
-    // thêm một dòng trống. Cột TOÀN rỗng → dùng lại mẫu đầy đủ, vì mẫu trống sẽ cho
-    // p75 = 0 làm `max > K×p75` đúng vô điều kiện — đúng cái đang muốn tránh.
-    const sample = contentWidths[i].length > 0 ? contentWidths[i] : colWidths[i];
-    const p75I = percentile(sample, 75);
-    const capI = maxI > FIT_OUTLIER_K * p75I ? Math.min(maxI, Math.max(comfortFloorPx, p75I * FIT_CAP_M)) : maxI;
-    comf[i] = Math.min(maxI, Math.max(minByCol[i], capI));
+    const cells = cellLines.map((row) => row[i] ?? emptyLines);
+    const units = cells.reduce((a, c) => a + c.units, 0);
+    const cjkUnits = cells.reduce((a, c) => a + c.cjkUnits, 0);
+    cols.push({
+      cells,
+      hardMinW: minByCol[i],
+      readFloorW: units > 0 && cjkUnits / units >= FIT_CJK_SHARE ? readFloorCjkPx : readFloorPx,
+      looseFloorW: looseFloorPx,
+      maxW: natural[i],
+    });
   }
-
-  // Sàn dễ đọc mỗi cột khi CO: 30ch, nhưng KHÔNG dưới min-content (từ rộng nhất →
-  // chữ không vỡ) và KHÔNG trên comf (cột vốn hẹp hơn 30ch giữ nguyên comf, không
-  // thổi rộng ra). Co chỉ tới sàn này; qua đó thì scroll (xem nhánh ③).
-  const shrinkFloor = comf.map((c, i) => Math.min(c, Math.max(minByCol[i], comfortFloorPx)));
-
-  const desired = comf.reduce((a, b) => a + b, 0);
-  const sumFloor = shrinkFloor.reduce((a, b) => a + b, 0);
-  const totalSlack = comf.reduce((a, c, i) => a + (c - shrinkFloor[i]), 0);
-  // US-19.26: tổng phần đã bị cap cắt đi — dùng để trả lại khi khung còn chỗ (①b).
-  const capSlack = natural.reduce((a, n, i) => a + (n - comf[i]), 0);
-
-  let widths: number[];
-  let scroll = false;
-  if (desired <= budgetW) {
-    // ①b US-19.26: cắt outlier xong lại dư chỗ → trả phần dư về đúng những cột đã bị
-    // cắt, theo tỉ lệ phần bị cắt, trần là max-content → bảng lấp đúng budget, không
-    // chừa khoảng trắng cạnh cột đang wrap. capSlack > 0 vì desired < sumNatural.
-    const spare = budgetW - desired;
-    widths = comf.map((c, i) => c + (natural[i] - c) * (spare / capSlack));
-  } else if (sumFloor >= budgetW || totalSlack <= 0) {
-    // ③ co tới sàn dễ đọc vẫn không vừa → SCROLL ngang, GIỮ độ rộng = sàn. Đây đúng
-    // là độ rộng mà nhánh ② tiến tới ở tới hạn (deficit→totalSlack) nên qua mốc
-    // scroll KHÔNG có cú nhảy — chỉ hiện thêm thanh cuộn (thanh nổi US-19.24).
-    widths = shrinkFloor;
-    scroll = true;
-  } else {
-    // ② co tỉ lệ theo slack (comf → sàn dễ đọc), vừa khít budget.
-    const deficit = desired - budgetW;
-    widths = comf.map((c, i) => c - (c - shrinkFloor[i]) * (deficit / totalSlack));
-  }
-
-  // CEIL từng cột (không floor): ô 1-token (ngày/id, chỉ có 1 chỗ ngắt là chính dấu
-  // '-') mà mất <1px do làm tròn xuống sẽ NGẮT ở '-' (overflow-wrap:normal không
-  // chặn hyphen). Ceil đảm bảo bề rộng ≥ nội dung → không ngắt.
-  const finalW = widths.map((w) => Math.max(1, Math.ceil(w)));
+  const { widths: finalW, scroll } = solveAreaFit(cols, {
+    budgetW,
+    padX: padBorderX,
+    lineH,
+    ...keep,
+  });
 
   if (scroll) {
     // Scroll-island: KHÔNG gắn FIT_CLASS → giữ base `table{display:block;
@@ -551,28 +739,7 @@ function applyFitColumns(table: HTMLTableElement, rows: HTMLTableRowElement[]): 
     return true;
   }
 
-  // Vừa khung (① / ②): table-layout:fixed (FIT_CLASS) + width/max-width mỗi ô. Tổng
-  // ceil có thể dôi vài px > budget → gỡ dần khỏi cột RỘNG DƯ nhất (còn slack trên
-  // sàn) để không sinh scrollbar dư.
-  const ceilFloor = shrinkFloor.map((m) => Math.ceil(m));
-  const cap = Math.floor(budgetW);
-  let overflow = finalW.reduce((a, b) => a + b, 0) - cap;
-  while (overflow > 0) {
-    let best = -1;
-    let bestSlack = 0;
-    for (let i = 0; i < colCount; i++) {
-      const slack = finalW[i] - ceilFloor[i];
-      if (slack > bestSlack) {
-        bestSlack = slack;
-        best = i;
-      }
-    }
-    if (best < 0) {
-      break; // không còn slack (mọi cột đã ở sàn) — chấp nhận dôi ≤ vài px
-    }
-    finalW[best] -= 1;
-    overflow -= 1;
-  }
+  // Fits the panel: table-layout:fixed (FIT_CLASS) + width/max-width per cell.
   table.classList.add(FIT_CLASS);
   table.style.width = `${finalW.reduce((a, b) => a + b, 0)}px`;
   for (const row of rows) {
@@ -630,6 +797,28 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
 }
 
 /**
+ * US-6.10: pins each locked column in auto layout like the scroll branch of
+ * `applyFitColumns` (no FIT_CLASS, no table width), minus `max-width`: Chromium
+ * honours it on a cell, which would let a typed word wider than the column
+ * overflow instead of widening it. An `undefined` entry (column inserted after
+ * the lock) gets no inline width.
+ */
+function applyLockedWidths(_table: HTMLTableElement, rows: HTMLTableRowElement[], widths: LockedWidths): void {
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      if (widths[i] === undefined) {
+        continue;
+      }
+      const cell = row.cells[i];
+      cell.style.boxSizing = 'border-box';
+      const w = `${widths[i]}px`;
+      cell.style.width = w;
+      cell.style.minWidth = w;
+    }
+  }
+}
+
+/**
  * Chỉnh bề rộng cột bảng sau mỗi render/sửa/resize. Fit-mode BẬT (US-19.25) và
  * bảng ĐƠN GIẢN (serialize ra pipe, không rò style/class vào .md) → co/wrap vừa
  * panel, HOẶC khi co tới sàn dễ đọc vẫn không vừa thì tự scroll TẠI sàn (đều trong
@@ -637,10 +826,24 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
  * (applyFitColumns trả false) → hành vi mặc định scroll-mode natural
  * (`applyDefaultColumnWidths`, US-19.3).
  */
-export function fitTableColumns(table: HTMLTableElement): void {
+export function fitTableColumns(table: HTMLTableElement, opts?: { keepPrevHysteresis?: number; growOnlyCol?: number }): void {
   const rows = Array.from(table.rows);
   if (rows.length === 0) {
     return;
+  }
+
+  // US-19.27 contract 8: the applied widths, read before the clear loop wipes
+  // them. A cell without an inline width (just-inserted column) → undefined; a
+  // deleted column's cells are gone, so survivors map by index. None at all
+  // (①a table, fit off) → no prev, fresh solve.
+  const keep: Pick<AreaFitOptions, 'prevWidths' | 'hysteresis' | 'growOnlyCol'> = {};
+  if (opts?.keepPrevHysteresis !== undefined) {
+    const prev = Array.from(rows[0].cells, (c) => parseFloat(c.style.width) || undefined);
+    if (prev.some((w) => w !== undefined)) {
+      keep.prevWidths = prev;
+      keep.hysteresis = opts.keepPrevHysteresis;
+      keep.growOnlyCol = opts.growOnlyCol;
+    }
   }
 
   // Dọn mọi bề rộng inline + fit-class trước (để đo sạch VÀ để tắt fit-mode
@@ -656,7 +859,14 @@ export function fitTableColumns(table: HTMLTableElement): void {
     }
   }
 
-  if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows)) {
+  // US-6.10 contract 2: a locked table keeps its session widths in every mode.
+  const locked = lockedWidths(table);
+  if (locked) {
+    applyLockedWidths(table, rows, locked);
+    return;
+  }
+
+  if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows, keep)) {
     return;
   }
   applyDefaultColumnWidths(table, rows);
@@ -716,6 +926,7 @@ function insertColumn(cell: HTMLTableCellElement, where: 'left' | 'right'): void
     }
     row.insertBefore(el, row.cells[index] ?? null);
   }
+  remapTableLock(table, { kind: 'insert', index });
   if (newHeaderCell) {
     // Chọn sẵn tên placeholder — gõ là thay được tên ngay
     ctx.dom.placeCaretIn(newHeaderCell, true);
@@ -772,7 +983,7 @@ function deleteRow(cell: HTMLTableCellElement): void {
       ctx.dom.placeCaretIn(next.cells[Math.min(cell.cellIndex, next.cells.length - 1)]);
     }
   }
-  afterTableEdit(table);
+  afterTableEdit(table, true);
 }
 
 /** Promotes `row` to become the table's header, swapping it with the current header row — the old
@@ -816,10 +1027,23 @@ function deleteColumn(cell: HTMLTableCellElement): void {
       r.deleteCell(index);
     }
   }
+  remapTableLock(table, { kind: 'delete', index });
   if (row) {
     ctx.dom.placeCaretIn(row.cells[Math.min(index, row.cells.length - 1)]);
   }
   afterTableEdit(table);
+}
+
+/** Drops the table's column-width lock and returns it to the current mode's automatic widths. No sync: widths never reach the .md. */
+function resetColumnWidths(cell: HTMLTableCellElement): void {
+  const table = cellTable(cell);
+  if (!table) {
+    return;
+  }
+  unlockTable(table);
+  fitTableColumns(table);
+  ctx.onColumnWidthsChanged?.();
+  positionTableToolbar(cell);
 }
 
 function deleteTable(cell: HTMLTableCellElement): void {
@@ -851,9 +1075,9 @@ export function navigateCells(cell: HTMLTableCellElement, dir: 1 | -1): void {
   ctx.dom.placeCaretIn(cells[next], true);
 }
 
-function afterTableEdit(table?: HTMLTableElement): void {
-  if (table) {
-    fitTableColumns(table);
+function afterTableEdit(table?: HTMLTableElement, rowDelete = false): void {
+  if (table && !(rowDelete && ctx.deferRowDeleteFit?.(table))) {
+    fitTableColumns(table, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
   }
   ctx.scheduleSync();
   updateTableToolbar();
@@ -987,19 +1211,18 @@ export function insertTable(): void {
 // dragged row lands at the very first/last gap) reproduced this on every
 // drag. `finishRowMove` below moves the live `<tr>` node directly instead —
 // no HTML serialize/reparse round-trip, so there's nothing for the browser
-// to misparse. Trade-off: unlike the column move below (still execCommand,
-// see its own comment), a row move no longer lands on the native undo stack
+// to misparse. Trade-off: a row move no longer lands on the native undo stack
 // as its own step — accepted over the alternative of corrupting the table.
 //
 // Column reorder is a DIFFERENT shape — a "column" isn't a DOM sibling run,
-// it's one cell per row scattered across every <tr>. Rather than juggling N
-// separate Ranges (which would cost N undo steps, breaking F1), the whole
-// <table> is cloned, every row's cells are reordered in the clone, and the
-// ENTIRE table is swapped in with a single Range (selectNode(table)) +
-// execCommand('insertHTML') call — one undo step for the whole column move,
-// same technique, applied to a subtree-rebuild instead of a sibling-reorder.
-// Each cell keeps its own align/style attributes since real cell elements
-// move as a unit — no separate column-alignment bookkeeping needed.
+// it's one cell per row scattered across every <tr>. `finishColMove` moves
+// each row's live cell node in place, same as the row move. It used to clone
+// the table and swap it in via execCommand('insertHTML') for one undo step,
+// but the swapped-in <table> is a fresh scroll-island element (scrollLeft 0),
+// so a wide, horizontally scrolled table jumped back to its first column on
+// every drop. Same undo trade-off as the row move. Each cell keeps its own
+// align/style attributes (including the inline widths fitTableColumns set)
+// since real cell elements move as a unit — no separate column bookkeeping.
 // ---------------------------------------------------------------------------
 
 type TableDragKind = 'row' | 'col';
@@ -1099,7 +1322,7 @@ function positionRowHandle(row: HTMLTableRowElement | null): void {
   rowHandleEl.style.display = 'flex';
   rowHandleEl.style.top = `${rRect.top}px`;
   rowHandleEl.style.height = `${rRect.height}px`;
-  rowHandleEl.style.right = `${window.innerWidth - tRect.left}px`;
+  rowHandleEl.style.right = `${fixedRightAt(tRect.left)}px`;
 }
 
 /** Hit column spans the header cell's own full width and sits flush (zero gap) against
@@ -1121,7 +1344,7 @@ function positionColHandle(col: { table: HTMLTableElement; index: number } | nul
   colHandleEl.style.display = 'flex';
   colHandleEl.style.left = `${cRect.left}px`;
   colHandleEl.style.width = `${cRect.width}px`;
-  colHandleEl.style.bottom = `${window.innerHeight - tRect.top}px`;
+  colHandleEl.style.bottom = `${fixedBottomAt(tRect.top)}px`;
 }
 
 function sameCol(a: { table: HTMLTableElement; index: number } | null, b: { table: HTMLTableElement; index: number } | null): boolean {
@@ -1288,7 +1511,7 @@ function finishRowMove(): void {
   ctx.scheduleSync();
 }
 
-/** Column move: whole-table rebuild + single execCommand — see the block comment above this section. */
+/** Column move: live cell move per row, table element kept — see the block comment above this section. */
 function finishColMove(): void {
   const table = tdTable;
   if (!table) {
@@ -1296,34 +1519,22 @@ function finishColMove(): void {
   }
   const fromIdx = tdColIndex;
   const gap = tdCurrentGap;
-  const clone = table.cloneNode(true) as HTMLTableElement;
   const insertionIndex = gap > fromIdx ? gap - 1 : gap;
-  for (const row of Array.from(clone.rows)) {
+  for (const row of Array.from(table.rows)) {
     const cells = Array.from(row.cells);
     const moved = cells[fromIdx];
     if (!moved) {
       continue;
     }
-    cells.splice(fromIdx, 1);
-    cells.splice(insertionIndex, 0, moved);
-    row.replaceChildren(...cells);
+    // `gap` indexes the pre-move order; `undefined` (gap past the last cell) means append.
+    row.insertBefore(moved, cells[gap] ?? null);
   }
-  const prevSibling = table.previousElementSibling;
-  const parent = table.parentElement;
-  const range = document.createRange();
-  range.selectNode(table);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  document.execCommand('insertHTML', false, clone.outerHTML);
-
-  const newTable = (prevSibling ? prevSibling.nextElementSibling : parent?.firstElementChild) as HTMLTableElement | null;
-  if (newTable) {
-    fitTableColumns(newTable);
-    const headerCell = newTable.tHead?.rows[0]?.cells[insertionIndex];
-    if (headerCell) {
-      ctx.dom.placeCaretIn(headerCell, true);
-    }
+  remapTableLock(table, { kind: 'move', from: fromIdx, to: insertionIndex });
+  // No fitTableColumns: per-cell widths moved with their cells, and its strip-then-measure
+  // pass can shrink scrollWidth mid-layout and clamp the island's scrollLeft.
+  const headerCell = table.tHead?.rows[0]?.cells[insertionIndex];
+  if (headerCell) {
+    ctx.dom.placeCaretIn(headerCell, true);
   }
   ctx.scheduleSync();
 }
@@ -1511,7 +1722,7 @@ function onTdMouseUp(): void {
     tdCleanupVisuals();
     if (shouldMove) {
       // Clear the highlight before the move rebuilds the DOM (row reorder replaces
-      // rows via Range + insertHTML; column reorder clones the whole table) —
+      // rows via Range + insertHTML; column reorder used to clone the whole table) —
       // otherwise tdResetState()'s own clear below only touches the stale,
       // now-detached original row/table, leaving the newly-created node
       // highlighted forever (bug 0715 #12).
@@ -1709,37 +1920,36 @@ function initTableDragDrop(): void {
   });
 
   // Handles use viewport coordinates from getBoundingClientRect(), recomputed
-  // only on mousemove over #content — a scroll with the mouse stationary
-  // otherwise leaves them stuck at the old position while the row/column
-  // underneath moves (mirrors the block-level drag handle in drag-drop.ts).
-  // rAF-coalesce the reposition: positionRowHandle/positionColHandle each read rects, and scroll
-  // fires uncoalesced — same frame-guard shape as the hover path above.
-  let scrollHandleRaf = 0;
-  window.addEventListener(
-    'scroll',
-    () => {
+  // on mousemove over #content only when the hovered row/column changes — a
+  // scroll, resize or re-wrap with the mouse stationary otherwise leaves them
+  // stuck at the old position/size while the row/column underneath moves
+  // (mirrors the block-level drag handle in drag-drop.ts).
+  // rAF-coalesce the reposition: positionRowHandle/positionColHandle each read rects, and
+  // scroll/resize fire uncoalesced — same frame-guard shape as the hover path above.
+  let repositionRaf = 0;
+  function scheduleHandleReposition(): void {
+    if (tdState !== 'idle' || repositionRaf !== 0) {
+      return;
+    }
+    repositionRaf = requestAnimationFrame(() => {
+      repositionRaf = 0;
+      // Re-check inside the frame: a drag can arm, or hover can clear, between event and frame.
       if (tdState !== 'idle') {
         return;
       }
-      if (scrollHandleRaf !== 0) {
-        return;
+      // An edit can detach a hovered row/table without a refresh() (the ResizeObserver fires on
+      // exactly those edits) — hide its handle instead of measuring a detached node.
+      if (hoveredRow) {
+        positionRowHandle(content.contains(hoveredRow) ? hoveredRow : null);
       }
-      scrollHandleRaf = requestAnimationFrame(() => {
-        scrollHandleRaf = 0;
-        // Re-check inside the frame: a drag can arm, or hover can clear, between event and frame.
-        if (tdState !== 'idle') {
-          return;
-        }
-        if (hoveredRow) {
-          positionRowHandle(hoveredRow);
-        }
-        if (hoveredCol) {
-          positionColHandle(hoveredCol);
-        }
-      });
-    },
-    { passive: true, capture: true }
-  );
+      if (hoveredCol) {
+        positionColHandle(content.contains(hoveredCol.table) ? hoveredCol : null);
+      }
+    });
+  }
+  window.addEventListener('scroll', scheduleHandleReposition, { passive: true, capture: true });
+  window.addEventListener('resize', scheduleHandleReposition);
+  new ResizeObserver(scheduleHandleReposition).observe(content);
 
   rowHandleEl.addEventListener('mousedown', (e) => {
     if (e.button !== 0 || !hoveredRow) {

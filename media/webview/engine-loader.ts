@@ -33,11 +33,11 @@ export function loadNoncedEngineScript<T>(
   messages: EngineLoadMessages
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const globals = window as unknown as Record<string, T | undefined>;
     if (!config) {
       reject(new Error(messages.notConfigured));
       return;
     }
+    const globals = window as unknown as Record<string, T | undefined>;
     const existing = globals[globalKey];
     if (existing) {
       resolve(existing);

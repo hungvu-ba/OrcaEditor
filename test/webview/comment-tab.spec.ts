@@ -492,7 +492,7 @@ test('scroll position and focus survive a re-render (US-23.7 AC4/AC10)', async (
 test('US-23.7 AC4: activating a tab header swaps the bodies, exactly one visible', async ({ page }) => {
   await openEditor(page, DOC);
   await page.locator('#toc-toggle').click({ force: true });
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('transform', 'none');
   await expect(page.locator('#toc-tabpanel')).toBeVisible();
   await expect(page.locator('#comment-tabpanel')).toBeHidden();
 
@@ -507,7 +507,7 @@ test('US-23.7 AC4: activating a tab header swaps the bodies, exactly one visible
 test('US-23.7 AC6: ←/→ walk the strip and it stays one tab stop', async ({ page }) => {
   await openEditor(page, DOC);
   await page.locator('#toc-toggle').click({ force: true });
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('transform', 'none');
 
   await page.locator('.right-dock-tab').first().focus();
   await page.keyboard.press('ArrowRight');

@@ -115,10 +115,23 @@ export interface CommentMenuController {
   refreshTarget(): void;
 }
 
+/**
+ * The editor's own clipboard actions (main.ts), which go through the async
+ * Clipboard API: inside VS Code's nested webview iframe `execCommand('paste')`
+ * is always refused and `execCommand('cut'|'copy')` does not reliably fire a
+ * clipboard event, so the menu cannot use them.
+ */
+export interface ClipboardActions {
+  cut: () => void;
+  copy: () => void;
+  paste: () => void;
+}
+
 export function initCommentMenu(
   content: HTMLElement,
   vscode: VsCodeApi,
-  resolve: CommentResolveController
+  resolve: CommentResolveController,
+  clipboard: ClipboardActions
 ): CommentMenuController {
   let docUri = '';
   let authorName = '';
@@ -194,16 +207,9 @@ export function initCommentMenu(
 
   const addCommentItem = menuItem('Add Comment', '', () => openComposer());
   addCommentItem.prepend(bubbleIcon('comment-menu-item-icon'));
-  const cutItem = menuItem('Cut', shortcutLabel('X'), () => document.execCommand('cut'));
-  const copyItem = menuItem('Copy', shortcutLabel('C'), () => document.execCommand('copy'));
-  const pasteItem = menuItem('Paste', shortcutLabel('V'), () => {
-    // execCommand('paste') is the only route that re-enters the editor's own
-    // paste pipeline (image paste, smart gap). It is blocked in plain browsers;
-    // when it is, say so rather than silently dropping the action.
-    if (!document.execCommand('paste')) {
-      showToast(`Use ${shortcutLabel('V')} to paste here.`);
-    }
-  });
+  const cutItem = menuItem('Cut', shortcutLabel('X'), clipboard.cut);
+  const copyItem = menuItem('Copy', shortcutLabel('C'), clipboard.copy);
+  const pasteItem = menuItem('Paste', shortcutLabel('V'), clipboard.paste);
   menu.append(addCommentItem, el('div', 'dd-menu-sep'), cutItem, copyItem, pasteItem);
 
   function openMenuAt(x: number, y: number, anchorable: boolean, hasSelection: boolean): void {

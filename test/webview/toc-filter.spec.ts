@@ -153,9 +153,9 @@ test('the depth menu is fully keyboard-operable and hands focus back to the ⋯ 
   await openDepthMenu(page);
   await page.keyboard.press('Escape');
   await expect(page.locator('.right-dock-menu')).toBeHidden();
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'visible');
   await page.keyboard.press('Escape');
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '0px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('visibility', 'hidden');
 });
 
 test('a .toc-item is not natively draggable (no native link-drag ghost)', async ({ page }) => {

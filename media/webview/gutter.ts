@@ -110,7 +110,8 @@ function readBlockInfo(el: Element): BlockLineInfo {
 export function initLineGutter(
   content: HTMLElement,
   gutterElOrNull: HTMLElement | null,
-  getRenderer: () => MarkdownRenderer | undefined
+  getRenderer: () => MarkdownRenderer | undefined,
+  isEnabled: () => boolean
 ): LineGutter {
   if (!gutterElOrNull) {
     return NOOP_GUTTER;
@@ -143,6 +144,9 @@ export function initLineGutter(
   }
 
   function refreshFromDom(): void {
+    if (!isEnabled()) {
+      return;
+    }
     const els = enumerateNumberedElements();
     rebuildDom(
       els,
@@ -256,6 +260,9 @@ export function initLineGutter(
   // qua) — tránh reflow/dựng lại gutter lặp lại nhiều lần trong 1 frame.
   let rafPending: number | undefined;
   const resizeObserver = new ResizeObserver(() => {
+    if (!isEnabled()) {
+      return;
+    }
     if (rafPending !== undefined) {
       return;
     }

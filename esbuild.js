@@ -30,6 +30,16 @@ const webviewConfig = {
   target: 'es2020',
   sourcemap: !production,
   minify: production,
+  // Audit L-9: routes both math-edit.ts's ESM import and
+  // @vscode/markdown-it-katex's require('katex') to katex-shim.ts, which
+  // forwards to the lazily loaded math-engine.js — so main.js carries no KaTeX
+  // (~270 KB). Only mathEngineConfig below keeps the real katex.mjs. js-yaml and
+  // smol-toml go the same way to front-matter-engine.js (~54 KB).
+  alias: {
+    katex: path.resolve(__dirname, 'media/webview/katex-shim.ts'),
+    'js-yaml': path.resolve(__dirname, 'media/webview/yaml-shim.ts'),
+    'smol-toml': path.resolve(__dirname, 'media/webview/toml-shim.ts'),
+  },
 };
 
 /**
@@ -80,6 +90,45 @@ const mermaidEngineConfig = {
 };
 
 /**
+ * Math engine (KaTeX) as its own bundle, audit L-9 (Performance Low-End —
+ * Audit.md): ~270 KB of main.js that only a document with `$...$` needs.
+ * math-engine.ts re-exports renderToString; lazy-engines.ts injects this file
+ * as a <script> on first use. Same katex.mjs alias as webviewConfig.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const mathEngineConfig = {
+  entryPoints: ['media/webview/math-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/math-engine.js',
+  format: 'iife',
+  globalName: 'OrcaMathEngine',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: !production,
+  minify: production,
+  alias: { katex: 'katex/dist/katex.mjs' },
+};
+
+/**
+ * Front-matter engine (js-yaml + smol-toml) as its own bundle, audit L-9:
+ * ~54 KB of main.js that only a document with front matter needs.
+ * front-matter-engine.ts re-exports load/parse; lazy-engines.ts injects this
+ * file as a <script> on first use.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const frontMatterEngineConfig = {
+  entryPoints: ['media/webview/front-matter-engine.ts'],
+  bundle: true,
+  outfile: 'dist/webview/front-matter-engine.js',
+  format: 'iife',
+  globalName: 'OrcaFrontMatterEngine',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: !production,
+  minify: production,
+};
+
+/**
  * Mỗi file trong test/roundtrip/ (trừ _lib.ts, hạ tầng dùng chung — không phải
  * entry point) build thành 1 bundle riêng dist/test/roundtrip/<feature>.js, để
  * chạy lại được từng feature độc lập (npm run test:roundtrip:<feature>).
@@ -115,6 +164,24 @@ const listOpsDebugConfig = {
   outfile: 'dist/webview/list-ops-debug.js',
   format: 'iife',
   globalName: 'ListOpsDebug',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: true,
+};
+
+/**
+ * Test-only bundle exposing the US-19.27 area-fit measure adapter + solver
+ * (measureCellLines/cellLineCount/solveAreaFit) as window.TableAreaFitDebug —
+ * lets test/webview/table-area-measure.spec.ts and GATE A measure real cells.
+ * Only built with --test, so it never ships in the production dist/webview bundle.
+ */
+/** @type {import('esbuild').BuildOptions} */
+const tableAreaFitDebugConfig = {
+  entryPoints: ['media/webview/table-area-fit-debug.ts'],
+  bundle: true,
+  outfile: 'dist/webview/table-area-fit-debug.js',
+  format: 'iife',
+  globalName: 'TableAreaFitDebug',
   platform: 'browser',
   target: 'es2020',
   sourcemap: true,
@@ -194,7 +261,15 @@ const hostTestConfig = {
 function copyAssets() {
   fs.mkdirSync('dist/webview', { recursive: true });
   for (const f of ['markdown.css', 'editor.css']) {
-    fs.copyFileSync(path.join('media', f), path.join('dist/webview', f));
+    const src = path.join('media', f);
+    const dest = path.join('dist/webview', f);
+    if (production) {
+      const text = fs.readFileSync(src, 'utf8');
+      const { code } = esbuild.transformSync(text, { loader: 'css', minify: true });
+      fs.writeFileSync(dest, code);
+    } else {
+      fs.copyFileSync(src, dest);
+    }
   }
   // Bundled fonts (Literata cho reading preset "academic" — @font-face trong
   // markdown.css trỏ url('fonts/literata/*.woff2'). Copy .woff2 + OFL.txt: media/**
@@ -211,6 +286,8 @@ function copyAssets() {
     const src = path.join('media', 'fonts', dir);
     if (!fs.existsSync(src)) continue;
     const dest = path.join('dist/webview/fonts', dir);
+    // Start clean so a font removed from media/fonts never lingers in dist (and the VSIX).
+    fs.rmSync(dest, { recursive: true, force: true });
     fs.mkdirSync(dest, { recursive: true });
     for (const file of fs.readdirSync(src)) {
       if (file.endsWith('.woff2') || file.endsWith('.woff') || file === license) {
@@ -236,13 +313,21 @@ function copyAssets() {
 
 async function main() {
   copyAssets();
-  const configs = [extensionConfig, webviewConfig, plantumlEngineConfig, mermaidEngineConfig];
+  const configs = [
+    extensionConfig,
+    webviewConfig,
+    plantumlEngineConfig,
+    mermaidEngineConfig,
+    mathEngineConfig,
+    frontMatterEngineConfig,
+  ];
   if (buildTest)
     configs.push(
       testConfig,
       unitTestConfig,
       hostTestConfig,
       listOpsDebugConfig,
+      tableAreaFitDebugConfig,
       escapeStackDebugConfig,
       triggerPopupDebugConfig
     );

@@ -39,6 +39,9 @@ const DEFAULT_CONFIG: InitConfig = {
   scriptNonce: '',
   // P-1: same file:// contract as plantumlEngineUri above.
   mermaidEngineUri: 'mermaid-engine.js',
+  // L-9: same file:// contract.
+  mathEngineUri: 'math-engine.js',
+  frontMatterEngineUri: 'front-matter-engine.js',
 };
 
 /** Default docUri echoed back to the harness's fake acquireVsCodeApi (Req 20 US-20.3). */
@@ -184,6 +187,10 @@ function harnessHtml(readability: InitConfig['readability']): string {
        list-ops-primitive.spec.ts can drive them directly without wiring into
        any real call site (Phase 2). -->
   <script src="./list-ops-debug.js"></script>
+  <!-- US-19.27: test-only bundle exposing measureTableLines/cellLineCount/
+       solveAreaFit on window.TableAreaFitDebug, so area-fit specs measure real
+       cells and feed them to the pure solver. -->
+  <script src="./table-area-fit-debug.js"></script>
   <!-- Req 20 US-20.4: test-only bundle exposing escape-stack.ts's
        registerEscapeHandler/ESCAPE_PRIORITY on window.EscapeStackDebug, so
        escape-stack-priority.spec.ts can register fake handlers and dispatch a
@@ -487,9 +494,9 @@ export async function dismissAnchorLost(page: Page): Promise<void> {
 export async function openCommentTab(page: Page): Promise<void> {
   // force: toolbar overflow math can transiently report #toc-toggle as offscreen.
   await page.locator('#toc-toggle').click({ force: true });
-  // The dock animates its width open; measuring a row mid-transition would give
+  // The dock slides open by transform; measuring a row mid-transition would give
   // a box that has moved by the time the pointer gets there.
-  await expect(page.locator('#toc-panel')).toHaveCSS('width', '300px');
+  await expect(page.locator('#toc-panel')).toHaveCSS('transform', 'none');
   await page.locator('.right-dock-tab', { hasText: 'Comment' }).click();
   await expect(page.locator('#comment-tabpanel')).toBeVisible();
 }

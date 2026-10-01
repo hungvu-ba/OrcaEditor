@@ -243,6 +243,28 @@ export function parseEntities(fileUri: string, text: string): IndexedEntity[] {
 const QUERY_RESULT_CAP = 50;
 
 /**
+ * True when two row lists would look the same to the webview re-check:
+ * equal length, pairwise equal namespace, id, title, preview, label. `line` is
+ * ignored — a line shift above a declaration is the common keystroke case and
+ * the re-check reads only exists / preview / occurrences.
+ */
+export function sameEntityRows(a: readonly IndexedEntity[], b: readonly IndexedEntity[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((x, i) => {
+    const y = b[i];
+    return (
+      x.namespace === y.namespace &&
+      x.id === y.id &&
+      x.title === y.title &&
+      x.preview === y.preview &&
+      x.label === y.label
+    );
+  });
+}
+
+/**
  * P2: internal per-row wrapper carrying search haystacks precomputed once at
  * parse time, so `query` does zero `normalizeForSearch` calls per row (only the
  * query string is normalized per call). Never exposed outside `EntityIndex`.
@@ -257,7 +279,8 @@ interface IndexedRow {
 /**
  * In-memory entity index keyed by file so an incremental per-file update just
  * replaces that file's rows (US-21.2). Pure — fed already-read text by
- * provider.ts. `isReady()` is false until the first full `build()` completes so
+ * provider.ts. `isReady()` is false until the first full `build()` or the
+ * scan-end `markReady()` so
  * a query during the initial background scan reports "indexing" rather than a
  * false "nothing exists" (index freshness is NOT existence truth).
  */
@@ -299,15 +322,18 @@ export class EntityIndex {
   /**
    * Re-parse a single file and overwrite its rows — works before or after the
    * full build (incremental, per US-21.2). Empty text / a deleted file drops
-   * that file's rows.
+   * that file's rows. Returns true when the file's rows changed per
+   * `sameEntityRows` (an absent file counts as no rows).
    */
-  onFileChanged(uri: string, text: string): void {
+  onFileChanged(uri: string, text: string): boolean {
+    const old = (this.byFile.get(uri) ?? []).map((r) => r.row);
     const rows = this.parseToRows(uri, text);
     if (rows.length > 0) {
       this.byFile.set(uri, rows);
     } else {
       this.byFile.delete(uri);
     }
+    return !sameEntityRows(old, rows.map((r) => r.row));
   }
 
   /**
@@ -399,7 +425,15 @@ export class EntityIndex {
     );
   }
 
-  /** False until the first full `build()` completes (US-21.2 indexing state). */
+  /**
+   * End of the file-by-file workspace scan (fed through `onFileChanged`): flips
+   * the index to ready without touching any row.
+   */
+  markReady(): void {
+    this.ready = true;
+  }
+
+  /** False until the first full `build()` or `markReady()` (US-21.2 indexing state). */
   isReady(): boolean {
     return this.ready;
   }

@@ -18,6 +18,8 @@
  */
 import { renderToString } from 'katex';
 import { el, makeDraggable, positionNear } from './dom-utils';
+import { MATH_FALLBACK_CLASS } from './katex-shim';
+import { engineMissCount, loadLazyEngine } from './lazy-engines';
 import { MATH_BLOCK_CLASS, MATH_INLINE_CLASS, MATH_RENDER_CLASS, MATH_TOGGLE_CLASS } from './render';
 
 const MATH_WRAPPER_SELECTOR = `.${MATH_BLOCK_CLASS}, .${MATH_INLINE_CLASS}`;
@@ -50,8 +52,27 @@ function renderInto(wrapper: HTMLElement, tex: string): void {
     return;
   }
   const isBlock = wrapper.classList.contains(MATH_BLOCK_CLASS);
+  const missesBefore = engineMissCount();
   renderEl.innerHTML = renderToString(tex, { throwOnError: false, displayMode: isBlock });
   wrapper.setAttribute('data-tex', tex);
+  // Audit L-9: rendered without the math engine (katex-shim stand-in) — load it
+  // (the one retry after a failed load) and swap the stand-in in place.
+  if (engineMissCount() !== missesBefore) {
+    loadLazyEngine('math').then(
+      () => upgradeMathFallbacks(wrapper),
+      () => undefined
+    );
+  }
+}
+
+/** Re-renders every katex-shim stand-in under `root` from its wrapper's `data-tex`. */
+export function upgradeMathFallbacks(root: Element): void {
+  for (const fallback of Array.from(root.querySelectorAll(`.${MATH_FALLBACK_CLASS}`))) {
+    const wrapper = fallback.closest(MATH_WRAPPER_SELECTOR) as HTMLElement | null;
+    if (wrapper) {
+      renderInto(wrapper, wrapper.getAttribute('data-tex') ?? '');
+    }
+  }
 }
 
 let closeActivePopover: (() => void) | undefined;

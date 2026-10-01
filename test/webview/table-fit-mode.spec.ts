@@ -113,10 +113,11 @@ test.describe('US-19.25 table fit-mode', () => {
     // Short columns must stay near their content width — not inflated by the wide
     // panel or the outlier (the cap redistributed width, it didn't stretch neighbors).
     expect(r.shortColWidth).toBeLessThan(160);
-    // US-19.26 branch ①b: the width the cap freed goes BACK to the capped column, so
-    // the table fills the panel instead of leaving a gap beside the wrapped column.
+    // US-19.27 contract 6: the area-fit solver stops at the knee — the table may end
+    // up to 15% short of the panel, never wider than it.
     const m = await tableInfo(page);
-    expect(m.rectWidth).toBeGreaterThan(m.contentWidth - 4);
+    expect(m.rectWidth).toBeGreaterThan(m.contentWidth * 0.85 - 4);
+    expect(m.rectWidth).toBeLessThanOrEqual(m.contentWidth + 1);
   });
 
   test('ON: an outlier column is NOT capped while the panel still has room (US-19.26 ①a)', async ({ page }) => {
@@ -204,7 +205,7 @@ test.describe('US-19.25 table fit-mode', () => {
     // US-19.26: plenty of room → applyFitColumns bails entirely (no cap needed), so
     // the table falls back to the natural default (no `.md-table-fit`, cells are not
     // pinned by max-width — typing more text can grow a column immediately instead
-    // of waiting for a debounced re-fit).
+    // of waiting for a pressure/settle re-fit).
     expect(m.fit).toBe(false);
     // Compact: the small table must NOT fill the wide panel either way.
     expect(m.rectWidth).toBeLessThan(m.contentWidth * 0.7);
@@ -240,9 +241,10 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(m.scrollWidth).toBeGreaterThan(m.clientWidth + 1); // scrolls
   });
 
-  test('ON: too many columns to fit readably → scrolls at the 30ch floor (not crushed)', async ({ page }) => {
+  test('ON: too many columns to fit readably → scrolls at the floor (not crushed)', async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 600 });
-    // 6 wide columns: 6×~30ch floor > 900px → cannot fit readably → scroll AT the floor,
+    // 6 wide columns: even at the floor assignment (US-19.27 contracts 5 + 7: 30ch, with
+    // non-bottleneck columns freely shrunk towards 15ch) > 900px → scroll AT the floor,
     // instead of crushing every column down to its min-content word width.
     await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
     await page.locator('#content table').waitFor();
@@ -255,7 +257,7 @@ test.describe('US-19.25 table fit-mode', () => {
     });
     expect(r.scrolls).toBe(true); // scrolls rather than cramming
     expect(r.fit).toBe(false); // scroll-island, not fixed-fit
-    expect(r.minColW).toBeGreaterThan(200); // ~30ch floor — NOT crushed to min-content
+    expect(r.minColW).toBeGreaterThan(115); // ≥ 15ch loose floor — NOT crushed to min-content
   });
 
   test('ON: no width jump crossing the fit⇄scroll boundary (continuity)', async ({ page }) => {
@@ -265,15 +267,15 @@ test.describe('US-19.25 table fit-mode', () => {
       page.evaluate(() => { const t = document.querySelector('#content table') as HTMLTableElement; return t.scrollWidth - t.clientWidth > 1; });
 
     // Just below the boundary → scrolls, columns pinned at the floor.
-    await page.setViewportSize({ width: 1300, height: 600 });
+    await page.setViewportSize({ width: 900, height: 600 });
     await openEditor(page, makeTable(6, 4, WIDE), { tableFitMode: true });
     await page.locator('#content table').waitFor();
     await page.waitForTimeout(300);
     const scrollW = await descrWidth();
     const didScroll = await scrolls();
 
-    // Just above the boundary → fits (branch ②) at essentially the same width.
-    await page.setViewportSize({ width: 1500, height: 600 });
+    // Just above the boundary → fits at essentially the same width.
+    await page.setViewportSize({ width: 1100, height: 600 });
     await page.waitForTimeout(300);
     const fitW = await descrWidth();
     const didFit = !(await scrolls());
@@ -397,7 +399,7 @@ test.describe('US-19.25 table fit-mode', () => {
     expect(await bodyCellWidth(page, 0)).toBeLessThan(350); // kept slack (462 if pinned)
   });
 
-  test('ON: typing into a pinned narrow column re-fits it (debounced) so it grows with content', async ({ page }) => {
+  test('ON: typing into a pinned narrow column re-fits it (pressure / idle settle) so it grows with content', async ({ page }) => {
     // Narrow enough that Σmax-content > budget — genuinely pinned territory (①b/②),
     // not the US-19.26 bail (plenty of room), which is covered by the next test.
     await page.setViewportSize({ width: 560, height: 600 });
@@ -422,7 +424,7 @@ test.describe('US-19.25 table fit-mode', () => {
     });
     await page.keyboard.type(' alpha beta gamma delta epsilon');
 
-    // The column is frozen (max-width pin) until the debounced re-fit fires; after it,
+    // The column is frozen (max-width pin) until a pressure or idle-settle re-fit fires; after it,
     // the column has grown to accommodate the typed content.
     await expect.poll(colAWidth, { timeout: 3000 }).toBeGreaterThan(before + 40);
   });
@@ -452,7 +454,7 @@ test.describe('US-19.25 table fit-mode', () => {
     await page.keyboard.type(' a fairly long phrase to widen this column');
 
     // No max-width was ever set on this cell, so the browser's own auto layout grows
-    // the column as the text lands — no polling/waiting for the 200ms debounced
+    // the column as the text lands — no polling/waiting for the pressure/settle
     // re-fit that the PINNED-column test above depends on. If a stale pin were
     // applied here, this assertion right after typing (no poll) would still see the
     // old, narrower width.

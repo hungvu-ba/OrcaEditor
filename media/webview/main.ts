@@ -25,9 +25,8 @@ import {
   postProcessEntityRefs,
   postProcessEmptyLinks,
   prepareDomForSerialize,
-  hasSiblingSensitiveBlock,
+  siblingSensitiveBlockIds,
   serializeChildren,
-  serializeFull,
   stampBlockStyle,
   stampBlockStyles,
   type BlockMarkdownCache,
@@ -39,10 +38,15 @@ import {
   MD_CODE_WRAP_CLASS,
   initFrontMatterToggle,
   applyFrontMatterViewState,
+  upgradeFrontMatterFallbacks,
   MERMAID_CLASS,
   MERMAID_CHART_CLASS,
   PLANTUML_CLASS,
   PLANTUML_CHART_CLASS,
+  MATH_BLOCK_CLASS,
+  MATH_DISPLAY_SELECTOR,
+  LINE_NUMBER_ATTR,
+  LINE_NUMBER_END_ATTR,
   type LineRange,
 } from './pipeline';
 import { initSearch } from './search';
@@ -54,8 +58,9 @@ import { initBrokenRef, slugifyHeadingText, fragmentToHeadingSlug } from './brok
 import { initQuickCorrect } from './quick-correct';
 import { initCaptionEdit } from './caption-edit';
 import { initMermaid, setMermaidEngineConfig } from './mermaid';
+import { lazyEngineFailed, loadLazyEngine, setLazyEngineConfig, takeEngineMisses, type LazyEngine } from './lazy-engines';
 import { initPlantuml, setPlantumlEngineConfig } from './plantuml';
-import { initMathEdit } from './math-edit';
+import { initMathEdit, upgradeMathFallbacks } from './math-edit';
 import { stripMetaRefresh } from './render-sanitize';
 import { initLineGutter } from './gutter';
 import { buildBlockMap, type BlockEntry } from './block-map';
@@ -83,6 +88,7 @@ import {
 } from './toolbar';
 import { initTable, navigateCells, warnIfComplexTableList, fitTableColumns, setTableFitMode } from './table';
 import { initStickyTableHeader } from './table-sticky-header';
+import { snapshotTableLocks, restoreTableLocks } from './table-col-resize';
 import { initInputRules, caretAtStartOfListItem } from './input-rules';
 import { hasInputOwner, onInputOwnerRelease } from './input-ownership';
 import { initTriggerPopup, type TriggerPopupController } from './trigger-popup';
@@ -101,7 +107,14 @@ import { initCommentAnchorClick } from './comment-anchor-click';
 import type { VsCodeApi } from './vscode-api';
 import type { HostToWebview, InitConfig, TriggerMode, WebviewToHost } from '../../src/shared/messages';
 import { computeMinimalEdit, rebuildFromEditDiff } from '../../src/text-utils';
-import { SYNC_DEBOUNCE_MS, SCROLL_SAVE_DEBOUNCE_MS, MD_CODE_WRAPPED_CLASS } from './constants';
+import {
+  SYNC_DEBOUNCE_MS,
+  SCROLL_SAVE_DEBOUNCE_MS,
+  MD_CODE_WRAPPED_CLASS,
+  MD_TABLE_FIT_CLASS,
+  FIT_RESIZE_SETTLE_MS,
+} from './constants';
+import { AREA_FIT_HYSTERESIS, AREA_FIT_RESIZE_HYSTERESIS } from './table-area-fit';
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
@@ -154,8 +167,8 @@ const mermaidView = initMermaid(content);
 const plantumlView = initPlantuml(content);
 initMathEdit(content);
 initFrontMatterToggle(content);
-const lineGutter = initLineGutter(content, gutterEl, () => renderer);
 let lineNumbersEnabled = false;
+const lineGutter = initLineGutter(content, gutterEl, () => renderer, () => lineNumbersEnabled);
 // US-17.3: block reorder engine — needs lineGutter (refresh after a move) and
 // scheduleSync (declared below; safe to reference here, function declarations hoist).
 const dragDrop = initDragDrop(content, {
@@ -170,7 +183,7 @@ const dragDrop = initDragDrop(content, {
     ensureTrailingParagraph();
   },
 });
-const pasteImage = initPasteImage(vscode, { scheduleSync, dom });
+const pasteImage = initPasteImage(vscode, { scheduleSync, dom, afterInsert: fitAfterPaste });
 // US-17.6: external file drop (Explorer/Finder) — needs pasteImage (images reuse
 // its save+insert flow) and insertMarkdownAtCaret (hoisted function, declared below).
 const externalDrop = initExternalDrop(content, {
@@ -179,7 +192,19 @@ const externalDrop = initExternalDrop(content, {
   insertMarkdown: insertMarkdownAtCaret,
   restoreSelection: dom.restoreSelection,
 });
-const table = initTable(content, toolbarEl, { scheduleSync, dom });
+const table = initTable(content, toolbarEl, {
+  scheduleSync,
+  dom,
+  deferRowDeleteFit,
+  // US-6.10: a column resize changed widths — re-measure the sticky header clone
+  // (declared below; only called after init) and the line gutter.
+  onColumnWidthsChanged: () => {
+    stickyTableHeader.refresh();
+    if (lineNumbersEnabled) {
+      lineGutter.refreshFromDom();
+    }
+  },
+});
 // US-19.14: header cột "dính" dưới toolbar khi cuộn bảng dài (đọc tên cột liên tục).
 const stickyTableHeader = initStickyTableHeader(content, toolbarEl);
 
@@ -197,8 +222,16 @@ function applyTableFitMode(on: boolean): void {
 // US-19.25: đổi bề rộng panel (#content) → re-fit khi Fit-mode bật. Chỉ phản ứng
 // khi WIDTH đổi (không re-fit oan mỗi lần #content cao lên do gõ thêm dòng);
 // rAF-coalesce theo mẫu gutter.ts (Known Traps — throttle layout reads).
+// US-19.27 contract 13 (resize): while events keep arriving, keep the applied
+// widths whenever they still fit (hysteresis 1); FIT_RESIZE_SETTLE_MS after the
+// last event, a full re-fit with AREA_FIT_RESIZE_HYSTERESIS.
 let lastFitContentWidth = 0;
 let fitReflowRaf: number | undefined;
+let fitResizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
+function refitAllTables(keepPrevHysteresis: number): void {
+  content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement, { keepPrevHysteresis }));
+  stickyTableHeader.refresh();
+}
 const fitReflowObserver = new ResizeObserver((entries) => {
   if (!tableFitModeOn) {
     return;
@@ -208,50 +241,265 @@ const fitReflowObserver = new ResizeObserver((entries) => {
     return;
   }
   lastFitContentWidth = w;
+  if (fitResizeSettleTimer !== undefined) {
+    clearTimeout(fitResizeSettleTimer);
+  }
+  fitResizeSettleTimer = setTimeout(() => {
+    fitResizeSettleTimer = undefined;
+    refitAllTables(AREA_FIT_RESIZE_HYSTERESIS);
+  }, FIT_RESIZE_SETTLE_MS);
   if (fitReflowRaf !== undefined) {
     return;
   }
   fitReflowRaf = requestAnimationFrame(() => {
     fitReflowRaf = undefined;
-    content.querySelectorAll('table').forEach((t) => fitTableColumns(t as HTMLTableElement));
-    stickyTableHeader.refresh();
+    refitAllTables(1);
   });
 });
 fitReflowObserver.observe(content);
-// US-19.25: gõ chữ trong ô bảng KHÔNG tự re-fit (input chỉ serialize, không render)
-// → cột đang bị ghim width ở fit-mode không nở theo chữ vừa gõ, wrap rất sớm (cột
-// mới thêm còn hẹp bằng đúng header). Re-fit ĐÚNG bảng đang gõ SAU KHI ngừng gõ
-// (debounce) để cột giãn theo nội dung. Chỉ khi Fit-mode BẬT (scroll-mode mặc định
-// tự giãn qua max-content nên không cần). Debounce (không mỗi phím) vì fitTableColumns
-// toggle class đo layout — tránh giật; đo gọn trong 1 tick nên không nháy.
-const FIT_TYPING_REFIT_MS = 200;
-let fitTypingTimer: ReturnType<typeof setTimeout> | undefined;
-let fitTypingTable: HTMLTableElement | null = null;
-function scheduleFitRefit(table: HTMLTableElement): void {
+// US-19.27 contract 13: edit-time re-fit policy (fit mode only). A keystroke never
+// re-fits or reads layout — the browser wraps inside the pinned width and the row
+// grows. FIT_PRESSURE_MS after the last input, a pressure signal widens only the
+// edited column (growOnlyCol); paste/drop/undo/redo re-fit the table at once. Every
+// re-fit keeps the edited cell's viewport top. Layout reads live in timer/rAF callbacks.
+// Settle (full re-fit, the only edit-time trigger that narrows a column): the caret
+// leaves the session table, the editor loses focus, or FIT_IDLE_SETTLE_MS with no input.
+const FIT_PRESSURE_MS = 300;
+const FIT_IDLE_SETTLE_MS = 2000;
+const FIT_DISCRETE_INPUT_TYPES = new Set(['insertFromPaste', 'insertFromDrop', 'historyUndo', 'historyRedo']);
+let fitPressureTimer: ReturnType<typeof setTimeout> | undefined;
+let fitDiscreteRaf: number | undefined;
+let fitIdleTimer: ReturnType<typeof setTimeout> | undefined;
+let fitSettleRaf: number | undefined;
+let fitSettleTarget: { table: HTMLTableElement; cell: HTMLTableCellElement | null } | null = null;
+let fitEditCell: HTMLTableCellElement | null = null;
+let fitComposing = false;
+// Edit session = caret inside one table; baseline = each edited cell's content
+// height at its first input of the session (read in a rAF, not in the handler).
+let fitSessionTable: HTMLTableElement | null = null;
+let fitSessionBaseH = new Map<HTMLTableCellElement, number>();
+
+function caretTableCell(): HTMLTableCellElement | null {
+  const sel = window.getSelection();
+  const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
+  return cell && content.contains(cell) ? (cell as HTMLTableCellElement) : null;
+}
+
+function cellContentHeight(cell: HTMLTableCellElement): number {
+  const r = document.createRange();
+  r.selectNodeContents(cell);
+  return r.getBoundingClientRect().height;
+}
+
+/** Re-fit `table`, refresh the sticky header, and keep `cell` where the user sees it. */
+function refitAnchored(table: HTMLTableElement, cell: HTMLTableCellElement | null, opts: { keepPrevHysteresis: number; growOnlyCol?: number }): void {
+  const anchor = cell && cell.isConnected && table.contains(cell) ? cell : null;
+  const topBefore = anchor?.getBoundingClientRect().top;
+  fitTableColumns(table, opts);
+  stickyTableHeader.refresh();
+  if (!anchor || topBefore === undefined) {
+    return;
+  }
+  const delta = anchor.getBoundingClientRect().top - topBefore;
+  if (Math.abs(delta) >= 1) {
+    window.scrollBy(0, delta);
+  }
+  if (!table.classList.contains(MD_TABLE_FIT_CLASS)) {
+    // Scroll branch: keep the edited cell inside the table's horizontal viewport.
+    const t = table.getBoundingClientRect();
+    const c = anchor.getBoundingClientRect();
+    if (c.left < t.left) {
+      table.scrollLeft -= t.left - c.left;
+    } else if (c.right > t.right) {
+      table.scrollLeft += Math.min(c.right - t.right, c.left - t.left);
+    }
+  }
+}
+
+function onFitPressure(): void {
+  fitPressureTimer = undefined;
+  const cell = fitEditCell;
+  const table = cell?.closest('table') as HTMLTableElement | null | undefined;
+  if (!cell || !table || !cell.isConnected || fitComposing) {
+    return;
+  }
+  const pinned = Array.from(table.rows[0]?.cells ?? []).some((c) => c.style.width !== '');
+  if (!pinned) {
+    // ①a table: no pinned widths, so only a panel overflow calls for a (full) re-fit.
+    if (table.scrollWidth > table.clientWidth) {
+      refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+    }
+    return;
+  }
+  const overflows = cell.scrollWidth > cell.clientWidth;
+  let grew = false;
+  const baseH = fitSessionBaseH.get(cell);
+  const row = cell.parentElement as HTMLTableRowElement | null;
+  if (!overflows && baseH !== undefined && row) {
+    const h = cellContentHeight(cell);
+    const style = getComputedStyle(cell);
+    const lineH = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+    const tallest = Array.from(row.cells).every((c) => c === cell || cellContentHeight(c) <= h);
+    grew = tallest && h - baseH >= 2 * lineH - 1;
+  }
+  if (!overflows && !grew) {
+    return;
+  }
+  const prevW = cell.style.width;
+  refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS, growOnlyCol: cell.cellIndex });
+  if (overflows && cell.style.width === prevW) {
+    // No spare width for the edited column → full re-fit (hysteresis-guarded).
+    refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+  }
+  // A grow-only re-fit may reflow the row; restart the growth count from here.
+  fitSessionBaseH.set(cell, cellContentHeight(cell));
+}
+
+/** Settle: full re-fit of `table` with its applied widths as prev (contract 13). */
+function settleFitTable(table: HTMLTableElement, cell: HTMLTableCellElement | null): void {
+  if (tableFitModeOn && table.isConnected && !fitComposing) {
+    refitAnchored(table, cell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+  }
+}
+
+/** End the edit session (caret left the table / editor lost focus) and settle it in the next frame. */
+function endFitSession(): void {
+  const table = fitSessionTable;
+  if (!table) {
+    return;
+  }
+  fitSessionTable = null;
+  fitSessionBaseH = new Map();
+  if (fitIdleTimer !== undefined) {
+    clearTimeout(fitIdleTimer);
+    fitIdleTimer = undefined;
+  }
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+    fitPressureTimer = undefined;
+  }
+  fitSettleTarget = { table, cell: fitEditCell };
+  if (fitSettleRaf === undefined) {
+    fitSettleRaf = requestAnimationFrame(() => {
+      fitSettleRaf = undefined;
+      const target = fitSettleTarget;
+      fitSettleTarget = null;
+      if (target) {
+        settleFitTable(target.table, target.cell);
+      }
+    });
+  }
+}
+
+/** Fit-mode input inside a table cell (also called for compositionend). */
+function onTableFitInput(cell: HTMLTableCellElement, inputType: string): void {
   if (!tableFitModeOn) {
     return;
   }
-  fitTypingTable = table;
-  if (fitTypingTimer !== undefined) {
-    clearTimeout(fitTypingTimer);
+  const table = cell.closest('table') as HTMLTableElement;
+  fitEditCell = cell;
+  if (FIT_DISCRETE_INPUT_TYPES.has(inputType)) {
+    if (fitPressureTimer !== undefined) {
+      clearTimeout(fitPressureTimer);
+      fitPressureTimer = undefined;
+    }
+    if (fitDiscreteRaf === undefined) {
+      fitDiscreteRaf = requestAnimationFrame(() => {
+        fitDiscreteRaf = undefined;
+        if (table.isConnected) {
+          refitAnchored(table, caretTableCell() ?? fitEditCell, { keepPrevHysteresis: AREA_FIT_HYSTERESIS });
+          fitSessionBaseH = new Map();
+        }
+      });
+    }
+    return;
   }
-  fitTypingTimer = setTimeout(() => {
-    fitTypingTimer = undefined;
-    const t = fitTypingTable;
-    fitTypingTable = null;
-    if (!t || !t.isConnected) {
-      return; // bảng đã bị dựng lại/xoá giữa chừng
+  if (table !== fitSessionTable) {
+    fitSessionTable = table;
+    fitSessionBaseH = new Map();
+  }
+  if (!fitSessionBaseH.has(cell)) {
+    fitSessionBaseH.set(cell, Number.NaN);
+    requestAnimationFrame(() => {
+      if (Number.isNaN(fitSessionBaseH.get(cell))) {
+        fitSessionBaseH.set(cell, cellContentHeight(cell));
+      }
+    });
+  }
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+  }
+  fitPressureTimer = setTimeout(onFitPressure, FIT_PRESSURE_MS);
+  if (fitIdleTimer !== undefined) {
+    clearTimeout(fitIdleTimer);
+  }
+  fitIdleTimer = setTimeout(() => {
+    fitIdleTimer = undefined;
+    if (fitSessionTable === table) {
+      settleFitTable(table, fitEditCell);
+      fitSessionBaseH = new Map();
     }
-    fitTableColumns(t);
-    stickyTableHeader.refresh();
-    // Cột nở → bảng có thể rộng thêm/đổi scroll ngang; kéo ô đang gõ về tầm nhìn.
-    const sel = window.getSelection();
-    const cell = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('td, th') : null;
-    if (cell && content.contains(cell)) {
-      cell.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    }
-  }, FIT_TYPING_REFIT_MS);
+  }, FIT_IDLE_SETTLE_MS);
 }
+
+/** A row delete narrows like deleting text (T1.7.p2): no re-fit now; pressure/settle as for typing. */
+function deferRowDeleteFit(edited: HTMLTableElement): boolean {
+  const cell = caretTableCell();
+  if (!tableFitModeOn || !cell || cell.closest('table') !== edited) {
+    return false;
+  }
+  onTableFitInput(cell, 'deleteRow');
+  return true;
+}
+
+/**
+ * Paste runs through execCommand (inputType insertText/insertHTML) → mark it discrete here,
+ * once the cell's still-loading images (the one just inserted) have a size to measure.
+ */
+function fitAfterPaste(): void {
+  const cell = caretTableCell();
+  if (!cell) {
+    return;
+  }
+  const loading = Array.from(cell.querySelectorAll('img')).filter((img) => !img.complete);
+  if (!loading.length) {
+    onTableFitInput(cell, 'insertFromPaste');
+    return;
+  }
+  void Promise.all(loading.map((img) => img.decode().catch(() => undefined))).then(() => {
+    if (cell.isConnected) {
+      onTableFitInput(cell, 'insertFromPaste');
+    }
+  });
+}
+
+content.addEventListener('compositionstart', () => {
+  fitComposing = true;
+  if (fitPressureTimer !== undefined) {
+    clearTimeout(fitPressureTimer);
+    fitPressureTimer = undefined;
+  }
+});
+content.addEventListener('compositionend', () => {
+  fitComposing = false;
+  const cell = caretTableCell();
+  if (cell) {
+    onTableFitInput(cell, 'insertCompositionText');
+  }
+});
+// The session ends (and settles, in a rAF) when the caret leaves the table or the
+// editor loses focus; moving between cells of the same table is not a trigger.
+document.addEventListener('selectionchange', () => {
+  if (fitSessionTable && caretTableCell()?.closest('table') !== fitSessionTable) {
+    endFitSession();
+  }
+});
+content.addEventListener('focusout', (e) => {
+  if (!(e.relatedTarget instanceof Node && content.contains(e.relatedTarget))) {
+    endFitSession();
+  }
+});
+window.addEventListener('blur', endFitSession);
 // Reading Mode (US-19.24) — controller lái CSS class/var. enabled/mode
 // global-in-memory ở host (bug 0716 #2, đảo ngược bug 0715 mục 4), cùng mô
 // hình zen (US-19.19, xem onZenChange) nhưng kênh riêng.
@@ -404,7 +652,11 @@ const quickCorrect = initQuickCorrect(vscode, content, () => {
 });
 // Req 23 US-23.1: right-click "Add Comment" + its composer. Owns the editor's
 // only contextmenu handler.
-const commentMenu = initCommentMenu(content, vscode, commentResolve);
+const commentMenu = initCommentMenu(content, vscode, commentResolve, {
+  cut: () => void cutSelectionViaClipboardApi(),
+  copy: () => void copySelectionViaClipboardApi(),
+  paste: pasteFromClipboardApi,
+});
 const brokenRef = initBrokenRef({
   content,
   vscode,
@@ -479,14 +731,6 @@ let syncTimer: ReturnType<typeof setTimeout> | undefined;
 let blockMap: BlockEntry[] = [];
 /** Performance Audit P-7: `BlockEntry` by id, so stamping ONE block's style is O(1). */
 let blockById = new Map<string, BlockEntry>();
-/**
- * Performance Audit P-7: the document holds a block that depends on its
- * neighbours, so no block in it may be serialized on its own (see
- * hasSiblingSensitiveBlock). Only ever changes with blockMap in renderDocument:
- * the "indented" style comes from mdSlice alone, so it cannot appear between two
- * renders.
- */
-let siblingSensitiveDocument = false;
 
 // ---------------------------------------------------------------------------
 // Khởi tạo
@@ -555,12 +799,52 @@ function applyTriggerMode(mode: TriggerMode): void {
   triggerAt.setTriggerMode(mode);
 }
 
+/**
+ * Audit L-9 render lifecycle: defined while a document render waits on a lazy
+ * engine (see holdForEngines) — every host message queues here instead of
+ * running, and replays in arrival order once the load settles.
+ */
+let heldMessages: HostToWebview[] | undefined;
+
 window.addEventListener('message', (event) => {
   const msg = event.data as HostToWebview;
+  if (heldMessages) {
+    heldMessages.push(msg);
+  } else {
+    handleHostMessage(msg);
+  }
+});
+
+function handleHostMessage(msg: HostToWebview): void {
   switch (msg.type) {
     case 'init': {
       const cfg: Partial<InitConfig> = msg.config ?? { breaks: false, linkify: true };
       renderer = new MarkdownRenderer({ breaks: !!cfg.breaks, linkify: !!cfg.linkify });
+      // L-9 (Performance Low-End — Audit.md): the math and front-matter engines
+      // load lazily, same URI + nonce contract as PlantUML / Mermaid below. Set
+      // before the render just below, which may be the first to need them.
+      if (cfg.mathEngineUri) {
+        setLazyEngineConfig('math', {
+          engineUri: cfg.mathEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      if (cfg.frontMatterEngineUri) {
+        setLazyEngineConfig('frontMatter', {
+          engineUri: cfg.frontMatterEngineUri,
+          scriptNonce: cfg.scriptNonce ?? '',
+        });
+      }
+      // L-9: render off the page before any other side effect, so an 'init'
+      // held for an engine has touched nothing; #content stays read-only until
+      // the replayed 'init' renders.
+      const prepared = prepareRender(msg.text ?? '');
+      if (Array.isArray(prepared)) {
+        content.contentEditable = 'false';
+        holdForEngines(prepared, msg);
+        break;
+      }
+      content.contentEditable = 'true';
       applyPreviewFontSettings(cfg);
       lineNumbersEnabled = cfg.showLineNumbers !== false;
       document.body.classList.toggle('md-line-numbers', lineNumbersEnabled);
@@ -641,7 +925,7 @@ window.addEventListener('message', (event) => {
           content.clientWidth - parseFloat(ics.paddingLeft || '0') - parseFloat(ics.paddingRight || '0')
         );
       }
-      renderDocument(msg.text ?? '');
+      renderDocument(prepared);
       // P-8: this text IS now currentText — adopt its rev as the diff base.
       appliedRev = msg.rev ?? 0;
       // C6: nếu panel này vừa được mở từ 1 kết quả tìm xuyên file, ưu tiên
@@ -710,7 +994,15 @@ window.addEventListener('message', (event) => {
         };
         break;
       }
-      applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
+      {
+        const misses = applyDocumentUpdate(nextText, msg.caretLine, msg.caretCol);
+        if (misses.length > 0) {
+          // L-9: nothing applied — replayed once the engine settles; the rev is
+          // adopted only then.
+          holdForEngines(misses, msg);
+          break;
+        }
+      }
       appliedRev = msg.rev ?? 0;
       break;
     }
@@ -963,7 +1255,41 @@ window.addEventListener('message', (event) => {
       break;
     }
   }
-});
+}
+
+/**
+ * L-9: hold the host channel until `engines` settle (loaded or failed), then
+ * flush a deferred update and replay the held messages in arrival order. A
+ * replayed message that holds again takes the rest of the queue with it.
+ */
+function holdForEngines(engines: LazyEngine[], first?: HostToWebview): void {
+  const queue: HostToWebview[] = first ? [first] : [];
+  heldMessages = queue;
+  void Promise.allSettled(engines.map((engine) => loadLazyEngine(engine))).then(() => {
+    heldMessages = undefined;
+    if (!hasInputOwner()) {
+      flushPendingUpdate();
+    } else if (pendingUpdate?.heldForEngines) {
+      // The hold is over: a local edit from here on makes the deferred text stale again.
+      pendingUpdate = { ...pendingUpdate, baseText: currentText, heldForEngines: false };
+    }
+    for (let i = 0; i < queue.length; i++) {
+      // Re-read each time: the previous replay (or the flush) may have held again.
+      const heldAgain = heldMessages as HostToWebview[] | undefined;
+      if (heldAgain) {
+        heldAgain.push(...queue.slice(i));
+        return;
+      }
+      // Each message ran in its own event dispatch before the hold: one that
+      // throws must not drop the rest of the queue.
+      try {
+        handleHostMessage(queue[i]);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  });
+}
 
 postToHost({ type: 'ready' });
 
@@ -1008,14 +1334,13 @@ function applyPreviewFontSettings(cfg: Partial<InitConfig>): void {
 // ---------------------------------------------------------------------------
 
 /**
- * The passes every fresh render must go through before it is shown or diffed.
- * Runs on the live #content for a full rebuild and on the detached staging
- * container for a P-9 block patch — every pass takes a plain root and reads no
+ * The passes every fresh render must go through before it is shown.
+ * Runs on the live #content for a full rebuild and on the detached run of
+ * inserted blocks for a P-9 block patch — every pass takes a plain root and reads no
  * layout. First entry is US-2.7: reapply the last known collapsed/expanded/raw
  * state onto the fresh `.md-front-matter` node — that state is in-memory only
  * (no extension-host persistence), so it must run on every render, not just
- * cold-open, and it must run before the snapshot/diff so both sides key the
- * front-matter block at the same stage.
+ * cold-open.
  */
 function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): void {
   applyFrontMatterViewState(root);
@@ -1031,7 +1356,7 @@ function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): voi
 
 /**
  * Performance Audit P-9: each live top-level node's render-time key (the
- * lineAgnosticKey of its post-postprocess DOM). A local mutation overwrites
+ * lineAgnosticKey of its RAW, pre-post-process render — T3.2). A local mutation overwrites
  * the node's entry with NO_RENDER_KEY via markDirtyFrom (the same
  * MutationObserver feed P-7 uses), so a REAL key always means "this node still
  * shows exactly what its render produced" — only such a node may be kept by
@@ -1047,17 +1372,43 @@ function postProcessRenderedDom(root: HTMLElement, mathRanges: LineRange[]): voi
  */
 let renderKeyByBlock = new WeakMap<Element, string>();
 let hasRenderSnapshot = false;
-/** Key stand-in for a poisoned live block — never equal to any real key (keys are outerHTML, starting with '<'). */
+/** Key stand-in for a poisoned live block — never equal to any real key (keys are `${length}:${hash}`, starting with a digit). */
 const NO_RENDER_KEY = ' ';
 /** Monotonic render counter behind RENDER_GENERATION_ATTR (see block-patch.ts). */
 let renderGeneration = 0;
 
-function snapshotRenderKeys(): void {
+/** `keys` = the raw children's keys, in order — post-process swaps top-level nodes 1:1, so they map by index. */
+function snapshotRenderKeys(keys: string[]): void {
   renderKeyByBlock = new WeakMap();
-  for (const child of Array.from(content.children)) {
-    renderKeyByBlock.set(child, lineAgnosticKey(child));
-  }
+  Array.from(content.children).forEach((child, i) => renderKeyByBlock.set(child, keys[i]));
   hasRenderSnapshot = true;
+}
+
+/** Display formulas (MATH_DISPLAY_SELECTOR) on or under `el` — the unit postProcessMathDom zips the math ranges against. */
+function katexDisplayCount(el: Element): number {
+  return (el.matches(MATH_DISPLAY_SELECTOR) ? 1 : 0) + el.querySelectorAll(MATH_DISPLAY_SELECTOR).length;
+}
+
+/**
+ * T3.2: a kept block's MATH_BLOCK_CLASS wrappers take their lines from the new
+ * render's math ranges, not from its raw HTML (copySrcLines skips them).
+ * `ranges` = this block's slice, [] when the render's display count did not
+ * match — the wrappers then end without lines, as a full render leaves them.
+ */
+function syncMathBlockLines(block: Element, ranges: LineRange[]): void {
+  const wrappers = block.classList.contains(MATH_BLOCK_CLASS)
+    ? [block]
+    : Array.from(block.querySelectorAll(`.${MATH_BLOCK_CLASS}`));
+  wrappers.forEach((wrapper, i) => {
+    const range = ranges[i];
+    if (range) {
+      wrapper.setAttribute(LINE_NUMBER_ATTR, String(range.start));
+      wrapper.setAttribute(LINE_NUMBER_END_ATTR, String(range.end));
+    } else {
+      wrapper.removeAttribute(LINE_NUMBER_ATTR);
+      wrapper.removeAttribute(LINE_NUMBER_END_ATTR);
+    }
+  });
 }
 
 /** `cls` present on or under any of the freshly inserted top-level nodes. */
@@ -1108,9 +1459,20 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   }
   const staging = document.createElement('div');
   staging.innerHTML = html;
-  postProcessRenderedDom(staging, mathRanges);
+  // T3.2: keys come from the RAW render; only the inserted run is post-processed below.
   const fresh = Array.from(staging.children);
   const freshKeys = fresh.map((el) => lineAgnosticKey(el));
+  // Display-math index each fresh block starts at (last entry = total). The
+  // math ranges zip against `.katex-display` in document order and apply only
+  // when the whole render's count matches — postProcessMathDom's rule, kept
+  // across the split into kept blocks and the inserted run.
+  const displayStart = [0];
+  for (const el of fresh) {
+    displayStart.push(displayStart[displayStart.length - 1] + katexDisplayCount(el));
+  }
+  const mathApplies = displayStart[fresh.length] === mathRanges.length;
+  const rangesBetween = (from: number, to: number): LineRange[] =>
+    mathApplies ? mathRanges.slice(displayStart[from], displayStart[to]) : [];
   // Live blocks that take part in the diff: keyed (pristine since their
   // render) or at least a real markdown block (poisoned → NO_RENDER_KEY →
   // always lands in the replaced run). Everything else (caret-trap <p>s) is
@@ -1129,15 +1491,22 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
     cursor = next;
   }
 
-  // Move the fresh changed run in (same anchoring, keeping text nodes).
-  const inserted = fresh.slice(prefix, fresh.length - suffix);
+  // Move the fresh changed run (same anchoring, keeping text nodes) into its
+  // own container, post-process only it, then splice it in. Post-process swaps
+  // top-level nodes 1:1, so `inserted` lines up with freshKeys[prefix..].
   const freshStop: ChildNode | null = suffix > 0 ? fresh[fresh.length - suffix] : null;
   let src: ChildNode | null = prefix === 0 ? staging.firstChild : fresh[prefix - 1].nextSibling;
-  const frag = document.createDocumentFragment();
+  const run = document.createElement('div');
   while (src && src !== freshStop) {
     const next: ChildNode | null = src.nextSibling;
-    frag.appendChild(src);
+    run.appendChild(src);
     src = next;
+  }
+  postProcessRenderedDom(run, rangesBetween(prefix, fresh.length - suffix));
+  const inserted = Array.from(run.children);
+  const frag = document.createDocumentFragment();
+  while (run.firstChild) {
+    frag.appendChild(run.firstChild);
   }
   content.insertBefore(frag, liveStop);
 
@@ -1145,10 +1514,12 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   // moved them even though their content did not change) and re-key.
   for (let i = 0; i < prefix; i++) {
     copySrcLines(fresh[i], live[i]);
+    syncMathBlockLines(live[i], rangesBetween(i, i + 1));
     renderKeyByBlock.set(live[i], freshKeys[i]);
   }
   for (let k = 1; k <= suffix; k++) {
     copySrcLines(fresh[fresh.length - k], live[live.length - k]);
+    syncMathBlockLines(live[live.length - k], rangesBetween(fresh.length - k, fresh.length - k + 1));
     renderKeyByBlock.set(live[live.length - k], freshKeys[freshKeys.length - k]);
   }
   for (let i = 0; i < inserted.length; i++) {
@@ -1157,26 +1528,49 @@ function tryPatchRender(html: string, mathRanges: LineRange[]): Element[] | null
   return inserted;
 }
 
-function renderDocument(markdown: string): void {
+interface PreparedRender {
+  markdown: string;
+  cleanHtml: string;
+  mathRanges: LineRange[];
+}
+
+/**
+ * L-9: render `markdown` off the page. Returns the engines a shim had to answer
+ * without (minus those whose load already failed — their stand-in is final)
+ * and leaves the page untouched; else the render, ready for renderDocument.
+ */
+function prepareRender(markdown: string): PreparedRender | LazyEngine[] {
   if (!renderer) {
-    return;
+    return [];
   }
+  // Drop leftovers (a paste or math-edit miss) so they are not charged to this render.
+  takeEngineMisses();
+  const { html } = renderer.render(markdown);
+  const misses = takeEngineMisses().filter((engine) => !lazyEngineFailed(engine));
+  if (misses.length > 0) {
+    return misses;
+  }
+  return { markdown, cleanHtml: stripMetaRefresh(html), mathRanges: renderer.getLastMathBlockRanges() };
+}
+
+function renderDocument(prepared: PreparedRender): void {
+  const { markdown, cleanHtml, mathRanges } = prepared;
   currentText = markdown;
   // Performance Audit P-7: the rebuild below replaces every node, so its records
   // would only mark blocks that are about to be dropped from the cache anyway.
   contentMutations.disconnect();
   resetBlockSerializeState();
   const scrollTop = window.scrollY;
-  const { html } = renderer.render(markdown);
-  const cleanHtml = stripMetaRefresh(html);
-  const mathRanges = renderer.getLastMathBlockRanges();
+  // US-6.10 contract 8: replaced tables lose their column-width lock — remember it by ordinal.
+  const tableLocks = snapshotTableLocks(content);
   // Performance Audit P-9: splice only the blocks this update changed; null =
   // nothing to diff against yet (first render) → full innerHTML rebuild.
   const inserted = tryPatchRender(cleanHtml, mathRanges);
   if (!inserted) {
     content.innerHTML = cleanHtml;
+    const rawKeys = Array.from(content.children, (el) => lineAgnosticKey(el));
     postProcessRenderedDom(content, mathRanges);
-    snapshotRenderKeys();
+    snapshotRenderKeys(rawKeys);
   }
   ensureTrailingParagraph();
   ensureCaretSpotBeforeHr();
@@ -1200,10 +1594,11 @@ function renderDocument(markdown: string): void {
   // sàn 14ch của cột dài nhất) — phải chạy TRƯỚC stickyTableHeader.refresh() vì
   // clone header đo bề rộng cột từ DOM tại thời điểm gọi.
   const freshTables = inserted ? tablesWithin(inserted) : (Array.from(content.querySelectorAll('table')) as HTMLTableElement[]);
+  restoreTableLocks(content, tableLocks);
   freshTables.forEach((t) => fitTableColumns(t));
   blockMap = buildBlockMap(content, markdown, blockMap);
   blockById = new Map(blockMap.map((entry) => [entry.id, entry]));
-  siblingSensitiveDocument = hasSiblingSensitiveBlock(blockMap);
+  serializeOptions.siblingSensitiveIds = siblingSensitiveBlockIds(blockMap);
   // P-9: a patched render keeps untouched nodes, so "my cached node detached"
   // no longer signals "a render happened" — consumers holding a cached DOM
   // walk (the re-attach picker) compare this stamp instead.
@@ -1270,6 +1665,12 @@ interface PendingUpdate {
   baseText: string;
   /** P-8: the push's rev — adopted into `appliedRev` only if this update is actually rendered. */
   rev: number;
+  /**
+   * L-9: already found current at release and kept only while its render waits
+   * on an engine — a local edit made during that hold does not drop it (the
+   * host text wins, as for an 'update' held for an engine).
+   */
+  heldForEngines?: boolean;
 }
 let pendingUpdate: PendingUpdate | undefined;
 
@@ -1300,19 +1701,29 @@ function resolveUpdateText(msg: HostToWebview & { type: 'update' }): string | un
 
 /** Render a host document 'update' and restore the caret (undo/redo carries an
  * explicit caretLine; a caret-less update snapshots the source caret and restores
- * it so it doesn't jump to the top of the file). */
-function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): void {
+ * it so it doesn't jump to the top of the file). L-9: returns the engines the
+ * render waits on — nothing applied — or `[]` once applied. */
+function applyDocumentUpdate(text: string, caretLine?: number, caretCol?: number): LazyEngine[] {
+  const prepared = prepareRender(text);
+  if (Array.isArray(prepared)) {
+    return prepared;
+  }
   const preservedCaret = caretLine === undefined ? captureCaretSource() : undefined;
-  renderDocument(text);
+  renderDocument(prepared);
   if (caretLine !== undefined) {
     restoreCaretAtSource(caretLine, caretCol ?? 0);
   } else if (preservedCaret) {
     restoreCaretAtSource(preservedCaret.line, preservedCaret.col);
   }
+  return [];
 }
 
 // Flush a deferred update when the trigger popup releases the editor keyboard.
-onInputOwnerRelease(() => {
+function flushPendingUpdate(): void {
+  // L-9: the channel is held — holdForEngines flushes once the engines settle.
+  if (heldMessages) {
+    return;
+  }
   const u = pendingUpdate;
   pendingUpdate = undefined;
   if (!u) {
@@ -1320,13 +1731,20 @@ onInputOwnerRelease(() => {
   }
   // A local edit (e.g. the popup's own commit) advanced the doc since we
   // deferred → the deferred host text is stale; drop it, the local DOM wins.
-  if (currentText !== u.baseText || u.text === currentText) {
+  if ((currentText !== u.baseText && !u.heldForEngines) || u.text === currentText) {
     return;
   }
-  applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  const misses = applyDocumentUpdate(u.text, u.caretLine, u.caretCol);
+  if (misses.length > 0) {
+    // L-9: keep it deferred until the engines settle.
+    pendingUpdate = { ...u, heldForEngines: true };
+    holdForEngines(misses);
+    return;
+  }
   // P-8: rendered at last — only now does currentText belong to that push's rev.
   appliedRev = u.rev;
-});
+}
+onInputOwnerRelease(flushPendingUpdate);
 
 /**
  * Sau khi render lại vì undo/redo, đặt caret về vị trí nguồn (`line` 1-based,
@@ -1852,12 +2270,6 @@ function serialize(): string {
   // pending records here, or the block just edited still counts as clean.
   contentMutations.takeRecords().forEach(markDirtyFromRecord);
   markCheckboxDrift();
-  if (siblingSensitiveDocument) {
-    // Keep the dirty marks, like serializeChildren's own fallback: the full pass
-    // fills no cache, so dropping them could serve stale markdown if the document
-    // ever returned to the per-block path.
-    return serializeFull(content, serializeOptions);
-  }
   return serializeChildren(content, serializeOptions, blockMarkdownCache, dirtyBlocks);
 }
 
@@ -1950,8 +2362,11 @@ content.addEventListener('input', (e) => {
   const editedTable = sel?.anchorNode ? closestElement(sel.anchorNode)?.closest('table') : null;
   if (editedTable && content.contains(editedTable)) {
     stickyTableHeader.refresh();
-    // US-19.25: cột (fit-mode) không nở khi gõ vì bị ghim width → re-fit có debounce.
-    scheduleFitRefit(editedTable as HTMLTableElement);
+    // US-19.27 contract 13: edit-time re-fit policy; skipped while an IME composes.
+    const editedCell = caretTableCell();
+    if (editedCell && !(e as InputEvent).isComposing) {
+      onTableFitInput(editedCell, inputType ?? '');
+    }
   }
 });
 
@@ -2145,6 +2560,28 @@ function cutSelectionViaClipboardApi(): boolean {
   return true;
 }
 
+/**
+ * Copy for the right-click menu: the same text/plain Markdown + text/html pair
+ * as the 'copy' event handler, written through the async Clipboard API since
+ * `execCommand('copy')` does not reliably fire 'copy' inside the nested webview
+ * iframe. Returns false when nothing is selected.
+ */
+function copySelectionViaClipboardApi(): boolean {
+  const md = selectionAsMarkdown();
+  if (md === null) {
+    return false;
+  }
+  const data: Record<string, Blob> = { 'text/plain': new Blob([md], { type: 'text/plain' }) };
+  const html = renderPasteHtml(md);
+  if (html) {
+    data['text/html'] = new Blob([html], { type: 'text/html' });
+  }
+  navigator.clipboard.write([new ClipboardItem(data)]).catch(() => {
+    /* No clipboard-write permission — nothing else to fall back to. */
+  });
+  return true;
+}
+
 // Paste: chỉ lấy text/plain (tránh dán HTML bừa từ ngoài vào làm hỏng cấu
 // trúc), rồi render lại bằng chính markdown-it của app. Nếu chèn thẳng làm
 // text thô, cú pháp Markdown copy từ file .md khác (**bold**, # heading,
@@ -2260,9 +2697,11 @@ function insertPastedMarkdown(text: string): void {
   const html = renderPasteHtml(text);
   if (!html) {
     document.execCommand('insertText', false, text);
+    fitAfterPaste();
     return;
   }
   document.execCommand('insertHTML', false, applySmartGap(html, text));
+  fitAfterPaste();
   // Có thể vừa chèn một khối ```mermaid``` mới — dựng SVG cho nó (renderAll
   // quét lại toàn bộ content nên cũng vô hại với các biểu đồ có sẵn, chỉ tốn
   // thêm chút công tính lại chứ không phá cấu trúc).
@@ -2337,6 +2776,18 @@ function renderPasteHtml(text: string): string {
   postProcessMermaidDom(tmp, document);
   postProcessPlantumlDom(tmp, document);
   postProcessCodeHeaders(tmp, document);
+  // L-9: never waits — a formula or front-matter card rendered without its
+  // engine is a stand-in now, rebuilt in place once the engine arrives.
+  for (const engine of takeEngineMisses()) {
+    if (!lazyEngineFailed(engine)) {
+      loadLazyEngine(engine).then(
+        () => (engine === 'math' ? upgradeMathFallbacks(content) : upgradeFrontMatterFallbacks(content)),
+        // A failed load: the shims throw now, so a rebuilt front-matter card takes
+        // the failed-engine look (YAML raw rows, TOML invalid frame), not 0 fields.
+        () => (engine === 'frontMatter' ? upgradeFrontMatterFallbacks(content) : undefined)
+      );
+    }
+  }
   if (tmp.children.length === 1 && tmp.firstElementChild?.tagName === 'P') {
     return tmp.firstElementChild.innerHTML;
   }

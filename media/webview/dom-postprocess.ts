@@ -49,10 +49,11 @@ export function postProcessMathDom(
   mathBlockRanges: LineRange[] = []
 ): void {
   // @vscode/markdown-it-katex: inline → <span class="katex">, block → <span class="katex-display"> (trong <p>)
-  const displays = Array.from(root.querySelectorAll('.katex-display'));
+  // TeX it cannot parse → KATEX_ERROR_BLOCK_SELECTOR / KATEX_ERROR_INLINE_SELECTOR, wrapped the same way.
+  const displays = Array.from(root.querySelectorAll(MATH_DISPLAY_SELECTOR));
   const ranges = mathBlockRanges.length === displays.length ? mathBlockRanges : [];
   displays.forEach((el, i) => {
-    const tex = extractTex(el);
+    const tex = errorTexOrExtract(el);
     const wrapper = doc.createElement('div');
     wrapper.className = MATH_BLOCK_CLASS;
     wrapper.setAttribute('data-tex', tex);
@@ -70,7 +71,7 @@ export function postProcessMathDom(
     }
     buildMathEditStructure(doc, wrapper, el, { toolbar: true });
   });
-  const inlines = Array.from(root.querySelectorAll('.katex')).filter(
+  const inlines = Array.from(root.querySelectorAll(`.katex, ${KATEX_ERROR_INLINE_SELECTOR}`)).filter(
     (el) =>
       !hasAncestor(el, (a) => a.classList?.contains(MATH_BLOCK_CLASS) ?? false) &&
       !(el.classList?.contains('katex-display') ?? false)
@@ -79,7 +80,7 @@ export function postProcessMathDom(
     if (hasAncestor(el, (a) => a.classList?.contains(MATH_INLINE_CLASS) ?? false)) {
       continue;
     }
-    const tex = extractTex(el);
+    const tex = errorTexOrExtract(el);
     const wrapper = doc.createElement('span');
     wrapper.className = MATH_INLINE_CLASS;
     wrapper.setAttribute('data-tex', tex);
@@ -170,6 +171,25 @@ function buildMathEditStructure(doc: Document, wrapper: HTMLElement, renderedEl:
 export function extractTex(katexEl: Element): string {
   const annotation = katexEl.querySelector('annotation[encoding="application/x-tex"]');
   return annotation?.textContent ?? '';
+}
+
+/**
+ * @vscode/markdown-it-katex's output for TeX KaTeX cannot parse: inline
+ * `<span class="katex-error" title="TEX">`, block `<p class="katex-block
+ * katex-error" title="TEX">`. The element text is the error message; the TeX
+ * lives in `title` only. KaTeX's own error span (`throwOnError: false`, the
+ * math-edit popover) carries `style` and holds the roles the other way round;
+ * raw HTML may use the class with no `title`. Neither is a formula to wrap.
+ */
+const KATEX_ERROR_BLOCK_SELECTOR = 'p.katex-block.katex-error[title]:not([title=""])';
+const KATEX_ERROR_INLINE_SELECTOR = 'span.katex-error[title]:not([title=""]):not(.katex-block):not([style])';
+
+/** A rendered display formula, valid or not — the unit the math block ranges zip against. */
+export const MATH_DISPLAY_SELECTOR = `.katex-display, ${KATEX_ERROR_BLOCK_SELECTOR}`;
+
+/** The TeX a formula element was rendered from: `title` for the plugin's error element, else the annotation. */
+function errorTexOrExtract(el: Element): string {
+  return el.classList.contains('katex-error') ? (el.getAttribute('title') ?? '') : extractTex(el);
 }
 
 /**

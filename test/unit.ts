@@ -19,6 +19,8 @@ import {
   driveMismatchHint,
   entityFollowingLabel,
   entityFollowingPreview,
+  evictToByteBudget,
+  FileTextCache,
   imageNamePrefix,
   isPathTooLongError,
   normalizeAssetName,
@@ -35,7 +37,7 @@ import {
 } from '../src/text-utils';
 import { isWindowsDrivePath, isWindowsUncPath, hasUrlScheme } from '../src/shared/link-scheme';
 import type { HostToWebview, TriggerConfig, WebviewToHost } from '../src/shared/messages';
-import { EntityIndex, parseEntities, nearestEnclosingHeading, type IndexedEntity } from '../src/entity-index';
+import { EntityIndex, parseEntities, nearestEnclosingHeading, sameEntityRows, type IndexedEntity } from '../src/entity-index';
 import { canonicalEntityId, scanEntityOccurrences } from '../src/occurrence-scan';
 import { findTextMatches, type MatchOptions } from '../src/shared/text-match';
 import { detectBlockStyle, type StyleOverride } from '../media/webview/block-style';
@@ -45,6 +47,7 @@ import { copySrcLines, lineAgnosticKey, planBlockPatch } from '../media/webview/
 import domino from '@mixmark-io/domino';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
+import { lockTable, lockedWidths, remapTableLock, remapWidths, restoreTableLocks, snapshotTableLocks, unlockTable } from '../media/webview/table-col-resize';
 import { buildGroups } from '../media/webview/comment-gutter';
 import { orphanKindLabel } from '../media/webview/comment-panel';
 import type { ThreadAnchor } from '../media/webview/comment-resolve';
@@ -136,7 +139,27 @@ import {
   type AnchorCandidate,
 } from '../media/webview/comment-anchor';
 import { countWords, estimateReadMinutes, formatCount } from '../media/webview/reading-stats';
+import {
+  cellLineCount,
+  solveAreaFit,
+  AREA_FIT_KNEE_EPSILON,
+  AREA_FIT_KNEE_MAX_SHRINK,
+  AREA_FIT_RESIZE_HYSTERESIS,
+  type AreaFitColumn,
+  type AreaFitOptions,
+  type AreaFitResult,
+  type BreakUnit,
+  type CellLines,
+} from '../media/webview/table-area-fit';
 import { neutralizeBodyText, normalizeBodyEol } from '../media/webview/dom-utils';
+import {
+  engineMissCount,
+  lazyEngineApi,
+  lazyEngineFailed,
+  loadLazyEngine,
+  noteEngineMiss,
+  takeEngineMisses,
+} from '../media/webview/lazy-engines';
 import {
   collectClassConstants,
   exportedConstants,
@@ -152,6 +175,8 @@ import {
 let pass = 0;
 let fail = 0;
 const failures: string[] = [];
+// Checks that must await a promise push it here; the summary waits for them.
+const pendingChecks: Promise<void>[] = [];
 
 function check(name: string, cond: boolean, detail?: string): void {
   if (cond) {
@@ -1390,6 +1415,8 @@ const toWebview: HostToWebview[] = [
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
+    mathEngineUri: 'vscode-resource://math-engine.js',
+    frontMatterEngineUri: 'vscode-resource://front-matter-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   } },
   { type: 'init', text: 'x', rev: 1, docUri: 'file:///a.md', config: {
@@ -1398,6 +1425,8 @@ const toWebview: HostToWebview[] = [
     crossFileSearchScope: 'markdown', tableFitMode: false, readability: readabilityFixture, trigger: triggerFixture,
     plantumlEngineUri: 'vscode-resource://plantuml-engine.js', scriptNonce: 'n0nce',
     mermaidEngineUri: 'vscode-resource://mermaid-engine.js',
+    mathEngineUri: 'vscode-resource://math-engine.js',
+    frontMatterEngineUri: 'vscode-resource://front-matter-engine.js',
     commentAuthorName: 'hungvu', docRelativePath: 'a.md', commentHighlightOn: false,
   }, reveal: { line: 0, character: 0, length: 1 } },
   { type: 'update', text: 'x', rev: 2 },
@@ -1416,6 +1445,42 @@ const toWebview: HostToWebview[] = [
 ];
 check('contract: WebviewToHost phủ đủ 15 biến thể (P-8 splits edit into diff + full-text; + requestFullPush)', fromWebview.length === 15);
 check('contract: HostToWebview phủ đủ 13 biến thể (init có/không reveal + update diff/full + requestFullSync + scrollToPosition + pasteImage + dropFile + zenChanged + readingModeChanged)', toWebview.length === 13);
+
+// ---------------------------------------------------------------------------
+// Lazy engines (audit L-9, media/webview/lazy-engines.ts): the miss ledger and
+// the loader's Node-side answers (no window, no config).
+// ---------------------------------------------------------------------------
+
+{
+  const before = engineMissCount();
+  takeEngineMisses();
+  noteEngineMiss('math');
+  noteEngineMiss('math');
+  noteEngineMiss('frontMatter');
+  eq('lazy engines: engineMissCount counts every miss', engineMissCount() - before, 3);
+  eq('lazy engines: takeEngineMisses dedups', takeEngineMisses().sort(), ['frontMatter', 'math']);
+  eq('lazy engines: takeEngineMisses clears', takeEngineMisses(), []);
+  eq('lazy engines: engineMissCount is monotonic (a take does not lower it)', engineMissCount() - before, 3);
+  eq('lazy engines: lazyEngineApi is undefined under Node', lazyEngineApi('math'), undefined);
+  check('lazy engines: lazyEngineFailed is false before any load', !lazyEngineFailed('math'));
+  const firstLoad = loadLazyEngine('math');
+  check('lazy engines: concurrent loadLazyEngine calls share one promise', loadLazyEngine('math') === firstLoad);
+  pendingChecks.push(
+    firstLoad.then(
+      () => check('lazy engines: loadLazyEngine without a config rejects', false, '  resolved'),
+      (err: unknown) => {
+        check('lazy engines: loadLazyEngine without a config rejects', /not provided by the host/.test(String(err)), `  ${String(err)}`);
+        check('lazy engines: lazyEngineFailed is true after the rejected load', lazyEngineFailed('math'));
+        const retry = loadLazyEngine('math');
+        check('lazy engines: a rejected load is dropped, the next call retries', retry !== firstLoad);
+        return retry.then(
+          () => check('lazy engines: the retry without a config rejects', false, '  resolved'),
+          () => check('lazy engines: the retry without a config rejects', true)
+        );
+      }
+    )
+  );
+}
 
 // ---------------------------------------------------------------------------
 // findTextMatches (src/shared/text-match.ts) — lõi so khớp THUẦN dùng chung cho
@@ -1610,6 +1675,404 @@ eq('countWords: supplementary-plane Han counts per character', countWords(String
 eq('estimateReadMinutes: 0 words → 0 min', estimateReadMinutes(0), 0);
 eq('estimateReadMinutes: 7 words → 1 min (floor never shown for real content)', estimateReadMinutes(7), 1);
 eq('formatCount: hardcoded comma, not toLocaleString', formatCount(1860), '1,860');
+
+// ---------------------------------------------------------------------------
+// table-area-fit (US-19.27) — height-first fit-mode column solver: greedy line
+// model, role floors, single + joint row moves, free shrink, scroll floor.
+// Fixture px: Latin char 8, space 4, CJK glyph 16, padX 16, line 24.
+// ---------------------------------------------------------------------------
+
+const AF_PAD = 16;
+const AF_LINE = 24;
+const afWords = (...chars: number[]): BreakUnit[] => chars.map((c) => ({ w: c * 8, gap: 4 }));
+const afCell = (...segments: BreakUnit[][]): CellLines => ({
+  segments,
+  cjkUnits: 0,
+  units: segments.reduce((s, g) => s + g.length, 0),
+});
+/** `words` five-char words on one line. */
+const afText = (words: number): CellLines => afCell(afWords(...new Array<number>(words).fill(5)));
+const afCjk = (glyphs: number): CellLines => ({
+  segments: [Array.from({ length: glyphs }, () => ({ w: 16, gap: 0 }))],
+  cjkUnits: glyphs,
+  units: glyphs,
+});
+function afColumn(cells: CellLines[], readFloorW = 240, looseFloorW = 120): AreaFitColumn {
+  const units = cells.flatMap((c) => c.segments.flat());
+  const lineW = (seg: BreakUnit[]): number => seg.reduce((s, u, i) => s + u.w + (i ? u.gap : 0), 0);
+  return {
+    cells,
+    hardMinW: Math.max(0, ...units.map((u) => u.w)) + AF_PAD,
+    readFloorW,
+    looseFloorW,
+    maxW: Math.max(0, ...cells.flatMap((c) => c.segments.map(lineW))) + AF_PAD,
+  };
+}
+const afOpts = (budgetW: number): AreaFitOptions => ({ budgetW, padX: AF_PAD, lineH: AF_LINE });
+const afSum = (ws: number[]): number => ws.reduce((s, w) => s + w, 0);
+/** Contract 4 cell height: Σ over hard lines of max(lines × lineH, that line's fixed box); an empty cell is 1 line. */
+function afCellH(cell: CellLines, contentW: number, lineH: number): number {
+  if (!cell.segments.length) return lineH;
+  return cell.segments.reduce((h, seg, s) => h + Math.max(cellLineCount({ ...cell, segments: [seg] }, contentW) * lineH, cell.fixedH?.[s] ?? 0), 0);
+}
+function afRowHeights(cols: AreaFitColumn[], widths: number[], padX = AF_PAD, lineH = AF_LINE): number[] {
+  return cols[0].cells.map((_, r) => Math.max(...cols.map((c, j) => afCellH(c.cells[r], widths[j] - padX, lineH))));
+}
+const afH = (cols: AreaFitColumn[], widths: number[]): number => afSum(afRowHeights(cols, widths));
+/** Smallest integer width in (w, maxW] giving the cell fewer lines; undefined when none. */
+function afOneLineLess(col: AreaFitColumn, r: number, w: number): number | undefined {
+  const lines = cellLineCount(col.cells[r], w - AF_PAD);
+  for (let x = w + 1; x <= col.maxW; x++) if (cellLineCount(col.cells[r], x - AF_PAD) < lines) return x;
+  return undefined;
+}
+const afRuns: { cols: AreaFitColumn[]; res: AreaFitResult }[] = [];
+function afSolve(cols: AreaFitColumn[], opts: AreaFitOptions): AreaFitResult {
+  const res = solveAreaFit(cols, opts);
+  afRuns.push({ cols, res });
+  return res;
+}
+
+eq('cellLineCount: single unit → 1 line', cellLineCount(afCell(afWords(5)), 100), 1);
+eq('cellLineCount: gap boundary — 40+4+40 fits 84px exactly', cellLineCount(afCell(afWords(5, 5)), 84), 1);
+eq('cellLineCount: gap boundary — 1px narrower wraps', cellLineCount(afCell(afWords(5, 5)), 83), 2);
+eq('cellLineCount: greedy fill 5 words at 3 per line → 2 lines', cellLineCount(afText(5), 128), 2);
+eq('cellLineCount: unit wider than the line takes a line of its own', cellLineCount(afCell(afWords(5, 25, 5)), 100), 3);
+eq('cellLineCount: CJK glyphs gap 0 → 3 per 48px line', cellLineCount(afCjk(6), 48), 2);
+eq('cellLineCount: CJK glyphs gap 0 → 2 per 47px line', cellLineCount(afCjk(6), 47), 3);
+eq('cellLineCount: two segments (hard break) → 2 lines', cellLineCount(afCell(afWords(5), afWords(5)), 1000), 2);
+eq('cellLineCount: empty cell → 1 line', cellLineCount({ segments: [], cjkUnits: 0, units: 0 }, 100), 1);
+
+// #20-shaped risk register: ID, Risk (medium), Owner, Status, Mitigation +
+// Contingency (long). At 240px Mitigation holds every row but one tie.
+const af20 = (): AreaFitColumn[] => [
+  afColumn([afCell(afWords(2)), ...[1, 2, 3, 4].map(() => afCell(afWords(2)))]),
+  afColumn([afCell(afWords(4)), afText(8), afText(7), afText(9), afText(6)]),
+  afColumn([afCell(afWords(5)), ...[1, 2, 3, 4].map(() => afCell(afWords(5)))]),
+  afColumn([afCell(afWords(6)), ...[1, 2, 3, 4].map(() => afCell(afWords(4)))]),
+  afColumn([afCell(afWords(10)), afText(30), afText(26), afText(22), afText(28)]),
+  afColumn([afCell(afWords(11)), afText(22), afText(18), afText(20), afText(16)]),
+];
+{
+  const cols = af20();
+  const res = afSolve(cols, afOpts(1000));
+  const risk = res.widths[1];
+  check('solveAreaFit #20: medium column ends below readFloorW', risk < cols[1].readFloorW, `  Risk ${risk}`);
+  check('solveAreaFit #20: medium column stays ≥ looseFloorW', risk >= cols[1].looseFloorW, `  Risk ${risk}`);
+  check('solveAreaFit #20: fits the budget, no scroll', !res.scroll && afSum(res.widths) <= 1000, `  ${JSON.stringify(res)}`);
+  eq('solveAreaFit #20: rowHeights match the line model at the widths', res.rowHeights, afRowHeights(cols, res.widths));
+  // US-19.26 ② baseline: every column at min(maxW, readFloorW), spare shared ∝ (maxW − floor).
+  const floors = cols.map((c) => Math.min(c.maxW, c.readFloorW));
+  const slack = cols.map((c, j) => c.maxW - floors[j]);
+  const spare = 1000 - afSum(floors);
+  const proportional = floors.map((f, j) => Math.floor(f + (spare * slack[j]) / afSum(slack)));
+  const hSolver = afH(cols, res.widths);
+  const hProp = afH(cols, proportional);
+  check('solveAreaFit #20: H lower than proportional shrink at the same budget', hSolver < hProp, `  solver ${hSolver}px, proportional ${hProp}px`);
+}
+
+// Scroll floor (contract 7) on the #20 shape: Mitigation tops every row but
+// one → readFloorW; Risk + Contingency are no row's strictly tallest → free
+// shrink (Risk to looseFloorW, Contingency to the 6-line breakpoint).
+{
+  const cols = af20();
+  const floorAssignment = [32, 120, 56, 64, 240, 188];
+  const tight = afSolve(cols, afOpts(500));
+  eq('solveAreaFit scroll: floors > budget → scroll', tight.scroll, true);
+  eq('solveAreaFit scroll: widths = floor assignment', tight.widths, floorAssignment);
+  const exact = afSolve(cols, afOpts(afSum(floorAssignment)));
+  eq('solveAreaFit scroll: budget = Σ floor assignment → no scroll', exact.scroll, false);
+  eq('solveAreaFit scroll: budget = Σ floor assignment → same widths', exact.widths, floorAssignment);
+}
+
+// CJK column (readFloorW 36ch = 288px) tops every row.
+{
+  const cols = [
+    afColumn([afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1))]),
+    afColumn([afCell(afWords(2)), afCjk(90), afCjk(80), afCjk(70)], 288),
+    afColumn([afCell(afWords(2)), afText(12), afText(10), afText(11)]),
+  ];
+  const tight = afSolve(cols, afOpts(456));
+  eq('solveAreaFit CJK: budget = Σ floor assignment → no scroll', tight.scroll, false);
+  eq('solveAreaFit CJK: tight budget holds the CJK column at its readFloorW', tight.widths[1], 288);
+  for (const budgetW of [460, 600, 800, 1200]) {
+    const w = afSolve(cols, afOpts(budgetW)).widths[1];
+    check(`solveAreaFit CJK: budget ${budgetW} → CJK column never below readFloorW`, w >= 288, `  CJK ${w}`);
+  }
+}
+
+// #8b-shaped: three text columns carry the same text → tied at every row's max.
+{
+  const cols = [
+    afColumn([afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1)), afCell(afWords(1))]),
+    ...[1, 2, 3].map(() => afColumn([afCell(afWords(2)), afText(20), afText(14), afText(26)])),
+  ];
+  const floor = afSolve(cols, afOpts(0));
+  // Moves act on P (every column at readFloorW clamped to [hardMinW, maxW]), not on the free-shrunk widths.
+  const floorP = cols.map((c) => Math.min(c.maxW, Math.max(c.hardMinW, c.readFloorW)));
+  const tiedEveryRow = afRowHeights(cols, floorP).every(
+    (h, r) => cols.filter((c, j) => cellLineCount(c.cells[r], floorP[j] - AF_PAD) * AF_LINE === h).length >= 2,
+  );
+  check('solveAreaFit #8b: every row tied at the floor assignment → no single move lowers H', tiedEveryRow);
+  const res = afSolve(cols, afOpts(1000));
+  const hFloor = afH(cols, floor.widths);
+  const hRes = afH(cols, res.widths);
+  check('solveAreaFit #8b: joint moves lower H below the floor assignment', hRes < hFloor, `  joint ${hRes}px, floor ${hFloor}px`);
+  const spare = 1000 - afSum(res.widths);
+  // Case — superseded by contract 6: a leftover joint move within the spare
+  // is now allowed when its own gain sits inside the knee epsilon; only a
+  // move that would still drop H by more than that is a real miss.
+  const beyondKnee: string[] = [];
+  res.rowHeights.forEach((h, r) => {
+    const tied = cols.map((_, j) => j).filter((j) => cellLineCount(cols[j].cells[r], res.widths[j] - AF_PAD) * AF_LINE === h);
+    if (tied.length < 2) return;
+    const next = res.widths.slice();
+    for (const j of tied) {
+      const w = afOneLineLess(cols[j], r, res.widths[j]);
+      if (w === undefined) return;
+      next[j] = w;
+    }
+    if (afSum(next) - afSum(res.widths) > spare) return;
+    const nextH = afH(cols, next);
+    if (nextH < hRes / (1 + AREA_FIT_KNEE_EPSILON)) beyondKnee.push(`row ${r}: ${JSON.stringify(next)}`);
+  });
+  eq('solveAreaFit #8b: no budget left unused beyond the knee epsilon (contract 6)', beyondKnee, []);
+  eq('solveAreaFit: same input twice → identical output', solveAreaFit(cols, afOpts(1000)), res);
+}
+
+// Tie-break (contract 4): two mirrored columns, each strictly topping its own
+// row; the budget affords one equal-ratio move → the lower column index widens.
+{
+  const cols = [afColumn([afCell(afWords(2)), afText(20), afText(2)]), afColumn([afCell(afWords(2)), afText(2), afText(20)])];
+  eq('solveAreaFit tie-break: equal ratio → lower column index takes width first', afSolve(cols, afOpts(560)).widths, [320, 240]);
+}
+
+// GATE A (T1.3): the DOM max-content width (maxW) can run a sub-pixel short of the
+// model's one-line width; hi is raised to the model line so the cell still reaches 1 line.
+{
+  // One line = 40 + 4 + 40 + 4 + 40 = 128 px; maxW − padX = ceil(142.6) − 16 = 127 px.
+  const short: AreaFitColumn = { cells: [afCell(afWords(5, 5, 5))], hardMinW: 40 + AF_PAD, readFloorW: 60, looseFloorW: 60, maxW: 128 + AF_PAD - 1.4 };
+  const fixed: AreaFitColumn = { cells: [afCell(afWords(5))], hardMinW: 100, readFloorW: 100, looseFloorW: 100, maxW: 100 };
+  const res = afSolve([short, fixed], afOpts(244));
+  eq('solveAreaFit hi: a cell whose model line exceeds maxW − padX still reaches 1 line', res.rowHeights, [AF_LINE]);
+  eq('solveAreaFit hi: the column widens to padX + the model line', res.widths, [128 + AF_PAD, 100]);
+  // Contract 6: Σ ceil(maxW) = 243 is 1px over budget 242 → knee floor 241; the raised hi (Σ 244) must not lower it to 240.
+  eq('solveAreaFit hi: the knee floor still uses Σ maxW, not the raised hi', afSolve([short, fixed], afOpts(242)).widths, [141, 100]);
+}
+
+// fixedH: a row held tall by a 120px image gives its text columns no width.
+{
+  const photo = (fixedH?: number): AreaFitColumn => ({
+    cells: [afCell(afWords(5)), { segments: [[{ w: 120, gap: 0 }]], cjkUnits: 0, units: 1, ...(fixedH ? { fixedH: [fixedH] } : {}) }],
+    hardMinW: 136,
+    readFloorW: 240,
+    looseFloorW: 120,
+    maxW: 136,
+  });
+  const text = (): AreaFitColumn[] => [afColumn([afCell(afWords(5)), afText(16)]), afColumn([afCell(afWords(4)), afText(10)])];
+  const withImg = [photo(120), ...text()];
+  const res = afSolve(withImg, afOpts(800));
+  // Case — superseded by contract 6: the knee-floor hand-back may widen the
+  // free-shrunk text columns again; the table only has to reach the knee floor.
+  check(
+    'solveAreaFit fixedH: under a 120px image row the table still reaches the knee floor (contract 6)',
+    afSum(res.widths) >= 800 * (1 - AREA_FIT_KNEE_MAX_SHRINK) && afSum(res.widths) <= 800,
+    `  ${JSON.stringify(res.widths)}`,
+  );
+  eq('solveAreaFit fixedH: the image sets the row height', res.rowHeights[1], 120);
+  const noImg = afSolve([photo(), ...text()], afOpts(800));
+  check('solveAreaFit fixedH: without the image the tallest text column gets width', noImg.widths[1] >= 240, `  ${JSON.stringify(noImg.widths)}`);
+}
+
+// fixedH per hard line (T1.7.p3): an image line and the caption lines under it add up.
+{
+  // Hard line 0: a 100px-wide, 200px-tall image; hard line 1: an 8-word caption (348px on one line).
+  const imgCaption: CellLines = { segments: [[{ w: 100, gap: 0 }], afWords(5, 5, 5, 5, 5, 5, 5, 5)], cjkUnits: 0, units: 9, fixedH: [200, 0] };
+  const col = afColumn([afCell(afWords(3)), imgCaption]);
+  eq('solveAreaFit fixedH per hard line: image 200 + a 2-line caption = 248', afSolve([col], afOpts(200)).rowHeights[1], 200 + 2 * AF_LINE);
+  const wide = afSolve([col], afOpts(400));
+  eq('solveAreaFit fixedH per hard line: widening the caption to 1 line lowers the row', [wide.widths[0], wide.rowHeights[1]], [364, 200 + AF_LINE]);
+}
+
+// Fractional floors / padding / line height still give integer widths.
+{
+  const cols = af20().map((c) => ({ ...c, hardMinW: c.hardMinW + 0.4, readFloorW: 233.6, looseFloorW: 117.3, maxW: c.maxW + 0.7 }));
+  for (const budgetW of [987.5, 400.2]) {
+    const res = afSolve(cols, { budgetW, padX: 16.5, lineH: 22.4 });
+    eq(`solveAreaFit fractional ${budgetW}: rowHeights match the line model`, res.rowHeights, afRowHeights(cols, res.widths, 16.5, 22.4));
+    check(`solveAreaFit fractional ${budgetW}: scroll or within budget`, res.scroll || afSum(res.widths) <= budgetW, `  ${JSON.stringify(res)}`);
+  }
+}
+
+// Knee (contract 6): a 30-word target column diluted by 40 one-line baseline
+// rows makes every further line-count reduction worth < 5% of H once it is
+// already close to the trajectory's reachable minimum — the solver should
+// stop short of the full budget instead of spending it all for a sliver of H.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const fillerCol: AreaFitColumn = {
+    cells: Array.from({ length: 41 }, () => ({ segments: [], cjkUnits: 0, units: 0 })),
+    hardMinW: 32,
+    readFloorW: 32,
+    looseFloorW: 32,
+    maxW: 1000,
+  };
+  const budgetW = 1450;
+  const res = afSolve([idCol, targetCol, fillerCol], afOpts(budgetW));
+  const total = afSum(res.widths);
+  check('solveAreaFit knee: stops short of the full budget once H gains are marginal', total < budgetW, `  Σ ${total} / budget ${budgetW}`);
+  check(
+    'solveAreaFit knee: knee floor still hands back to ≥ (1 − AREA_FIT_KNEE_MAX_SHRINK) of the budget',
+    total >= budgetW * (1 - AREA_FIT_KNEE_MAX_SHRINK),
+    `  Σ ${total} / floor ${budgetW * (1 - AREA_FIT_KNEE_MAX_SHRINK)}`,
+  );
+}
+
+// Knee floor at the ①a boundary (contract 6): Σ maxW only 20px over budget →
+// the min() picks Σ maxW − budgetW (20), not the 15% cap → hand-back should
+// land within 20px of the budget and push the flexible column near its maxW.
+{
+  const budgetW = 500;
+  const fixed: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 100, readFloorW: 100, looseFloorW: 100, maxW: 100 };
+  const flex: AreaFitColumn = {
+    cells: [{ segments: [], cjkUnits: 0, units: 0 }],
+    hardMinW: 50,
+    readFloorW: 50,
+    looseFloorW: 50,
+    maxW: budgetW + 20 - 100,
+  };
+  const res = afSolve([fixed, flex], afOpts(budgetW));
+  const total = afSum(res.widths);
+  check('solveAreaFit knee floor ①a boundary: Σ widths ≥ budget − 20', total >= budgetW - 20, `  Σ ${total}`);
+  check(
+    'solveAreaFit knee floor ①a boundary: the widest (flexible) column ends within 40px of its maxW',
+    flex.maxW - res.widths[1] <= 40,
+    `  width ${res.widths[1]} maxW ${flex.maxW}`,
+  );
+}
+
+// Hysteresis (contract 8): prevWidths is kept unless the fresh solve drops H
+// by more than the hysteresis fraction; infeasible or undefined entries are
+// handled per contract. Reuses the diluted target column above so a 1-line
+// difference is a small (~2%) H change and a 4-line difference is a large one.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const cols = [idCol, targetCol];
+  const budgetW = 800; // affords the mid trajectory but not the final (1-line) move.
+  const bpWidth = (maxLines: number): number => {
+    for (let w = targetCol.hardMinW; w <= targetCol.maxW; w++) {
+      if (cellLineCount(targetCol.cells[0], w - AF_PAD) <= maxLines) return w;
+    }
+    return targetCol.maxW;
+  };
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const idW = fresh.widths[0];
+  const kFresh = cellLineCount(targetCol.cells[0], fresh.widths[1] - AF_PAD);
+  const wSmallDrop = bpWidth(kFresh + 1);
+  const wBigDrop = bpWidth(kFresh + 4);
+
+  const kept = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wSmallDrop] });
+  eq('solveAreaFit hysteresis: H drop within the default hysteresis → prevWidths kept', kept.widths, [idW, wSmallDrop]);
+
+  const tighter = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wSmallDrop], hysteresis: AREA_FIT_RESIZE_HYSTERESIS });
+  eq('solveAreaFit hysteresis: AREA_FIT_RESIZE_HYSTERESIS honoured → the same drop now replaces', tighter.widths, fresh.widths);
+
+  const bigDrop = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, wBigDrop] });
+  eq('solveAreaFit hysteresis: H drop beyond the default hysteresis → fresh solution wins', bigDrop.widths, fresh.widths);
+
+  const infeasible = afSolve(cols, { ...afOpts(budgetW), prevWidths: [idW, targetCol.maxW] });
+  eq('solveAreaFit hysteresis: prevWidths wider than the budget → ignored, fresh solution wins', infeasible.widths, fresh.widths);
+
+  const undef = afSolve(cols, { ...afOpts(budgetW), prevWidths: [undefined, wSmallDrop] });
+  eq('solveAreaFit hysteresis: undefined prevWidths entries filled from the fresh solution', undef.widths, kept.widths);
+}
+
+// Hysteresis maxW: a prevWidths entry wider than the column's OWN current
+// maxW (its content shrank since that width was applied) must be treated as
+// infeasible even when it still clears hardMinW and fits budgetW — kept
+// widths must never exceed the single-line max-content width.
+{
+  const a: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 80 };
+  const b: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 200 };
+  const budgetW = 300;
+  const cols = [a, b];
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const stale = afSolve(cols, { ...afOpts(budgetW), prevWidths: [a.maxW + 20, fresh.widths[1]] });
+  eq("solveAreaFit hysteresis: a prevWidths entry past the column's own maxW is infeasible, fresh solution wins", stale.widths, fresh.widths);
+}
+
+// growOnlyCol (contract 8): every other column keeps its prev width; the
+// grow-only column only widens, never past the budget, and no spare leaves
+// prevWidths unchanged.
+{
+  const idCol = afColumn(Array.from({ length: 41 }, () => afCell(afWords(2))));
+  const targetCol = afColumn([afText(30), ...Array.from({ length: 40 }, () => afText(2))]);
+  const cols = [idCol, targetCol];
+  const idW = 32; // idCol is forced to its single word width regardless of budget.
+  const prevW = 452;
+  const bpWidth = (maxLines: number): number => {
+    for (let w = targetCol.hardMinW; w <= targetCol.maxW; w++) {
+      if (cellLineCount(targetCol.cells[0], w - AF_PAD) <= maxLines) return w;
+    }
+    return targetCol.maxW;
+  };
+  const prevLines = cellLineCount(targetCol.cells[0], prevW - AF_PAD);
+  const grownBudget = idW + bpWidth(prevLines - 1) + 20;
+  const grown = afSolve(cols, { ...afOpts(grownBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  check('solveAreaFit growOnlyCol: only the grow-only column changes', grown.widths[0] === idW, `  ${JSON.stringify(grown.widths)}`);
+  check('solveAreaFit growOnlyCol: never narrower than the prev width', grown.widths[1] >= prevW, `  ${grown.widths[1]}`);
+  check('solveAreaFit growOnlyCol: stays within the budget', afSum(grown.widths) <= grownBudget, `  ${afSum(grown.widths)} / ${grownBudget}`);
+  check(
+    'solveAreaFit growOnlyCol: widened to fewer lines than the prev width',
+    cellLineCount(targetCol.cells[0], grown.widths[1] - AF_PAD) < prevLines,
+    `  widths ${JSON.stringify(grown.widths)}`,
+  );
+
+  const noSpareBudget = idW + prevW;
+  const noSpare = afSolve(cols, { ...afOpts(noSpareBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  eq('solveAreaFit growOnlyCol: no spare → prevWidths unchanged', noSpare.widths, [idW, prevW]);
+
+  // Stale prevWidths (e.g. the panel narrowed since they were applied) already
+  // exceed budgetW before growOnlyCol even widens — the fast path must not
+  // return them unchanged as a non-scroll, over-budget result.
+  const staleBudget = idW + prevW - 20;
+  const stale = afSolve(cols, { ...afOpts(staleBudget), prevWidths: [idW, prevW], growOnlyCol: 1 });
+  check('solveAreaFit growOnlyCol: stale prevWidths over budget → falls back to a full solve within budget', afSum(stale.widths) <= staleBudget || stale.scroll, `  ${JSON.stringify(stale)}`);
+
+  // A non-grow column's prevWidths can also fall below its CURRENT hardMinW
+  // (its longest word grew since that width was applied) — the fast path
+  // must not copy it through unshrunk.
+  const staleHard = afSolve([idCol, targetCol], {
+    ...afOpts(idW + prevW),
+    prevWidths: [idW - 10, prevW],
+    growOnlyCol: 1,
+  });
+  check('solveAreaFit growOnlyCol: a stale prevWidths entry below hardMinW is not copied through', staleHard.widths[0] >= idW, `  ${JSON.stringify(staleHard.widths)}`);
+}
+
+// growOnlyCol maxW: a non-grow column's prevWidths entry can also exceed its
+// OWN current maxW (its content shrank since that width was applied), while
+// still clearing hardMinW and fitting the budget — grow-only keeps it; only the
+// settle narrows it (T1.7.p2).
+{
+  const shrunk: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 80 };
+  const grow: AreaFitColumn = { cells: [{ segments: [], cjkUnits: 0, units: 0 }], hardMinW: 50, readFloorW: 50, looseFloorW: 50, maxW: 200 };
+  const cols = [shrunk, grow];
+  const budgetW = 400;
+  const fresh = afSolve(cols, afOpts(budgetW));
+  const stale = afSolve(cols, { ...afOpts(budgetW), prevWidths: [shrunk.maxW + 20, fresh.widths[1]], growOnlyCol: 1 });
+  eq("solveAreaFit growOnlyCol: a non-grow column's prevWidths past its own maxW is kept (narrowing waits for settle)", stale.widths[0], shrunk.maxW + 20);
+  const settled = afSolve(cols, { ...afOpts(budgetW), prevWidths: [shrunk.maxW + 20, fresh.widths[1]] });
+  check('solveAreaFit hysteresis: the settle then narrows it to its maxW', settled.widths[0] <= shrunk.maxW, `  ${JSON.stringify(settled.widths)}`);
+}
+
+{
+  const bad = afRuns.flatMap(({ cols, res }) =>
+    res.widths.flatMap((w, j) => (Number.isInteger(w) && w >= cols[j].hardMinW ? [] : [`${w} (hardMinW ${cols[j].hardMinW})`])),
+  );
+  eq(`solveAreaFit: every width ≥ hardMinW and an integer (${afRuns.length} runs)`, bad, []);
+}
 
 // ---------------------------------------------------------------------------
 // Security tripwires (src/provider.ts) — khoá các bất biến từ security review
@@ -2118,6 +2581,23 @@ check(
   idx.build([]);
   check('entity: index is ready after build', idx.isReady() === true);
 }
+// T1.3 — file-by-file scan: onFileChanged per file, then markReady().
+{
+  const idx = new EntityIndex();
+  idx.onFileChanged('file:///a.md', 'caption::UC01\n');
+  idx.onFileChanged('file:///b.md', 'caption::BR01\n');
+  check('entity T1.3: not ready while the scan feeds files', idx.isReady() === false);
+  idx.markReady();
+  check('entity T1.3: ready after markReady', idx.isReady() === true);
+  eq('entity T1.3: markReady keeps every scanned file\'s rows', idx.query('').map((r) => r.namespace + r.id), ['BR01', 'UC01']);
+}
+{
+  const idx = new EntityIndex();
+  idx.onFileChanged('file:///a.md', 'caption::UC01\n');
+  idx.onFileChanged('file:///a.md', ''); // emptied before the scan finishes.
+  idx.markReady();
+  check('entity T1.3: file emptied before markReady stays dropped', idx.query('').length === 0);
+}
 
 // namespaces() — count-desc sort + case-insensitive fold to first-seen casing.
 {
@@ -2219,6 +2699,41 @@ check(
   check('truncate: result length is 30 + ellipsis', truncateDisplay('b'.repeat(50)) === 'b'.repeat(30) + '…');
   check('truncate: empty string unchanged', truncateDisplay('') === '');
   check('truncate: does not split a surrogate pair at the boundary', truncateDisplay('😀'.repeat(40)) === '😀'.repeat(30) + '…');
+}
+
+// ---------------------------------------------------------------------------
+// T3.3 (audit L-13) — onFileChanged reports whether a file's rows changed, so
+// the provider pings open panels only when the index really moved.
+// ---------------------------------------------------------------------------
+{
+  const row = (over: Partial<IndexedEntity> = {}): IndexedEntity => ({
+    namespace: 'UC',
+    id: '01',
+    file: 'file:///a.md',
+    line: 1,
+    title: 'Login',
+    preview: 'Login',
+    label: 'UC01 Login',
+    ...over,
+  });
+  check('entity T3.3: sameEntityRows identical rows -> true', sameEntityRows([row()], [row()]));
+  check('entity T3.3: sameEntityRows id change -> false', !sameEntityRows([row()], [row({ id: '02' })]));
+  check('entity T3.3: sameEntityRows title change -> false', !sameEntityRows([row()], [row({ title: 'Logout' })]));
+  check('entity T3.3: sameEntityRows namespace change -> false', !sameEntityRows([row()], [row({ namespace: 'BR' })]));
+  check('entity T3.3: sameEntityRows preview change -> false', !sameEntityRows([row()], [row({ preview: 'Other' })]));
+  check('entity T3.3: sameEntityRows label change -> false', !sameEntityRows([row()], [row({ label: 'UC01 Other' })]));
+  check('entity T3.3: sameEntityRows length change -> false', !sameEntityRows([row()], [row(), row({ id: '02' })]));
+  check('entity T3.3: sameEntityRows line-only shift -> true', sameEntityRows([row()], [row({ line: 7 })]));
+}
+{
+  const idx = new EntityIndex();
+  check('entity T3.3: no declarations -> unchanged', !idx.onFileChanged('file:///a.md', '# H\nplain text\n'));
+  check('entity T3.3: still no declarations -> unchanged', !idx.onFileChanged('file:///a.md', '# H\nplain text, more\n'));
+  check('entity T3.3: first declaration -> changed', idx.onFileChanged('file:///a.md', '# H\ncaption::UC01\n'));
+  check('entity T3.3: identical re-index -> unchanged', !idx.onFileChanged('file:///a.md', '# H\ncaption::UC01\n'));
+  check('entity T3.3: line shift above the declaration -> unchanged', !idx.onFileChanged('file:///a.md', '# H\n\ncaption::UC01\n'));
+  check('entity T3.3: dropped file -> changed', idx.onFileChanged('file:///a.md', ''));
+  check('entity T3.3: dropped again -> unchanged', !idx.onFileChanged('file:///a.md', ''));
 }
 
 // ---------------------------------------------------------------------------
@@ -5252,8 +5767,156 @@ check(
   eq('US-23.26 locateQuote: a marker-only quote is null', locateQuote('Alpha ** beta.', ' ** `` '), null);
 }
 
-console.log(`\n${pass} pass, ${fail} fail`);
-if (failures.length) {
-  console.log('\n' + failures.join('\n\n'));
-  process.exit(1);
+// --- FileTextCache (audit L-5) ---------------------------------------------
+{
+  const hit = new FileTextCache(100);
+  hit.set('a', '1:5', 'alpha');
+  eq('FileTextCache (audit L-5): an equal stamp returns the kept text', hit.get('a', '1:5'), 'alpha');
+
+  const stale = new FileTextCache(100);
+  stale.set('a', '1:5', 'alpha');
+  eq('FileTextCache (audit L-5): a changed stamp returns undefined', stale.get('a', '2:5'), undefined);
+  eq('FileTextCache (audit L-5): ...and drops the entry', stale.get('a', '1:5'), undefined);
+
+  const lru = new FileTextCache(10);
+  lru.set('a', 's', 'aaaa');
+  lru.set('b', 's', 'bbbb');
+  lru.get('a', 's');
+  lru.set('c', 's', 'cccc');
+  eq('FileTextCache (audit L-5): past budget evicts the least recently used (b), not a just-read entry (a)',
+    [lru.get('a', 's'), lru.get('b', 's'), lru.get('c', 's')], ['aaaa', undefined, 'cccc']);
+
+  const big = new FileTextCache(4);
+  big.set('a', 's', 'aaaaa');
+  eq('FileTextCache (audit L-5): a text longer than the budget is not stored', big.get('a', 's'), undefined);
+
+  const del = new FileTextCache(100);
+  del.set('a', 's', 'alpha');
+  del.delete('a');
+  eq('FileTextCache (audit L-5): delete removes the entry', del.get('a', 's'), undefined);
 }
+
+// --- evictToByteBudget (audit C-3) + host cleanup order (L-12, C-4, C-5) ------
+{
+  const bytes = (n: number) => new Uint8Array(n);
+  const under = new Map([['a', bytes(4)], ['b', bytes(4)]]);
+  evictToByteBudget(under, 10);
+  eq('evictToByteBudget (audit C-3): under budget keeps every entry', [...under.keys()], ['a', 'b']);
+
+  const over = new Map([['a', bytes(4)], ['b', bytes(4)], ['c', bytes(4)]]);
+  evictToByteBudget(over, 8);
+  eq('evictToByteBudget (audit C-3): over budget drops the oldest first', [...over.keys()], ['b', 'c']);
+
+  const huge = new Map([['a', bytes(20)]]);
+  evictToByteBudget(huge, 8);
+  eq('evictToByteBudget (audit C-3): a single entry larger than the budget is kept', [...huge.keys()], ['a']);
+
+  const exact = new Map([['a', bytes(4)], ['b', bytes(4)]]);
+  evictToByteBudget(exact, 8);
+  eq('evictToByteBudget (audit C-3): a total equal to the budget keeps every entry', [...exact.keys()], ['a', 'b']);
+
+  const newest = new Map([['a', bytes(2)], ['b', bytes(2)], ['c', bytes(20)]]);
+  evictToByteBudget(newest, 8);
+  eq('evictToByteBudget (audit C-3): the newest entry is never dropped', [...newest.keys()], ['c']);
+
+  const anchorCase = providerSrc.match(/case 'commentAnchorUpdate': \{[\s\S]*?\n        \}\n/)?.[0] ?? '';
+  check(
+    'audit L-12: the accepted anchor-update path schedules a coalesced re-sync',
+    /this\.scheduleAnchorSync\(document\);\s*break;\s*\}\s*$/.test(anchorCase)
+  );
+  const siblingBody = providerSrc.match(/private async readSiblingMdTexts\([\s\S]*?\n  \}/)?.[0] ?? '';
+  check(
+    'audit C-4: readSiblingMdTexts reads siblings without opening a TextDocument',
+    siblingBody !== '' &&
+      /readMarkdownText\(uri, true\)[\s\S]*openTextDocument/.test(siblingBody) &&
+      !/openTextDocument[\s\S]*readMarkdownText\(/.test(siblingBody)
+  );
+  const rememberBody = providerSrc.match(/private rememberDeletedImage\([\s\S]*?\n  \}/)?.[0] ?? '';
+  check(
+    'audit C-3: rememberDeletedImage re-inserts a known name as the newest entry',
+    /recentlyDeletedImages\.delete\(fileName\);\s*this\.recentlyDeletedImages\.set\(fileName/.test(rememberBody)
+  );
+  const restoreBody = providerSrc.match(/private async restoreUndoneImageDeletions\([\s\S]*?\n  \}/)?.[0] ?? '';
+  const referencedAt = restoreBody.indexOf('referencedAssetBasenames(');
+  const allowedDirAt = restoreBody.indexOf('resolveAllowedAssetsDir(');
+  const guardAt = restoreBody.search(/if \(!cached\.some\([\s\S]*?\)\) \{\s*return;/);
+  check(
+    'audit C-5: restoreUndoneImageDeletions checks referenced names before the allowed-roots walk',
+    referencedAt !== -1 && guardAt !== -1 && allowedDirAt !== -1 && referencedAt < guardAt && guardAt < allowedDirAt
+  );
+}
+
+// ---------------------------------------------------------------------------
+// US-6.10 — table-col-resize lock state (media/webview/table-col-resize.ts)
+// ---------------------------------------------------------------------------
+
+{
+  const w = [100, undefined, 300];
+  eq('table-col-resize remapWidths: insert at 0', remapWidths(w, { kind: 'insert', index: 0 }), [undefined, 100, undefined, 300]);
+  eq('table-col-resize remapWidths: insert in the middle', remapWidths(w, { kind: 'insert', index: 1 }), [100, undefined, undefined, 300]);
+  eq('table-col-resize remapWidths: insert at the end', remapWidths(w, { kind: 'insert', index: 3 }), [100, undefined, 300, undefined]);
+  eq('table-col-resize remapWidths: delete first', remapWidths(w, { kind: 'delete', index: 0 }), [undefined, 300]);
+  eq('table-col-resize remapWidths: delete last', remapWidths(w, { kind: 'delete', index: 2 }), [100, undefined]);
+  eq('table-col-resize remapWidths: move left', remapWidths(w, { kind: 'move', from: 2, to: 0 }), [300, 100, undefined]);
+  eq('table-col-resize remapWidths: move right', remapWidths(w, { kind: 'move', from: 0, to: 2 }), [undefined, 300, 100]);
+  eq('table-col-resize remapWidths: move to the same index', remapWidths(w, { kind: 'move', from: 1, to: 1 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: undefined entry survives a move', remapWidths(w, { kind: 'move', from: 1, to: 2 }), [100, 300, undefined]);
+  eq('table-col-resize remapWidths: undefined entry survives a delete elsewhere', remapWidths(w, { kind: 'delete', index: 0 }).includes(undefined), true);
+  eq('table-col-resize remapWidths: delete out of range', remapWidths(w, { kind: 'delete', index: 3 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: delete negative index', remapWidths(w, { kind: 'delete', index: -1 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: insert past the end', remapWidths(w, { kind: 'insert', index: 4 }), [100, undefined, 300]);
+  eq('table-col-resize remapWidths: move out of range', remapWidths(w, { kind: 'move', from: 0, to: 3 }), [100, undefined, 300]);
+  const unchanged = remapWidths(w, { kind: 'delete', index: 9 });
+  check('table-col-resize remapWidths: out-of-range result is a copy', unchanged !== w);
+  remapWidths(w, { kind: 'insert', index: 0 });
+  remapWidths(w, { kind: 'move', from: 0, to: 2 });
+  eq('table-col-resize remapWidths: input array is not mutated', w, [100, undefined, 300]);
+
+  const mk = () => domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>a</td><td>b</td><td>c</td></tr></table></div>', true);
+  const before = mk().body.firstElementChild as HTMLElement;
+  const t1 = before.querySelectorAll('table')[1] as unknown as HTMLTableElement;
+  lockTable(t1, [10, undefined, 30]);
+  remapTableLock(t1, { kind: 'delete', index: 0 });
+  eq('table-col-resize remapTableLock: remaps the stored widths', lockedWidths(t1), [undefined, 30]);
+  lockTable(t1, [10, undefined, 30]);
+  const snap = snapshotTableLocks(before);
+  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap.entries.map(({ ordinal, colCount, head, widths }) => ({ ordinal, colCount, head, widths })), [{ ordinal: 1, colCount: 3, head: 'a\tb\tc', widths: [10, undefined, 30] }]);
+  const after = mk().body.firstElementChild as HTMLElement;
+  restoreTableLocks(after, snap);
+  eq('table-col-resize restore: same ordinal and column count is locked', lockedWidths(after.querySelectorAll('table')[1] as unknown as HTMLTableElement), [10, undefined, 30]);
+  eq('table-col-resize restore: other table stays unlocked', lockedWidths(after.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
+  const mismatch = mk().body.firstElementChild as HTMLElement;
+  restoreTableLocks(mismatch, { entries: [{ table: t1, ordinal: 0, colCount: 3, head: 'a\tb\tc', widths: [1, 2, 3] }] });
+  eq('table-col-resize restore: column-count mismatch drops the entry', lockedWidths(mismatch.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
+  const inserted = t1.cloneNode(true) as HTMLTableElement;
+  t1.parentNode!.insertBefore(inserted, t1);
+  restoreTableLocks(before, snap);
+  eq('table-col-resize restore: a kept locked node keeps its ordinal entry off a table inserted above it', lockedWidths(inserted), undefined);
+  const shifted = domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>x</td><td>y</td><td>z</td></tr></table><table><tr><td>a</td><td>b</td><td>c</td></tr></table></div>', true).body.firstElementChild as HTMLElement;
+  restoreTableLocks(shifted, snap);
+  const st = shifted.querySelectorAll('table');
+  eq('table-col-resize restore: a same-width table with another header at the old ordinal stays unlocked', lockedWidths(st[1] as unknown as HTMLTableElement), undefined);
+  eq('table-col-resize restore: the lock follows its header text to the shifted table', lockedWidths(st[2] as unknown as HTMLTableElement), [10, undefined, 30]);
+  const renamed = domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>a</td><td>B</td><td>c</td></tr></table></div>', true).body.firstElementChild as HTMLElement;
+  restoreTableLocks(renamed, snap);
+  eq('table-col-resize restore: a changed header text drops the entry', lockedWidths(renamed.querySelectorAll('table')[1] as unknown as HTMLTableElement), undefined);
+  unlockTable(t1);
+  eq('table-col-resize unlock: removes the lock', lockedWidths(t1), undefined);
+}
+
+let summaryPrinted = false;
+// An unsettled pending check lets Node exit 0 without a summary; fail instead.
+process.on('beforeExit', () => {
+  if (!summaryPrinted) {
+    console.log('\nFAIL  a pending check never settled; no summary printed');
+    process.exitCode = 1;
+  }
+});
+void Promise.all(pendingChecks).then(() => {
+  summaryPrinted = true;
+  console.log(`\n${pass} pass, ${fail} fail`);
+  if (failures.length) {
+    console.log('\n' + failures.join('\n\n'));
+    process.exit(1);
+  }
+});

@@ -36,7 +36,7 @@ import { positionMenuClearOf, lockPageScroll, unlockPageScroll } from './menu-po
 import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escape-stack';
 import type { LineGutter } from './gutter';
 import type { DomHelpers } from './dom-utils';
-import { findTaskCheckbox } from './dom-utils';
+import { findTaskCheckbox, fixedRightAt, fixedBottomAt } from './dom-utils';
 
 export interface DragDropDeps {
   scheduleSync: () => void;
@@ -58,6 +58,9 @@ type DragKind = 'block' | 'li';
 
 const HEADING_RE = /^H([1-6])$/;
 const DRAG_THRESHOLD_PX = 4;
+/** Table body rows / list items a block drag ghost carries — enough to fill `.dd-ghost`'s
+ * 160 px cap, so a 300-row table is never cloned whole (Performance Low-End L-11). */
+const GHOST_MAX_ROWS = 10;
 /** Horizontal drag distance (px) that shifts the target nesting depth by one level during an li
  * drag (US-17.7, M6) — target depth is `liOrigDepth + round(dx / LIST_INDENT_THRESHOLD_PX)`,
  * clamped to whatever depths are valid at the chosen vertical gap (liDepthRangeAtGap). */
@@ -98,6 +101,71 @@ export function headingLevel(el: Element): number | null {
 
 function isAtomBlock(el: Element): boolean {
   return el.classList.contains(MERMAID_CLASS) || el.classList.contains(MATH_BLOCK_CLASS);
+}
+
+/** A block without a box (`display:none`) reports an all-zero rect, which breaks the Y order. */
+function isBoxless(r: DOMRect): boolean {
+  return r.top === 0 && r.bottom === 0 && r.left === 0 && r.right === 0;
+}
+
+/** Binary search over the Y-ordered top-level blocks: the first index whose rect satisfies
+ * `reached` (false -> true along the blocks), `blocks.length` when none. A boxless block is
+ * never reached — stepped past, never probed — the same result as a linear scan
+ * (Performance Low-End L-11: a hover/drag frame reads O(log n) rects, not n). */
+function firstBlockIndex(blocks: readonly HTMLElement[], reached: (r: DOMRect) => boolean): number {
+  let lo = 0;
+  let hi = blocks.length;
+  // First hit in [lo, hi), else `found`.
+  let found = blocks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    let i = mid;
+    let r = blocks[i].getBoundingClientRect();
+    while (isBoxless(r) && i + 1 < hi) {
+      i++;
+      r = blocks[i].getBoundingClientRect();
+    }
+    if (isBoxless(r)) {
+      hi = mid;
+    } else if (reached(r)) {
+      found = i;
+      hi = mid;
+    } else {
+      lo = i + 1;
+    }
+  }
+  return found;
+}
+
+/** Shallow clone of `el` with its child nodes up to and including the GHOST_MAX_ROWS-th `rowTag` child. */
+function cloneFirstRows(el: Element, rowTag: string): Node {
+  const clone = el.cloneNode(false);
+  let rows = 0;
+  for (const child of Array.from(el.childNodes)) {
+    if (child instanceof Element && child.tagName === rowTag && ++rows > GHOST_MAX_ROWS) {
+      break;
+    }
+    clone.appendChild(child.cloneNode(true));
+  }
+  return clone;
+}
+
+/** The drag ghost's copy of `block`: a table keeps every non-row child (thead, colgroup...) and
+ * its first GHOST_MAX_ROWS body rows, a list its first GHOST_MAX_ROWS items, anything else is
+ * cloned whole — the ghost is capped at 160 px anyway (Performance Low-End L-11). */
+function ghostCloneOf(block: HTMLElement): HTMLElement {
+  if (block.tagName === 'UL' || block.tagName === 'OL') {
+    return cloneFirstRows(block, 'LI') as HTMLElement;
+  }
+  if (block.tagName === 'TABLE') {
+    const clone = block.cloneNode(false) as HTMLElement;
+    for (const child of Array.from(block.childNodes)) {
+      const isBody = child instanceof Element && child.tagName === 'TBODY';
+      clone.appendChild(isBody ? cloneFirstRows(child, 'TR') : child.cloneNode(true));
+    }
+    return clone;
+  }
+  return block.cloneNode(true) as HTMLElement;
 }
 
 /**
@@ -214,13 +282,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
 
   /** Gap index g means "insert before blocks[g]" (g === blocks.length means "insert at the end"). */
   function gapAt(blocks: HTMLElement[], clientY: number): number {
-    for (let i = 0; i < blocks.length; i++) {
-      const r = blocks[i].getBoundingClientRect();
-      if (clientY < r.top + r.height / 2) {
-        return i;
-      }
-    }
-    return blocks.length;
+    return firstBlockIndex(blocks, (r) => clientY < r.top + r.height / 2);
   }
 
   /** Performs the move (Range deleteContents/insertNode, via sibling-move.ts — see applyBlockMove for why not execCommand) and returns the moved block's new live element, for caret placement. */
@@ -250,15 +312,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   let hoveredBlock: HTMLElement | null = null;
 
   /** Excludes <table> so hovering a cell only shows table.ts's own row/col handles, never the whole-block handle on top of them (bug 0715 #11). draggableBlocks() itself stays unfiltered — section-move/menu-move (computeHeadingSectionSpan, moveBlockToGap) still need tables in the list so a table inside a dragged heading section is carried along. */
-  function findBlockAt(clientY: number): HTMLElement | null {
-    const blocks = draggableBlocks().filter((b) => b.tagName !== 'TABLE');
-    for (const b of blocks) {
-      const r = b.getBoundingClientRect();
-      if (clientY >= r.top && clientY <= r.bottom) {
-        return b;
-      }
+  function findBlockAt(blocks: HTMLElement[], clientY: number): HTMLElement | null {
+    const i = firstBlockIndex(blocks, (r) => clientY <= r.bottom);
+    const b = blocks[i];
+    if (!b || b.tagName === 'TABLE') {
+      return null;
     }
-    return null;
+    return clientY >= b.getBoundingClientRect().top ? b : null;
   }
 
   /** The blocks a drag starting on `block` would actually move — a heading's whole section
@@ -315,7 +375,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     handleEl.classList.toggle('dd-handle--section', span.length > 1);
     handleEl.style.top = `${firstRect.top}px`;
     handleEl.style.height = `${bottom - firstRect.top}px`;
-    handleEl.style.right = `${window.innerWidth - firstRect.left - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
+    handleEl.style.right = `${fixedRightAt(firstRect.left) - BLOCK_HANDLE_SHIFT_RIGHT_PX}px`;
   }
 
   // ---------------------------------------------------------------------
@@ -346,8 +406,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
    * can't reliably agree on, and which a real mouse can't reliably land on either) — the
    * "table handle can show together with row/column handles" acceptance criterion needs an
    * actually reachable overlap, not just a technically-non-conflicting one. */
-  function findTableBlockAt(clientX: number, clientY: number): HTMLElement | null {
-    for (const b of draggableBlocks()) {
+  function findTableBlockAt(blocks: HTMLElement[], clientX: number, clientY: number): HTMLElement | null {
+    for (const b of blocks) {
       if (b.tagName !== 'TABLE') {
         continue;
       }
@@ -382,8 +442,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     const r = block.getBoundingClientRect();
     tableHandleEl.style.display = 'flex';
-    tableHandleEl.style.right = `${window.innerWidth - r.left}px`;
-    tableHandleEl.style.bottom = `${window.innerHeight - r.top}px`;
+    tableHandleEl.style.right = `${fixedRightAt(r.left)}px`;
+    tableHandleEl.style.bottom = `${fixedBottomAt(r.top)}px`;
   }
 
   // ---------------------------------------------------------------------
@@ -539,6 +599,8 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       addMenuItem('Move up', idx === 0, () => moveBlockToGap(block, idx - 1));
       addMenuItem('Move down', spanEndIdx >= blocks.length - 1, () => moveBlockToGap(block, spanEndIdx + 2));
     }
+    // Mouse counterpart of the Delete/Backspace shortcut below — same whole-block removal.
+    addMenuItem('Delete', false, () => deleteSelectedBlock(block));
 
     // "Move to…" targets: sibling headings only (heading), else every other heading (unchanged).
     const targets: Array<{ heading: HTMLElement; gap: number }> = sib
@@ -566,6 +628,12 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
     }
 
+    showMenu(block, span, anchorX, anchorY);
+  }
+
+  /** Shows the already-filled menu at the handle click point and marks `target` (outlining
+   * `outlined`) as the menu's selected block. */
+  function showMenu(target: HTMLElement, outlined: HTMLElement[], anchorX: number, anchorY: number): void {
     menuPopupEl.style.display = 'block';
     // Anchor the popup at the handle click point (bug General R3 #1) rather than the whole block's
     // rect — a tall block/section used to open the menu far below where the handle was clicked. A
@@ -579,10 +647,68 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Track the block by reference only (bug General R2 #1) — no native text selection; the
     // `.dd-hover-outline` outline is the "selected" cue and the Delete/Backspace handler keys
     // off `menuTargetBlock`, so atom blocks / tables still delete cleanly as whole elements.
-    menuTargetBlock = block;
+    menuTargetBlock = target;
     // Outline the whole section a "Move" would carry (bug General #2), reusing the span already
     // computed above — matches the section-spanning handle so the menu targets what it says.
-    span.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
+    outlined.forEach((el) => el.classList.add(DD_HOVER_OUTLINE_CLASS));
+  }
+
+  /** Li handle click (no drag): Move up / Move down swap the item with its own sibling (nested
+   * subtree carried), Delete removes it — the li counterpart of `openMenu`. */
+  function openLiMenu(li: HTMLLIElement, anchorX: number, anchorY: number): void {
+    closeMenu();
+    if (!content.contains(li)) {
+      return;
+    }
+    const prev = li.previousElementSibling;
+    const next = li.nextElementSibling;
+    addMenuItem('Move up', !prev, () => moveLiBefore(li, prev));
+    addMenuItem('Move down', !next, () => moveLiBefore(li, next?.nextElementSibling ?? null));
+    addMenuItem('Delete', false, () => deleteSelectedLi(li));
+    showMenu(li, [li], anchorX, anchorY);
+  }
+
+  /** Re-inserts `li` into its own list before `beforeEl` (null = append) — the same
+   * `applyLiReparentMove` + `normalizeListDom` path a li drop uses (`finishLiMove`). */
+  function moveLiBefore(li: HTMLLIElement, beforeEl: Element | null): void {
+    const container = li.parentElement;
+    if (!container || !content.contains(li)) {
+      return;
+    }
+    if (li === hoveredLi) {
+      setHighlightedLi(null);
+    }
+    const movedEl = applyLiReparentMove(li, { container, beforeEl });
+    normalizeListDom(content);
+    if (movedEl && content.contains(movedEl)) {
+      deps.dom.placeCaretIn(movedEl);
+    }
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    refresh();
+  }
+
+  /** Removes `li` with its subtree. A sole item takes its emptied list with it — a top-level list
+   * goes through `deleteSelectedBlock`; a nested one leaves its owner item behind. */
+  function deleteSelectedLi(li: HTMLLIElement): void {
+    closeMenu();
+    const list = li.parentElement;
+    if (!list || !content.contains(li)) {
+      return;
+    }
+    const target = list.children.length === 1 ? list : li;
+    if (draggableBlocks().includes(target)) {
+      deleteSelectedBlock(target);
+      return;
+    }
+    const caretTarget = li.previousElementSibling ?? li.nextElementSibling ?? list.parentElement?.closest('li');
+    const range = document.createRange();
+    range.selectNode(target);
+    range.deleteContents();
+    deps.dom.placeCaretIn(caretTarget && content.contains(caretTarget) ? caretTarget : content.lastElementChild);
+    deps.lineGutter.refreshFromDom();
+    deps.scheduleSync();
+    refresh();
   }
 
   document.addEventListener('mousedown', (e) => {
@@ -603,7 +729,11 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // native delete at whatever caret happens to be focused never runs alongside it.
     if ((e.key === 'Delete' || e.key === 'Backspace') && menuTargetBlock) {
       e.preventDefault();
-      deleteSelectedBlock(menuTargetBlock);
+      if (menuTargetBlock instanceof HTMLLIElement) {
+        deleteSelectedLi(menuTargetBlock);
+      } else {
+        deleteSelectedBlock(menuTargetBlock);
+      }
       return;
     }
     // A bare modifier keydown is the start of a combo (e.g. Ctrl+Z), not an action on its own —
@@ -813,7 +943,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     }
     const r = li.getBoundingClientRect();
     liHandleEl.style.display = 'flex';
-    liHandleEl.style.right = `${window.innerWidth - liHandleAnchorLeft(li)}px`;
+    liHandleEl.style.right = `${fixedRightAt(liHandleAnchorLeft(li))}px`;
     // A parent whose only child is its nested list has ~0 own content, so clamp to a grabbable
     // minimum; its vertical extent is the item's OWN content only, down to the top of its first
     // nested `<ul>`/`<ol>` — unchanged from before this change (out of scope, bug General #2).
@@ -862,8 +992,9 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       if (state !== 'idle') {
         return;
       }
+      const blocks = draggableBlocks();
       const li = findLiAt(hoverX, hoverY);
-      const block = li ? null : findBlockAt(hoverY);
+      const block = li ? null : findBlockAt(blocks, hoverY);
       if (block !== hoveredBlock) {
         setHighlightedBlock(block);
         positionHandle(block);
@@ -874,7 +1005,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       }
       // Independent of block/li above (bug 0716 round 2, #1) — must be able to show at the
       // same time as a row/column handle, so it never reads or writes hoveredBlock/hoveredLi.
-      const tableBlock = findTableBlockAt(hoverX, hoverY);
+      const tableBlock = findTableBlockAt(blocks, hoverX, hoverY);
       if (tableBlock !== hoveredTableBlock) {
         setHighlightedTableBlock(tableBlock);
         positionTableHandle(tableBlock);
@@ -923,7 +1054,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
       if (!climbed) {
         // Past the outermost item's band — surface the block handle for the top-level block
         // spanning this y (the `<ul>`/`<ol>` itself when the list is a top-level block).
-        const block = findBlockAt(clientY);
+        const block = findBlockAt(draggableBlocks(), clientY);
         setHighlightedBlock(block);
         positionHandle(block);
       }
@@ -960,7 +1091,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Independent of block/li below (bug 0716 round 2, #1) — findTableBlockAt is pure rect
     // math (no elementFromPoint), so it's safe to re-run directly at the exit point, unlike
     // findLiAt's climb.
-    const tableBlock = findTableBlockAt(e.clientX, e.clientY);
+    const tableBlock = findTableBlockAt(draggableBlocks(), e.clientX, e.clientY);
     if (tableBlock !== hoveredTableBlock) {
       setHighlightedTableBlock(tableBlock);
       positionTableHandle(tableBlock);
@@ -984,20 +1115,33 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   });
 
   // Handles use position:fixed + viewport coordinates from
-  // getBoundingClientRect(), recomputed only on mousemove over #content — a
-  // scroll with the mouse stationary otherwise leaves them stuck at the old
-  // position while the block underneath moves.
-  window.addEventListener(
-    'scroll',
-    () => {
+  // getBoundingClientRect(), recomputed on mousemove over #content only when
+  // the hovered target changes — a scroll, resize or re-wrap (TOC toggle, image
+  // load, zoom) with the mouse stationary otherwise leaves them stuck at the old
+  // position/size while the block underneath moves. rAF-coalesced: each
+  // position* call reads rects, and scroll/resize fire uncoalesced.
+  let repositionRaf = 0;
+  function scheduleHandleReposition(): void {
+    if (state !== 'idle' || repositionRaf !== 0) {
+      return;
+    }
+    repositionRaf = requestAnimationFrame(() => {
+      repositionRaf = 0;
+      // Re-check inside the frame: a drag can arm between the event and this callback.
       if (state !== 'idle') {
         return;
       }
-      positionHandle(hoveredBlock);
-      positionLiHandle(hoveredLi);
-    },
-    { passive: true, capture: true }
-  );
+      // An edit can detach a hovered target without a refresh() (the ResizeObserver fires on
+      // exactly those edits) — hide its handle instead of measuring a zero rect.
+      const live = <T extends HTMLElement>(el: T | null): T | null => (el && content.contains(el) ? el : null);
+      positionHandle(live(hoveredBlock));
+      positionLiHandle(live(hoveredLi));
+      positionTableHandle(live(hoveredTableBlock));
+    });
+  }
+  window.addEventListener('scroll', scheduleHandleReposition, { passive: true, capture: true });
+  window.addEventListener('resize', scheduleHandleReposition);
+  new ResizeObserver(scheduleHandleReposition).observe(content);
 
   // ---------------------------------------------------------------------
   // IME guard (F5)
@@ -1344,7 +1488,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     tableHandleEl.style.display = 'none';
     if (kind === 'block') {
       const rect = dragSpan[0].getBoundingClientRect();
-      const clone = dragSpan[0].cloneNode(true) as HTMLElement;
+      const clone = ghostCloneOf(dragSpan[0]);
       clone.classList.remove(DD_HOVER_OUTLINE_CLASS);
       ghostEl.replaceChildren(clone);
       ghostEl.style.width = `${rect.width}px`;
@@ -1401,7 +1545,13 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     if (hoveredBlock !== menuTargetBlock) {
       setHighlightedBlock(null);
     }
-    setHighlightedLi(null);
+    // Same for an li menu (opened just before this in the click path): drop the hover reference
+    // but keep the outline, which closeMenu owns.
+    if (hoveredLi === menuTargetBlock) {
+      hoveredLi = null;
+    } else {
+      setHighlightedLi(null);
+    }
     if (hoveredTableBlock !== menuTargetBlock) {
       setHighlightedTableBlock(null);
     }
@@ -1554,13 +1704,15 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     } else {
       // Never crossed DRAG_THRESHOLD_PX — a click, not a drag. For the block handle
       // (armedBlock set), that click opens the same menu the removed kebab button used
-      // to (bug 0716 #5). The li/row/col handles never set armedBlock, so they stay
-      // drag-only (spec: no new li/row/col menu).
+      // to (bug 0716 #5); the li handle opens its own Move up/down/Delete menu. The
+      // row/col handles stay drag-only.
       cleanupVisuals();
       if (armedBlock) {
         // startX/startY still hold this click's handle-mousedown point (reset happens below in
         // resetState) — anchor the menu there so it opens at the cursor (bug General R3 #1).
         openMenu(armedBlock, startX, startY);
+      } else if (kind === 'li' && liDragged) {
+        openLiMenu(liDragged, startX, startY);
       }
     }
     resetState();
@@ -1677,7 +1829,7 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
   // removal is folded into the existing `mouseleave` below (which already runs
   // the leftward climb), so both effects share one exit handler.
   liHandleEl.addEventListener('mouseenter', () => {
-    if (state !== 'idle') {
+    if (state !== 'idle' || isMenuOpen()) {
       return;
     }
     hoveredLi?.classList.add(DD_HOVER_OUTLINE_CLASS);
@@ -1726,8 +1878,10 @@ export function initDragDrop(content: HTMLElement, deps: DragDropDeps): DragDrop
     // Bug #3: leaving the glyph drops its hover preview outline. The climb below
     // only re-targets which handle shows (a bare gutter band is not a glyph, so it
     // re-adds no outline), and its `setHighlightedLi` wouldn't fire on the early
-    // return-to-#content path — so clear it unconditionally here.
-    hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
+    // return-to-#content path — so clear it here, unless an open li menu owns the outline.
+    if (!isMenuOpen()) {
+      hoveredLi?.classList.remove(DD_HOVER_OUTLINE_CLASS);
+    }
     const related = e.relatedTarget as Node | null;
     // Back into #content, or onto another handle/menu — those handlers own the state from here.
     if (

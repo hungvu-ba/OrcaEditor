@@ -17,7 +17,13 @@
  */
 import { MERMAID_CLASS, MERMAID_CHART_CLASS, MERMAID_SOURCE_CLASS } from './pipeline';
 import { openLightbox } from './lightbox';
-import { MERMAID_FRAME, hashSource, initDiagramFrameToolbar, isDarkBackground } from './diagram-frame';
+import {
+  MERMAID_FRAME,
+  initDiagramFrameToolbar,
+  isDarkBackground,
+  recallSvg,
+  rememberSvg,
+} from './diagram-frame';
 import { loadNoncedEngineScript, type EngineConfig } from './engine-loader';
 
 export interface MermaidController {
@@ -46,9 +52,11 @@ interface MermaidEngine {
 
 let idCounter = 0;
 
-// Cache SVG theo hash nội dung source: nếu một biểu đồ có source không đổi thì
-// tái dùng SVG đã dựng, khỏi render lại (mermaid.render khá nặng).
+// Rendered SVG per (color signature, source): a diagram whose source is unchanged
+// reuses its SVG instead of re-running mermaid.render (heavy). LRU, see rememberSvg.
 const svgCache = new Map<string, string>();
+// Mermaid diagrams in the document at the last renderAll (rememberSvg's keep floor).
+let liveDiagrams = 0;
 
 // Token tăng dần cho mỗi đợt render. Kết quả render async chỉ được ghi vào DOM
 // nếu token của nó vẫn là mới nhất — tránh việc một kết quả cũ (đến muộn) ghi
@@ -166,6 +174,7 @@ export function initMermaid(content: HTMLElement): MermaidController {
   function renderAll(): void {
     const seq = ++renderSeq; // đánh dấu đợt render mới; kết quả cũ sẽ bị coi là stale
     const wrappers = Array.from(content.querySelectorAll<HTMLElement>(`.${MERMAID_CLASS}`));
+    liveDiagrams = wrappers.length;
     for (const wrapper of wrappers) {
       void renderDiagram(wrapper, { fallbackToCodeOnError: true, seq });
     }
@@ -205,8 +214,8 @@ async function renderDiagram(
   const { theme, colors, signature: colorSignature } = computeColorSignature();
 
   // Cache hit: source + color signature unchanged → reuse the existing SVG instead of re-calling mermaid.render.
-  const key = `${colorSignature}:${hashSource(source)}`;
-  const cached = svgCache.get(key);
+  const key = `${colorSignature}:${source}`;
+  const cached = recallSvg(svgCache, key);
   if (cached !== undefined) {
     chart.innerHTML = cached;
     chart.classList.remove(ERROR_CLASS);
@@ -227,7 +236,7 @@ async function renderDiagram(
     // pass with different colors) store an SVG under the wrong
     // `signature:hash` key → a later cache hit would then return the wrong colors.
     // A pass that clears the guard is guaranteed the newest, so its SVG matches its key's signature.
-    svgCache.set(key, svg);
+    rememberSvg(svgCache, key, svg, liveDiagrams);
     chart.innerHTML = svg;
     chart.classList.remove(ERROR_CLASS);
   } catch (err) {

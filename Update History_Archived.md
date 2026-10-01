@@ -1,0 +1,623 @@
+# Update History
+
+| Version | Date | Update Content |
+| --- | --- | --- |
+| 0.5.7 | 2026-07-09 | Baseline: bắt đầu ghi update history từ phiên bản hiện tại. |
+| 0.5.8 | 2026-07-09 | Fix: nút chèn bảng tạo bảng lồng bảng khi caret đang ở trong ô bảng khác, gây vỡ Markdown thuần. |
+| 0.5.9 | 2026-07-09 | Fix: copy bảng/list trong editor rồi paste bị mất định dạng do clipboard lấy text thô thay vì Markdown. |
+| 0.5.10 | 2026-07-09 | Fix: khối Mermaid/code/bảng/công thức ở cuối tài liệu không thêm được dòng mới phía dưới — luôn đảm bảo có đoạn văn thoát ở cuối. |
+| 0.5.11 | 2026-07-10 | Feature: gutter số dòng thật (theo file .md gốc) bên trái mỗi block; thêm "Mở WYSIWYG Preview" vào menu chuột phải editor. |
+| 0.5.12 | 2026-07-10 | Fix: gutter số dòng cho block Mermaid/công thức KaTeX — hiển thị dòng bắt đầu ở mép trên và dòng kết thúc ở mép dưới thay vì một số duy nhất, vì trình bày (biểu đồ/công thức) không tỉ lệ với số dòng nguồn. |
+| 0.5.13 | 2026-07-10 | Feature: thêm "Mở WYSIWYG Preview" vào menu chuột phải trên tab editor (editor/title/context) để mở file .md bằng extension. |
+| 0.5.14 | 2026-07-10 | Feature: đổi tên extension thành "Orca MD Preview" và nhãn menu thành "Mở Orca Preview". |
+| 0.5.15 | 2026-07-11 | Feature: type an toàn cho kênh postMessage host↔webview — thêm src/shared/messages.ts với union WebviewToHost/HostToWebview (C3). |
+| 0.5.16 | 2026-07-11 | Refactor: tách god file pipeline.ts thành render/dom-postprocess/dom-serialize-prep/turndown/dom-portable, giữ pipeline.ts làm barrel re-export, hành vi không đổi (C1). |
+| 0.5.17 | 2026-07-11 | Fix (security): siết CSP (bỏ img-src https:, thêm form-action/frame-src none), realpath chống symlink ở openLink, nonce dùng crypto, thu hẹp localResourceRoots, log lỗi (S1–S8, C8). |
+| 0.5.18 | 2026-07-11 | Fix (perf): debounce update host, cache findFiles/mermaid, debounce ô tìm + tách read/write layout, gate parse gutter; bundle --production (main.js −56%) + KaTeX chỉ woff2 (P-01…P-09). |
+| 0.5.19 | 2026-07-11 | Refactor: gộp escapeHtml + helper chèn list trùng lặp, gom hằng debounce vào constants.ts, bật noUnusedLocals/noUnusedParameters + ESLint (typescript-eslint, security) (C2, C4, C5, C9, C-new). |
+| 0.5.20 | 2026-07-11 | Feature: thêm 48 unit test (computeMinimalEdit, normalizeForSearch, relativePath, classifyLink, message-contract) và tách src/text-utils.ts để test được (C6). |
+| 0.5.21 | 2026-07-11 | Fix: gutter đánh số riêng cho từng mục bullet/list (mọi độ sâu) thay vì chỉ hiện số dòng đầu của cả danh sách. |
+| 0.5.22 | 2026-07-11 | Fix: Cmd/Ctrl+X không cắt được vùng chọn — thêm fallback qua Clipboard API vì webview lồng của VS Code không luôn bắn sự kiện 'cut'. |
+| 0.5.23 | 2026-07-11 | Fix: mục list gõ thêm khi soạn không hiện số dòng (chỉ hiện sau undo) — refreshFromMarkdown ghi data-line mới trở lại DOM để ResizeObserver không xoá số của mục mới. |
+| 0.6.0 | 2026-07-11 | Release: đồng bộ số phiên bản package.json với các fix/feature 0.5.15–0.5.23 đã tích lũy (type-safe messages, split pipeline, security/perf hardening, gutter list). |
+| 0.6.1 | 2026-07-11 | Fix: click vào checkbox task-list không đổi trạng thái check/uncheck do preventDefault khiến browser revert lại property sau click. |
+| 0.6.2 | 2026-07-11 | Fix: nút checkbox toolbar bấm lần 2 để bỏ checkbox lại còn trơ bullet thay vì về đoạn văn thường. |
+| 0.6.3 | 2026-07-11 | Feature: đổi tên extension thành "Orca Editor" (name, menu chuột phải tab, settings), đổi tên file build thành orca-editor-0.6.0.vsix. |
+| 0.6.4 | 2026-07-11 | Fix: hết 2 warning khi build vsce — thêm field repository vào package.json và tạo file LICENSE. |
+| 0.6.5 | 2026-07-11 | Feature: chuẩn bị publish Marketplace — bỏ private:true, thêm script publish, loại tài liệu nội bộ khỏi .vscodeignore. |
+| 0.6.6 | 2026-07-11 | Fix: README tách "Install" (Marketplace) khỏi "Build from source" — hướng dẫn build.sh/install.sh cũ không còn đi kèm .vsix nên gây nhầm lẫn cho end-user. |
+| 0.6.6 | 2026-07-11 | Chore: gộp build.sh/install.sh/build-and-install.sh thành 1 file build.sh (subcommand build/install), loại khỏi gói .vsix. |
+| 0.6.6 | 2026-07-11 | Fix: đổi tên 3 setting từ markdownWysiwyg.* sang orcaEditor.*; autoOpenToc/showLineNumbers áp dụng ngay khi đổi setting, không cần mở lại preview. |
+| 0.6.6 | 2026-07-11 | Chore: đổi command ID và viewType từ markdownWysiwyg.* sang orcaEditor.* để nhất quán với tên setting. |
+| 0.6.6 | 2026-07-11 | Fix: dịch toàn bộ chuỗi tiếng Việt hiển thị cho người dùng (toolbar, mục lục, tìm kiếm, bảng, thông báo) sang tiếng Anh. |
+| 0.6.6 | 2026-07-11 | Fix: đồng nhất version trong package.json/package-lock.json với CHANGELOG.md và Update History.md (0.6.0 → 0.6.6). |
+| 0.6.6 | 2026-07-11 | Chore: thêm THIRD-PARTY-NOTICES.md liệt kê license của toàn bộ dependency được bundle (mermaid, dompurify, katex...). |
+| 0.6.6 | 2026-07-11 | Feature: thêm icon extension (cá heo xanh) tại images/icon.png, khai báo trong package.json. |
+| 0.6.6 | 2026-07-11 | Fix: nút ¶/H1-H3 đổi tag qua execCommand thay vì thao tác DOM thô — undo hoàn tác đúng từng bước, không còn reset toàn bộ định dạng. |
+| 0.6.6 | 2026-07-11 | Fix: nút code block khi chọn text giữa câu — tách đúng phần trước/sau vùng chọn thành đoạn riêng thay vì để trình duyệt tự tách lộn xộn. |
+| 0.6.6 | 2026-07-11 | Fix: tooltip toolbar không hiện ở một số icon — thay title attribute gốc bằng tooltip tự vẽ qua mouseenter/focus, hiển thị nhất quán mọi nút. |
+| 0.6.6 | 2026-07-11 | Fix: toolbar bị xô xuống dòng 2 khi cửa sổ hẹp — chuyển sang menu tràn "..." gom các nút định dạng không đủ chỗ. |
+| 0.6.6 | 2026-07-11 | Fix: dịch nốt 2 chuỗi tiếng Việt còn sót (tooltip tick tìm kiếm, thông báo lỗi Mermaid) sang tiếng Anh. |
+| 0.6.6 | 2026-07-11 | Fix: nút checkbox toolbar chỉ đổi item chứa caret khi chọn nhiều dòng bullet — nay convert toàn bộ dòng đang chọn, undo hoạt động đúng. |
+| 0.6.6 | 2026-07-11 | Feature: tự ẩn panel mục lục khi tab hẹp hơn nửa màn hình (split editor); user vẫn tự bật lại được qua nút toolbar. |
+| 0.6.6 | 2026-07-11 | Fix: chuyển đổi giữa bullet/numbered/task list không convert được (bấm nút bullet trên task list chỉ tắt cả list) — bỏ checkbox trước khi đổi kiểu list. |
+| 0.6.6 | 2026-07-11 | Fix: đổi kiểu list nhiều dòng chỉ áp lên dòng cuối, tách rời khỏi list gốc kèm dòng trống dư — re-select đúng phạm vi trước execCommand, dọn `<p>` rỗng còn sót. |
+| 0.6.6 | 2026-07-11 | Fix: bấm checkbox ép đổi luôn danh sách số (1.) sang dạng gạch đầu dòng (-) — bỏ checkbox nay giữ nguyên kiểu list, sửa CSS để số thứ tự vẫn hiện đúng. |
+| 0.6.6 | 2026-07-11 | Fix (triệt để): chọn nhiều dòng text thường bấm task list chỉ dòng đầu có checkbox — dò lại từ selection sau execCommand thay vì reference DOM cũ, gộp mọi case về một đường xử lý chung. |
+| 0.6.6 | 2026-07-11 | Fix: khoảng trắng thừa đầu dòng sau khi bỏ checkbox (chuyển task list về bullet/số) — cắt dấu cách mà markdown-it-task-lists để sót lại trong text khi gỡ checkbox. |
+| 0.6.6 | 2026-07-11 | Feature: thêm sample song ngữ EN/JP (SAMPLE_EN_JP.md) đủ mọi format để test preview với tiếng Nhật. |
+| 0.6.6 | 2026-07-11 | Feature: thêm subcommand `release` vào build.sh — kiểm tra git sạch, đăng nhập vsce, bump version, test, đóng gói, publish Marketplace và tag git; kèm `--dry-run`. |
+| 0.6.7 | 2026-07-11 | Release: nâng version lên 0.6.7, gom toàn bộ fix/feature sau bản 0.6.6 vào một mục [0.6.7] trong CHANGELOG.md. |
+| 0.6.8 | 2026-07-12 | Feature: highlight mọi vị trí khác trùng với text đang bôi đen trong file hiện tại, và icon tìm xuyên file trong project (bấm hoặc Ctrl/Cmd+Shift+F) với popover kết quả nhóm theo file. |
+| 0.6.8 | 2026-07-12 | Feature: Enter ở dòng task list (kể cả trong ô bảng) tự tạo dòng mới cũng có checkbox, thay vì mất định dạng task. |
+| 0.6.8 | 2026-07-12 | Fix: ordered task list ("1. [ ] ...") chỉ hiện checkbox, không hiện thêm số thứ tự "1." gây rối mắt. |
+| 0.6.8 | 2026-07-12 | Fix: bấm H1/H2/H3 làm mất vị trí con trỏ, bấm lại lần 2 không revert về đoạn văn thường — dùng execCommand('formatBlock') riêng khi đổi TỪ heading (insertHTML bị Chrome lờ đi hoặc rò rỉ style sang block liền sau), khôi phục đúng offset caret khi tạo heading mới. |
+| 0.6.8 | 2026-07-12 | Fix: highlight trong kết quả tìm xuyên file bị mất hút khi popover hẹp/dòng dài — cắt ngữ cảnh 40 ký tự mỗi bên quanh match trước khi render, thay vì phó mặc CSS ellipsis cắt mất luôn cả phần highlight. |
+| 0.6.8 | 2026-07-12 | Feature: icon tìm xuyên file tự ẩn sau 3s (pause khi hover/focus); debounce hiện icon 750ms + huỷ khi copy/cut/Backspace/Delete; icon neo bubble phía trên vùng chọn, cuộn theo tài liệu. |
+| 0.6.8 | 2026-07-12 | Fix: click kết quả tìm xuyên file trỏ tới .md không cuộn tới đúng vị trí match — forward line/character qua message init/scrollToPosition, cả khi file đã mở sẵn ở tab khác. |
+| 0.6.8 | 2026-07-12 | Feature: thước overview bên phải cho highlight khi select text (Feature A) — chỉ báo trực quan, tắt hẳn khi Ctrl+F đang mở, throttle 150ms/cap 500 tick tránh giật với file dài. |
+| 0.6.8 | 2026-07-12 | Feature: thêm option Match Case/Whole Word (mặc định Whole Word ON) cho Ctrl+F và tìm xuyên file, word-boundary Unicode-aware cho tiếng Việt, fallback tự động về substring khi 0 kết quả. |
+| 0.6.8 | 2026-07-12 | Fix: caret sai vị trí (trước checkbox thay vì sau) khi tạo task item mới hoặc Enter xuống dòng trong task list. |
+| 0.6.8 | 2026-07-12 | Fix: click kết quả tìm xuyên file chỉ scroll, không select đoạn text khớp — forward character/length qua reveal/scrollToPosition, select trong block đơn dòng. |
+| 0.6.8 | 2026-07-12 | Feature: thước overview khi select text (Feature A) thêm tick riêng cho vị trí đang chọn (màu cam) để so sánh với các match khác. |
+| 0.6.8 | 2026-07-12 | Fix: icon Whole Word dễ nhầm với toggle chữ hoa/thường — đổi sang icon "ab" có vạch biên; icon Match Case/Whole Word đổi màu accent khi bật. |
+| 0.6.8 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet "•" ở dòng đầu — Chrome tách nhiều `<ul>` độc lập, nay quét cả vùng chọn thay vì chỉ 1 list. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file không tự ẩn sau 3s — bỏ qua mouseenter dư vị trí chuột trong 400ms đầu sau khi icon hiện, tránh pause timer vĩnh viễn. |
+| 0.6.8 | 2026-07-12 | Feature: dán ảnh từ clipboard vào editor — lưu file thật vào images/ cạnh file .md (hoặc thư mục tuỳ chỉnh qua setting), chèn `<img>` với đường dẫn tương đối. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file giữ nguyên hình kính lúp, đổi màu sang accent vàng/cam (giống 💡) cho dễ nhận biết hơn. |
+| 0.6.8 | 2026-07-12 | Fix: dán ảnh Cmd/Ctrl+V tạo 2 file/2 link ảnh trùng nhau — chặn trùng 500ms giữa fallback Clipboard API và 'paste' event thật cùng xử lý 1 lượt dán. |
+| 0.6.8 | 2026-07-12 | Feature: thêm dải viewport band trên thước overview (Ctrl+F/select-highlight), đánh dấu vùng đang cuộn tới, cập nhật live theo scroll. |
+| 0.6.8 | 2026-07-12 | Feature: khi save, tự dọn ảnh dán mồ côi (paste nhầm rồi undo) theo prefix tên file .md, chuyển vào images/.trash thay vì xoá cứng. |
+| 0.6.8 | 2026-07-12 | Fix: icon tìm xuyên file không bao giờ tự ẩn — thiếu CSS `.cross-file-search-icon[hidden]{display:none}` nên `icon.hidden=true` bị rule `display:inline-flex` cùng độ đặc hiệu ghi đè. |
+| 0.6.8 | 2026-07-12 | Fix: follow link kết quả tìm xuyên file highlight lệch vị trí — offset thô (raw markdown) lệch với text đã render; nay dùng matchText làm mỏ neo tìm lại trong DOM. |
+| 0.6.8 | 2026-07-12 | Fix: tạo task list từ nhiều đoạn văn rời bị thừa bullet + dòng trắng (list loose/tách nhiều `<ul>`) — tự dựng một `<ul>` tight duy nhất bằng insertHTML thay vì execCommand. |
+| 0.6.8 | 2026-07-12 | Fix: xoá dòng cuối bullet/task list làm heading kế tiếp bị gộp thành bullet — thêm handler Backspace/Delete xoá vắt ranh giới list mà giữ nguyên danh tính block hai đầu. |
+| 0.6.8 | 2026-07-12 | Fix: ảnh mồ côi bị xoá cứng ngay khi save (bỏ .trash); undo xoá ảnh tự khôi phục lại file thật, xử lý như đang paste ảnh mới. |
+| 0.6.8 | 2026-07-12 | Feature: click vào ảnh trong editor đặt caret ngay bên phải ảnh, cho phép Enter xuống dòng ngay sau ảnh. |
+| 0.6.8 | 2026-07-12 | Release: nâng version lên 0.6.8, gom toàn bộ feature/fix sau bản 0.6.7 (tìm xuyên file, dán ảnh, select-highlight, task list, fix list/task/gutter) vào mục [0.6.8]; publish lên Marketplace. |
+| 0.6.9 | 2026-07-12 | Fix (packaging): loại WIP/, Requirement/, Plan/ khỏi .vsix publish — các thư mục này bị đóng gói nhầm ở 0.6.8; không đổi tính năng editor. |
+| 0.6.9 | 2026-07-12 | Feature: đổi tên extension thành "Orca MD Editor", id marketplace thành hungvu.orca-md-editor (do tên cũ orca-editor bị khóa sau khi lỡ vsce unpublish=delete); giữ nguyên namespace orcaEditor.* nội bộ. |
+| 0.6.9 | 2026-07-13 | Feature: kết quả tìm xuyên file (US-15.6) đổi sang accordion theo file — cap ưu tiên số file thay vì tổng match, badge/overflow đúng số thật, "+N match khác" mở Search panel scope đúng 1 file. |
+| 0.6.9 | 2026-07-13 | Feature: xếp hạng kết quả tìm xuyên file (US-15.7) theo fileScore — heading/definition/vị trí/tên file/độ hiếm từ khoá, thay vì thứ tự tìm thấy. |
+| 0.6.9 | 2026-07-14 | Feature: kết quả tìm xuyên file (US-15.6) — file chỉ 1 match show thẳng snippet luôn, bỏ accordion cho riêng case này; ≥2 match vẫn giữ accordion như cũ. |
+| 0.6.9 | 2026-07-14 | Feature: mở rộng popover kết quả tìm xuyên file (US-15.9) từ 320×360px lên 400×min(70vh,560)px, giữ nguyên cơ chế neo/clamp vị trí. |
+| 0.6.9 | 2026-07-13 | Feature: nút Heading gộp thành 1 split-button (mặc định H2, caret mở dropdown Paragraph/H1–H6), giữ nguyên hành vi toggle-về-paragraph (US-4.9). |
+| 0.6.9 | 2026-07-13 | Feature: nút Code block gộp thành 1 split-button (mặc định JavaScript, caret mở dropdown 10 ngôn ngữ), giữ nguyên hành vi tách before/pre/after (US-4.10). |
+| 0.6.9 | 2026-07-13 | Feature: thêm nút Math split-button (mặc định inline $...$, caret mở dropdown Inline/Block $$...$$), render KaTeX ngay qua ctx.insertMarkdown (US-4.11). |
+| 0.6.9 | 2026-07-13 | Feature: thêm nút chèn nhanh sơ đồ Mermaid mẫu (flowchart Start/Decision/End) qua ctx.insertMarkdown (US-4.12). |
+| 0.6.9 | 2026-07-13 | Feature: thêm nút Clear formatting (eraser) trong cụm Edit cạnh Undo/Redo — execCommand("removeFormat") trên vùng chọn (US-4.13). |
+| 0.6.9 | 2026-07-13 | Feature: gộp nút Copy @file/View raw source vào popover "more options" (⋮) cạnh TOC, thay vì luôn hiện — phân biệt icon với "..." tràn (US-4.14). |
+| 0.6.9 | 2026-07-13 | Feature: nút Bold/Italic/Strike/Inline code/Blockquote/Bullet/Numbered/Task tự sáng theo caret (selectionchange), loại trừ Heading/Code block/Math (US-4.15). |
+| 0.6.9 | 2026-07-13 | Fix: nút Heading hiện đúng cấp heading (H1–H6) tại caret thay vì luôn tĩnh "H2" (US-4.16). |
+| 0.6.9 | 2026-07-13 | Feature: popup chèn Link/Image kéo-thả được (drag handle riêng, không dịch chuyển lớp nền mờ) (US-17.2). |
+| 0.6.9 | 2026-07-13 | Fix: bỏ "Markdown" khỏi danh sách ngôn ngữ dropdown code block — còn 9 ngôn ngữ (US-4.10). |
+| 0.6.9 | 2026-07-13 | Feature: công thức Math (KaTeX) chèn xong sửa lại được — nút toggle công thức ⇄ TeX thô, giống Mermaid (US-4.18). |
+| 0.6.9 | 2026-07-14 | Fix: popup chèn Link/Image kéo được từ bất kỳ đâu trên box, không chỉ 1 thanh handle mỏng — trừ input/nút/gợi ý file (US-17.2). |
+| 0.6.9 | 2026-07-14 | Fix: dịch nốt text tiếng Việt còn sót trong toolbar sang tiếng Anh — badge "Phổ biến"→"Common", nút toggle Mermaid "Xem mã nguồn/biểu đồ"→"View source/chart". |
+| 0.6.9 | 2026-07-14 | Feature: sửa công thức Math (KaTeX) qua popup nổi có textarea + gợi ý cú pháp, thay toggle inline cũ — không đè công thức, hết bug caret lạc (US-4.19). |
+| 0.6.9 | 2026-07-14 | Feature: nút Mermaid thêm dropdown 4 loại sơ đồ (Flowchart/Sequence/Class/State) thay vì chỉ 1 flowchart cố định (US-4.20). |
+| 0.6.9 | 2026-07-14 | Fix: popup sửa công thức KaTeX cho resize textarea 2 chiều, kéo thả cả popup, cheat-sheet hiện cú pháp ngay trên nút (US-4.22). |
+| 0.6.9 | 2026-07-14 | Fix: chèn Mermaid/math block từ toolbar tự thêm dòng trống sau khối để đặt caret; rà mọi khối atom liền kề đều có chỗ caret ngay sau. |
+| 0.6.9 | 2026-07-14 | Docs: đồng bộ Requirement - 15 (US-15.6/15.7/15.9 Shipped) và HLR từ worktree cross-file-search-v3 vào dự án chính; không đổi code. |
+| 0.6.9 | 2026-07-14 | Docs: cập nhật design-log kiến trúc theo code mới nhất; lập plan refactor Block-Indexed Architecture — HLR mục 18 + Requirement - 18 (US-18.1–18.3, 📝 Planned). |
+| 0.6.9 | 2026-07-14 | Feature: popover kết quả tìm xuyên file kéo-thả được, dùng chung makeDraggable() với popup Insert Link/Image và popup sửa Math (US-17.1). |
+| 0.6.9 | 2026-07-14 | Fix: click kết quả tìm xuyên file ngoài viewport bị nhảy về caret cũ — set selection trước, scrollIntoView smooth sau cùng + focus preventScroll để không cắt ngang animation. |
+| 0.6.9 | 2026-07-14 | Fix: Ctrl+F Next tới match ngoài viewport rồi bấm ra content bị nhảy về caret cũ — đóng search box giờ focus() có preventScroll, không tự cuộn về caret. |
+| 0.6.9 | 2026-07-14 | Feature: US-18.1 Block Map — module block-map.ts (id/type/srcRange/mdSlice), gutter refactor đọc chung, bail-out thu hẹp. |
+| 0.6.9 | 2026-07-14 | Fix: code block mới chèn qua toolbar không có syntax highlight, chỉ hiện sau khi save/mở lại — nay hljs.highlightElement ngay tại chỗ. |
+| 0.6.9 | 2026-07-14 | Fix: chèn code block khi vùng chọn xuyên nhiều đoạn (kể cả qua đoạn trắng) làm nhân đôi nội dung — xoá đúng hết mọi block nằm giữa. |
+| 0.6.9 | 2026-07-14 | Feature: tách test roundtrip theo feature (test/roundtrip/*.ts, chạy riêng từng cái); thêm test cho toolbar/input-rules/math-edit/paste-image, phát hiện bug insertImage() mất ổn định với path có dấu cách. |
+| 0.6.9 | 2026-07-14 | Fix: insertLink()/insertImage() (toolbar) không encode path tương đối có dấu cách, làm markdown đổi hình dạng khi lưu/mở lại — nay encodeLinkPath() trừ URL tuyệt đối. |
+| 0.6.9 | 2026-07-14 | Feature: HLR mục 19 Readability — Reading Mode (nút toolbar + 4 preset), measure ch, palette đọc (Sepia…), typography, Zen, zoom ảnh, table content-aware sizing, ARIA/reduce-motion; state lưu ở orcaEditor.readability.*. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 #2/#3/#6): đổi nút "Zen" → "Focus Mode"; nâng min-width cột table 8ch→14ch (panel hẹp scroll ngang thay vì wrap từng từ); TOC không tự bật khi file không có heading. |
+| 0.6.9 | 2026-07-15 | Feature (US-19.10, bug 0715 #7): thêm control chọn reading palette lên toolbar (Follow VS Code mặc định / Light / Dark / Sepia / High-contrast), đánh dấu palette đang áp; setPalette tự bật Reading Mode như setPreset (trừ followTheme trung tính) — fix "lệch màu" khi chuyển tab. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 #1): Focus Mode ẩn toolbar bằng position:fixed overlay thay vì sticky+transform (hết cảnh "ẩn nửa thanh"); và bấm Reading/Focus không còn tự bật TOC (configUpdate chỉ auto-open khi cờ autoOpenToc đổi). |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 #5): Comfortable Reading dùng font của VS Code (bỏ ép serif) như preset Default, chỉ giữ giãn dòng/thu hẹp cột. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 #1): mở rộng dải hover ở mép trên (4px→64px, ẩn lại ở 120px) để dễ rê chuột mở lại toolbar trong Focus Mode. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 #4): trạng thái Reading Mode/preset/palette/Zen chuyển sang per-tab session-only — không còn ghi config Global nên bật ở 1 tab không lan sang tab khác; Settings chỉ là default cho tab mới. |
+| 0.6.9 | 2026-07-15 | Fix (paste ảnh): đo naturalWidth/devicePixelRatio khi dán, chèn width để ảnh giữ kích thước gốc thay vì bị max-width:100% kéo full bề ngang cửa sổ; ảnh to hơn cửa sổ vẫn thu nhỏ cho vừa. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 đợt2 #4): Focus Mode không còn tự hiện lại toolbar khi rê chuột xuống ngay sau khi bấm Focus — thêm cơ chế "arm": chỉ reveal sau khi con trỏ đã rời dải trên một lần. |
+| 0.6.9 | 2026-07-15 | Fix (bug 0715 đợt2 #1): toolbar/popover/table-toolbar đổi màu theo reading palette (kế thừa --rp-*), hết cảnh chrome tối lệch với vùng chữ sepia/ivory. |
+| 0.6.9 | 2026-07-15 | Feature (US-19.11, bug 0715 đợt2 #3): reading palette thành lớp theme GLOBAL, độc lập Reading Mode — đổi palette 1 tab .md áp cho mọi tab và nhớ qua Settings; Reading Mode/Focus vẫn per-tab. |
+| 0.6.9 | 2026-07-15 | Tinh chỉnh UI (US-19.11): dời nút "Color" (reading palette) xuống cuối nhóm phải toolbar (sau TOC, cạnh menu "...") vì palette là theme global ít khi đổi, không nên chiếm ô giữa Read/Focus. |
+| 0.6.9 | 2026-07-15 | Fix (UI): preset đang chọn trong dropdown Reading Mode giờ có dấu ✓ giống dropdown palette đọc (US-19.10) — dùng chung helper syncDropdownSelection. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.13): reading palette phủ nốt chrome còn lại (TOC, hộp tìm, popup link/ảnh/TeX, tìm chéo file, toast) + tô selection & màu chữ search-highlight theo palette cho đủ tương phản. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.13): embedded block (math/mermaid/code/front-matter) đọc rõ như "card" theo palette — thêm --rp-elev-bg/--rp-embed-border, math block có nền+viền, viền các khối đậm hơn, nút Edit/View source theo màu palette. |
+| 0.6.9 | 2026-07-15 | Fix (scroll): heading không còn bị toolbar sticky che khi nhảy heading/anchor/reveal source line — thêm scroll-padding-top = chiều cao toolbar (đo động qua --toolbar-height). |
+| 0.6.9 | 2026-07-15 | Feature (UI default): mặc định khi mới cài đổi sang Comfortable Reading + palette Sepia; "Follow VS Code" (preset/palette) là trung tính — không sáng nút, không dấu ✓, badge Default dời sang Sepia. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.14): sticky table header — cuộn bảng dài qua dòng tiêu đề thì header cột "dính" dưới toolbar (clone nổi ngoài #content, đồng bộ scroll ngang), luôn đọc được tên cột. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.14): sticky table header bị lệch cột dần sang phải — clone th thiếu box-sizing:border-box nên width (đo border-box) bị cộng thêm padding/viền; thêm border-box để cột dính khớp thẳng cột thân bảng. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.15): reading mode "Academic Paper" theo look ai-2027.com — preset serif "sách" cột hẹp ~62ch (no-bundle) + palette "Paper" nền kem trắng ấm #fffff8; 2 lever độc lập, ghép cho trọn style. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.6): mỗi reading preset có cỡ chữ nền riêng qua --reading-font-size (Comfortable 16 / Compact 13 / Dyslexia 18px; Default giữ VS Code) — heading em tự co giãn theo, cả type scale đồng bộ. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.15): preset Academic Paper đặt cỡ chữ nền 19px (essay serif kiểu ai-2027.com ~ET Book 20px) — hoàn thiện bộ --reading-font-size theo preset. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.6): TOC + pop-up (popover/prompt/search) phóng cỡ chữ theo preset qua --reading-ui-font-size (Comfortable/Academic 14 / Compact 12 / Dyslexia 15px; Default giữ VS Code) — chrome đồng bộ với vùng đọc. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #1): Focus Mode reveal không còn che dòng đầu tài liệu — chỉ khi toolbar hiện mới chừa padding-top (đẩy chữ xuống cùng nhịp trượt), ẩn thì về 0; gỡ reveal khi chuột rời webview/mất focus; giữ reveal khi dropdown đang mở. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715, US-19.9): mở tab khi Zen bật — bake class đọc vào HTML từ provider + chặn transition lúc seed, toolbar ẩn ngay từ first paint, hết giật/trượt; animation chỉ khi bấm Focus. |
+| 0.6.10 | 2026-07-15 | Feature (TOC readability): heading dài đọc rõ hơn — panel mục lục rộng hơn (260→300px) + kéo đổi rộng được (nhớ giữa các lần mở), và mục đang hover/đang đọc bung đủ chữ thay vì cắt "…". |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #1): padding đẩy chữ khi reveal toolbar Focus Mode chỉ áp khi ở gần đỉnh tài liệu (.reading-zen-reveal-push); reveal giữa trang chỉ phủ tạm, không xê dịch content; cuộn lên đỉnh khi đang reveal tự nâng cấp thành đẩy. |
+| 0.6.10 | 2026-07-15 | Fix (Reading Mode measure): heading nhô quá cột chữ, lề phải ngắn hơn body — do `--reading-measure` đo bằng `ch` theo font-size to của heading; chia lại theo tỉ lệ em (h1÷2, h2÷1.5, h3÷1.25, h5÷0.875, h6÷0.85) để heading chung mép cột với `<p>`, giữ nguyên `ch`. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.15): bundle font Literata (OFL, subset Latin+Vietnamese) vào preset Academic Paper — đứng đầu stack, render giống nhau mọi OS và đủ dấu tiếng Việt (thay Iowan Old Style thiếu dấu). |
+| 0.6.10 | 2026-07-15 | Feature (US-19.1): sắp lại thứ tự dropdown Reading Mode theo tần suất dùng — Comfortable → Academic Paper → Compact → Default → Dyslexia-friendly. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.15): Academic Paper tự dò ngôn ngữ tài liệu — tiếng Anh dùng ET Book (bundled, MIT, đúng font ai-2027.com) + Palatino fallback; tiếng Việt dùng Literata (đủ dấu). |
+| 0.6.10 | 2026-07-15 | Fix (Reading Mode width system): thiết kế lại hệ độ rộng cột 2 tầng — prose (text/heading/hr/list/blockquote = --reading-measure) vs wide (table/code/math/mermaid = --reading-container ~1.14× measure), chung mép trái. Heading đo bằng % container (miễn nhiễm weight/letter-spacing/mono), thu hẹp container mọi preset để bảng/embedded rộng vừa phải không lệch; hr căn trái. |
+| 0.6.10 | 2026-07-15 | Fix (table column width): cột nội dung ngắn (vd "#") không còn bị ép rộng bằng sàn 14ch — co vừa nội dung (fitTableColumns), cột dài vẫn giữ sàn chống wrap vụn; sticky header refresh khi gõ trong ô bảng. |
+| 0.6.10 | 2026-07-15 | Fix (cross-file search): dịch chuỗi empty-state sang tiếng Anh; thêm quy tắc CLAUDE.md: output dự án luôn English, chỉ chat trả lời tiếng Việt. |
+| 0.6.10 | 2026-07-15 | Feature (US-17.3, M1): drag & drop reorder for top-level blocks — hover handle, heading section-move, single-undo-step move via execCommand; roundtrip tests added. |
+| 0.6.10 | 2026-07-15 | Feature (US-17.4, M2): drag reorder table rows/columns (single-undo-step even for columns); fixed self-drop no-op bug shared with M1 in new sibling-move.ts. |
+| 0.6.10 | 2026-07-15 | Feature (US-17.5, M3): drag reorder list items (nested sub-tree included) and horizontal-drag indent/outdent via native execCommand. |
+| 0.6.10 | 2026-07-15 | Feature (US-17.6, M4): drag images/files from Explorer/Finder into the editor, saved to assets/. Breaking: renamed config orcaEditor.pasteImage.* to orcaEditor.assetsPaste.*, default folder images/ to assets/ (no migration of existing images). |
+| 0.6.10 | 2026-07-15 | Feature (US-17.7, M5): handle menu (Move up/down/to a heading) and TOC-item drag both reorder sections; standalone image paragraphs already draggable via M1, confirmed with a test. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #1): drag handle no longer hides on mouseleave when the cursor moves onto it; only hides when hovering a different block. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #2): block and table row/column drag handles reposition on scroll instead of staying frozen at stale coordinates. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #3): table toolbar gap above the table increased (6→28px) so it no longer overlaps the column drag handle. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #4): table column autofit no longer ratchets wider only — clears stale inline min-width before remeasuring so columns can shrink again. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #5): Focus Mode padding-top is now always reserved instead of toggled by toolbar reveal, removing the layout jump. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #6): TOC font-family now follows the Reading Mode preset, hoisted onto body like the existing font-size/palette pattern. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #7): hyperlinks are always underlined by default now, not only on hover or via Reading Mode's opt-in toggle. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #8): TOC items always wrap to show the full heading text instead of ellipsis-truncating with a tooltip fallback. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #9): pasted image width measurement is now awaited before insert, fixing a race that could drop the width attribute. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.17, bug 0715 #7): link underline color/thickness/weight/background now adapt per reading preset (dyslexia, academic, others); removed dead linkUnderline setting. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #3): pasted images always lost their width (CSP blocked the blob: URL used to measure them); now measured via an already-allowed data: URL instead. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): Reading Mode dropdown now lists 10 curated preset+palette bundles + "Follow VS Code"; hover live-previews the palette colors; removed the separate Color/Palette toolbar control. |
+| 0.6.10 | 2026-07-15 | Tooling: added bmad-quick-dev and bmad-testarch-automate skills (ported from Dev/.cursor/skills) to .claude/skills/ for spec-driven implementation and test-automation workflows. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #2): TOC items truncate with ellipsis + native tooltip instead of wrapping to 2 lines; truncation now tracks the resizable panel width. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18 follow-up): Reading Mode dropdown hover now previews full typography/measure too, not just palette colors; fixed a self-reflow bug by locking each row's font-size inline while the dropdown is open. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): "Follow VS Code" in the Reading Mode dropdown did nothing while Focus/Zen mode was on, since Zen alone keeps reading styling active; disable() now also exits Zen. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): reading style dropdown hover now debounces 120ms before previewing (skip rows the cursor just passes over) and color changes ease in over 0.18s instead of snapping instantly. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): hovering between two rows in the reading style dropdown now transitions directly from the current preview to the new one, instead of snapping back to the committed style first. |
+| 0.6.10 | 2026-07-15 | Feature: scale up main toolbar 1.25x (button/icon/separator size) — was too small, hard to click precisely. |
+| 0.6.10 | 2026-07-15 | Fix: Zen mode toolbar hover-reveal zone now scales with real toolbar height instead of hardcoded 64/120px, easier to hit. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.18): clicking the main Reading Mode icon to turn it off now reuses disable() (also exits Zen) instead of just flipping `enabled`, which looked like a no-op while Zen was on. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.18): moved "Follow VS Code" to the top of the Reading Mode dropdown (was last), separated from the 10 style bundles by a divider — faster access to the reset action. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.19): TOC panel now starts below the toolbar instead of overlapping it — toolbar no longer shrinks/gets covered inconsistently between Zen and Normal mode when TOC is open. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.20): Zen/Focus mode is now global across all open .md tabs (session-only, not persisted to Settings) instead of per-tab — toggling it in one tab switches every open tab. |
+| 0.6.10 | 2026-07-15 | Tweak: narrowed the Zen mode toolbar keep-visible hover margin (HIDE_MARGIN_PX 96→76px) per feedback that it was too wide. |
+| 0.6.10 | 2026-07-15 | Fix (US-19.19 revert): TOC panel moved back to top:0 (the below-toolbar fix left its sideBar background not reaching the screen top, looking like a floating box); toolbar now overlaps it via z-index (100→160, above TOC's 150) instead, matching how Zen mode already worked. |
+| 0.6.10 | 2026-07-15 | Feature (US-19.19): "TABLE OF CONTENTS" panel title font-size bumped to H2 scale (11px → 1.5em, matches h2 in markdown.css and scales with the user's configured font size). |
+| 0.6.10 | 2026-07-15 | Feature: truncated TOC headings now show a custom-drawn tooltip on hover/focus (reusing the toolbar's tooltip module), consistent with icon buttons. |
+| 0.6.10 | 2026-07-15 | Feature: TOC no longer auto-opens on file open when the document has only 1 heading (was: only suppressed for 0 headings) — a single-entry TOC adds no navigation value. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #6): image zoom button now clamps below the sticky toolbar instead of overlapping it for images near the top of the document. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #5): reading palette default was "sepia" instead of "followTheme" for newly opened tabs; corrected in package.json/provider.ts/readability.ts. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #13): inline code font-size trimmed to 0.9em with em-based padding, so formatted spans no longer visually outsize surrounding text across every reading mode. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #14): cross-tab Zen broadcast landing during a panel's init handshake no longer animates the toolbar slide; steady-state broadcasts still animate normally. |
+| 0.6.10 | 2026-07-15 | Feature (bug 0715 #12): hover-highlight outline around the block/list-item/row/column under the cursor, synced with the existing drag handles. |
+| 0.6.10 | 2026-07-15 | Fix (bug 0715 #7/#8/#9): list-item handle clears wide markers, nested list ancestors get a reachable handle, table row/col handles no longer hide before click. |
+| 0.6.10 | 2026-07-15 | Tooling: added a Playwright-based webview interaction test track (test/webview/, real Chromium execCommand/Selection API) to cover interactive bugs domino/unit tests can't reproduce; wired into `npm run test`. |
+| 0.6.10 | 2026-07-16 | Feature: added TOC heading-level filter slider (H1/H1-H2/H1-H2-H3, per-tab persisted); removed TOC drag & drop entirely (bug 0716 #7/#9). |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #1): Zen toolbar no longer flashes visible then slides away on cold-open — hidden state now baked as inline style instead of depending on external CSS load timing. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #3-#6): exclusive nested-list handle, larger flush hit-area (block/li/row/col), kebab merged into handle click, hover outline now shows only while a handle is held. |
+| 0.6.10 | 2026-07-16 | Fix: TOC heading-filter slider moved into its own full-width bar with H1/H2/H3 labels, no longer hidden under the toolbar; also fixes bug 0716 #8's toolbar/TOC color mismatch. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #4 follow-up): drag handle (block/li/row/col) no longer disappears when the mouse overshoots past its now-narrower hit area in one fast move. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2): column handle glyph rotated 90° to match its wide/short shape; table margin-top increased so the handle no longer overlaps the line above. |
+| 0.6.10 | 2026-07-16 | Fix: dragging a table row could merge its content into a neighboring row and wipe the other cells — row move now relocates the real DOM node instead of replacing it via HTML string. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #8, root cause): TOC panel background now uses the same theme-token order as the toolbar, removing the color seam a padding-only fix had left in some themes. |
+| 0.6.10 | 2026-07-16 | Fix: toolbar's B/I/S buttons now render bold/italic/strikethrough respectively, matching the formatting they apply instead of plain text labels. |
+| 0.6.10 | 2026-07-16 | Feature (bug 0716 #2, US-19.21): Reading Mode (enabled/preset/palette) reversed from per-tab to global across all open tabs, matching Zen mode's existing scope. |
+| 0.6.10 | 2026-07-16 | Fix: a table's header row had no drag handle at all (row-hover only scanned tbody rows). |
+| 0.6.10 | 2026-07-16 | Feature: click a row handle to promote that row to become the table's header ("Set as header row"), swapping it with the old header in place. |
+| 0.6.10 | 2026-07-16 | Fix: Zen mode + line-number gutter combo zeroed out the left margin, clipping the drag handle at the viewport edge. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #10): Task List button no longer stacks duplicate checkboxes onto unrelated list items on repeated clicks; added idempotency + turndown guards. |
+| 0.6.10 | 2026-07-16 | Fix: drag ghost preview no longer shows a double blue outline and now matches the dragged block/li/row/column's real on-screen size instead of an unrelated auto-sized box. |
+| 0.6.10 | 2026-07-16 | Fix: row-drag ghost content was inset by the ghost box's own padding, making it visibly narrower than the real row; column-drag ghost now shows a full-height column placeholder instead of just the tiny header cell. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 #10 follow-up): checkbox-stacking guards now also recognize a loose-list item's checkbox nested in its child `<p>`, not just a direct `<li>` child. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #4): table column drag ghost now clones the real column content (header + every cell) instead of an empty placeholder box. |
+| 0.6.10 | 2026-07-16 | Fix: drag ghost's own 480px max-width was clamping every normal-width block/heading, re-wrapping its text narrower than the real editor content; ghost now matches the real block width. |
+| 0.6.10 | 2026-07-16 | Fix: block/list-item drag ghost's bottom padding clipped the last line of wrapped text — height now grows to fit the content instead of being pinned to the source's raw height. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #4 follow-up): table column drag ghost was clipped to 160px tall on tables with more than a few rows, no longer matching the real column height. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 3): top-level block moves now use Range deleteContents/insertNode instead of execCommand(insertHTML), fixing WebKit's smart-merge silently corrupting/duplicating neighboring blocks. |
+| 0.6.10 | 2026-07-16 | Fix (bug 0716 round 2 #2): nested list item's own drag handle is now reachable on a cold mouse arrival, not just an already-hovered item; also fixes the same misresolution in loose lists' inter-item gaps. |
+| 0.6.10 | 2026-07-16 | Fix: leaving the editor's content area leftward while hovering a nested list item's handle now shows the parent item's handle instead of freezing on the child. |
+| 0.6.10 | 2026-07-16 | Feature (bug 0716 round 2 #1): tables now get their own drag handle at the top-left corner to reorder the whole table, alongside the existing row/column handles. |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handle now sits left of the marker (no longer covers the bullet/number); moving left climbs to the parent item, then to a whole-list drag handle. |
+| 0.6.10 | 2026-07-16 | Feature: Ctrl/Cmd+Z·Y now delegate undo/redo to the underlying TextDocument (single history) instead of contentEditable, restoring caret to the changed block after re-render. |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handle now sits snug just left of each item's own number/bullet, so a nested item's handle no longer shares its parent's column. |
+| 0.6.10 | 2026-07-16 | Fix: sliding the cursor left off a list item's handle now reveals the parent/whole-list handle even on a gradual move (previously only a single fast jump surfaced it). |
+| 0.6.10 | 2026-07-16 | Fix: block-level elements (headings, paragraphs, list items, blockquote, hr, dl) had no left padding, so the drag hover outline sat flush against the text; added breathing room. |
+| 0.6.10 | 2026-07-16 | Feature: drag hover-highlight outline now has a low-alpha tint of its own border color instead of no background, staying legible against text in any theme. |
+| 0.6.10 | 2026-07-16 | Fix: dragged block's hover-outline background nearly vanished under its own 0.4 muted-opacity; also made drag outline/ghost colors follow Reading Mode's palette (was always VS Code blue, clashing with sepia/high-contrast). |
+| 0.6.10 | 2026-07-16 | Fix: list-item drag handles are now a uniform height aligned to each item's own marker row, instead of a parent handle spanning its whole nested subtree. |
+| 0.6.10 | 2026-07-16 | Feature: a list item's drag handle is now grabbable anywhere in its left gutter (tall invisible hit zone), not only on the small glyph — easier to grab a climbed parent. |
+| 0.6.10 | 2026-07-16 | Feature: dragging a list item by its handle can now move it to a different nesting depth within the same list in one gesture, not just reorder among original siblings. |
+| 0.7.0 | 2026-07-16 | Release: bumped version to 0.7.0, consolidating Reading Mode, drag & drop, toolbar redesign, TOC filter, and undo/redo delegation (US-4/17/18/19) into one \[0.7.0\] entry in CHANGELOG.md. |
+| 0.7.0 | 2026-07-16 | Fix (packaging): excluded .claude/, _bmad*/, test-results/, playwright-report/ from the published .vsix — bundled by mistake (same class of bug as 0.6.9's fix). |
+| 0.7.0 | 2026-07-16 | Refactor: "Copy @file for Claude" toolbar button generalized to a plain clipboard copy, removing Claude Code-specific tab detection and auto-insert. |
+| 0.7.0 | 2026-07-16 | Test: added Phase 0 safety net (HLR 22, execCommand verb replacement) — characterization + RED clean-DOM-target + delete/cut hardening + roundtrip tests; no production code changed yet. |
+| 0.7.0 | 2026-07-16 | Refactor: added shared list-ops primitive (computeIndent/computeOutdent/computeToList/commitListOp, HLR 22 Phase 1) plus its tests; not wired to any call site yet. |
+| 0.7.0 | 2026-07-17 | Feature (US-18.4a): headings now keep their original ATX (#) vs. Setext (===/---) style on save instead of always normalizing to ATX. |
+| 0.7.0 | 2026-07-17 | Feature (US-18.4b): bullets, code blocks, em/strong, HRs now keep their original per-block syntax on save; new defaults `*` bullets and `\` hard breaks. |
+| 0.8.0 | 2026-07-17 | Release: bumped version to 0.8.0, consolidating heading/bullet/code-block/em-strong/HR style preservation (US-18.4a/18.4b) into one [0.8.0] entry in CHANGELOG.md. |
+| 0.7.0 | 2026-07-16 | Fix: Shift+Tab outdent (HLR 22 Phase 2.1) now wired to computeOutdent/commitListOpDirect instead of raw execCommand — no more empty `<ul>` or styling-span artifact. |
+| 0.7.0 | 2026-07-17 | Fix: Tab indent (HLR 22 Phase 2.2) now wired to computeIndent/commitListOp instead of raw execCommand — no more `ul > ul` sibling malformation. |
+| 0.7.0 | 2026-07-17 | Fix: setBulletList's toggle-off/OL→UL-convert and toggleTaskItem's toggle-off sites (HLR 22 Phase 2.3) wired to new computeRetagListRange/computeUnwrapListRange — no more styling-span artifact or malformed list split. |
+| 0.7.0 | 2026-07-17 | Fix: Tab/Shift+Tab pressed right after Enter (fresh empty list item) indented/outdented the WRONG item — caret restore now anchors to the moved item itself instead of a document-wide character offset that couldn't distinguish an empty sibling `<li>`'s start from the previous item's end. |
+| 0.7.0 | 2026-07-17 | Fix: pressing Enter at the end of a non-last list item left a stray blank line in the saved markdown — turndown's default `<br>`/empty-`<li>` handling corrupted the output; two new rules serialize an empty list item cleanly. |
+| 0.7.0 | 2026-07-17 | Fix: undo now follows edit chronology — toolbar actions flush pending typing first and commit as their own undo unit; toolbar Undo/Redo buttons delegate to TextDocument like Ctrl+Z/Y. |
+| 0.7.0 | 2026-07-17 | Fix: word-boundary undo checkpoint now reads the caret-adjacent DOM character instead of inputType/data — Vietnamese diacritic (composed/IME) typing no longer merges multiple words into one undo step. |
+| 0.8.0 | 2026-07-17 | Refactor/perf: shared `applyRange`/`emptyParagraph` helpers dedupe caret-restore and empty-`<p>` construction; `rankFileGroups` scores once before sort; `cleanupOrphanImages` reads each sibling `.md` once. |
+| 0.8.0 | 2026-07-17 | Refactor/perf: rAF-coalesce TOC-resizer `updateActive`; sticky-header reuses table rect; `flatMap`/`filter` cleanups (gutter, search); readability `mutateAndNotify` dedup + dead-export removal; cross-file-search `pluralize`/`dismiss` helpers. |
+| 0.8.0 | 2026-07-17 | Fix: selecting text with a blank line and clicking Bullet/Task List no longer creates an empty bullet/checkbox for that blank line. |
+| 0.8.0 | 2026-07-17 | Refactor: shared `resetCaptureState` (render), `parseHtml` (sibling-move), `resolveInserted` (dom-utils); drop duplicate `placeCaretAfterCheckbox` for `placeCaretAtBlockStart`; table `flatMap`/template-literal cleanups. |
+| 0.8.0 | 2026-07-17 | Fix: Numbered list button (HLR 22 Phase 2.4) wired to computeToList/computeRetagListRange instead of raw execCommand — no more `<p><ol>` leak when converting a plain paragraph. |
+| 0.8.0 | 2026-07-17 | Refactor/perf: cross-file-search `el()` DOM helper + lazy-render match rows on expand; drag-drop caret-restore routed through `dom.placeCaretIn` (3x) and shared `attach/detachDragListeners`. |
+| 0.8.0 | 2026-07-17 | Fix: heading/blockquote conversions (HLR 22 Phase 2.5/2.6) moved off execCommand formatBlock/insertHTML onto direct-Range insert — no nested-heading, style-leak, or p-revert-merge Chrome bugs. |
+| 0.8.0 | 2026-07-17 | Refactor: toggleTaskItem's inline tight-`<ul>` workaround (HLR 22 Phase 2.7) consolidated onto shared resolveTopLevelBlocks + computeToList — one implementation with setBulletList/setNumberedList. |
+| 0.8.0 | 2026-07-17 | Fix: refresh stale undo-chronology/granularity webview fixtures for the US-18.4b `*`-bullet + backslash-break defaults (4 failing tests); no app-code change. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group Backslash): broadened turndown `strayTrailingBr` rule strips a residual trailing `<br>` in `<li>`/`<p>`/`<blockquote>` so list/blockquote verb ops no longer leave a stray `\` on save. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group DragRefresh): Tab/Shift+Tab indent/outdent now calls `dragDrop.refresh()` so the drag handle no longer stays frozen over the moved `<li>`'s old position. |
+| 0.8.0 | 2026-07-17 | Test (HLR 22 Group Targeting): strengthened Enter+Tab/Shift+Tab regression tests with nesting-depth + serialized-markdown asserts; verified the reported list-targeting bug does not reproduce, no app-code change. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group IndentCollapse): indent (Tab) onto a previous sibling's existing sublist now commits via `commitListOpDirect`, so loose lists no longer get phantom `<li>`s/blank-line artifacts. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group HrCaretTrap): a caret-trap `<p>` now precedes every mid-document `<hr>`, and `formatHeading` bails on a `#content`-root selection, so typing `>`/changing heading level near an `<hr>` no longer absorbs it. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group ListVerbBlankDrop): Bullet/Numbered/Task on a selection spanning an `<hr>`/table now route through `computeToListAroundAtoms` (atom kept, list splits around it) instead of the corrupting legacy execCommand path; blank lines still dropped. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Bug #12): `>` input rule on an empty paragraph now places the caret inside the new blockquote (with a `<br>` placeholder), so typed text no longer leaks out beside it. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group DragRefresh, mở rộng): typing (`input`) and "Move up/Move down" menu reorders now call `dragDrop.refresh()`, so the drag handle no longer stays frozen over a block's old position. |
+| 0.8.0 | 2026-07-17 | Fix (HLR 22 Group TaskListFallback, Bug #11): Task List over a selection spanning a table/pre/blockquote/heading now splits the list around atoms (headings convert) via `commitListOpDirect`, replacing the corrupting legacy execCommand. |
+| 0.8.0 | 2026-07-18 | Fix (bug_ExcelCommand #1): undo now restores the caret inside the edited list item (using each `<li>`'s own `data-line`) instead of jumping to the first bullet's start. |
+| 0.8.0 | 2026-07-18 | Feature (bug_ExcelCommand #4): typing `> ` inside a blockquote now creates a nested blockquote (`> >`) instead of an escaped literal `\>`; Quote button strips the caret's own quote level and any deeper nested quotes, leaving higher levels intact. |
+| 0.8.0 | 2026-07-18 | Fix (bug_ExcelCommand #3): Task List on one `<ol>` item now splits it into its own task `<ul>` (siblings stay numbered) instead of leaving `2. [ ] Bravo`. |
+| 0.8.0 | 2026-07-18 | Fix (bug_ExcelCommand #2): an empty nested bullet (Tab-indent then Undo at TC2.2c) no longer serializes to a lone `-` line that re-parses as a setext heading; serialize now drops all-blank nested sublists. |
+| 0.8.0 | 2026-07-18 | Test: add clean-on-open webview guard verifying that opening a `.md` file posts no `edit` (stays not-dirty) even for non-byte-faithful content (CRLF, hr, table, math/mermaid). |
+| 0.8.0 | 2026-07-18 | Fix (bug_ExcelCommand #5): toggling a Task list item off now returns it to normal text (a paragraph), splitting the list and keeping sibling task items, instead of leaving a plain bullet. |
+| 0.8.0 | 2026-07-18 | Feature (bug_General #3): hovering a drag handle glyph (block/list-item/table) now outlines its drag target so the user sees what will move; plain content hover still adds nothing (bug 0716 #6). |
+| 0.8.0 | 2026-07-18 | Fix (bug_General #1): toggling Zen/Focus mode no longer forces Reading Mode styling on; reading styling now gates on Reading Mode only, so Zen keeps the current reading state (Zen and Reading Mode fully independent). |
+| 0.8.0 | 2026-07-18 | Fix (bug_General #2): copying editor content now also writes formatted text/html to the clipboard, so pasting into external rich-text tools (email, Word) keeps formatting; text/plain stays Markdown for paste-back into the editor. |
+| 0.8.0 | 2026-07-18 | Fix (bug_General #1): clicking a block/table handle now opens its menu clear of the block content and selects the whole block, deletable via Delete/Backspace. |
+| 0.8.0 | 2026-07-18 | Fix (bug_General R2): handle menus (block/table/row) open clear of the selected element and below the toolbar; handle click no longer selects text; scroll locks while a menu is open. |
+| 0.8.0 | 2026-07-18 | Refactor (Code Optimization Notes Group A): dedup 5 previously-blocked files — extract getAnchorElement/wireTriggerButton + drop dead mainOpensDropdown (toolbar), broadcastToOtherPanels/resolveAllowedAssetsDir (provider), serializeIfChanged/applyInlineFormat (main), commitListPlan/hasNestedSublist (list-ops), pickFence/outerHtmlFallback (turndown); behavior unchanged. |
+| 0.8.0 | 2026-07-18 | Refactor (Code Optimization Notes Group B): dedup table.ts (attachDragListeners/detachDragListeners for the drag-listener trio) + input-rules.ts (finishTaskItem/applyOrderedStart for the task-checkbox and ordered-list-start tails); behavior unchanged. |
+| 0.8.0 | 2026-07-18 | Refactor (Code Optimization Notes — re-triaged defers): shared readAsDataUrl/dataUrlToBase64 (dom-utils, dedup paste-image + external-drop), createToolbarToggle (dom-postprocess, dedup math/mermaid toolbar), and named message payload types (RevealPosition/AssetSaveResult/Zen/ReadingModeChanged in messages.ts); behavior unchanged. |
+| 0.8.0 | 2026-07-18 | Feature: register Orca MD Editor with customEditor priority "default" so .md files (incl. followed links) open in Orca instead of raw text. |
+| 0.8.0 | 2026-07-18 | Refactor + security (Optimization Notes): shared el() helper, toggleAttribute checkbox mirror, cellPrefix/rangeToInnerHtml/fillSequenceColumn dedup, zen toolbar-height rAF-coalesce; S-1/S-2 message-boundary validation. |
+| 0.8.0 | 2026-07-18 | Fix: dropped non-image files now orphan-cleaned like pasted images — deleting the link removes+caches the asset (undo restores it) via per-document in-session tracking. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #2): heading block handle + hover-preview outline now span the whole section (heading + content), matching what a drag actually moves. |
+| 0.8.0 | 2026-07-18 | Feature: heading Move Up/Down/"Move to"/drag now restricted to same-level sibling positions under the same parent heading; level changes stay separate (Tab/Shift+Tab). |
+| 0.8.0 | 2026-07-18 | Fix (bug General #4): TOC auto-hides based on Comfortable Reading content width + live panel width, not half the physical screen. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #6): Mermaid diagrams get a toolbar "Zoom" button opening a fullscreen lightbox (scroll to zoom, drag to pan, Esc to close), sharing the image-zoom overlay. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): bare relative file paths render as clickable links labelled by file name (display-only); the raw path round-trips unchanged in the .md. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): a relative path written as inline code (backticks) is now Cmd/Ctrl+Click-openable while keeping its code style; the code span round-trips unchanged. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #5): auto-linked inline-code paths now display just the file name in link colour (code background kept); the .md still round-trips to the full `path`. |
+| 0.8.0 | 2026-07-18 | Feature (bug General #10): TOC entries now render as bordered, rounded cards (subtle background, per-level indent) instead of flat hyperlinks; palette-aware in reading modes. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #10): TOC card text no longer painted as an underlined link on hover/active; the accent moved to the card border/background. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #10): TOC now rebuilds after toolbar heading-level changes (raw-DOM ops that skip 'input'), via scheduleSync — matching keyboard edits. |
+| 0.8.0 | 2026-07-18 | Fix (bug General #7): code-block syntax highlighting and Mermaid diagrams now follow the active reading palette, not just the VS Code theme, so both stay readable on light palettes (e.g. Sepia). |
+| 0.8.0 | 2026-07-18 | Feature (bug General #9): in a heading, Tab demotes / Shift+Tab promotes it and its descendant headings; Tab past H6 becomes a paragraph, Shift+Tab on H1 is a no-op. |
+| 0.8.0 | 2026-07-18 | Fix (bug General R3 #1): clicking a block/table drag handle now opens the Move menu at the click point, not far below a tall block/section. |
+| 0.8.0 | 2026-07-18 | Fix (bug2): undo after deleting a just-pasted image now restores it — the inverse paste↔delete pair is split so VS Code no longer merges them into one net-zero undo step. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel header now shows a reading-progress ring, estimated read time, and word count instead of the "Table of Contents" title. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel now slides open/closed (width+opacity) and outline rows use a flat active-tint + growing left accent bar, per the outline-rail design handoff. |
+| 0.8.0 | 2026-07-19 | Feature: TOC heading-level filter changed from a slider to 3 pill buttons (H1/H2/H3), matching the outline-rail design handoff; same filter behavior, control only. |
+| 0.8.0 | 2026-07-19 | Fix + polish: TOC resize-drag no longer lags cursor; ring/filter/focus re-tint under Reading palettes; empty state gains an icon + no-match reset link; `.toc-item` keyboard focus outline. |
+| 0.8.0 | 2026-07-19 | Fix: long TOC heading titles truncate with an ellipsis again — the flat-row `.toc-item` had become `display:flex`, which broke `text-overflow:ellipsis`; reverted to block. |
+| 0.8.0 | 2026-07-19 | Change: TOC reading-progress ring is now a fixed 54px instead of scaling with the panel width — a resizing ring read as unstable. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel width now shrinks proportionally as the editor window narrows (capped to ~35% of the window, floor 200px), and restores the user's preferred width when it grows back. |
+| 0.8.0 | 2026-07-19 | Fix: during TOC resize-drag the editor content + toolbar now track the panel edge 1:1 — their `padding-right`/`margin-right` transition is suppressed while dragging, removing the 0.3s lag. |
+| 0.8.0 | 2026-07-19 | Feature: fixed-px heading scale (H1–H6) per Document Blocks design — plain editor + the 4 Reading-Mode groups, with per-level weight, H2-only border, small-heading opacity and letter-spacing; headings no longer scale with font-size. |
+| 0.8.0 | 2026-07-19 | Feature: High-Contrast code-block syntax token colors; nested blockquote receded (opacity .82); blockquote 3px border + italic + tighter plain-editor size + HC weight 500 (Document Blocks items 9/10/5). |
+| 0.8.0 | 2026-07-19 | Feature: Link/Image toolbar buttons disable (dim, cursor:not-allowed, "unavailable inside a code block" tooltip) when the caret is inside a code block, per design state (f) — US-4.23. |
+| 0.8.0 | 2026-07-19 | Refactor/Feature: toolbar controls reordered to wireframe sequence (Undo/Redo lead, Inline code by B/I/S) + explicit collapse-priority overflow so Zen can collapse and Link/Image stay — US-4.24. |
+| 0.8.0 | 2026-07-19 | Feature: dedicated `--toolbar-*` chrome token set — each reading mode gets its own toolbar hue (not inherited from content) + the "Common" badge is now an accent per theme instead of flat gray; followTheme stays adaptive — US-4.25. |
+| 0.8.0 | 2026-07-19 | Feature: per-code-block header (language label + Copy button) on every fenced block, fenced-code typography box (13px/1.7, radius 8, HC 2px border) and inline-code HC/Sepia polish — Document Blocks item 8. |
+| 0.8.0 | 2026-07-19 | Refactor: toolbar control sizes (button/icon/separator/padding) now derive from one fixed `--toolbar-base-height` knob via calc ratios — pixel-identical default, density tunable in one line — US-4.26. |
+| 0.8.0 | 2026-07-19 | Feature: click a code block's header language label to change its language in place — reuses the toolbar's 9-language dropdown, rewrites the `<code>` class, re-highlights, and re-serializes the fence — US-4.28. |
+| 0.8.0 | 2026-07-19 | Feature: Reading Mode dropdown redesign — 14×14 live swatch per row, bold group captions, "Previewing…" tag on the hovered row; combo set reconciled to the wireframe 9 (dropped 3, added compact-light + dyslexia-sepia); fixed a stuck-preview when closing during the hover debounce — US-4.27. |
+| 0.8.0 | 2026-07-19 | Fix: Academic Paper reading palette syntax colors (function/number/type/variable) and quote border/fg now match the prototype spec instead of reusing the generic light-palette token set. |
+| 0.8.0 | 2026-07-19 | Feature: Reading Mode dropdown now reads --rp-widget-bg/--rp-tab-active/--rp-widget-shadow (fallback to old shared tokens) so Academic Paper's dropdown chrome matches spec; other palettes unaffected until they define their own. |
+| 0.8.0 | 2026-07-19 | Feature: TOC panel/header/depth-filter pills/heading rows now use a dedicated --toc-* token set per reading palette (bg, chrome bg, border, shadow, accent, accentSoft, pill surface); first H1 row always bold + accentSoft to mark it as always-visible. |
+| 0.8.0 | 2026-07-19 | Feature: Reading Mode dropdown trimmed to 3 flat modes (Standard, Sepia Comfort, Paper Comfort); removed group captions/swatches/separator; other bundles still reachable via settings. |
+| 0.8.0 | 2026-07-19 | Feature: newly opened tabs with no session reading state now default to Standard (Reading Mode off) instead of Comfortable; Zen stays Off. |
+| 0.8.0 | 2026-07-19 | Fix: toolbar now sits flush to the top edge in Zen-off (canceled inherited body padding-top:1em that left a visible gap above it under reading palettes). |
+| 0.8.0 | 2026-07-19 | Fix: toolbar now spans full viewport width in Zen-off (neutralized inherited html padding:0 26px that left an uncompensated ~26px gap on both sides). |
+| 0.8.0 | 2026-07-20 | Fix: an untouched table's compact `\|---\|---\|` separator row no longer gets rewritten to the padded `\| --- \| --- \|` style when another part of the file is edited. |
+| 0.8.0 | 2026-07-20 | Fix: TOC active-heading highlight no longer flickers/auto-scrolls the rail while typing elsewhere in the editor. |
+| 0.8.0 | 2026-07-20 | Fix: a code block inserted from the toolbar now shows its header (language label/switch menu + Copy) immediately, instead of only after an undo. |
+| 0.8.0 | 2026-07-20 | Feature: each code block header gets a "Wrap" toggle; blocks word-wrap by default and can switch to horizontal scroll per block (UI-only, not serialized). |
+| 0.8.0 | 2026-07-20 | Fix: right-align the Wrap/Copy buttons in the code block header (the language label's margin shorthand was overriding the intended push). |
+| 0.8.0 | 2026-07-20 | Fix: H1 headings render their bottom underline again (regression from heading typography update that dropped the border rule for H1). |
+| 0.8.0 | 2026-07-20 | Feature: establish :root Reading-Mode token contract (--rp-/--reading-/--reading-ui-*) with VS Code Standard values; strip inline fallbacks from safe consumers (US-19.23 Phase 0). |
+| 0.8.0 | 2026-07-20 | Fix: clicking the Reading Mode icon now resets to Standard instead of reopening the last-used reading style. |
+| 0.8.0 | 2026-07-20 | Feature: complete the --rp-* color contract in every reading-palette block (marker/accent/mark/diff/search/gutter/scrollbar tokens) (US-19.23 Phase 1). |
+| 0.8.0 | 2026-07-20 | Feature: palette-scoped Sepia/Paper color contract — exact --rp-* values, --hl-* syntax tokens, mark/checkbox/diff/marker/gutter/scrollbar/search consumers, chrome hue; Standard/followTheme untouched (US-19.23 Phase 1b/2/3). |
+| 0.8.0 | 2026-07-20 | Fix: chrome text (TOC, prompt-box, math popover, search, toast) now uses per-size --reading-ui-fs-* buckets, fixing a silent 1px regression; embedded chrome scales via em (US-19.23). |
+| 0.8.0 | 2026-07-20 | Feature: wire --reading-list-indent/--reading-quote-style/--reading-embed-padding to bullet/ordered lists, blockquote, front matter; task-list indent unified with bullet indent only under named presets (US-4.28). |
+| 0.8.0 | 2026-07-20 | Fix: left padding restored to 26px (was silently 20px) and line-gutter total offset to 82px (26 + 56px gutter), matching design; toolbar bleed margins updated to match. |
+| 0.8.0 | 2026-07-20 | Feature: Mermaid diagrams now recolor from the active reading palette's --rp-* tokens via themeVariables; lightbox stays fixed-dark (US-19.23 Phase 4). |
+| 0.8.0 | 2026-07-20 | Fix: line-gutter left padding now 26px + 56px gutter (offset to 26px) + 16px gap = 98px to heading; off state stays 26px; toolbar bleed margins updated to match. |
+| 0.8.0 | 2026-07-20 | Fix: TOC ring track uses --toc-accent-soft (warm faint ring, not the cool tan --toc-border) and H1/H2/H3 filter is borderless per design (plain muted text, active = soft-fill pill) under named reading palettes. |
+| 0.8.0 | 2026-07-20 | Feature: Reading Mode adds 24px top breathing room below the sticky toolbar (on #content, non-zen) to match the design prototype content-pane spacing. |
+| 0.8.0 | 2026-07-20 | Refactor: collapse the two-axis preset×palette Reading Mode model into one ReadingMode concept (Standard/Sepia/Paper) across types/messages/provider/toolbar/mermaid/CSS/settings; drop unused presets/palettes + Vietnamese font auto-detect (US-19.24). |
+| 0.8.0 | 2026-07-20 | Fix: Sepia TOC panel two-tone — header (--toc-chrome-bg #f4ecd8) was lighter than the list body (--toc-bg #ece0c4), leaving a stray light band behind the progress ring; unified chrome-bg to #ece0c4 so the rail is one uniform cream (matches design + other modes). |
+| 0.8.0 | 2026-07-20 | Fix: align Sepia/Paper Reading Mode with the handoff prototype — new --rp-row-border/--rp-select-match-bg/--rp-scrollbar-thumb-hover/--rp-stripe-* tokens, chrome keeps native font sizes (no 14px scale-up), reading font pinned to system-sans, and TOC active/item/pill re-wired to gold --toc-pill-bg/--toc-accent. |
+| 0.8.0 | 2026-07-20 | Fix: scope Reading Mode system-sans font to Sepia/Paper only; Standard now keeps the VS Code editor font (--markdown-font-family) via the base→palette override pattern, so "Follow VS Code" stays like VS Code without a special-cased selector. |
+| 0.8.0 | 2026-07-20 | Fix: Reading Mode content column rendered full-width (wide right gutter) instead of the 80ch centered container — a stray star-slash in the syntax-token comment ("selector-*/link") closed it early and the CSS parser dropped the `body.reading-mode #content` width rule; spaced the token and added a computed-width regression test. |
+| 0.8.0 | 2026-07-20 | Feature: add `check:css-comments` guard (scripts/check-css-comments.js, in the `test` aggregate) that fails on an orphan star-slash or unclosed comment in media/*.css — prevents a comment from silently closing early and dropping the next CSS rule. |
+| 0.8.0 | 2026-07-20 | Fix: selecting Standard Reading Mode no longer exits Zen Mode — disable() now only resets enabled/mode, Zen stays fully independent. |
+| 0.8.0 | 2026-07-20 | Fix: block/li/table drag handle restyled to two-tier hover (dim glyph, then accent bar + tint on handle hover), driven by --rp-accent so it's correctly themed per reading mode. |
+| 0.8.0 | 2026-07-20 | Refactor: TOC panel/header/item/depth-pill/progress-ring now read a single --toc-* token contract with a real Standard baseline (was --vscode-* hardcoded separately from Sepia/Paper's overrides) — Standard TOC now matches the prototype's filled active-item/pill/ring styling instead of a plain VS Code selection tint. |
+| 0.8.0 | 2026-07-20 | Feature: add shared capture-phase Escape priority stack (escape-stack.ts); route drag, table, cross-file-search, and Zen Escape handlers through it (US-20.4). |
+| 0.8.0 | 2026-07-20 | Feature: add input-ownership flag module (input-ownership.ts); guard input-rules and main content keydown so an overlay can claim editor input (US-20.2). |
+| 0.8.0 | 2026-07-20 | Feature: add shared trigger-popup shell (trigger-popup.ts) with Reading-Mode-token chrome, Escape-stack + input-ownership integration and cross-instance staleness guard (US-20.1/20.4). |
+| 0.8.0 | 2026-07-20 | Feature: add Reading Mode entity/warning tokens (--rp-entity-accent, --rp-entity-ref-bg, --rp-warning, --rp-warning-bg, --rp-warning-border) to Standard/Sepia/Paper palettes for Req 20/21. |
+| 0.8.0 | 2026-07-21 | Fix: Req 20 B0 trigger-popup foundation — remove stray main.js popup instantiation and share input-ownership across bundles; webview suite fully green. |
+| 0.8.0 | 2026-07-21 | Feature: `@` Reference trigger — file/heading mention popup with scope tabs, ghost-text Tab-accept, `](`-alt-trigger, and selection-aware link insert (US-20.1/20.6/20.7). |
+| 0.8.0 | 2026-07-21 | Feature: `/` Define trigger popup — location-sensitive block/inline inserts reusing toolbar actions, plus a configurable insert-today's-date setting (US-20.2). |
+| 0.8.0 | 2026-07-21 | Feature: `/` Execute trigger group — 3 real contributed commands (Reading Mode/Zen/TOC) invoked via a validated, document-scoped host round-trip (US-20.3). |
+| 0.8.0 | 2026-07-21 | Feature: broken file/heading link detection — always-visible warning marker, hover tooltip, and Search-again quick-correct popover (US-20.9). |
+| 0.8.0 | 2026-07-21 | Feature: toolbar broken-reference count badge, warning-token styled; click jumps caret to the nearest broken ref, wrapping (US-21.3). |
+| 0.8.0 | 2026-07-21 | Fix: single shared trigger-popup instance for `@`/`/` (lazy, no standing card at init) + contentEditable space handling in `/` literalize and insert-date, restoring the webview suite to green. |
+| 0.8.0 | 2026-07-21 | Refactor: remove toolbar Insert Link/Image modals (delete prompt.ts); both buttons now open the `@` trigger-popup (Image mode inserts a bare `<img>`, Files-only scope), code-block context disabled with feedback (US-20.8). |
+| 0.8.0 | 2026-07-21 | Feature: add `orcaEditor.triggerActions.mode` (simple/advanced, default advanced) gating `@`/`/` trigger visibility, with live-toggle plumbing + reusable advanced-only guard infra (US-21.5). |
+| 0.8.0 | 2026-07-21 | Feature: `/add reference` builds/updates a `## References` section (merge-preserving, `⚠️` broken-file marker); broken entry jumps to first body occurrence, healthy entry opens the target (US-20.5). |
+| 0.8.0 | 2026-07-21 | Feature: host-side workspace entity index — `caption::` parse, nearest-enclosing-heading title, id+title fuzzy query, incremental update, indexing state (US-21.2). |
+| 0.8.0 | 2026-07-21 | Fix: EntityIndex query-by-full-id (e.g. `UC01`) now matches — search haystack includes namespace+id, not just the id half. |
+| 0.8.0 | 2026-07-21 | Feature: Declare-entity `/` trigger (namespace picker + id duplicate-check) inserts `caption::NS_ID` as a Reading-Mode-tokenized solid-pill badge (US-21.1). |
+| 0.8.0 | 2026-07-21 | Feature: `@` popup Entities scope tab — namespace browse/drill-down + id/title search, indexing state, `--rp-entity-ref-bg` tint, Advanced-mode gated (US-21.2). |
+| 0.8.0 | 2026-07-21 | Fix: Declare-entity `/` flow lost typed characters (duplicate-check never fired, namespace input dropped chars) — stabilized the step paragraph and made the query read lag-free. |
+| 0.8.0 | 2026-07-21 | Feature: entity dot-drill (`UC01.`) scoped popup (headings + captions, breadcrumb, go-deeper) + muted reference pill + hover-only parent context (US-21.3). |
+| 0.8.0 | 2026-07-21 | Feature: `/relate` trigger — one-way `Refers to: [id](path#id)` entity link, advanced-mode-only, current file only (US-21.4). |
+| 0.8.0 | 2026-07-21 | Feature: broken entity-reference detection (bold marker) + Entities quick-correct/Fix-all + session occurrence cache + toolbar badge spanning file+entity refs (US-21.3). |
+| 0.8.0 | 2026-07-21 | Fix: `/relate` back-row now re-fetches a fresh namespace list, and the `/relate` commit preserves the space before "Refers to:". |
+| 0.8.0 | 2026-07-21 | Fix: Mermaid zoom lightbox opens the diagram fit-to-viewport (reads viewBox aspect ratio, drops inline max-width cap) instead of tiny native size. |
+| 0.8.0 | 2026-07-21 | Fix: `/` trigger popup now opens inside headings and list items (not just paragraphs), matching US-20.1 allowed block types — fixes `/declare` after a heading and `/` in bullets. |
+| 0.8.0 | 2026-07-21 | Fix: `@`//` trigger popup now shows a blinking caret in its query row (row 1) and hides the editor caret while open, so users can see that typing filters (Mention Declare bugs 3 & 4). |
+| 0.8.0 | 2026-07-21 | Fix: entity declaration pill hides the `caption::` prefix and shows `namespace value`, is a non-editable atom (click to edit its value via a duplicate-validated popup), and no longer leaks its pill format on Enter (Mention Declare bugs 5, 6, 7). |
+| 0.8.0 | 2026-07-22 | Fix: `@`//` trigger popup now filters while typing under a Vietnamese IME (was dropped on isComposing), and clicking anywhere in the popup no longer closes it (Mention Declare bug 3). |
+| 0.8.0 | 2026-07-22 | Fix: `@`//` trigger popup now flips above the caret when there is not enough room below, instead of overflowing off the bottom of the viewport (Mention Declare). |
+| 0.8.0 | 2026-07-22 | Fix: `/` at the start of an empty heading now shows the full Blocks group and normalizes the heading to a paragraph on pick, so block inserts apply cleanly (start-of-line, ignoring heading format). |
+| 0.8.0 | 2026-07-22 | Fix: `@`//` trigger popup no longer closes when selecting text inside the trigger token to edit the query (selectionchange now checks both selection ends stay within the run, not isCollapsed). |
+| 0.8.0 | 2026-07-22 | Fix: `⋮` More-options kebab now stays pinned at the toolbar's right edge (position:sticky) when the editor narrows, so it is the last icon to disappear instead of the first to be clipped off. |
+| 0.8.0 | 2026-07-22 | Fix: Reworked toolbar overflow priority — every left formatting control (undo/heading/bold/link…) now collapses into `•••` first; the right cluster (Reading/Focus/Outline) collapses last; `•••` and the `⋮` kebab never collapse (replaces the reverted sticky-pin, which floated over other icons). |
+| 0.8.0 | 2026-07-22 | Feature: `---` thematic break now renders one step stronger than the H1/H2 underline via new per-reading-mode `--rp-hr-border` token (mixed toward fg), instead of sharing `--rp-border`. |
+| 0.8.0 | 2026-07-22 | Fix: Empty-text link `[](url)` (e.g. a bare bullet) now displays the decoded target file name instead of rendering as a blank, unclickable bullet; display-only, the `.md` still round-trips to `[](url)`. |
+| 0.8.0 | 2026-07-22 | Fix: Entity declaration pill (`.md-caption`) restyled as an outline capsule — transparent fill, 1.5px accent border + accent label, bold — via new per-theme `--orca-entity-*` tokens. |
+| 0.8.0 | 2026-07-22 | Fix: Entity reference now renders as a normal hyperlink instead of a muted pill (PO decision); the `.md-entity-ref` class stays as a JS hook, broken-ref marker unchanged. |
+| 0.8.0 | 2026-07-22 | Fix: `@` search result label and detail now truncate at 20 chars + ellipsis, so a long file name / entity title no longer overruns the row and hides the pick target. |
+| 0.8.0 | 2026-07-22 | Fix: trigger popup positioning — declaring `/` on an empty line no longer jumps to the top-left corner, and the `@` popup keeps its first-shown vertical position when a scope switch resizes the card (re-clamps only if it would overflow the viewport). |
+| 0.8.0 | 2026-07-22 | Fix: trigger popups (@ / slash / declare) no longer leak filter text or the committing Enter into the editor — Enter is always consumed while a popup is open, and the declare id-step popup opens before its entity fetch so typing during the fetch can no longer land as raw editor text. |
+| 0.8.0 | 2026-07-22 | Fix: `@` over a selected link — Backspace/typing now edits the popup filter instead of deleting the link, and abandoning that popup no longer sticks `@` open (blocking all later `@`). |
+| 0.8.0 | 2026-07-22 | Fix: trigger popup shell now clears stale result rows on (re)open and highlights the first enabled row, so pressing Enter during the declare/@ flow can no longer commit a leftover item (corrupt `are-entity` namespace) or leak the typed search text + a newline into the editor. |
+| 0.8.0 | 2026-07-22 | Fix: switching Reading Mode / Focus / TOC no longer marks the file dirty — these view-only toolbar actions skip the post-action content sync (`viewOnly`) that previously posted a spurious edit on documents with dormant serialization drift. |
+| 0.8.0 | 2026-07-22 | Fix: broken-link tooltip no longer vanishes when the pointer crosses the anchor→tooltip gap, so "Search again →" is clickable; relative links now resolve workspace-root-first (fallback file-relative) for both the broken marker and opening. |
+| 0.8.0 | 2026-07-22 | Feature: trigger popups (@ / slash / declare / relate) now filter through a real focused `<input>` (native caret + IME) instead of reading the editor DOM; the trigger marker stays inline and only the picked result is written back. |
+| 0.8.0 | 2026-07-22 | Fix: trigger commit functions now focus `#content` before `execCommand`, since typing focus lives in the popup input. |
+| 0.8.0 | 2026-07-22 | Fix: slash / declare popup no longer dismisses the instant it opens — auto-close switched from `selectionchange` (which fired when focus left the editor) to a click-away outside the popup card. |
+| 0.8.0 | 2026-07-22 | Fix: typing `@` over a selected link no longer overwrites the link — editor input is blocked while a selection-mode popup is open. |
+| 0.8.0 | 2026-07-22 | Change: trigger popup row label/detail truncation cap raised from 20 to 30 chars so action/hint rows (declare suggestion, create-namespace, execute command) stay readable. |
+| 0.8.0 | 2026-07-22 | Change: trigger popup query `<input>` caret and text-selection colors now follow the Reading Mode tokens (`--rp-fg`, `--rp-selection-bg/-fg`), so they restyle per mode (Standard/Sepia/Paper) instead of using browser defaults. |
+| 0.8.0 | 2026-07-22 | Feature: trigger popup query input is now a soft-ring field (`--orca-input-*` tokens) — boxed 28px field with a `--rp-accent` border + focus-glow ring that restyles per Reading Mode. |
+| 0.8.0 | 2026-07-22 | Fix: closing/committing a trigger popup no longer jitters the editor — refocus now uses `focus({ preventScroll: true })` so the caret is restored without re-scrolling the (unmoved) viewport. |
+| 0.8.0 | 2026-07-22 | Fix: host-driven re-renders without caret info (Add reference, doc-mutating Execute commands, external edits) no longer jump the caret to the top of the file — the webview snapshots the source caret before `renderDocument` and restores it after. |
+| 0.8.0 | 2026-07-22 | Test: added broken-ref-tooltip.spec.ts covering the tooltip hide lifecycle — grace-timeout hide, re-hover cancel, tooltip mouseleave instant hide, scroll hide. |
+| 0.8.0 | 2026-07-22 | Fix: typing filter text in the `/`/`@` trigger popup then choosing a result no longer leaks that text into the editor/namespace — host suppresses the spurious echo of both `applyEditBreakingCoalesce` change events (bug-2 undo fix intact). |
+| 0.8.0 | 2026-07-22 | Feature: pasting inline text next to a word now inserts a smart space gap (skips whitespace/punctuation neighbors, block-level pastes, and code) so "foo"+paste no longer glues into "foobar". |
+| 0.8.0 | 2026-07-22 | Fix: cancelling the `/`/`@` trigger popup now restores the editor caret right after the marker — Escape refocuses #content; an empty-filter Space cancels to a literal `/`/`@` (space consumed). |
+| 0.8.0 | 2026-07-22 | Fix: removed the `/relate` ("Relate to entity") slash-menu item and its entire target-picker implementation (trigger-slash + toolbar), plus its tests. |
+| 0.8.0 | 2026-07-22 | Fix: Cmd/Ctrl-clicking an entity link now scrolls the opened file to its `caption::` declaration (resolved via the entity index) instead of just opening at the top. |
+| 0.8.0 | 2026-07-22 | Fix (bug #6): `@` pick no longer eats the space before the trigger — link/image commit now inserts via Range.insertNode instead of execCommand('insertHTML'). |
+| 0.8.0 | 2026-07-22 | Fix: `/`/`@` trigger popup filter text no longer leaks into the editor (+ stray newline on Enter) when a host `update` arrives mid-flow — the webview now defers the re-render until the popup releases input ownership instead of rebuilding #content under the open popup. |
+| 0.8.0 | 2026-07-22 | Fix (bug #9/#10): `/heading` on an empty line pre-fills selected "Heading N" and re-picking a level is absolute; `/` at the start of a line with text shows the full Blocks menu to re-format it. |
+| 0.8.0 | 2026-07-22 | Feature: navigating an entity link now also flashes/highlights the target `caption::` declaration badge (it is a non-selectable atom, so a transient flash stands in for a text selection). |
+| 0.8.0 | 2026-07-22 | Fix: pressing Tab in the `/`/`@` trigger popup no longer blurs the query input (popup was orphaned, Escape stopped working) — plain Tab is now swallowed so focus stays in the input. |
+| 0.8.0 | 2026-07-22 | Fix: entity index strips trailing punctuation the `caption::` capture absorbed from prose/markdown (e.g. ``caption::UC01`,`` → `UC01`), so search no longer shows malformed ids. |
+| 0.8.0 | 2026-07-22 | Fix: entity link now reveals its `caption::` declaration by whole-document text search (scroll + flash), so it works even when the target file is outside the workspace / not in the entity index. |
+| 0.8.0 | 2026-07-22 | Fix (bug #10): `/` command menu now lists Heading 1–3 only (Heading 4–6 hidden from the list but kept in data / toolbar). |
+| 0.8.0 | 2026-07-22 | Fix (bug C1): `@`-mention search no longer returns unrelated entities on a short token — title match is now word-start anchored (e.g. `UC` stops matching mid-word "strUCtured"), id match unchanged. |
+| 0.8.0 | 2026-07-22 | Fix (bug B1): trigger popups (`/` declare, `@`, `.` scope) no longer skip a stage under a Vietnamese IME — a reopened step ignores an IME double-Enter's second keydown. |
+| 0.8.0 | 2026-07-22 | Fix (bug D2): a `caption::` written inside an inline code span (backticks) is no longer indexed as a declaration, so documentation example syntax stops polluting the `@`-mention search. |
+| 0.8.0 | 2026-07-22 | Fix: picking a broken reference's "Search again →" no longer scrolls the page to the top — the seeded input focuses with `preventScroll`, keeping the popover anchored to the link. |
+| 0.8.0 | 2026-07-22 | Fix: an entity-ref hover tooltip on a cross-file mention (`file.md#UC01`) now names the target file instead of mis-resolving to a local same-id caption's parent namespace. |
+| 0.8.0 | 2026-07-22 | Feature: split entity-link hover — the info tooltip ("UC01 in …") shows over the link text; the broken-link fix popup now opens only over the leading warning-triangle marker, not the whole link. |
+| 0.8.0 | 2026-07-22 | Fix: entity-link info tooltip now renders ABOVE the pill so it no longer overlaps the broken-link fix popup (which sits below) during the hover grace period. |
+| 0.8.1 | 2026-07-22 | Feature: entity mention hover tooltip now shows a 20-char preview of the text following the `caption::NS_ID` declaration (same-file from DOM, cross-file from the host index) so a bare namespace code is understandable. |
+| 0.8.1 | 2026-07-22 | Fix: correcting a broken entity reference via "Search again" now repoints the href at the picked entity's declaring file instead of keeping the old file part (which opened the wrong file). |
+| 0.8.2 | 2026-07-22 | Feature: an entity mention now inserts the entity's full human name as its display text (`UC01 Submit Leave Request`), not the bare code; the href fragment stays clean `#UC01`. Added a gap between the declaration badge and its following label. |
+| 0.9.0 | 2026-07-22 | Release: bumped version to 0.9.0, consolidating the `@` mention / `/` define-execute triggers, entity declare/index/reference system, broken-reference detection, and Reading Mode 3-mode redesign (Req 20/21, US-19.23/19.24) into one [0.9.0] entry in CHANGELOG.md. |
+| 0.9.0 | 2026-07-24 | Fix: workspace-boundary check falsely blocked/broke valid new-file links on Windows due to a case-sensitive path prefix compare mismatched between realpath and fsPath fallback. |
+| 0.9.0 | 2026-07-24 | Fix: workspace-boundary check now compares lexical paths first (realpath only as best-effort fallback) so OneDrive/junction reparse points no longer falsely block valid cross-folder links on Windows. |
+| 0.9.0 | 2026-07-24 | Feature: ```plantuml``` blocks render as diagrams in the preview, client-side and offline via @plantuml/core, lazy-loaded so diagram-free files pay nothing (US-2.8). |
+| 0.9.0 | 2026-07-24 | Fix: multiple PlantUML diagrams in one document left all-but-one stuck on "Rendering…" — the single-threaded engine's concurrent renders clashed; renders are now serialized through a queue. |
+| 0.9.0 | 2026-07-24 | Fix: PlantUML diagrams (dark-on-transparent, not theme-aware) were invisible on dark themes — gave the chart + zoom a light canvas, using the Reading Mode palette surface in reading modes. |
+| 0.9.0 | 2026-07-24 | Fix: orphan-asset cleanup no longer hard-deletes dropped files whose names contain spaces, parens, `&`, or diacritics (encoded-href + NFC/NFD mismatch); classify and undo-restore now share one normalizer (X-1). |
+| 0.9.0 | 2026-07-24 | Fix: editing a CRLF document no longer rewrites the whole file to LF on the first keystroke — the host now reconciles serialized text to the document's EOL before diffing (X-2). |
+| 0.9.0 | 2026-07-24 | Fix: creating a `## References` section in a CRLF document no longer leaves a stray `\r` before the heading — the trailing-blank-line strip in `renderReferences` is now EOL-agnostic (X-3). |
+| 0.9.0 | 2026-07-24 | Fix: typing in a CRLF document no longer loses the caret on every keystroke — the echo-suppression key is now reconciled to the document's EOL, so an edit isn't mistaken for an external change and re-rendered (X-2). |
+| 0.9.0 | 2026-07-24 | Fix: on Windows/Linux, AltGr+Shift+X / AltGr+Shift+Z no longer fire strikethrough / a destructive redo (and swallow the typed character) — both shortcuts now require `!altKey` (X-6). |
+| 0.9.0 | 2026-07-24 | Fix: toggling the Table of Contents now keeps the focused line in place (anchor-pinned across the reflow), clicking a TOC row sets the caret at its heading (no jump to top on close) and leaves no focus ring. |
+| 0.9.0 | 2026-07-24 | Fix: an entity mention with a non-ASCII (Vietnamese) namespace no longer always renders broken — the fragment is decoded+NFC-reconciled at the four classify/lookup/scan boundaries via one shared helper (X-5). |
+| 0.9.0 | 2026-07-24 | Change: the Table of Contents now defaults to H1–H2–H3 (was H1–H2), and a dense doc (>20 H1–H3 headings) now falls back to H2 (was H1-only); saved per-tab depth still wins. |
+| 0.9.0 | 2026-07-24 | Fix: a Vietnamese heading `#fragment` link no longer breaks across NFC vs NFD authoring forms — `slugifyHeadingText` now NFC-normalizes and both consumers slugify the fragment side via one shared helper (X-4). |
+| 0.9.0 | 2026-07-24 | Fix: unify link classify/resolve — `C:\…` is one consistent local target (X-7), References reuses openLink's resolver (X-10), href keys case-fold on case-insensitive filesystems to avoid duplicate entries (X-12). |
+| 0.9.0 | 2026-07-24 | Fix: `package.json` now declares `capabilities` (virtualWorkspaces false, untrustedWorkspaces limited) so VS Code shows the correct banner instead of loading a half-working extension (X-14). |
+| 0.9.0 | 2026-07-24 | Fix: cap dropped-file names (60-char stem, extension preserved) so a long name under a long OneDrive root no longer crosses Windows MAX_PATH, and surface a path-too-long message (X-9); toolbar tooltips now show dual ⌘/Ctrl shortcuts (X-11). |
+| 0.9.0 | 2026-07-24 | Fix: cross-OS customFolderPath — normalize on read, detect Windows drive paths regardless of host, case-fold containment/relative-link/self-exclusion on case-insensitive FS, specific drive-mismatch error (X-8). |
+| 0.9.0 | 2026-07-24 | Fix: cross-env hygiene batch — allowed-roots guard on undo-restore (X-15), debounced/scoped file watcher (X-16), higher undo settle ceiling (X-17), collision-safe concurrent drops (X-18), symmetric link encode/decode (X-19), specific untitled-doc paste/drop error (X-20), case-preserving image prefix on case-sensitive FS (X-21). |
+| 0.9.0 | 2026-07-24 | Fix: an entity declaration `caption::` authored in Unicode NFD now parses its namespace whole (NFC-normalize before the namespace split) instead of breaking at the combining mark, so it resolves against NFC/NFD mention queries (X-5 deferred follow-up). |
+| 0.9.0 | 2026-07-24 | Fix: a UNC link `\\server\share\x.md` is treated as an absolute local target (allowed-roots gated), not mis-joined onto the workspace root, and gets a distinct References dedup key (X-7 deferred follow-up). |
+| 0.9.0 | 2026-07-24 | Feature: external file/image drop now shows a drop-caret highlight at the exact insertion point while dragging, and falls back to end-of-file when the point resolves no caret (instead of a stale caret). |
+| 0.9.0 | 2026-07-24 | Feature: pressing Escape during an external file/image drag cancels it — clears the drop highlight and swallows the drop so nothing is inserted (registered on the shared Escape arbiter at DRAG priority). |
+| 0.9.0 | 2026-07-24 | Feature: wide tables get a floating horizontal scrollbar pinned to the viewport bottom, column-aligned and two-way synced, so you no longer scroll to the table's bottom to reach it (US-19.24). |
+| 0.9.0 | 2026-07-25 | Feature: "Toggle Table Fit Width" command — a global mode that shrinks/wraps table columns to fit the panel (capping columns bloated by one long cell) instead of scrolling; falls back to scroll when content can't fit (US-19.25). |
+| 0.9.0 | 2026-07-25 | Fix: entity index now debounces open-buffer re-parse and precomputes search haystacks (perf P1/P2); host pushes broken-ref recheck after each reindex so markers converge. |
+| 0.9.0 | 2026-07-25 | Fix: TOC no longer highlights the heading above once scrolled to the document's true bottom — the last heading is force-selected instead of relying on it crossing the threshold line. |
+| 0.9.0 | 2026-07-25 | Perf: rAF-coalesce webview hover detection so drag-handle and table row/column hover no longer force layout on every mousemove; fixes a stuck-handle-on-leave regression (P3/P4). |
+| 0.9.0 | 2026-07-25 | Feature: PlantUML quick-insert — toolbar split button (default Activity + 4-type dropdown Activity/Sequence/Class/State) and a "PlantUML diagram" slash-command entry, mirroring Mermaid (US-4.30). |
+| 0.9.0 | 2026-07-25 | Change: Table Fit Width (fit-mode) now defaults ON — tables shrink/wrap columns to fit the panel out of the box instead of scrolling; still toggleable live per session (US-19.25). |
+| 0.9.0 | 2026-07-25 | Perf: cache normalized file-name entries so file-link search no longer re-normalizes 5000 URIs per keystroke, and request-scope cross-file text so whole-word fallback stops re-reading the corpus (P7/P8). |
+| 0.9.0 | 2026-07-25 | Perf: rAF-coalesce table scroll handle-repositioning and the selectionchange table-toolbar update so they no longer force layout per scroll tick / keystroke (P6; P5 sticky-header already coalesced). |
+| 0.9.0 | 2026-07-25 | Fix: Table Fit Width now uses the whole word (spaces only) as the wrap unit — never breaks a word mid-character and keeps hyphenated tokens like dates ("2026-07-20") on one line (US-19.25). |
+| 0.9.0 | 2026-07-25 | Feature: Table Fit Width adds a 30ch readability floor — many-column tables scroll horizontally at that floor instead of crushing columns; no width jump crossing the fit/scroll boundary (US-19.25). |
+| 0.9.0 | 2026-07-25 | Fix: in Table Fit Width, typing into a width-pinned column (e.g. a newly added one) now re-fits that table after a short debounce so the column grows with the content instead of wrapping after 1-2 words (US-19.25). |
+| 0.9.0 | 2026-07-25 | Fix: a wide-but-short table's own horizontal scrollbar is now always visible (Chromium's overlay scrollbar previously stayed invisible until hovered/scrolled) (US-19.24). |
+| 0.9.0 | 2026-07-25 | Fix: an `@`-mention link to a same-folder file no longer loses its `[]()` syntax on save — `bareUrl` now only collapses true absolute-URL/mailto autolinks. |
+| 0.9.0 | 2026-07-25 | Fix: Windows UNC/drive-path links (`\\server\...`, `C:\...`) no longer mark the file dirty on open (backslash was percent-encoded then decayed on re-save) and are now correctly detected as absolute, not workspace-relative. |
+| 0.9.0 | 2026-07-25 | Fix: "Copy `@file` reference" / "View raw Markdown source" no longer dirty the file on a doc with a pre-existing render/reserialize drift — both are now `viewOnly`, matching Reading Mode/Focus/TOC. |
+| 0.9.0 | 2026-07-25 | Fix (security): bump transitive dev dependency `fast-uri` to 3.1.4, patching a host-confusion parser desync (CVE-2026-16221). |
+| 0.9.0 | 2026-07-25 | Fix (security): pin `brace-expansion` to 5.0.8 via npm `overrides` and bump eslint/eslint-plugin-security, closing a DoS advisory (GHSA-mh99-v99m-4gvg) unreachable via a plain audit fix. |
+| 0.10.0 | 2026-07-25 | Feature: add `check:cross-platform` script (metaKey/ctrlKey symmetry, `⌘`/`Ctrl` labels, CRLF/NFD/Windows-path fixtures) run automatically by `build.sh release`. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.1): right-click "Add Comment" creates a `vscode.comments` thread anchored to the selected node — author, timestamp, no change to the `.md`. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): comment anchors survive edits via four tiers (structural id, fuzzy text, covering block, floating), re-evaluated whenever an edit settles; duplicated anchors are re-minted. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.4): "Unresolved location" panel lists every floated comment (no cap), with drag-to-reattach, a ranked Re-attach… picker, and a keyboard-equivalent path; toolbar button badges the count. |
+| 0.10.0 | 2026-07-26 | Change: toolbar icon area now extends flush to both screen edges (was inset 26px each side); the "everything collapses to overflow" breakpoint moved accordingly. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.5): comments persist to an append-only `<file>.md.orca-comments.jsonl` sidecar, written before the thread exists and reloaded on reopen; the `.md` is never touched. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.5): renaming a `.md` moves its comment sidecar in the same VS Code operation (atomic, prompts on collision); a case/NFC-drifted sidecar is adopted on open. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.6): comment actions can no longer touch the `.md` — the session-only anchor marker class is stripped before serialize, and undo/redo inside a comment text field never reaches the document stack. |
+| 0.10.0 | 2026-07-26 | Feature (US-23.2): comment gutter pins (with clustering), a "Show Comments" inline highlight toggle, and a thread popover for reply/delete — reachable from both the webview and the native `vscode.comments` UI. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.3): two-step comment resolve — Author marks Resolved, Reviewer Closes, one-step Reopen, a live "text may have changed" hint, and an anchor-lost confirmation. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.7): the right TOC panel becomes a shared tab container — 32px tab strip with the TOC as its first tab, an overflow-menu shell, and Escape-to-close ordering. |
+| 0.10.0 | 2026-07-27 | Feature (US-10.8): TOC header restacked — ring and stat lines become a 3px bar plus one 28px meta row; depth pills move into the keyboard-operable `⋯` menu. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.9): Comment tab beside the TOC lists every thread grouped by status, absorbing the Unresolved-location panel; fixes reloaded threads collapsing onto one anchor. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.11): resolve state machine revised — no author gate on Resolve/Close/Reopen, full transition trail, one-directional drift, illegal status lines skipped at load, anchor-lost dialog becomes a notice. |
+| 0.10.0 | 2026-07-27 | Feature (US-19.26): table fit-mode only caps columns when max-content overflows the panel, hands the freed width back, and ignores empty cells in p75. |
+| 0.10.0 | 2026-07-27 | Fix (US-19.26): fit-mode no longer pins width when there's room — typing into a cell grows it live instead of waiting for the debounced re-fit. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.10): comment create hardened — click-point anchoring, refusals stay inline with retry, up-front document guard, author-name prompt, plain-text rendering everywhere. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.8): reload resolves comment threads through the anchor tiers before drawing, marks non-exact anchor state on all three surfaces, hardens the reply guard with a timeout. |
+| 0.10.0 | 2026-07-27 | Feature (US-23.8): reply draft survives a concurrent native Close (Reopen re-enables it), and the popover's temporary highlight is independent of the "Show Comments" toggle. |
+| 0.10.0 | 2026-07-27 | Feature (US-2.7): front matter redesigned — collapsed one-line row by default, click to expand into a title/badge/grid card or view raw YAML. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.20): sidecar append always writes a leading newline (no more probe); a confirmed-overwrite rename backs up the destination's sidecar instead of deleting it. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.19): a comment/reply/status-change/delete now saves the dirty document first, so its recorded text can never outlive an unsaved buffer. |
+| 0.10.0 | 2026-07-27 | Fix (US-23.13 AC4/AC5): merging two commented paragraphs no longer floats the second thread; verified empty-text anchors already skip tier 2; fixes a stale gutter/highlight refresh after a same-state re-resolve. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.13 AC1/AC2): a manual re-attach or an automatic floating-recovery now persists via a new sidecar line, so it survives a document reload instead of floating again. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.12): "Copy all as Markdown" — a Comment-tab menu item and Command Palette command export the file's review to the clipboard as Markdown. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.13 AC3/AC6): a floating-thread delete re-validates at confirm time; two panels on one document share one authoritative anchor resolver now. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.17): new `@vscode/test-electron` host test track covers the sidecar's rename/adopt/append filesystem paths via an injectable seam — no real modal or permission errors needed. |
+| 0.10.0 | 2026-07-28 | Fix (US-9.3): select-highlight's cached text map now invalidates on any local edit (MutationObserver), not just a full re-render — stops painting the match on unrelated text. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.21): 7 leaking presentation classes and injected UI chrome now strip from raw-HTML `.md` output on every serialize path, not just some. |
+| 0.10.0 | 2026-07-28 | Fix: the Ctrl/Cmd+F find box now sits below the sticky toolbar (offset by the measured `--toolbar-height`) instead of painting over its buttons. |
+| 0.10.0 | 2026-07-28 | Fix: follow-ups to the find-box move — toolbar dropdowns and the image-zoom button now win the band under the toolbar, and a short pane keeps the box on screen. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.14): edit a posted comment or reply via a new append-only `edit` sidecar line, folded latest-wins and marked "edited"; Closed threads locked. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.18): undo/redo pressed in any comment surface now dies there instead of rolling back the document, and a write refuses if the document moved mid-flight. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.16 AC1-AC8): comment sidecar dedup now spans every line type, belonging uses discriminating-length thresholds, delete drops its author gate. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.22): an unregistered `#content` CSS class now fails `npm test`; the scan found and registered three more leaking classes. |
+| 0.10.0 | 2026-07-28 | Feature (US-23.15): the comment sidecar now reloads when it changes on disk — threads added, refreshed and removed — and load losses plus an unshareable sidecar are surfaced. |
+| 0.10.0 | 2026-07-28 | Fix: repo hygiene — typecheck and lint now pass clean, roundtrip skips stale bundles with no source (23/23, was a misleading 27/27), comment-popover.ts no longer binary. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.18 host track): AC6's probe now proves an undo reverts US-23.5's sidecar rename — a confirmed defect; the capability positive control no longer reddens the gate. |
+| 0.10.0 | 2026-07-28 | Fix: test:host was a coin flip — restored windows ran the suite in 10 concurrent hosts, and every case ran with no workspace folder, hiding a false pass. |
+| 0.10.0 | 2026-07-28 | Fix (US-23.18 AC6): a webview undo no longer reverts your last file rename — the provider refuses the global undo command when the document owns no undo step. |
+| 0.10.0 | 2026-07-28 | Fix: the feature-guide screenshot generator moved out of test/webview to scripts/feature-shots — a test run no longer rewrites eight tracked PNGs. |
+| 0.10.0 | 2026-07-28 | Fix: two comments sharing one anchor no longer mask each other's approximate marking — a relocated cluster now shows as misplaced instead of exact. |
+| 0.10.0 | 2026-07-28 | Fix: the native comment reply and thread-create paths now strip bidi/control characters and normalize line endings before writing to the sidecar. |
+| 0.10.0 | 2026-07-28 | Fix: a status change now answers its refusals before the author-name prompt instead of after, and claims its dedup guard ahead of every await. |
+| 0.10.0 | 2026-07-28 | Fix: exclude playwright.shots.config.ts and scripts/ from eslint so npm run lint reports zero errors again. |
+| 0.10.0 | 2026-07-28 | Fix: caption badges, math wrappers and diagram frames inside a raw-HTML-serialized table now write their markdown source instead of editor markup into the .md. |
+| 0.10.0 | 2026-07-28 | Fix: webview test workers no longer share one harness HTML file — the truncate race that made four specs time out waiting for #content is gone. |
+| 0.10.0 | 2026-07-28 | Feature: a unit guard now fails when a webview-posted message type has no case in provider.ts, the gap that hid the editComment bug. |
+| 0.10.0 | 2026-07-28 | Fix: symlinks below the workspace root no longer let asset writes, orphan hard-deletes or sidecar mutations escape the allowed roots (Security Audit S-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): a raw `<meta http-equiv="refresh">` tag in a document can no longer trigger a navigation attempt on open (Security Audit S-2). |
+| 0.10.0 | 2026-07-28 | Fix (security): PlantUML diagram SVGs are now sanitized (script/handler/foreignObject/javascript: stripped) before insertion, matching Mermaid's own sanitization (Security Audit S-4). |
+| 0.10.0 | 2026-07-28 | Fix (security): declared `untrustedWorkspaces` restrictions now actually restrict — customFolderPath and comments.authorName are User-scope only in a restricted workspace (Security Audit S-5). |
+| 0.10.0 | 2026-07-28 | Fix (security): dropped file names that are Windows-reserved device names or end in dots/spaces are now sanitized before saving (Security Audit S-6). |
+| 0.10.0 | 2026-07-28 | Fix (perf): Mermaid engine (~2.8 MB) now lazy-loads only when a document has a mermaid block, shrinking every preview's baseline bundle (Performance Audit P-1). |
+| 0.10.0 | 2026-07-28 | Fix (security): closed a control-character javascript: bypass in the PlantUML SVG sanitizer and a compound-extension gap in the reserved-device-name check, found in review of S-4/S-6. |
+| 0.10.0 | 2026-07-28 | Fix: dropped file names with whitespace before a leading dot (e.g. " .htaccess") were not stripped of the dot — fixed the step order in sanitizeDroppedFileName. |
+| 0.10.0 | 2026-07-28 | Fix (security): paste/insert now also sanitizes raw meta-refresh HTML, closing a second entry point to Security Audit S-2 (defense-in-depth). |
+| 0.10.0 | 2026-07-28 | Fix (perf): serialize no longer rescans the whole cloned document once per block — one index pass replaces the quadratic lookup (Performance Audit P-2). |
+| 0.10.0 | 2026-07-28 | Fix (perf): block, list-item and table row/column drags now compute their drop line once per frame instead of per mousemove (Performance Audit P-3/P-4). |
+| 0.10.0 | 2026-07-28 | Fix (perf): dragging a popup no longer measures it on every mouse move — the move is frame-coalesced, keeping the mid-drag resize behaviour (Performance Audit P-5). |
+| 0.10.0 | 2026-07-28 | Fix (perf): the comment re-attach picker walks the document once on open instead of on every filter keystroke (Performance Audit P-6). |
+| 0.10.0 | 2026-07-28 | Fix (perf review): the re-attach picker now re-walks when the document is rebuilt under it, and a dismissed popup no longer moves off-screen mid-drag. |
+| 0.10.0 | 2026-07-28 | Fix: converting a loose bullet item to a task item keeps its text on the checkbox line instead of leaving an empty "- [ ]" marker. |
+| 0.10.0 | 2026-07-28 | Fix (review): loose task items no longer lose their task-list styling, leak a raw <input> into the .md on Bullet, or misplace the caret on Enter. |
+| 0.10.0 | 2026-07-28 | Fix (security S-1 residual): asset paste/drop/undo-restore/orphan-cleanup now refuse a symlinked target file instead of writing or reading through it. |
+| 0.10.0 | 2026-07-28 | Perf: typing re-serializes only the blocks an edit touched via a per-block markdown cache, instead of turndown over the whole document (Performance Audit P-7). |
+| 0.10.0 | 2026-07-28 | Perf: each typing sync now sends only the changed region to the host instead of the whole document, with a revision-checked full resync fallback (Performance Audit P-8). |
+| 0.10.0 | 2026-07-28 | Feature: the gutter comment-group (cluster) pill gets a per-mode outline token --comment-pin-group-border for Standard Light/Dark, Sepia and Paper. |
+| 0.10.0 | 2026-07-28 | Fix: comment-anchor highlight gains contrast in Standard Dark — wash .22 to .30, active .34 to .46, plus a violet underline rule; text colour untouched. |
+| 0.10.0 | 2026-07-28 | Fix: the comment-group pin halo painted the VS Code theme background over Sepia/Paper pages, reading as a thick black ring; it now follows --rp-bg. |
+| 0.10.0 | 2026-07-28 | Fix: gutter comment pins read the VS Code link/description colours directly, showing blue on Sepia/Paper; they now resolve through the per-palette --comment-status-* layer. |
+| 0.10.0 | 2026-07-28 | Fix: table fit-mode measured a column floor over text glyphs only, so a one-token inline code chip broke at a hyphen inside an already-wide column, leaving dead space. |
+| 0.10.0 | 2026-07-29 | Fix: a comment in a loose list item reported the whole list's first line, and gutter pins on nearby-but-different lines merged; pins now cluster per exact line. |
+| 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-9): a host update now splices only changed top-level blocks into the preview instead of rebuilding the whole document via innerHTML. |
+| 0.10.0 | 2026-07-29 | Fix: annotate a loop-local var in `nearestSrcRange` — TS7022 implicit-any circular inference broke `npm run typecheck`. |
+| 0.10.0 | 2026-07-29 | Fix (perf, Performance Audit P-7): hovering a drag handle no longer marks its block dirty, so it is not re-serialized nor replaced by the next host update. |
+| 0.10.0 | 2026-07-29 | Fix: Comment tab rows showed the anchored text; they now show the comment itself, and the `⚑` toolbar button is retired with its lost-anchor badge moved to Show Comments. |
+| 0.10.0 | 2026-07-29 | Fix: the toast sat below the right dock in the stacking order, so whenever the dock was open every toast — including US-23.8 AC4's deletion notice — was painted behind it. |
+| 0.10.0 | 2026-07-29 | Feature (perf, Performance Audit P-8): host→webview document updates now ship only the changed region, guarded by rev + seq base checks with a full-push fallback. |
+| 0.10.0 | 2026-07-29 | Fix: comment delete now physically rewrites/removes the sidecar's cascade instead of appending a tombstone, and deletes the file once zero threads remain. |
+| 0.10.0 | 2026-07-29 | Feature: clicking a comment's highlighted text opens its thread popover, a second route beside the gutter pin; refused for drag/double-click selections and when Show Comments is off. |
+| 0.10.0 | 2026-07-29 | Fix: the two host-side comment anchor warnings now also reach the "Markdown WYSIWYG" output channel, not just console.warn. |
+| 0.10.0 | 2026-07-29 | Feature: the comment popover now anchors to the clicked text instead of the whole block, keeps clear of that text, and can be dragged aside. |
+| 0.10.0 | 2026-07-29 | Fix: `/` at the start of a bullet line (empty, with text, or a loose `<li><p>` item) now offers Bulleted/Numbered list in the Blocks menu instead of showing none. |
+| 0.10.0 | 2026-07-29 | Fix: the click-to-open-comment deferral is now 500ms, up from 250ms, so a double-click at the common OS interval no longer flashes the popover. |
+| 0.10.0 | 2026-07-29 | Fix: Bullet/Numbered/Task-list on a paragraph next to a sibling blockquote no longer merges the new list into the blockquote. |
+| 0.10.0 | 2026-07-29 | Fix: a plain click on a `## References` entry no longer navigates (US-20.5) — behaves like any other link, Cmd/Ctrl+Click still opens it. |
+| 0.10.0 | 2026-07-29 | Fix: task-list drag handle no longer overlaps the comment-gutter pin, now covers the checkbox/marker, and stays row-aligned on wrapped items. |
+| 0.10.0 | 2026-07-29 | Fix: the drag-handle hover highlight on a task-list item now extends past the checkbox instead of cutting through its left edge. |
+| 0.10.0 | 2026-07-29 | Fix: a still-present comment was flagged "foreign" once its anchored text got a markdown link, because the link's raw target slug split the belonging match. |
+| 1.0.0 | 2026-07-29 | Feature: added Comment feature. |
+| 1.0.0 | 2026-07-30 | Fix: front matter's collapse/expand toggle now shows for every field count, not just when there are more than 2 fields. |
+| 1.0.0 | 2026-07-31 | Feature: front matter is parsed by a real YAML parser, so nested maps, block-style lists and block scalars display as structured fields. |
+| 1.0.0 | 2026-07-31 | Feature: TOML front matter (`+++` fences, e.g. Hugo) now renders as the same card as YAML and saves back with its own fences. |
+| 1.0.0 | 2026-07-31 | Feature: a leading `{...}` block that is valid JSON now renders as a front-matter card, and saves back with no fence added. |
+| 1.0.0 | 2026-07-31 | Fix: Copy on an empty front-matter block no longer adds a blank line between the two fences, matching what a save writes. |
+| 1.1.0 | 2026-07-31 | Release: bumped version to 1.1.0, consolidating YAML/TOML/JSON front matter parsing and the collapse/expand fix into one [1.1.0] entry in CHANGELOG.md. |
+| 1.1.0 | 2026-07-31 | Chore: dropped `test:host` from the `npm test`/release gate — its VS Code download kept timing out on this network; still runnable manually via `npm run test:host`. |
+| 1.1.0 | 2026-09-24 | Chore: added review tiers with a fresh-session review handoff, a review run log (`scripts/review_log.py`), and a per-task context-usage audit (`scripts/context_audit.py`). |
+| 1.1.0 | 2026-09-24 | Fix: a long anchored quote no longer hides a comment thread — the popover clamps the quote to 2 lines and keeps a 5-line message list. |
+| 1.1.0 | 2026-09-24 | Fix: anyone can now delete any comment or reply — the popover and host no longer refuse delete on another author's content (confirm dialog kept). |
+| 1.1.0 | 2026-09-24 | Fix: removed the dead disabled-delete-button CSS rule left over after the author gate was dropped (T1.2 review). |
+| 1.1.0 | 2026-09-24 | Fix: a comment on a code block no longer records its Copy/Wrap/language header as anchor text, so its sidecar is no longer flagged foreign. |
+| 1.1.0 | 2026-09-24 | Fix: a comment on a selection crossing blocks now anchors to the block where the selection starts, not the whole document. |
+| 1.1.0 | 2026-09-24 | Feature: `scripts/codemap.py` (ported from PZMod) — `sym`/`doc`/`build` find a symbol's def+callers+tests+doc-mentions or one doc section by heading, without grepping or reading whole files. |
+| 1.1.0 | 2026-09-24 | Fix: ⌘B/⌘I/⌘E/⌘⇧X in the editor no longer also toggle the sidebar, open Extensions or Quick Open — the chords stop at the content. |
+| 1.1.0 | 2026-09-24 | Fix: toolbar/menu shortcut tooltips now show only the current platform's chord (⌘ on macOS, Ctrl+ elsewhere), not both. |
+| 1.1.0 | 2026-09-24 | Fix: a comment whose stored offsets land past its paragraph (e.g. AI-written sidecar) now re-finds its quote by text search and highlights again. |
+| 1.1.0 | 2026-09-24 | Feature: a comment line in the sidecar may carry a loose { last_known_line, quote } anchor instead of computed offsets; the thread loads and is flagged loose. |
+| 1.1.0 | 2026-09-24 | Fix: comment thread popover widened so an edited row's timestamps stay on one line and the edit field's Save button is no longer clipped. |
+| 1.1.0 | 2026-09-24 | Feature: a loose sidecar anchor now finds its quote, highlights it exactly and saves the full anchor once; an unmatched quote stays floating, nothing written. |
+| 1.1.0 | 2026-09-24 | Chore: added `scripts/plan_check.py` (ported from PZMod) — checks paths, file symbols/call arity, quoted headings, US-x.y headings and dependency commits named in a task plan before a session starts. |
+| 1.1.0 | 2026-09-24 | Fix: `plan_check.py` warns instead of erroring on US ids from unmerged dependencies, and reads quoted paths containing spaces. |
+| 1.2.0 | 2026-09-24 | Release: bumped version to 1.2.0, consolidating the comment-anchor, delete-permission and shortcut-scoping fixes since 1.1.0 into one [1.2.0] entry in CHANGELOG.md. |
+| 1.2.0 | 2026-09-24 | Fix: `npm audit fix` for brace-expansion, dompurify, fast-uri, js-yaml, mermaid, qs and undici transitive vulnerabilities. |
+| 1.2.0 | 2026-09-24 | Fix: `.vscodeignore` now excludes `.map/` and `.github/` so codemap tooling output no longer ships in the packaged VSIX. |
+| 1.2.0 | 2026-09-24 | Fix: right-click menu Cut/Copy/Paste now work — routed through the async Clipboard API instead of blocked `execCommand` calls. |
+| 1.2.0 | 2026-09-24 | Feature: block-handle menu gains a "Delete" item below "Move down" that removes the selected block, same as the Delete/Backspace shortcut. |
+| 1.2.0 | 2026-09-24 | Fix: clicking a list-item (bullet) drag handle now opens a Move up / Move down / Delete menu instead of doing nothing. |
+| 1.2.1 | 2026-09-24 | Release: bumped version to 1.2.1, consolidating the list-item handle menu, block-handle Delete, and Cut/Copy/Paste fixes since 1.2.0 into one [1.2.1] entry in CHANGELOG.md. |
+| 1.2.1 | 2026-09-24 | Feature: the line-number gutter (`orcaEditor.showLineNumbers`) is now hidden by default; enable it in Settings to show it. |
+| 1.2.1 | 2026-09-24 | Fix: with line numbers off, the gutter no longer draws numbers over the text — ResizeObserver/drag-drop repaints are now hidden by CSS. |
+| 1.2.1 | 2026-09-24 | Fix: dragging a table column to a new position no longer rebuilds the table or resets a wide table's horizontal scroll to the left. |
+| 1.2.2 | 2026-09-24 | Release: bumped version to 1.2.2, shipping the hidden-by-default line-number gutter, gutter overlap fix, and table column-move scroll fix. |
+| 1.2.2 | 2026-09-25 | Fix: line-number gutter no longer rebuilds markers on every relayout while showLineNumbers is off. |
+| 1.2.2 | 2026-09-25 | Perf: the workspace entity index is now built file by file at activation, so only one markdown file's text is held in memory at a time. |
+| 1.2.2 | 2026-09-25 | Feature: faster webview load — KaTeX bundled once, production CSS minified, test/debug artifacts excluded from the .vsix (T1.2). |
+| 1.2.2 | 2026-09-28 | Fix: Drag, table and li handles no longer shift left by the scrollbar width; fixed right/bottom now computed from clientWidth/clientHeight, not innerWidth/innerHeight. |
+| 1.2.2 | 2026-09-28 | Fix: drag, list, table, row and column handles now follow their block on window resize, TOC open/close, image load, zoom and table-corner scroll instead of keeping a stale position. |
+| 1.2.2 | 2026-09-29 | Fix: Table fit mode treats each CJK glyph as its own word, so a long unbroken Japanese/Chinese run no longer pins its column at ~650px. |
+| 1.2.2 | 2026-09-29 | Fix: table cells top-align and use text-wrap: pretty to avoid mid-row float and one-word wrap lines (T1.2) |
+| 1.2.2 | 2026-09-29 | Feature: Fit-mode tables gain a pure height-first column-width solver core (line model, role floors, single and joint row moves, free shrink, scroll floor) — not wired in yet (US-19.27). |
+| 1.2.2 | 2026-09-29 | Feature: area-fit cell measure adapter (measureCellLines: word/CJK break units, gaps, hard breaks, fixedH) plus TableAreaFitDebug test bundle and shared table fixtures (US-19.27, T1.9). |
+| 1.2.2 | 2026-09-29 | Feature: area-fit table solver stops at the knee (5% H), keeps a 15% knee floor, and holds applied widths within a 5%/2% hysteresis band with grow-only column support. |
+| 1.2.2 | 2026-09-29 | Fix: area-fit cell measure adapter counts inline-box padding, block-child line breaks, KaTeX formula height and <br>-only lines, and keeps non-breaking spaces inside words (US-19.27, T1.9 review). |
+| 1.2.2 | 2026-09-29 | Feature: GATE A probe measures the area-fit line model against Chromium (99.8% exact); the solver's column upper bound now covers the model's one-line width (US-19.27, T1.3). |
+| 1.2.2 | 2026-09-29 | Fix: area-fit knee floor keeps Σ maxW after the model-line hi raise; GATE A probe counts atomic inline and wrapped KaTeX boxes, asserts pin drift. |
+| 1.2.2 | 2026-09-29 | Fix: area-fit cell measure keeps kinsoku glyphs (、。，．：；？！・closing brackets, 々ゝゞヽヾ〜) with the unit before them, matching Chromium line starts. |
+| 1.2.2 | 2026-09-29 | Fix: area-fit measure takes line-break units from Chromium itself (1px layout) instead of hand-written rules; GATE A 441/441 exact, CJK rows match. |
+| 1.2.2 | 2026-09-29 | Feature: Table fit mode now picks column widths with the area-fit solver — lowest total row height, CJK-aware read floors, stops at the knee instead of filling the panel (US-19.27). |
+| 1.2.2 | 2026-09-29 | Fix: table area-fit solver caps candidate widths per column at 16, cutting a 20 × 50 solve from ~36 ms to ~18 ms. |
+| 1.2.2 | 2026-09-30 | Fix: fit-mode tables meet area targets: #8b and #20 lower than the old ladder; scrolling tables judged by scroll width; CJK 36ch floor only where it sets row height. |
+| 1.2.2 | 2026-09-30 | Feature: fit-mode tables keep existing column widths when a row or column is added or deleted, unless re-solving saves over 5% height (US-19.27) |
+| 1.2.2 | 2026-09-30 | Feature: Fit-mode tables keep column edges still while typing; only the edited column widens under overflow or growth pressure, paste/undo re-fit at once, IME-safe, caret row anchored. |
+| 1.2.2 | 2026-09-30 | Fix: pasted/dropped images inside a fit-mode table cell now re-fit immediately, not only on overflow/2-line-growth heuristics that a single insert never trips |
+| 1.2.2 | 2026-09-30 | Feature: fit-mode tables settle a typing-widened column back on table leave, editor blur or 2 s idle; panel resize keeps widths until 150 ms after the last event. |
+| 1.2.2 | 2026-09-30 | Feature: Fit-mode tables use area-optimal column widths with calm re-fits (US-19.27 shipped); phase gate green: unit 1041, roundtrip 25/25, webview 915, 0 flaky. |
+| 1.2.2 | 2026-09-30 | Fix: Table area fit no longer keeps a column wider than its content, and stacked images in a cell add one height per line (review fixes T1.8.p1, T1.9.p1). |
+| 1.2.2 | 2026-09-30 | Fix: Table area fit splits words correctly under a small line-height, in RTL text and at <wbr>; a pasted image re-fits the table once it has loaded. |
+| 1.2.2 | 2026-09-30 | Fix: Table area fit adds up a cell's hard lines, so an image with a wrapped caption under it counts both heights (T1.7.p3). |
+| 1.2.2 | 2026-09-30 | Fix: Fit-mode tables keep column widths after a row delete, like deleting text; columns narrow only when the table settles (2 s idle or caret leaves) (T1.7.p2). |
+| 1.2.2 | 2026-09-30 | Fix: Cross-file search keeps file text across queries, checked by mtime and size, so repeat searches no longer re-read every file from disk (audit L-5). |
+| 1.2.2 | 2026-09-30 | Fix: TOC panel slides with a transform and the content reflows once per toggle, removing show/hide lag on large tables |
+| 1.2.2 | 2026-09-30 | Feature: TOC reading stats count words without cloning the document, and debounced TOC builds keep the list when no heading changed. |
+| 1.2.2 | 2026-09-30 | Fix: TOC toggle keeps the reading line with one scroll correction and two re-holds instead of a per-frame pin loop |
+| 1.2.2 | 2026-09-30 | Feature: Documents with an indented code block now serialize per block on each sync instead of re-serializing the whole document (audit L-10). |
+| 1.2.2 | 2026-09-30 | Feature: drag-and-drop hover and drop-gap hit tests binary-search the top-level blocks, and large table/list drag ghosts carry only their first 10 rows (L-11) |
+| 1.2.2 | 2026-09-30 | Fix: dragging the TOC resize handle moves only the panel; content re-lays out after a 150 ms pause and on release |
+| 1.2.2 | 2026-09-30 | Fix: TOC show/hide and resize lag on large tables closed — one content reflow per toggle, debounced reserve while dragging |
+| 1.2.2 | 2026-09-30 | Fix: re-render after undo/redo reuses cached code highlighting and math typesetting for unchanged blocks |
+| 1.2.2 | 2026-09-30 | Fix: external or undo updates post-process only the changed blocks and keep a short hash per block instead of its full HTML |
+| 1.2.2 | 2026-09-30 | Fix: typing in a file without entity declarations no longer makes every open editor re-check entity references; declaration files are stat-ed once per check |
+| 1.2.2 | 2026-09-30 | Fix: mermaid and PlantUML keep at most 32 rendered diagrams in memory per tab instead of every diagram ever shown |
+| 1.2.2 | 2026-09-30 | Fix: in documents with more than 32 mermaid or PlantUML diagrams, paste, undo and external changes no longer re-render existing diagrams |
+| 1.2.2 | 2026-09-30 | Fix: an escaped dollar sign keeps its backslash when the document is saved, so it no longer turns into a formula after reopening |
+| 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse keeps its original text when the document is saved instead of being replaced by the error message |
+| 1.2.2 | 2026-09-30 | Fix: a formula KaTeX cannot parse now behaves like a valid one, one unit with an Edit button; Enter or Backspace beside it no longer duplicates it or loses text |
+| 1.2.2 | 2026-09-30 | Feature: math and front-matter engines build as separate lazily loadable bundles, groundwork for keeping KaTeX, js-yaml and smol-toml out of the preview's startup script |
+| 1.2.2 | 2026-09-30 | Fix: previews without math no longer load the KaTeX engine at startup; it loads on the first formula, rendering and saved Markdown unchanged |
+| 1.2.2 | 2026-09-30 | Fix: previews without YAML or TOML front matter no longer load the YAML/TOML parsers at startup; they load on first use |

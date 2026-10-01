@@ -74,6 +74,37 @@ export function hashSource(s: string): string {
   return h.toString(36);
 }
 
+/** Most rendered SVGs one engine keeps in memory per tab (audit C-2). */
+export const DIAGRAM_SVG_CACHE_MAX = 32;
+
+/** Cache read; a hit re-inserts the key so it becomes the most recently used. */
+export function recallSvg(cache: Map<string, string>, key: string): string | undefined {
+  const svg = cache.get(key);
+  if (svg !== undefined) {
+    cache.delete(key);
+    cache.set(key, svg);
+  }
+  return svg;
+}
+
+/**
+ * Cache write; evicts the least recently used entries beyond
+ * max(DIAGRAM_SVG_CACHE_MAX, keep). `keep` = the engine's diagram count on screen,
+ * so a render pass over more than 32 diagrams never evicts one it still shows.
+ */
+export function rememberSvg(cache: Map<string, string>, key: string, svg: string, keep = 0): void {
+  cache.delete(key);
+  cache.set(key, svg);
+  const max = Math.max(DIAGRAM_SVG_CACHE_MAX, keep);
+  while (cache.size > max) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cache.delete(oldest);
+  }
+}
+
 /**
  * bug_General #7: nền hiệu dụng của biểu đồ là do READING MODE quyết định (nếu
  * đang bật), KHÔNG chỉ theme VS Code. US-19.24: các mode màu (sepia/paper) đều

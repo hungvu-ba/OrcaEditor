@@ -22,6 +22,8 @@ import {
   classifyLink,
   computeMinimalEdit,
   documentStateKey,
+  evictToByteBudget,
+  FileTextCache,
   imageNamePrefix,
   driveMismatchHint,
   isPathTooLongError,
@@ -407,7 +409,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     const reindex = (uri: vscode.Uri): void => provider.scheduleReindex(uri);
     const watcherSubs = [
       watcher.onDidChange(reindex),
-      watcher.onDidCreate(reindex),
+      // A new file can resolve a file link in another panel even with no declarations.
+      watcher.onDidCreate((uri) => provider.scheduleReindex(uri, true)),
       watcher.onDidDelete((uri) => provider.forgetIndexedFile(uri)),
       watcher,
     ];
@@ -537,6 +540,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * other occurrence(s)` count, NOT any correctness guarantee.
    */
   private occurrenceCache = new Map<string, { file: string; line: number }[]>();
+  /** L-13: an open scan changed a count panels have not re-checked yet (cleared by notifyEntityIndexUpdated). */
+  private occurrencesChanged = false;
 
   /**
    * Req 21 US-21.3: re-scan one just-opened markdown document for entity
@@ -556,10 +561,12 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         for (let i = rows.length - 1; i >= 0; i--) {
           if (rows[i].file === fileKey) {
             rows.splice(i, 1);
+            this.occurrencesChanged = true;
           }
         }
       }
       for (const { id, line } of scanEntityOccurrences(text)) {
+        this.occurrencesChanged = true;
         const bucket = this.occurrenceCache.get(id);
         if (bucket) {
           bucket.push({ file: fileKey, line });
@@ -578,13 +585,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * (catches unsaved edits) and falling back to disk — same source-of-truth
    * order as crossFileSearch.
    */
-  private async readMarkdownText(uri: vscode.Uri): Promise<string> {
-    const openDoc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  private async readMarkdownText(uri: vscode.Uri, fatal = false): Promise<string> {
+    const key = documentStateKey(uri.toString(), CASE_INSENSITIVE_FS);
+    const openDoc = vscode.workspace.textDocuments.find(
+      (d) => documentStateKey(d.uri.toString(), CASE_INSENSITIVE_FS) === key
+    );
     if (openDoc) {
       return openDoc.getText();
     }
     const bytes = await vscode.workspace.fs.readFile(uri);
-    return new TextDecoder().decode(bytes);
+    return new TextDecoder('utf-8', { fatal }).decode(bytes);
   }
 
   /**
@@ -603,9 +613,11 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     'coverage',
   ]);
   private readonly reindexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** URIs whose pending reindex must notify even when their rows did not change (watcher create). */
+  private readonly forcedReindex = new Set<string>();
 
   /** X-16: debounced, dir-scoped entry point for watcher change/create events. */
-  private scheduleReindex(uri: vscode.Uri): void {
+  private scheduleReindex(uri: vscode.Uri, force = false): void {
     if (uri.path.split('/').some((seg) => MarkdownWysiwygProvider.WATCHER_EXCLUDE_DIRS.has(seg))) {
       return;
     }
@@ -614,11 +626,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (existing !== undefined) {
       clearTimeout(existing);
     }
+    if (force) {
+      this.forcedReindex.add(key);
+    }
     this.reindexTimers.set(
       key,
       setTimeout(() => {
         this.reindexTimers.delete(key);
-        void this.reindexFile(uri);
+        void this.reindexFile(uri, this.forcedReindex.delete(key));
       }, MarkdownWysiwygProvider.WATCHER_DEBOUNCE_MS)
     );
   }
@@ -631,7 +646,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       clearTimeout(existing);
       this.reindexTimers.delete(key);
     }
+    this.forcedReindex.delete(key);
     this.entityIndex.onFileChanged(key, '');
+    this.crossFileTextCache.delete(documentStateKey(key, CASE_INSENSITIVE_FS));
+    // Always notify: a deleted file breaks file links in other panels even with no declarations.
     this.notifyEntityIndexUpdated();
   }
 
@@ -641,6 +659,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * `.md` reindex and a sidecar reload for the same file never cancel each other.
    */
   private readonly sidecarReloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Audit L-12: pending thread re-syncs after accepted `commentAnchorUpdate`s,
+   * keyed by `documentStateKey`. One inserted line above N anchored threads
+   * posts N updates; they collapse into a single `commentThreadsSync`.
+   */
+  private readonly anchorSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly ANCHOR_SYNC_DEBOUNCE_MS = 100;
 
   /**
    * Req 24 US-23.18 AC6: per-document undo/redo depth, keyed the same normalized way as
@@ -745,6 +771,22 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     );
   }
 
+  /** Audit L-12: coalesce the thread re-sync of a burst of accepted anchor updates. */
+  private scheduleAnchorSync(document: vscode.TextDocument): void {
+    const key = document.uri.toString();
+    const existing = this.anchorSyncTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    this.anchorSyncTimers.set(
+      key,
+      setTimeout(() => {
+        this.anchorSyncTimers.delete(key);
+        this.syncCommentThreads(document);
+      }, MarkdownWysiwygProvider.ANCHOR_SYNC_DEBOUNCE_MS)
+    );
+  }
+
   /**
    * Req 24 US-23.15 AC2: the sidecar itself is gone (branch switch, `git rm`, or
    * by hand). `forgetDocument` drops every thread for that document and releases
@@ -797,13 +839,21 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       clearTimeout(timer);
     }
     this.sidecarReloadTimers.clear();
+    for (const timer of this.anchorSyncTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.anchorSyncTimers.clear();
   }
 
   /** Req 21 US-21.2: re-read + re-parse one file into the index (watcher change/create). */
-  private async reindexFile(uri: vscode.Uri): Promise<void> {
+  private async reindexFile(uri: vscode.Uri, force = false): Promise<void> {
     try {
-      this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
-      this.notifyEntityIndexUpdated();
+      // L-13: a file whose declarations did not change leaves every panel's markers valid,
+      // unless it was just created or an open scan changed an occurrence count since the last notify.
+      const changed = this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
+      if (changed || force || this.occurrencesChanged) {
+        this.notifyEntityIndexUpdated();
+      }
     } catch (err) {
       MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
     }
@@ -816,6 +866,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * absorbed by the webview's own recompute debounce.
    */
   private notifyEntityIndexUpdated(): void {
+    this.occurrencesChanged = false;
     for (const panels of this.panelsByUri.values()) {
       for (const panel of panels) {
         void panel.webview.postMessage({ type: 'entityIndexUpdated' } satisfies HostToWebview);
@@ -825,8 +876,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
 
   /**
    * Req 21 US-21.2: initial non-blocking full build of the entity index —
-   * findFiles all markdown, read each (skipping+logging any single failing
-   * file), yielding between files so activation isn't blocked, then build().
+   * findFiles all markdown, read and index each one in turn (skipping+logging
+   * any single failing file) so only one file's text is alive at a time,
+   * yielding between files so activation isn't blocked, then markReady().
    */
   public async buildEntityIndex(): Promise<void> {
     let uris: readonly vscode.Uri[];
@@ -840,10 +892,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       MarkdownWysiwygProvider.log('entityIndex: findFiles failed', err);
       uris = [];
     }
-    const entries: { uri: string; text: string }[] = [];
     for (const uri of uris) {
       try {
-        entries.push({ uri: uri.toString(), text: await this.readMarkdownText(uri) });
+        this.entityIndex.onFileChanged(uri.toString(), await this.readMarkdownText(uri));
       } catch (err) {
         // One unreadable file must not abort the whole build — skip + log.
         MarkdownWysiwygProvider.log(`entityIndex: could not read ${uri.toString()}`, err);
@@ -851,7 +902,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       // Yield so a large workspace scan doesn't monopolize the event loop.
       await new Promise<void>((r) => setTimeout(r, 0));
     }
-    this.entityIndex.build(entries);
+    this.entityIndex.markReady();
+    // Panels opened mid-scan checked a partial index — re-check them once now.
+    this.notifyEntityIndexUpdated();
   }
 
   /**
@@ -1238,6 +1291,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'mermaid-engine.js')
       )
       .toString();
+    // L-9 (Performance Low-End — Audit.md): same contract for the math and
+    // front-matter engine bundles.
+    const mathEngineUri = webview
+      .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'math-engine.js'))
+      .toString();
+    const frontMatterEngineUri = webview
+      .asWebviewUri(
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview', 'front-matter-engine.js')
+      )
+      .toString();
     webview.html = this.getHtml(webview, documentDir, initialReadability, scriptNonce);
 
     /** Văn bản cuối cùng mà webview đẩy lên qua 'edit' — dùng để chặn echo. */
@@ -1460,7 +1523,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       void postToWebview({
         type: 'configUpdate',
         autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
-        showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+        showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', false),
         // US-21.5: triggerActions.mode is the one trigger.* setting that DOES
         // need live propagation (visibility gate, not just a seed) — dateFormat/
         // executeCommands stay init-only, unchanged behavior.
@@ -1529,7 +1592,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
                 '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif'
               ),
               autoOpenToc: wysiwygCfg.get<boolean>('autoOpenToc', true),
-              showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', true),
+              showLineNumbers: wysiwygCfg.get<boolean>('showLineNumbers', false),
               crossFileSearchScope: wysiwygCfg.get<CrossFileSearchScope>('crossFileSearch.scope', 'markdown'),
               // US-19.25: global in-session (globalTableFitMode) ghi đè setting default,
               // cùng mô hình globalZen — tab mới khớp trạng thái Fit-mode hiện tại.
@@ -1540,6 +1603,9 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
               scriptNonce,
               // P-1: same mechanism, for mermaid.ts (see mermaidEngineUri above).
               mermaidEngineUri,
+              // L-9: same mechanism, for lazy-engines.ts.
+              mathEngineUri,
+              frontMatterEngineUri,
               readability: this.resolveReadability(wysiwygCfg),
               trigger: {
                 dateFormat: wysiwygCfg.get<string>('trigger.dateFormat', 'YYYY-MM-DD'),
@@ -2022,7 +2088,7 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             // webview then re-applied — pure amplification of a no-op.
             break;
           }
-          this.syncCommentThreads(document);
+          this.scheduleAnchorSync(document);
           break;
         }
         case 'replyToComment': {
@@ -2185,6 +2251,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       messageSubscription.dispose();
       viewStateSubscription.dispose();
       existCheckTokenSource?.dispose();
+      entityExistCheckTokenSource?.cancel();
+      entityExistCheckTokenSource?.dispose();
       // US-23.15 AC1: only this panel's no-workspace-folder fallback watcher, if
       // it needed one — the provider-level watcher lives as long as the extension.
       sidecarFallbackWatcher?.dispose();
@@ -2495,6 +2563,10 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     // return raw `{"schema_version":1,...}` lines instead of document text.
     // US-23.20 AC8: its timestamped `.bak` sibling is the same machine data.
     '**/*.orca-comments.jsonl,**/*.orca-comments.jsonl.*.bak}';
+  /** Audit L-5: char budget of the cross-query file text cache (~16 MB as UTF-16). */
+  private static readonly CROSS_FILE_SEARCH_CACHE_MAX_CHARS = 8_000_000;
+  /** Audit L-5: disk-read file text kept across crossFileSearch requests, stamp-checked by mtime + size. */
+  private readonly crossFileTextCache = new FileTextCache(MarkdownWysiwygProvider.CROSS_FILE_SEARCH_CACHE_MAX_CHARS);
 
   // P-08: cache danh sách URI của workspace với TTL ngắn để không glob lại
   // toàn bộ cây thư mục cho mỗi ký tự gõ; chỉ re-score theo query trong bộ nhớ.
@@ -2662,8 +2734,17 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
             if (openDoc) {
               text = openDoc.getText();
             } else {
-              const bytes = await vscode.workspace.fs.readFile(uri);
-              text = new TextDecoder().decode(bytes);
+              const stat = await vscode.workspace.fs.stat(uri);
+              const stamp = `${stat.mtime}:${stat.size}`;
+              const diskKey = documentStateKey(uriKey, CASE_INSENSITIVE_FS);
+              const kept = this.crossFileTextCache.get(diskKey, stamp);
+              if (kept !== undefined) {
+                text = kept; // unchanged since an earlier request (audit L-5)
+              } else {
+                const bytes = await vscode.workspace.fs.readFile(uri);
+                text = new TextDecoder().decode(bytes);
+                this.crossFileTextCache.set(diskKey, stamp, text);
+              }
             }
           } catch (err) {
             // Một file lỗi (quyền truy cập, binary lọt qua glob...) không được
@@ -3008,18 +3089,14 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
    * không bao giờ undo; key là tên file (đã unique nhờ hash ngẫu nhiên trong
    * savePastedImage nên không cần phân biệt theo document).
    */
-  private static readonly MAX_RECENTLY_DELETED_IMAGES = 20;
+  private static readonly MAX_RECENTLY_DELETED_BYTES = 16 * 1024 * 1024;
   private readonly recentlyDeletedImages = new Map<string, Uint8Array>();
 
   private rememberDeletedImage(fileName: string, bytes: Uint8Array): void {
+    // Map.set keeps an existing key's old position; re-insert so it counts as newest.
+    this.recentlyDeletedImages.delete(fileName);
     this.recentlyDeletedImages.set(fileName, bytes);
-    while (this.recentlyDeletedImages.size > MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_IMAGES) {
-      const oldest = this.recentlyDeletedImages.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      this.recentlyDeletedImages.delete(oldest);
-    }
+    evictToByteBudget(this.recentlyDeletedImages, MarkdownWysiwygProvider.MAX_RECENTLY_DELETED_BYTES);
   }
 
   /**
@@ -3141,6 +3218,13 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
         continue;
       }
       try {
+        texts.push(await this.readMarkdownText(uri, true));
+        continue;
+      } catch {
+        // Not valid UTF-8 (UTF-16, a legacy code page): let VS Code decode it per
+        // files.encoding below, so a reference in that file is not missed.
+      }
+      try {
         texts.push((await vscode.workspace.openTextDocument(uri)).getText());
       } catch (err) {
         MarkdownWysiwygProvider.log(`cleanupOrphanImages: could not read ${uri.toString()}`, err);
@@ -3181,6 +3265,16 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (this.recentlyDeletedImages.size === 0) {
       return;
     }
+    // Same normalizer as cleanupOrphanImages: match the normalized name against
+    // the link/image/HTML targets so undo restores the right file even when its
+    // name has diacritics / spaces / parens (X-1).
+    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
+    // Audit C-5: no cached name is referenced -> nothing to restore, so skip the
+    // allowed-roots symlink walk below on this doc change.
+    const cached = [...this.recentlyDeletedImages.keys()];
+    if (!cached.some((fileName) => referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS)))) {
+      return;
+    }
     // X-15: same allowed-roots guard as every other writer (savePastedImage /
     // saveDroppedFile / cleanupOrphanImages) — a mis-configured customFolderPath
     // must not let undo write a restored file outside the workspace. Skip when
@@ -3189,10 +3283,6 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     if (!imagesDir) {
       return;
     }
-    // Same normalizer as cleanupOrphanImages: match the normalized name against
-    // the link/image/HTML targets so undo restores the right file even when its
-    // name has diacritics / spaces / parens (X-1).
-    const referenced = referencedAssetBasenames(text, CASE_INSENSITIVE_FS);
     for (const [fileName, bytes] of this.recentlyDeletedImages) {
       if (!referenced.has(normalizeAssetName(fileName, CASE_INSENSITIVE_FS))) {
         continue;
@@ -3324,6 +3414,8 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
     token: vscode.CancellationToken
   ): Promise<EntityExistResult[]> {
     const results: EntityExistResult[] = [];
+    // L-13: one guard + stat per declaration file per call, shared by every id it declares.
+    const liveFiles = new Map<string, Promise<boolean>>();
     for (const id of ids) {
       if (token.isCancellationRequested) {
         break;
@@ -3332,18 +3424,30 @@ export class MarkdownWysiwygProvider implements vscode.CustomTextEditorProvider 
       let exists = false;
       let preview = ''; // Req 21 tooltip: only a RESOLVED declaration contributes a preview.
       for (const row of rows) {
-        try {
-          const uri = vscode.Uri.parse(row.file);
-          // Same allowed-roots guard as checkTargetsExist — never leak existence
-          // of a declaration file outside the current document/workspace roots.
-          if (await this.isInsideAllowedRoots(document, uri)) {
-            await vscode.workspace.fs.stat(uri);
-            exists = true;
-            preview = row.preview;
-            break;
-          }
-        } catch {
-          // stat failed / file gone for this row — try the next declaration row.
+        const key = documentStateKey(row.file, CASE_INSENSITIVE_FS);
+        let live = liveFiles.get(key);
+        if (live === undefined) {
+          live = (async () => {
+            try {
+              const uri = vscode.Uri.parse(row.file);
+              // Same allowed-roots guard as checkTargetsExist — never leak existence
+              // of a declaration file outside the current document/workspace roots.
+              if (!(await this.isInsideAllowedRoots(document, uri))) {
+                return false;
+              }
+              await vscode.workspace.fs.stat(uri);
+              return true;
+            } catch {
+              // stat failed / file gone for this row — try the next declaration row.
+              return false;
+            }
+          })();
+          liveFiles.set(key, live);
+        }
+        if (await live) {
+          exists = true;
+          preview = row.preview;
+          break;
         }
       }
       const canonical = canonicalEntityId(id);

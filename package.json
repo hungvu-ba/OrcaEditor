@@ -2,7 +2,7 @@
   "name": "orca-md-editor",
   "displayName": "Orca MD Editor",
   "description": "A fast, clean WYSIWYG editor for .md — drag-and-drop reorder, project-wide search, and a rich toolbar, all while keeping your Markdown source pristine and diff-friendly.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "publisher": "hungvu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -266,7 +266,7 @@
         },
         "orcaEditor.showLineNumbers": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Show line numbers (from the original Markdown file) in a gutter to the left of each content block (paragraph, heading, list, table, code, mermaid...), like the line-number gutter in raw text mode."
         },
         "orcaEditor.table.fitMode": {
@@ -382,6 +382,7 @@
     "test:roundtrip:toolbar-format": "node esbuild.js --test && node dist/test/roundtrip/toolbar-format.js",
     "test:roundtrip:toolbar-insert": "node esbuild.js --test && node dist/test/roundtrip/toolbar-insert.js",
     "test:roundtrip:math-edit": "node esbuild.js --test && node dist/test/roundtrip/math-edit.js",
+    "test:roundtrip:math-source": "node esbuild.js --test && node dist/test/roundtrip/math-source.js",
     "test:roundtrip:input-rules": "node esbuild.js --test && node dist/test/roundtrip/input-rules.js",
     "test:roundtrip:accessibility": "node esbuild.js --test && node dist/test/roundtrip/accessibility.js",
     "test:roundtrip:drag-drop": "node esbuild.js --test && node dist/test/roundtrip/drag-drop.js",

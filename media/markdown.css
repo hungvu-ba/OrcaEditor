@@ -478,6 +478,9 @@ td {
   min-width: 14ch;
   overflow-wrap: normal;
   word-break: normal;
+  /* US-19.27 contract 12: top-align cells and avoid one-word wrapped last lines. */
+  vertical-align: top;
+  text-wrap: pretty;
 }
 
 /* Dùng bởi fitTableColumns() (table.ts) khi đo bề rộng tự nhiên (max-content)
@@ -528,6 +531,8 @@ td {
 #content table.md-table-fit td {
   min-width: 0;
   white-space: normal;
+  /* Chromium < 130: the white-space shorthand resets text-wrap → restate contract 12. */
+  text-wrap: pretty;
   /* US-19.25: KHÔNG cắt giữa từ. Sàn cột (fitTableColumns) đã đảm bảo bề rộng ≥
    * từ rộng nhất nên không cần cắt khẩn cấp; nếu lệch sub-pixel thì từ tràn vô
    * hình thay vì gãy kiểu "Cod|e". Ngắt dòng chỉ xảy ra ở khoảng trắng. */
@@ -1328,32 +1333,32 @@ body[class*='reading-mode-'] #content {
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-/* ET Book (bundled, US-19.15): chính là font PRIMARY của ai-2027.com (Tufte CSS
- * dùng et-book đầu stack) — serif kiểu Bembo cho look essay in. License MIT (free,
- * thương mại OK), KHÔNG cài sẵn trên OS nào nên phải bundle. Chỉ có định dạng
- * .woff (webview Chromium chạy tốt). 3 style: roman/italic/bold. ET Book KHÔNG có
- * dấu tiếng Việt → chỉ dùng cho tài liệu tiếng Anh; tiếng Việt đi Literata (xem
- * dưới). Bản quyền LICENSE kèm trong media/fonts/et-book/. */
+/* ET Book (bundled, US-19.15): the PRIMARY font of ai-2027.com (Tufte CSS puts
+ * et-book first in its stack) — a Bembo-style serif for a printed-essay look. MIT
+ * license (free, commercial use OK); no OS ships it, so it is bundled. Shipped as
+ * .woff2 (converted from the original .woff). 3 styles: roman/italic/bold. ET Book
+ * has no Vietnamese diacritics → English documents only; Vietnamese goes to
+ * Literata (below). LICENSE ships in media/fonts/et-book/. */
 @font-face {
   font-family: 'et-book';
   font-style: normal;
   font-weight: normal;
   font-display: swap;
-  src: url('fonts/et-book/et-book-roman.woff') format('woff');
+  src: url('fonts/et-book/et-book-roman.woff2') format('woff2');
 }
 @font-face {
   font-family: 'et-book';
   font-style: italic;
   font-weight: normal;
   font-display: swap;
-  src: url('fonts/et-book/et-book-italic.woff') format('woff');
+  src: url('fonts/et-book/et-book-italic.woff2') format('woff2');
 }
 @font-face {
   font-family: 'et-book';
   font-style: normal;
   font-weight: bold;
   font-display: swap;
-  src: url('fonts/et-book/et-book-bold.woff') format('woff');
+  src: url('fonts/et-book/et-book-bold.woff2') format('woff2');
 }
 
 /* --- Reading Mode heading scale (US-19.24) ---
@@ -1683,15 +1688,16 @@ body[class*='reading-mode-'] #content a {
  * switching palette OFF also transitions smoothly, not just ON. JS side also
  * debounces the preview trigger itself (READING_PREVIEW_DEBOUNCE_MS,
  * toolbar.ts) so quickly scanning past dropdown rows doesn't fire a flurry of
- * these transitions. prefers-reduced-motion (below) neutralizes this globally. */
+ * these transitions. prefers-reduced-motion (below) neutralizes this globally.
+ * Table cells are deliberately NOT listed: a palette switch would run thousands
+ * of concurrent transitions on a big table. Cell text still fades through the
+ * `color` it inherits from #content; cell background/border switch at once. */
 body,
 #content,
 #content a,
 #content pre,
 #content :not(pre) > code,
-#content blockquote,
-#content th,
-#content td {
+#content blockquote {
   transition:
     background-color 0.18s ease,
     color 0.18s ease,

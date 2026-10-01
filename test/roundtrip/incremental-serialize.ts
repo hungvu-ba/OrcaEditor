@@ -13,7 +13,7 @@
  *  2) warm cache + one block edited === full pass,
  *  3) exactly ONE block is re-serialized in case 2 (the whole point),
  * plus the structural cases a cache can get wrong (insert, remove, reorder) and the
- * sibling-sensitive guard that forces the full pass.
+ * sibling-sensitive blocks (indented code), serialized together with their neighbours.
  */
 import domino from '@mixmark-io/domino';
 import {
@@ -25,7 +25,7 @@ import {
   serializeFull,
   stampBlockStyle,
   stampBlockStyles,
-  hasSiblingSensitiveBlock,
+  siblingSensitiveBlockIds,
   type BlockMarkdownCache,
   type BlockSerializeOptions,
 } from '../../media/webview/pipeline';
@@ -75,6 +75,7 @@ function open(md: string): Harness {
         stampBlockStyle(clone, entry);
       }
     },
+    siblingSensitiveIds: siblingSensitiveBlockIds(blockMap),
   };
   return { doc, content, opts, blockMap, calls: () => calls, resetCalls: () => (calls = 0) };
 }
@@ -363,51 +364,215 @@ for (const { name, md } of CORPUS) {
   runner.check('a duplicated data-block-id stamps the first twin only', after === expected, firstDiff(after, expected));
 }
 
-// --- sibling-sensitive guard ------------------------------------------------------
+// --- sibling-sensitive blocks (audit L-10) ------------------------------------------
+// An indented code block is the one block whose markdown depends on a SIBLING, so it
+// is serialized in one wrapper with its neighbours (a "unit") while the rest of the
+// document stays per block.
 {
   // Indented code only becomes its OWN top-level block after a paragraph; after a
   // list the same lines are the list's continuation.
   const indented = open('Text.\n\n    indented code\n');
   runner.check(
-    'indented code block forces the full pass',
-    hasSiblingSensitiveBlock(indented.blockMap),
+    'an indented code block is sibling-sensitive',
+    siblingSensitiveBlockIds(indented.blockMap).size === 1,
     `  blockMap: ${JSON.stringify(indented.blockMap.map((b) => [b.type, b.mdSlice]))}`
   );
 
   const fenced = open('- a list\n\n```\nfenced code\n```\n');
-  runner.check('a fenced code document stays incremental', !hasSiblingSensitiveBlock(fenced.blockMap));
+  runner.check('a fenced code block is not sibling-sensitive', siblingSensitiveBlockIds(fenced.blockMap).size === 0);
 
   const prose = open('Just text.\n\nMore text.\n');
-  runner.check('a prose document stays incremental', !hasSiblingSensitiveBlock(prose.blockMap));
+  runner.check('a prose document has no sibling-sensitive block', siblingSensitiveBlockIds(prose.blockMap).size === 0);
 
-  // The guard is load-bearing, not decorative: an indented code block directly
-  // after a list serializes as a FENCE (turndown's mdCodeBlock rule reads
+  /** Cold cache === full pass; returns the markdown so a case can pin the bytes too. */
+  const coldEquals = (name: string, h: Harness): string => {
+    const out = incremental(h, new WeakMap(), new Set());
+    const expected = fullPass(h);
+    runner.check(`${name} === full pass`, out === expected, firstDiff(out, expected));
+    return out;
+  };
+  const codeBlock = (h: Harness): HTMLElement => h.content.querySelector('pre') as HTMLElement;
+  /** A warm cache over `md` — the state every sync after the first one runs in. */
+  const warm = (md: string): { h: Harness; cache: BlockMarkdownCache; dirty: Set<Node> } => {
+    const h = open(md);
+    const cache: BlockMarkdownCache = new WeakMap();
+    const dirty = new Set<Node>();
+    incremental(h, cache, dirty);
+    return { h, cache, dirty };
+  };
+
+  // The unit is load-bearing, not decorative: an indented code block directly after
+  // a list serializes as a FENCE (turndown's mdCodeBlock rule reads
   // previousElementSibling), which a wrapper holding only that block cannot see.
   // Rendering can't produce that shape — the lines would be the list's
   // continuation — but an edit can, so build it by removing the paragraph between.
   const afterList = open('- a list\n\nText.\n\n    indented code\n');
   const middle = afterList.content.querySelector('p');
   middle?.parentNode?.removeChild(middle);
-  const perBlock = incremental(afterList, new WeakMap(), new Set());
-  const whole = fullPass(afterList);
-  runner.check(
-    'indented code after a list DIVERGES per block — the guard is what prevents it',
-    perBlock !== whole,
-    `  per-block: ${JSON.stringify(perBlock)}\n  full:      ${JSON.stringify(whole)}`
-  );
-  runner.check('...and that document is guarded', hasSiblingSensitiveBlock(afterList.blockMap));
+  const afterListOut = coldEquals('indented code after a list', afterList);
+  runner.check('...and it fell back to a fence', afterListOut.includes('```'), `  got: ${JSON.stringify(afterListOut)}`);
 
-  // The tab variant needs the guard for a second reason: turndown's postProcess
-  // strips a leading tab from every per-block result, so on its own the block stops
-  // being code at all.
-  const tabIndented = open('Text.\n\n\tcode\n');
-  const tabPerBlock = incremental(tabIndented, new WeakMap(), new Set());
-  const tabWhole = fullPass(tabIndented);
-  runner.check(
-    'indented-tab code loses its indent per block — also guarded',
-    tabPerBlock !== tabWhole && hasSiblingSensitiveBlock(tabIndented.blockMap),
-    `  per-block: ${JSON.stringify(tabPerBlock)}\n  full:      ${JSON.stringify(tabWhole)}`
-  );
+  // The tab variant needs the unit for a second reason: turndown's postProcess
+  // strips a leading tab from every result, so on its own the block stops being
+  // code at all.
+  const tabOut = coldEquals('indented-tab code after a paragraph', open('Text.\n\n\tcode\n'));
+  runner.check('...and it kept its tab indent', tabOut.includes('\n\tcode'), `  got: ${JSON.stringify(tabOut)}`);
+
+  for (const [variant, indent] of [
+    ['space', '    '],
+    ['tab', '\t'],
+  ]) {
+    const code = `${indent}code line\n${indent}second line\n`;
+    const name = (what: string): string => `[indented code, ${variant}] ${what}`;
+
+    const afterParagraph = open(`Text.\n\n${code}\nTail.\n`);
+    coldEquals(name('after a paragraph'), afterParagraph);
+    runner.check(
+      name('after a paragraph stayed on the per-block path'),
+      // 2 = the whole-document pass + the `fullPass` inside coldEquals.
+      afterParagraph.calls() > 2,
+      `  turndown calls: ${afterParagraph.calls()} (expected > 2)`
+    );
+    coldEquals(name('after a heading'), open(`# Title\n\n${code}`));
+    coldEquals(name('after an HTML comment'), open(`Intro.\n\n<!-- note -->\n\n${code}`));
+    coldEquals(name('after a leading HTML comment'), open(`<!-- note -->\n\n${code}\nTail.\n`));
+    coldEquals(name('as the first block'), open(`${code}\nText.\n`));
+    coldEquals(name('as the only block'), open(code));
+
+    // An empty paragraph serializes to nothing, so a unit starting with it would
+    // start with the code — and lose a leading tab.
+    const afterEmpty = open(`Text.\n\n${code}`);
+    const emptyParagraph = afterEmpty.doc.createElement('p');
+    emptyParagraph.appendChild(afterEmpty.doc.createElement('br'));
+    afterEmpty.content.insertBefore(emptyParagraph, codeBlock(afterEmpty));
+    coldEquals(name('after an inserted <p><br></p>'), afterEmpty);
+
+    const listThenCode = open(`- a list\n\nText.\n\n${code}`);
+    const between = listThenCode.content.querySelector('p');
+    between?.parentNode?.removeChild(between);
+    coldEquals(name('after a list'), listThenCode);
+
+    // Two sensitive blocks with only a comment between them fold into one unit.
+    const twoBlocks = `Lead.\n\n${code}\n<!-- split -->\n\n${indent}other code\n\nTail.\n`;
+    coldEquals(name('two blocks in a row'), open(twoBlocks));
+
+    // --- warm cache: the unit must notice every change that reaches its markdown ---
+    const md = `Lead.\n\nBefore.\n\n${code}\nAfter.\n`;
+    const edits: Array<[string, (h: Harness) => Node]> = [
+      ['the code', codeBlock],
+      ['its previous sibling', (h) => h.content.querySelectorAll('p')[1]],
+      ['an unrelated paragraph before', (h) => h.content.querySelectorAll('p')[0]],
+      ['an unrelated paragraph after', (h) => h.content.querySelectorAll('p')[2]],
+    ];
+    for (const [what, pick] of edits) {
+      const { h, cache, dirty } = warm(md);
+      const target = pick(h);
+      typeInto(target);
+      dirty.add(target);
+      runner.eq(name(`typing into ${what} === full pass`), incremental(h, cache, dirty), fullPass(h));
+    }
+
+    // Blanks ending the last code line survive in the middle of a document and are
+    // dropped at its end; turndown trims the END of every result, so the unit has to
+    // tell the two apart.
+    const trailingBlanks: Array<[string, string, string]> = [
+      ['kept before a paragraph', md, 'second line  \n\nAfter.\n'],
+      ['dropped at the end of the document', `Lead.\n\n${code}`, 'second line\n'],
+    ];
+    for (const [what, source, tail] of trailingBlanks) {
+      const { h, cache, dirty } = warm(source);
+      const text = codeBlock(h).querySelector('code')?.firstChild as Text;
+      text.nodeValue = `${(text.nodeValue ?? '').replace(/\n$/, '')}  \n`;
+      dirty.add(codeBlock(h));
+      const out = incremental(h, cache, dirty);
+      runner.eq(name(`trailing spaces on the last code line, ${what} === full pass`), out, fullPass(h));
+      runner.check(name(`...and really ${what}`), out.endsWith(tail), `  got: ${JSON.stringify(out)}`);
+    }
+
+    // The structural changes below are deliberately NOT marked dirty: the unit has
+    // to notice on its own that it no longer sits next to the nodes it was cached with.
+    {
+      const { h, cache, dirty } = warm(md);
+      const before = h.content.querySelectorAll('p')[1];
+      before.parentNode?.removeChild(before);
+      runner.eq(name('deleting the previous sibling === full pass'), incremental(h, cache, dirty), fullPass(h));
+    }
+    {
+      const { h, cache, dirty } = warm(md);
+      const list = h.doc.createElement('ul');
+      list.innerHTML = '<li>new item</li>';
+      h.content.insertBefore(list, codeBlock(h));
+      const out = incremental(h, cache, dirty);
+      runner.eq(name('a <ul> inserted before a cached block === full pass'), out, fullPass(h));
+      runner.check(name('...and the cached block became a fence'), out.includes('```'), `  got: ${JSON.stringify(out)}`);
+    }
+    {
+      const { h, cache, dirty } = warm(`Intro.\n\n<!-- note -->\n\n${code}`);
+      const comment = Array.from(h.content.childNodes).find((node) => node.nodeType === 8) as Node;
+      comment.parentNode?.removeChild(comment);
+      runner.eq(name('deleting a comment inside the unit === full pass'), incremental(h, cache, dirty), fullPass(h));
+    }
+    {
+      // A unit that starts the document may start with empty markdown; once a block
+      // lands in front of it, the unit has to reach back to that block.
+      const { h, cache, dirty } = warm(code);
+      const blank = h.doc.createElement('p');
+      blank.appendChild(h.doc.createElement('br'));
+      h.content.insertBefore(blank, codeBlock(h));
+      incremental(h, cache, dirty);
+      const intro = h.doc.createElement('p');
+      intro.textContent = 'Intro.';
+      h.content.insertBefore(intro, blank);
+      runner.eq(
+        name('a block inserted before a unit that led the document === full pass'),
+        incremental(h, cache, dirty),
+        fullPass(h)
+      );
+    }
+    {
+      // The previous sibling is edited while folded into the unit, then the unit
+      // splits: the sibling's own markdown must not be the pre-edit one.
+      const { h, cache, dirty } = warm(md);
+      const before = h.content.querySelectorAll('p')[1];
+      typeInto(before);
+      dirty.add(before);
+      incremental(h, cache, dirty);
+      const pre = codeBlock(h);
+      pre.parentNode?.removeChild(pre);
+      runner.eq(name('an edit made inside a unit survives its split'), incremental(h, cache, dirty), fullPass(h));
+    }
+    {
+      const { h, cache, dirty } = warm(twoBlocks);
+      const first = codeBlock(h);
+      typeInto(first);
+      dirty.add(first);
+      runner.eq(
+        name('typing into the first of two blocks in a row === full pass'),
+        incremental(h, cache, dirty),
+        fullPass(h)
+      );
+    }
+
+    // --- the number that matters (audit L-10): one keystroke, one block -----------
+    {
+      const paragraphs = Array.from({ length: 40 }, (_, i) => `Paragraph number ${i} with some words.`);
+      const { h, cache, dirty } = warm(
+        `${paragraphs.slice(0, 20).join('\n\n')}\n\n${code}\n${paragraphs.slice(20).join('\n\n')}\n`
+      );
+      const target = h.content.querySelectorAll('p')[5];
+      typeInto(target);
+      dirty.add(target);
+      h.resetCalls();
+      const out = incremental(h, cache, dirty);
+      const calls = h.calls();
+      runner.check(
+        name('typing into one of 40 paragraphs re-serializes only that paragraph'),
+        calls === 1,
+        `  turndown calls: ${calls} (expected 1)`
+      );
+      runner.eq(name('...and still === full pass'), out, fullPass(h));
+    }
+  }
 }
 
 runner.finish('incremental-serialize');
