@@ -361,6 +361,38 @@ function measureLineHeight(sampleCell: HTMLTableCellElement): number {
   return px;
 }
 
+interface FontProbes {
+  readFloorPx: number;
+  readFloorCjkPx: number;
+  looseFloorPx: number;
+  lineH: number;
+}
+
+const FONT_PROBE_CACHE_MAX = 8;
+/** Probe measures by font stamp of the sample cell; cleared whole when it would pass FONT_PROBE_CACHE_MAX keys. */
+const fontProbeCache = new Map<string, FontProbes>();
+
+/** The area-fit probe measures in `sampleCell`'s font, cached by its font stamp once fonts have loaded. */
+function fontProbes(sampleCell: HTMLTableCellElement, stamp: string): FontProbes {
+  const cached = fontProbeCache.get(stamp);
+  if (cached) {
+    return cached;
+  }
+  const probes: FontProbes = {
+    readFloorPx: measureChWidth(sampleCell, FIT_READ_FLOOR_CH),
+    readFloorCjkPx: measureChWidth(sampleCell, FIT_READ_FLOOR_CJK_CH),
+    looseFloorPx: measureChWidth(sampleCell, FIT_LOOSE_FLOOR_CH),
+    lineH: measureLineHeight(sampleCell),
+  };
+  if (document.fonts.status === 'loaded') {
+    if (fontProbeCache.size >= FONT_PROBE_CACHE_MAX) {
+      fontProbeCache.clear();
+    }
+    fontProbeCache.set(stamp, probes);
+  }
+  return probes;
+}
+
 /**
  * US-19.25: bề rộng "từ" rộng nhất trong ô — từ = cụm KHÔNG khoảng trắng, GIỮ
  * nguyên dấu '-' bên trong (vd "2026-07-20", "C-01" đều là 1 từ). Đo bằng Range
@@ -460,11 +492,67 @@ function cellPadBorderX(cell: HTMLTableCellElement): number {
   );
 }
 
+/** Per-cell content measures (px, without padding/border), valid while `key` matches the cell. */
+interface CellMeasure {
+  key: string;
+  maxContentW?: number;
+  lines?: CellLines;
+  wordW?: number;
+}
+
+/** Bounded by the live cells: a cell removed from the DOM drops its entry. */
+const cellMeasureMemo = new WeakMap<HTMLTableCellElement, CellMeasure>();
+
+/** Replaced content can change size on load, which triggers no refit. */
+const UNMEMOIZED_CELL_CONTENT = 'img, svg, video, canvas, iframe, object, embed, input';
+
+/** Font stamp per cell tag (`TH` / `TD`), read from the first cell of that tag. */
+function cellFontStamps(rows: HTMLTableRowElement[]): Map<string, string> {
+  const stamps = new Map<string, string>();
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      if (!stamps.has(cell.tagName)) {
+        const cs = getComputedStyle(cell);
+        stamps.set(cell.tagName, `${cs.font}|${cs.letterSpacing}`);
+      }
+    }
+  }
+  return stamps;
+}
+
+/** Each cell's memo entry: the stored one while font stamp + tag + innerHTML match, else a fresh one. */
+function cellMeasuresOf(rows: HTMLTableRowElement[], stamps: Map<string, string>): Map<HTMLTableCellElement, CellMeasure> {
+  const out = new Map<HTMLTableCellElement, CellMeasure>();
+  for (const row of rows) {
+    for (const cell of Array.from(row.cells)) {
+      const key = `${stamps.get(cell.tagName)}|${cell.tagName}|${cell.innerHTML}`;
+      const stored = cellMeasureMemo.get(cell);
+      out.set(cell, stored?.key === key ? stored : { key });
+    }
+  }
+  return out;
+}
+
+/** Stores the entries once fonts have loaded, except for cells holding replaced content. */
+function storeCellMeasures(measures: Map<HTMLTableCellElement, CellMeasure>): void {
+  if (document.fonts.status !== 'loaded') {
+    return;
+  }
+  measures.forEach((m, cell) => {
+    if (!cell.querySelector(UNMEMOIZED_CELL_CONTENT)) {
+      cellMeasureMemo.set(cell, m);
+    }
+  });
+}
+
 /**
  * Each column's hard minimum width (border-box px): its min-content, raised to its
  * widest word. Fit-mode's `hardMinW` and the column-resize drag clamp (US-6.10).
  */
-export function measureColumnHardMin(table: HTMLTableElement): number[] {
+export function measureColumnHardMin(
+  table: HTMLTableElement,
+  measures?: Map<HTMLTableCellElement, CellMeasure>
+): number[] {
   const rows = Array.from(table.rows);
   const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
   if (!sampleCell) {
@@ -475,18 +563,27 @@ export function measureColumnHardMin(table: HTMLTableElement): number[] {
 
   // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong ngữ cảnh
   // nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
-  table.classList.add(MEASURE_CLASS);
-  const range = document.createRange();
+  // Only cells missing from the memo are measured.
+  const memo = measures ?? cellMeasuresOf(rows, cellFontStamps(rows));
+  const misses = Array.from(memo).filter(([, m]) => m.wordW === undefined);
+  if (misses.length) {
+    table.classList.add(MEASURE_CLASS);
+    const range = document.createRange();
+    for (const [cell, m] of misses) {
+      m.wordW = widestWordWidth(cell, range);
+    }
+    table.classList.remove(MEASURE_CLASS);
+    storeCellMeasures(memo);
+  }
   const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
-      const wf = widestWordWidth(row.cells[i], range) + padBorderX;
+      const wf = (memo.get(row.cells[i])?.wordW ?? 0) + padBorderX;
       if (wf > wordFloorByCol[i]) {
         wordFloorByCol[i] = wf;
       }
     }
   }
-  table.classList.remove(MEASURE_CLASS);
 
   // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
   table.classList.add(MIN_MEASURE_CLASS);
@@ -543,19 +640,30 @@ function applyFitColumns(
 
   const padBorderX = cellPadBorderX(sampleCell);
 
+  // Per-cell memo: each pass below measures only the cells it misses.
+  const stamps = cellFontStamps(rows);
+  const measures = cellMeasuresOf(rows, stamps);
+
   // Pass 1 (nowrap): max-content TỪNG Ô qua Range — độc lập bề rộng cột (đo nội
   // dung thật 1 dòng, không phải bề rộng cột chung của table-layout:auto).
-  table.classList.add(MEASURE_CLASS);
-  const range = document.createRange();
+  const misses = Array.from(measures).filter(([, m]) => m.maxContentW === undefined);
+  if (misses.length) {
+    table.classList.add(MEASURE_CLASS);
+    const range = document.createRange();
+    for (const [cell, m] of misses) {
+      range.selectNodeContents(cell);
+      m.maxContentW = range.getBoundingClientRect().width;
+    }
+    table.classList.remove(MEASURE_CLASS);
+    storeCellMeasures(measures);
+  }
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
-      range.selectNodeContents(row.cells[i]);
-      const cellW = range.getBoundingClientRect().width + padBorderX;
+      const cellW = (measures.get(row.cells[i])?.maxContentW ?? 0) + padBorderX;
       colWidths[i].push(cellW);
     }
   }
-  table.classList.remove(MEASURE_CLASS);
 
   // US-19.26 (revised): each column's max-content already tells whether there is
   // horizontal room — bail right here, BEFORE measuring min-content / computing the
@@ -573,15 +681,24 @@ function applyFitColumns(
   }
   // Short of room: break units of every cell, measured once outside the
   // MEASURE_CLASS window (sets and restores its own layout states).
-  const cellLines = measureTableLines(table);
-  const minByCol = measureColumnHardMin(table);
+  const cellLines = measureTableLines(table, (cell) => measures.get(cell)?.lines);
+  cellLines.forEach((row, r) =>
+    row.forEach((lines, i) => {
+      const m = measures.get(rows[r].cells[i]);
+      if (m) {
+        m.lines = lines;
+      }
+    })
+  );
+  const minByCol = measureColumnHardMin(table, measures);
 
   // US-19.27: height-first area fit (Code Plan contracts 3–7). Floors by role in
   // border-box px; the solver clamps them into [hardMinW, maxW] and returns
   // integer widths with Σ ≤ budgetW unless it scrolls at the floor assignment.
-  const readFloorPx = measureChWidth(sampleCell, FIT_READ_FLOOR_CH);
-  const readFloorCjkPx = measureChWidth(sampleCell, FIT_READ_FLOOR_CJK_CH);
-  const looseFloorPx = measureChWidth(sampleCell, FIT_LOOSE_FLOOR_CH);
+  const { readFloorPx, readFloorCjkPx, looseFloorPx, lineH } = fontProbes(
+    sampleCell,
+    stamps.get(sampleCell.tagName) ?? ''
+  );
   const emptyLines: CellLines = { segments: [], cjkUnits: 0, units: 0 };
   const cols: AreaFitColumn[] = [];
   for (let i = 0; i < colCount; i++) {
@@ -599,7 +716,7 @@ function applyFitColumns(
   const { widths: finalW, scroll } = solveAreaFit(cols, {
     budgetW,
     padX: padBorderX,
-    lineH: measureLineHeight(sampleCell),
+    lineH,
     ...keep,
   });
 

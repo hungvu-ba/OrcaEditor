@@ -4,10 +4,11 @@
  * per render fit, typing refit (grow-only and full), settle refit, structural
  * edit, panel resize and fit toggle. Counts go to test annotations, never
  * asserted; the only assertion is that the fitted widths stay FIT_WIDTHS_302X13
- * (contract 1 — T5.5 must reproduce them exactly).
+ * (contract 1 — T5.5 must reproduce them exactly). T5.5 adds (h)–(j): the
+ * per-cell measure memo's cost target and its invalidation on edit / font change.
  */
 import { test, expect, type Page } from '@playwright/test';
-import { openBlankHarness, postInit } from './_harness';
+import { openBlankHarness, openEditor, postInit } from './_harness';
 
 const ROWS = 302;
 const COLS = 13;
@@ -105,6 +106,33 @@ async function openFixture(page: Page): Promise<{ rangeRects: number; computedSt
     await expect(page.locator('#content table tr')).toHaveCount(ROWS);
     await page.waitForTimeout(500);
   });
+}
+
+/** Toggles fit mode off, then on again (a full refit without previous widths). */
+async function toggleFitOffOn(page: Page): Promise<void> {
+  const toggle = (): Promise<void> =>
+    page.evaluate(() => window.postMessage({ type: 'runCommand', command: 'toggleTableFitMode' }, '*'));
+  await toggle();
+  await expect(page.locator('body.table-fit-mode')).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await toggle();
+  await expect(page.locator('body.table-fit-mode')).toHaveCount(1);
+  await page.waitForTimeout(300);
+}
+
+/** Widths a fresh page in the same context renders for `doc` (fit on, 1400 × 900), with `init` run before the editor opens. */
+async function freshWidths(page: Page, doc: string, init?: () => void): Promise<number[]> {
+  const fresh = await page.context().newPage();
+  if (init) {
+    await fresh.addInitScript(init);
+  }
+  await fresh.setViewportSize({ width: 1400, height: 900 });
+  await openEditor(fresh, doc, { tableFitMode: true });
+  await expect(fresh.locator('#content table tr')).toHaveCount(ROWS);
+  await fresh.waitForTimeout(500);
+  const got = await widths(fresh);
+  await fresh.close();
+  return got;
 }
 
 /** Collapsed caret at the end of body cell (row, col), like table-fit-refit-policy's caretAtEnd. */
@@ -216,5 +244,58 @@ test.describe('L-3 fit-mode cost on the 302 × 13 table (fit on, viewport 1400)'
         await page.waitForTimeout(300);
       })
     );
+  });
+
+  test('(h) memo: typing grow-only and settle refits stay under 1,000 Range rects', async ({ page }) => {
+    await openFixture(page);
+    test.info().annotations.push({ type: 'fonts', description: await page.evaluate(() => document.fonts.status) });
+    expect(await widths(page)).toEqual(FIT_WIDTHS_302X13);
+    // Every cell answered by the memo: the full refit reproduces the widths.
+    annotate('fit toggle off + on (memo warm)', await fitCost(page, () => toggleFitOffOn(page)));
+    expect(await widths(page)).toEqual(FIT_WIDTHS_302X13);
+
+    await caretAtEnd(page, EDIT_ROW, EDIT_COL);
+    const grow = await fitCost(page, async () => {
+      await page.keyboard.type(` ${TOKEN_GROW}`);
+      await page.waitForTimeout(800);
+    });
+    annotate('typing refit, grow-only', grow);
+    expect(grow.rangeRects).toBeLessThanOrEqual(1000);
+    const settle = await fitCost(page, () => page.waitForTimeout(SETTLE_WAIT_MS));
+    annotate('settle refit', settle);
+    expect(settle.rangeRects).toBeLessThanOrEqual(1000);
+  });
+
+  test('(i) memo: an edited cell is remeasured', async ({ page }) => {
+    await openFixture(page);
+    await caretAtEnd(page, EDIT_ROW, EDIT_COL);
+    await page.keyboard.type(` ${TOKEN_WIDE}`);
+    await page.waitForTimeout(SETTLE_WAIT_MS);
+    await toggleFitOffOn(page);
+    const got = await widths(page);
+    const text = `cell r${EDIT_ROW} c${EDIT_COL} lorem ip`.slice(0, 20).padEnd(20, '.');
+    const doc = bigTableDoc().replace(text, `${text} ${TOKEN_WIDE}`);
+    expect(got).toEqual(await freshWidths(page, doc));
+    expect(got).not.toEqual(FIT_WIDTHS_302X13);
+  });
+
+  test('(j) memo and probe cache: a font change remeasures every cell', async ({ page }) => {
+    await openFixture(page);
+    await page.evaluate(() => {
+      const style = document.createElement('style');
+      style.textContent = '#content table { font-size: 18px }';
+      document.head.appendChild(style);
+    });
+    await toggleFitOffOn(page);
+    const got = await widths(page);
+    const fresh = await freshWidths(page, bigTableDoc(), () => {
+      document.addEventListener('DOMContentLoaded', () => {
+        const style = document.createElement('style');
+        style.textContent = '#content table { font-size: 18px }';
+        document.head.appendChild(style);
+      });
+    });
+    expect(got).toEqual(fresh);
+    expect(got).not.toEqual(FIT_WIDTHS_302X13);
   });
 });

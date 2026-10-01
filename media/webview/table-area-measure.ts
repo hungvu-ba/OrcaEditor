@@ -287,11 +287,19 @@ function restoreAttr(el: Element, name: string, value: string | null): void {
  * the kinsoku marks Chromium keeps with it, a KaTeX `.base` box, …). Pass 2:
  * under the nowrap measure class, one Range per unit gives its width; its gap is
  * the distance from the previous unit's right edge. A block child's left inset
- * goes to the first unit of each of its lines.
+ * goes to the first unit of each of its lines. A cell `known` answers is neither
+ * collected nor measured; with no cell left, no layout state is toggled.
  */
-export function measureTableLines(table: HTMLTableElement): CellLines[][] {
+export function measureTableLines(
+  table: HTMLTableElement,
+  known?: (cell: HTMLTableCellElement) => CellLines | undefined
+): CellLines[][] {
   const cells = Array.from(table.rows).map((row) => Array.from(row.cells));
-  const collected = cells.map((row) => row.map(collectLines));
+  const answered = cells.map((row) => row.map((cell) => known?.(cell)));
+  if (answered.every((row) => row.every((lines) => lines !== undefined))) {
+    return answered as CellLines[][];
+  }
+  const collected = cells.map((row, i) => row.map((cell, j) => (answered[i][j] ? [] : collectLines(cell))));
   const range = document.createRange();
   const tableStyle = table.getAttribute('style');
   const tableClass = table.getAttribute('class');
@@ -314,7 +322,7 @@ export function measureTableLines(table: HTMLTableElement): CellLines[][] {
   cells.forEach((row, i) => row.forEach((cell, j) => restoreAttr(cell, 'style', cellStyles[i][j])));
 
   table.classList.add(TABLE_FIT_MEASURING_CLASS);
-  const out = collected.map((row, i) => row.map((lines, j) => toCellLines(lines, spans[i][j], range)));
+  const out = collected.map((row, i) => row.map((lines, j) => answered[i][j] ?? toCellLines(lines, spans[i][j], range)));
   restoreAttr(table, 'class', tableClass);
   return out;
 }
