@@ -47,7 +47,7 @@ import { copySrcLines, lineAgnosticKey, planBlockPatch } from '../media/webview/
 import domino from '@mixmark-io/domino';
 import { truncateDisplay } from '../media/webview/trigger-popup';
 import { headingSiblingGaps } from '../media/webview/drag-drop';
-import { remapWidths } from '../media/webview/table-col-resize';
+import { lockTable, lockedWidths, remapTableLock, remapWidths, restoreTableLocks, snapshotTableLocks, unlockTable } from '../media/webview/table-col-resize';
 import { buildGroups } from '../media/webview/comment-gutter';
 import { orphanKindLabel } from '../media/webview/comment-panel';
 import type { ThreadAnchor } from '../media/webview/comment-resolve';
@@ -5871,6 +5871,25 @@ check(
   remapWidths(w, { kind: 'insert', index: 0 });
   remapWidths(w, { kind: 'move', from: 0, to: 2 });
   eq('table-col-resize remapWidths: input array is not mutated', w, [100, undefined, 300]);
+
+  const mk = () => domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>a</td><td>b</td><td>c</td></tr></table></div>', true);
+  const before = mk().body.firstElementChild as HTMLElement;
+  const t1 = before.querySelectorAll('table')[1] as unknown as HTMLTableElement;
+  lockTable(t1, [10, undefined, 30]);
+  remapTableLock(t1, { kind: 'delete', index: 0 });
+  eq('table-col-resize remapTableLock: remaps the stored widths', lockedWidths(t1), [undefined, 30]);
+  lockTable(t1, [10, undefined, 30]);
+  const snap = snapshotTableLocks(before);
+  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap, { entries: [{ ordinal: 1, colCount: 3, widths: [10, undefined, 30] }] });
+  const after = mk().body.firstElementChild as HTMLElement;
+  restoreTableLocks(after, snap);
+  eq('table-col-resize restore: same ordinal and column count is locked', lockedWidths(after.querySelectorAll('table')[1] as unknown as HTMLTableElement), [10, undefined, 30]);
+  eq('table-col-resize restore: other table stays unlocked', lockedWidths(after.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
+  const mismatch = mk().body.firstElementChild as HTMLElement;
+  restoreTableLocks(mismatch, { entries: [{ ordinal: 0, colCount: 3, widths: [1, 2, 3] }] });
+  eq('table-col-resize restore: column-count mismatch drops the entry', lockedWidths(mismatch.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
+  unlockTable(t1);
+  eq('table-col-resize unlock: removes the lock', lockedWidths(t1), undefined);
 }
 
 let summaryPrinted = false;
