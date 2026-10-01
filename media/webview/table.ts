@@ -29,6 +29,7 @@ import { registerEscapeHandler, ESCAPE_PRIORITY, type Disposable } from './escap
 import { isCjkBreakUnit } from './reading-stats';
 import { solveAreaFit, AREA_FIT_HYSTERESIS, type AreaFitColumn, type AreaFitOptions, type CellLines } from './table-area-fit';
 import { measureTableLines } from './table-area-measure';
+import { lockedWidths, type LockedWidths } from './table-col-resize';
 
 export interface TableContext {
   scheduleSync: () => void;
@@ -414,6 +415,67 @@ function widestWordWidth(cell: HTMLTableCellElement, range: Range): number {
 }
 
 /**
+ * Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
+ * cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
+ */
+function cellPadBorderX(cell: HTMLTableCellElement): number {
+  const ccs = getComputedStyle(cell);
+  return (
+    parseFloat(ccs.paddingLeft || '0') +
+    parseFloat(ccs.paddingRight || '0') +
+    parseFloat(ccs.borderLeftWidth || '0') +
+    parseFloat(ccs.borderRightWidth || '0')
+  );
+}
+
+/**
+ * Each column's hard minimum width (border-box px): its min-content, raised to its
+ * widest word. Fit-mode's `hardMinW` and the column-resize drag clamp (US-6.10).
+ */
+export function measureColumnHardMin(table: HTMLTableElement): number[] {
+  const rows = Array.from(table.rows);
+  const sampleCell = rows.find((r) => r.cells.length > 0)?.cells[0];
+  if (!sampleCell) {
+    return [];
+  }
+  const colCount = Math.max(...rows.map((r) => r.cells.length));
+  const padBorderX = cellPadBorderX(sampleCell);
+
+  // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong ngữ cảnh
+  // nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
+  table.classList.add(MEASURE_CLASS);
+  const range = document.createRange();
+  const wordFloorByCol: number[] = new Array(colCount).fill(0);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      const wf = widestWordWidth(row.cells[i], range) + padBorderX;
+      if (wf > wordFloorByCol[i]) {
+        wordFloorByCol[i] = wf;
+      }
+    }
+  }
+  table.classList.remove(MEASURE_CLASS);
+
+  // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
+  table.classList.add(MIN_MEASURE_CLASS);
+  const minByCol: number[] = new Array(colCount).fill(0);
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      minByCol[i] = Math.max(minByCol[i], row.cells[i].getBoundingClientRect().width);
+    }
+  }
+  table.classList.remove(MIN_MEASURE_CLASS);
+
+  // Nâng sàn mỗi cột lên ÍT NHẤT bằng từ rộng nhất → cột không bao giờ hẹp hơn 1
+  // từ: không cắt giữa từ (vd "Code") và không ngắt ngày tháng ở '-' (vd
+  // "2026-07-20"). Pass 2 vẫn giữ sàn cho ô ảnh/nội dung không-chữ (wordFloor=0).
+  for (let i = 0; i < colCount; i++) {
+    minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
+  }
+  return minByCol;
+}
+
+/**
  * US-19.25 Fit-mode: co/wrap cột cho vừa bề rộng panel thay vì scroll ngang, và
  * cắt bớt cột bị 1 ô dài đột biến làm rộng dư. Trả về `true` nếu đã áp fit; trả
  * `false` để caller rơi về hành vi mặc định (min-width tự nhiên, KHÔNG ghim
@@ -447,32 +509,18 @@ function applyFitColumns(
     return false;
   }
 
-  // Padding+viền ngang của ô (đồng nhất cho mọi ô theo CSS th,td) — đo 1 lần để
-  // cộng vào bề rộng NỘI DUNG (đo bằng Range) ra bề rộng ô (border-box).
-  const ccs = getComputedStyle(sampleCell);
-  const padBorderX =
-    parseFloat(ccs.paddingLeft || '0') +
-    parseFloat(ccs.paddingRight || '0') +
-    parseFloat(ccs.borderLeftWidth || '0') +
-    parseFloat(ccs.borderRightWidth || '0');
+  const padBorderX = cellPadBorderX(sampleCell);
 
   // Pass 1 (nowrap): max-content TỪNG Ô qua Range — độc lập bề rộng cột (đo nội
   // dung thật 1 dòng, không phải bề rộng cột chung của table-layout:auto).
   table.classList.add(MEASURE_CLASS);
   const range = document.createRange();
   const colWidths: number[][] = Array.from({ length: colCount }, () => []);
-  // Sàn "1 từ" mỗi cột (từ = cụm không khoảng trắng, giữ '-') — đo trong cùng
-  // ngữ cảnh nowrap để hưởng đúng font ô. Bù cho Pass 2 (ngắt cả ở '-').
-  const wordFloorByCol: number[] = new Array(colCount).fill(0);
   for (const row of rows) {
     for (let i = 0; i < row.cells.length; i++) {
       range.selectNodeContents(row.cells[i]);
       const cellW = range.getBoundingClientRect().width + padBorderX;
       colWidths[i].push(cellW);
-      const wf = widestWordWidth(row.cells[i], range) + padBorderX;
-      if (wf > wordFloorByCol[i]) {
-        wordFloorByCol[i] = wf;
-      }
     }
   }
   table.classList.remove(MEASURE_CLASS);
@@ -494,23 +542,7 @@ function applyFitColumns(
   // Short of room: break units of every cell, measured once outside the
   // MEASURE_CLASS window (sets and restores its own layout states).
   const cellLines = measureTableLines(table);
-
-  // Pass 2: min-content từng CỘT (ép width:1px → cột co về từ dài nhất).
-  table.classList.add(MIN_MEASURE_CLASS);
-  const minByCol: number[] = new Array(colCount).fill(0);
-  for (const row of rows) {
-    for (let i = 0; i < row.cells.length; i++) {
-      minByCol[i] = Math.max(minByCol[i], row.cells[i].getBoundingClientRect().width);
-    }
-  }
-  table.classList.remove(MIN_MEASURE_CLASS);
-
-  // Nâng sàn mỗi cột lên ÍT NHẤT bằng từ rộng nhất → cột không bao giờ hẹp hơn 1
-  // từ: không cắt giữa từ (vd "Code") và không ngắt ngày tháng ở '-' (vd
-  // "2026-07-20"). Pass 2 vẫn giữ sàn cho ô ảnh/nội dung không-chữ (wordFloor=0).
-  for (let i = 0; i < colCount; i++) {
-    minByCol[i] = Math.max(minByCol[i], wordFloorByCol[i]);
-  }
+  const minByCol = measureColumnHardMin(table);
 
   // US-19.27: height-first area fit (Code Plan contracts 3–7). Floors by role in
   // border-box px; the solver clamps them into [hardMinW, maxW] and returns
@@ -616,6 +648,27 @@ function applyDefaultColumnWidths(table: HTMLTableElement, rows: HTMLTableRowEle
 }
 
 /**
+ * US-6.10: pins each locked column in auto layout like the scroll branch of
+ * `applyFitColumns` (no FIT_CLASS, no table width). An `undefined` entry (column
+ * inserted after the lock) gets no inline width.
+ */
+function applyLockedWidths(_table: HTMLTableElement, rows: HTMLTableRowElement[], widths: LockedWidths): void {
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      if (widths[i] === undefined) {
+        continue;
+      }
+      const cell = row.cells[i];
+      cell.style.boxSizing = 'border-box';
+      const w = `${widths[i]}px`;
+      cell.style.width = w;
+      cell.style.minWidth = w;
+      cell.style.maxWidth = w;
+    }
+  }
+}
+
+/**
  * Chỉnh bề rộng cột bảng sau mỗi render/sửa/resize. Fit-mode BẬT (US-19.25) và
  * bảng ĐƠN GIẢN (serialize ra pipe, không rò style/class vào .md) → co/wrap vừa
  * panel, HOẶC khi co tới sàn dễ đọc vẫn không vừa thì tự scroll TẠI sàn (đều trong
@@ -654,6 +707,13 @@ export function fitTableColumns(table: HTMLTableElement, opts?: { keepPrevHyster
       cell.style.removeProperty('width');
       cell.style.removeProperty('max-width');
     }
+  }
+
+  // US-6.10 contract 2: a locked table keeps its session widths in every mode.
+  const locked = lockedWidths(table);
+  if (locked) {
+    applyLockedWidths(table, rows, locked);
+    return;
   }
 
   if (fitModeEnabled && !tableNeedsHtmlSerialization(table) && applyFitColumns(table, rows, keep)) {

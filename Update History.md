@@ -9,3 +9,4 @@
 | 1.2.2 | 2026-10-01 | Fix: fewer host round trips on low-end machines — one comment re-sync per anchor burst, deleted-image undo cache capped at 16 MB, sibling notes read without opening them |
 | 1.2.2 | 2026-10-01 | Fix: image cleanup no longer misses references in unsaved or non-UTF-8 sibling notes; a re-deleted image stays undo-restorable |
 | 1.2.2 | 2026-10-01 | Feature: table column-width lock state module (session-only, remap on column insert/delete/move, carry-over snapshot) for drag resize |
+| 1.2.2 | 2026-10-01 | Feature: table fit measures column hard minimum in measureColumnHardMin; fitTableColumns applies session column-width locks before fitting |
