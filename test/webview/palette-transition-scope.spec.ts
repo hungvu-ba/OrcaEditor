@@ -14,8 +14,12 @@ test('table cells have no transition; #content still does', async ({ page }) => 
   expect(await dur('#content')).not.toBe('0s');
 });
 
-test('ET Book woff2 face loads', async ({ page }) => {
+test('ET Book woff2 faces load (roman, italic, bold)', async ({ page }) => {
   await openEditor(page, 'hello');
-  const loaded = await page.evaluate(async () => (await document.fonts.load('16px et-book')).length);
-  expect(loaded).toBe(1);
+  const loaded = await page.evaluate(() =>
+    Promise.all(
+      ['16px et-book', 'italic 16px et-book', 'bold 16px et-book'].map(async (f) => (await document.fonts.load(f)).length)
+    )
+  );
+  expect(loaded).toEqual([1, 1, 1]);
 });

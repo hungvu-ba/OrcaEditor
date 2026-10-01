@@ -286,6 +286,8 @@ function copyAssets() {
     const src = path.join('media', 'fonts', dir);
     if (!fs.existsSync(src)) continue;
     const dest = path.join('dist/webview/fonts', dir);
+    // Start clean so a font removed from media/fonts never lingers in dist (and the VSIX).
+    fs.rmSync(dest, { recursive: true, force: true });
     fs.mkdirSync(dest, { recursive: true });
     for (const file of fs.readdirSync(src)) {
       if (file.endsWith('.woff2') || file.endsWith('.woff') || file === license) {
