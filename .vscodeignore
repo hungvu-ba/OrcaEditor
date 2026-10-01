@@ -27,6 +27,8 @@ Fix Plan.md
 Review Plan.md
 Review Report.md
 Update History.md
+Update History_Archived.md
+docs/drag-handle-position-analysis.md
 build.sh
 eslint.config.mjs
 .DS_Store
