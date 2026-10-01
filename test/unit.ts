@@ -5880,18 +5880,26 @@ check(
   eq('table-col-resize remapTableLock: remaps the stored widths', lockedWidths(t1), [undefined, 30]);
   lockTable(t1, [10, undefined, 30]);
   const snap = snapshotTableLocks(before);
-  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap.entries.map(({ ordinal, colCount, widths }) => ({ ordinal, colCount, widths })), [{ ordinal: 1, colCount: 3, widths: [10, undefined, 30] }]);
+  eq('table-col-resize snapshot: only locked tables, with ordinal and colCount', snap.entries.map(({ ordinal, colCount, head, widths }) => ({ ordinal, colCount, head, widths })), [{ ordinal: 1, colCount: 3, head: 'a\tb\tc', widths: [10, undefined, 30] }]);
   const after = mk().body.firstElementChild as HTMLElement;
   restoreTableLocks(after, snap);
   eq('table-col-resize restore: same ordinal and column count is locked', lockedWidths(after.querySelectorAll('table')[1] as unknown as HTMLTableElement), [10, undefined, 30]);
   eq('table-col-resize restore: other table stays unlocked', lockedWidths(after.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
   const mismatch = mk().body.firstElementChild as HTMLElement;
-  restoreTableLocks(mismatch, { entries: [{ table: t1, ordinal: 0, colCount: 3, widths: [1, 2, 3] }] });
+  restoreTableLocks(mismatch, { entries: [{ table: t1, ordinal: 0, colCount: 3, head: 'a\tb\tc', widths: [1, 2, 3] }] });
   eq('table-col-resize restore: column-count mismatch drops the entry', lockedWidths(mismatch.querySelectorAll('table')[0] as unknown as HTMLTableElement), undefined);
   const inserted = t1.cloneNode(true) as HTMLTableElement;
   t1.parentNode!.insertBefore(inserted, t1);
   restoreTableLocks(before, snap);
   eq('table-col-resize restore: a kept locked node keeps its ordinal entry off a table inserted above it', lockedWidths(inserted), undefined);
+  const shifted = domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>x</td><td>y</td><td>z</td></tr></table><table><tr><td>a</td><td>b</td><td>c</td></tr></table></div>', true).body.firstElementChild as HTMLElement;
+  restoreTableLocks(shifted, snap);
+  const st = shifted.querySelectorAll('table');
+  eq('table-col-resize restore: a same-width table with another header at the old ordinal stays unlocked', lockedWidths(st[1] as unknown as HTMLTableElement), undefined);
+  eq('table-col-resize restore: the lock follows its header text to the shifted table', lockedWidths(st[2] as unknown as HTMLTableElement), [10, undefined, 30]);
+  const renamed = domino.createDocument('<div><table><tr><td>a</td><td>b</td></tr></table><table><tr><td>a</td><td>B</td><td>c</td></tr></table></div>', true).body.firstElementChild as HTMLElement;
+  restoreTableLocks(renamed, snap);
+  eq('table-col-resize restore: a changed header text drops the entry', lockedWidths(renamed.querySelectorAll('table')[1] as unknown as HTMLTableElement), undefined);
   unlockTable(t1);
   eq('table-col-resize unlock: removes the lock', lockedWidths(t1), undefined);
 }

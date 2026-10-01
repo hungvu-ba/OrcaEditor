@@ -459,6 +459,25 @@ test.describe('US-6.10 lock across host re-render', () => {
     expectWidths(await headerWidths(page), locked);
   });
 
+  test('an update inserting a same-width table above the locked one keeps the lock on the resized table', async ({ page }) => {
+    const OTHER = '| Alpha | Beta | Gamma |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n\n';
+    const shifted = (doc: string) => doc.replace('| Name |', OTHER + '| Name |');
+    await openEditor(page, shifted(DOC));
+    const auto = await headerWidths(page);
+    await hostUpdate(page, DOC, 'Name');
+    await dragColumnEdge(page, 0, 80);
+    const locked = await headerWidths(page);
+
+    await hostUpdate(page, shifted(DOC.replace('| x |', '| xx |')), 'Gamma');
+
+    expectWidths(await headerWidths(page), auto);
+    const resized = await page.evaluate(() => {
+      const t = document.querySelectorAll('#content table')[1] as HTMLTableElement;
+      return Array.from(t.rows[0].cells, (c) => c.getBoundingClientRect().width);
+    });
+    expectWidths(resized, locked);
+  });
+
   test('a re-render replacing the table mid-drag ends the drag', async ({ page }) => {
     await openEditor(page, DOC);
     const { x, y } = await headerEdge(page, 0);

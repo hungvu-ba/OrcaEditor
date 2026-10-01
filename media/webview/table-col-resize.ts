@@ -6,7 +6,7 @@ type ColumnOp =
   | { kind: 'delete'; index: number }
   | { kind: 'move'; from: number; to: number };
 export type LockedWidths = (number | undefined)[];
-interface TableLockSnapshot { entries: { table: HTMLTableElement; ordinal: number; colCount: number; widths: LockedWidths }[] }
+interface TableLockSnapshot { entries: { table: HTMLTableElement; ordinal: number; colCount: number; head: string; widths: LockedWidths }[] }
 interface ColResizeHooks {
   measureHardMin(table: HTMLTableElement): number[];
   refit(table: HTMLTableElement): void;
@@ -65,23 +65,36 @@ function columnCount(table: HTMLTableElement): number {
   return max;
 }
 
+function headerText(table: HTMLTableElement): string {
+  const row = headerRow(table);
+  return row ? Array.from(row.cells, (c) => c.textContent ?? '').join('\t') : '';
+}
+
 export function snapshotTableLocks(content: HTMLElement): TableLockSnapshot {
   const entries: TableLockSnapshot['entries'] = [];
   Array.from(content.querySelectorAll('table')).forEach((table, ordinal) => {
     const widths = locks.get(table);
-    if (widths) entries.push({ table, ordinal, colCount: columnCount(table), widths: widths.slice() });
+    if (widths) entries.push({ table, ordinal, colCount: columnCount(table), head: headerText(table), widths: widths.slice() });
   });
   return { entries };
 }
 
 export function restoreTableLocks(content: HTMLElement, snap: TableLockSnapshot): void {
   if (snap.entries.length === 0) return;
-  const tables = content.querySelectorAll('table');
-  for (const { table: prev, ordinal, colCount, widths } of snap.entries) {
+  const tables = Array.from(content.querySelectorAll('table'));
+  for (const { table: prev, ordinal, colCount, head, widths } of snap.entries) {
     // A kept node still holds its own lock; its ordinal may now name a newly inserted table.
     if (content.contains(prev)) continue;
-    const table = tables[ordinal];
-    if (table && !locks.has(table) && columnCount(table) === colCount) lockTable(table, widths);
+    // Same column count and header text; the nearest to the old ordinal wins (a table inserted above shifts it).
+    let best: HTMLTableElement | undefined;
+    let bestDist = Infinity;
+    tables.forEach((table, i) => {
+      if (Math.abs(i - ordinal) < bestDist && !locks.has(table) && columnCount(table) === colCount && headerText(table) === head) {
+        best = table;
+        bestDist = Math.abs(i - ordinal);
+      }
+    });
+    if (best) lockTable(best, widths);
   }
 }
 
